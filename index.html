@@ -542,8 +542,8 @@ function renderHistoryTags() {
   if (!list.length) { bar.style.display = 'none'; return; }
   bar.style.display = 'flex';
   tags.innerHTML = list.map(h =>
-    `<span class="history-tag" onclick="switchToHistory('${h.symbol}')" title="${h.symbol}">
-      ${h.name}<span class="sym">${h.symbol.replace(/\.(SH|SZ|BJ)$/,'')}</span>
+    `<span class="history-tag" onclick="switchToHistory('${esc(h.symbol)}')" title="${esc(h.symbol)}">
+      ${esc(h.name)}<span class="sym">${esc(h.symbol.replace(/\.(SH|SZ|BJ)$/,''))}</span>
     </span>`
   ).join('');
 }
@@ -733,7 +733,7 @@ function renderIntraday(data) {
     ],
     series: series,
   };
-  chart.setOption(option, true);
+  chart.setOption(option, { notMerge: false });
   // 分时面板名称标签 (graphic)
   const igraphics = [];
   const iLabels = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI' };
@@ -911,9 +911,9 @@ function updateChart(reTheme) {
 
   // ── Readonly series data ──
   const ohlc = klines.map(k => [k.open, k.close, k.low, k.high]);
-  const vols = klines.map(k => {
+  const vols = klines.map((k, i) => {
     const close = k.close || 0;
-    const prevClose = klines.indexOf(k) > 0 ? (klines[klines.indexOf(k) - 1].close || close) : close;
+    const prevClose = i > 0 ? (klines[i - 1].close || close) : close;
     const up = close >= prevClose;
     return { value: k.volume || 0, itemStyle: { color: up ? C().up : C().down } };
   });
@@ -1155,7 +1155,7 @@ function updateChart(reTheme) {
     }
   });
 
-  chart.setOption(option, true);
+  chart.setOption(option, { notMerge: false });
   // 缓存 grid 像素位置 (供 zrender mousemove 判断鼠标在哪个面板)
   const cw = chart.getWidth(), ch = chart.getHeight();
   STATE._gridRects = grids.map(g => {

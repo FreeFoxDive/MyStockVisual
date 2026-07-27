@@ -60,13 +60,16 @@ else:
     print("[Visual] AF_API_KEY 已加载", flush=True)
 
 _af = None
+_af_lock = threading.Lock()
 
 
 def get_af():
     global _af
     if _af is None:
-        from alphafeed import AlphaFeed
-        _af = AlphaFeed(api_key=AF_API_KEY)
+        with _af_lock:
+            if _af is None:
+                from alphafeed import AlphaFeed
+                _af = AlphaFeed(api_key=AF_API_KEY)
     return _af
 
 
@@ -111,41 +114,42 @@ quote_cache = TTLCache(ttl_seconds=30)
 
 # ── 质押数据缓存 ──
 _pledge_cache = None
+_pledge_lock = threading.Lock()
 
 
 def _load_pledge():
     global _pledge_cache
     if _pledge_cache is not None:
         return _pledge_cache
-    try:
-        import akshare as ak
-        from datetime import date, timedelta
-        # 尝试最近5个交易日，找到有数据的日期
-        df = None
-        for offset in range(5):
-            d = (date.today() - timedelta(days=offset)).strftime("%Y%m%d")
-            try:
-                df = ak.stock_gpzy_pledge_ratio_em(date=d)
-                if df is not None and len(df) > 0:
-                    break
-            except Exception:
-                continue
-        if df is None:
-            df = ak.stock_gpzy_pledge_ratio_em()  # fallback: default date
-        pledge = {}
-        for _, r in df.iterrows():
-            code = str(r["股票代码"]).strip()
-            pledge[code] = {
-                "ratio": float(r.get("质押比例", 0) or 0),
-                "shares": float(r.get("质押股数", 0) or 0),
-                "market_value": float(r.get("质押市值", 0) or 0),
-                "count": int(r.get("质押笔数", 0) or 0),
-            }
-        _pledge_cache = pledge
-        print(f"[Visual] 已加载 {len(pledge)} 条质押数据", flush=True)
-    except Exception as e:
-        print(f"[Visual] 质押数据加载失败: {e}", flush=True)
-        _pledge_cache = {}
+    with _pledge_lock:
+        if _pledge_cache is not None:  # double-check within lock
+            return _pledge_cache
+        try:
+            import akshare as ak
+            from datetime import date, timedelta
+            df = None
+            for offset in range(5):
+                d = (date.today() - timedelta(days=offset)).strftime("%Y%m%d")
+                try:
+                    df = ak.stock_gpzy_pledge_ratio_em(date=d)
+                    if df is not None and len(df) > 0: break
+                except Exception: continue
+            if df is None:
+                df = ak.stock_gpzy_pledge_ratio_em()
+            pledge = {}
+            for _, r in df.iterrows():
+                code = str(r["股票代码"]).strip()
+                pledge[code] = {
+                    "ratio": float(r.get("质押比例", 0) or 0),
+                    "shares": float(r.get("质押股数", 0) or 0),
+                    "market_value": float(r.get("质押市值", 0) or 0),
+                    "count": int(r.get("质押笔数", 0) or 0),
+                }
+            _pledge_cache = pledge
+            print(f"[Visual] 已加载 {len(pledge)} 条质押数据", flush=True)
+        except Exception as e:
+            print(f"[Visual] 质押数据加载失败: {e}", flush=True)
+            _pledge_cache = {}
     return _pledge_cache
 
 
@@ -249,43 +253,47 @@ def _normalize(df):
 # ── 全量股票搜索缓存 ──
 _stock_list = None
 _stock_list_time = 0
+_stock_lock = threading.Lock()
 
 
 def _load_stock_list():
-    """加载全量A股+ETF列表 (缓存1小时, 失败重试1次)"""
+    """加载全量A股+ETF列表 (缓存1小时, 失败重试1次, 线程安全)"""
     global _stock_list, _stock_list_time
     now = time.time()
     if _stock_list is not None and now - _stock_list_time < 3600:
         return _stock_list
-    print("[Visual] 加载全量A股+ETF列表...", flush=True)
-    for attempt in range(2):
-        try:
-            af = get_af()
-            stocks = []
-            for universe in ("CN_Stock", "CN_ETF"):
-                try:
-                    df = af.quotes.get(universes=universe, to_dataframe=True)
-                    for _, r in df.iterrows():
-                        sym = r.get("symbol", "")
-                        name = r.get("ext.name", "")
-                        if not sym or not name or pd.isna(name):
-                            continue
-                        code = sym.split(".")[0] if "." in sym else sym
-                        stocks.append({"symbol": sym, "name": str(name), "code": code})
-                except Exception as e:
-                    print(f"[Visual] {universe} 加载失败: {e}", flush=True)
-            _stock_list = stocks
-            _stock_list_time = now
-            print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+ETF)", flush=True)
+    with _stock_lock:
+        if _stock_list is not None and now - _stock_list_time < 3600:  # double-check
             return _stock_list
-        except Exception as e:
-            print(f"[Visual] 加载列表({attempt+1}/2)失败: {e}", flush=True)
-            if attempt == 0:
-                time.sleep(3)
-            else:
-                if _stock_list is None:
-                    _stock_list = []
-    return _stock_list
+        print("[Visual] 加载全量A股+ETF列表...", flush=True)
+        for attempt in range(2):
+            try:
+                af = get_af()
+                stocks = []
+                for universe in ("CN_Stock", "CN_ETF"):
+                    try:
+                        df = af.quotes.get(universes=universe, to_dataframe=True)
+                        for _, r in df.iterrows():
+                            sym = r.get("symbol", "")
+                            name = r.get("ext.name", "")
+                            if not sym or not name or pd.isna(name):
+                                continue
+                            code = sym.split(".")[0] if "." in sym else sym
+                            stocks.append({"symbol": sym, "name": str(name), "code": code})
+                    except Exception as e:
+                        print(f"[Visual] {universe} 加载失败: {e}", flush=True)
+                _stock_list = stocks
+                _stock_list_time = time.time()
+                print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+ETF)", flush=True)
+                return _stock_list
+            except Exception as e:
+                print(f"[Visual] 加载列表({attempt+1}/2)失败: {e}", flush=True)
+                if attempt == 0:
+                    time.sleep(3)
+                else:
+                    if _stock_list is None:
+                        _stock_list = []
+        return _stock_list
 
 
 def _search_stocks(query):
@@ -440,8 +448,8 @@ class VisualHandler(BaseHTTPRequestHandler):
     # ── 静态文件 ──
     def _serve_static(self, filename):
         filepath = (SCRIPT_DIR / filename).resolve()
-        # 防止路径穿越: 确保解析后仍在 visual/ 目录内
-        if not str(filepath).startswith(str(SCRIPT_DIR.resolve())):
+        # 防止路径穿越: 确保解析后仍在 visual/ 目录内 (加 os.sep 防 visual-xxx 绕过)
+        if not str(filepath).startswith(str(SCRIPT_DIR.resolve()) + os.sep):
             self._send_error("Forbidden", 403)
             return
         if not filepath.is_file():
@@ -561,7 +569,6 @@ class VisualHandler(BaseHTTPRequestHandler):
             "is_etf": is_etf,
             "macd_params": indicators["macd"]["params"],
             "klines": klines,
-            "indicators": indicators,
             "meta": {
                 "cached": False,
                 "server_time": str(datetime.now()),
@@ -594,7 +601,7 @@ class VisualHandler(BaseHTTPRequestHandler):
                 return self._send_error(f"无法获取 {symbol} 的快照", 404)
             self._send_json(quote)
         except Exception as e:
-            self._send_error(f"获取快照失败: {e}", 500)
+            self._send_error(f"获取快照失败: {_sanitize_error(e)}", 500)
 
     # ── API: 日内分钟线 (用 batch 绕过单点权限限制) ──
     def _handle_intraday(self, params):
