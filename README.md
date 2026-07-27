@@ -29,6 +29,9 @@ python -u visual/server.py
 | 主题 | 默认亮色 / 可切换暗色 |
 | 实时刷新 | 交易时段每30秒自动拉取快照 |
 | 数据缩放 | 鼠标滚轮 + 滑块，底部可拖动 |
+| 请求频率限制 | 服务端令牌桶 120次/分钟 |
+| 安全头 | CSP 限制脚本来源 + CORS 同源限制 |
+| 速率限制 | 服务端令牌桶 120次/分钟，超限返回 429 |
 
 ## 文件结构
 
@@ -38,7 +41,9 @@ visual/
 ├── index.html         # 前端单页面 (ECharts 5 CDN)
 ├── indicators.py      # 从 triple_screen_v5.py 提取的指标函数
 │                      #   ema / atr / macd / kdj / rsi / force_index
-├── echarts.min.js     # ECharts 5.5.0 本地副本 (1MB)
+├── Dockerfile         # Docker 构建文件
+├── docker-compose.yml # Docker Compose 配置
+├── requirements.txt   # Python 依赖
 └── README.md          # 本文件
 ```
 
@@ -82,8 +87,25 @@ visual/
 ## 依赖
 
 - Python: `alphafeed`, `numpy`, `pandas` (已存在于项目 venv)
-- 前端: ECharts 5.5.0 (本地文件 `echarts.min.js`)
+- 前端: ECharts 5.5.0 (通过 CDN `https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js` 加载)
 - 无额外 pip 依赖 (仅用 Python 标准库 `http.server`)
+
+## 安全性
+
+### 速率限制
+服务端实现令牌桶算法，默认 120 次/分钟。超限返回 HTTP 429。
+
+### CORS
+限制为同源请求，避免跨域滥用。默认监听 localhost。
+
+### Content-Security-Policy
+所有响应包含 `Content-Security-Policy` 头，限制脚本来源仅为 `self` 和 `cdn.jsdelivr.net`。
+
+### 错误信息过滤
+敏感关键词（api key, token, auth 等）在错误响应中被过滤。
+
+### Docker
+Dockerfile 使用非 root 用户运行，降低容器逃逸风险。
 
 ## 配色
 

@@ -344,6 +344,16 @@ body {
 
 <script>
 // ═══════════════════════════════════════════════════════════════
+// HTML ESCAPE (XSS 防护)
+// ═══════════════════════════════════════════════════════════════
+function escHtml(str) {
+  if (str == null) return '';
+  const d = document.createElement('div');
+  d.textContent = String(str);
+  return d.innerHTML;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════════════════════
 const STATE = {
@@ -355,6 +365,7 @@ const STATE = {
   chart: null,
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
   _gridRects: null,      // cached grid pixel rects
+  _themeAuto: true,      // 默认自动主题(系统偏好 > 时间)
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -482,25 +493,7 @@ async function fetchData() {
     try {
       const entry = JSON.stringify({ ts: Date.now(), data });
       localStorage.setItem(cacheKey, entry);
-      // 清理最旧缓存
-      let totalSize = 0;
-      const keys = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k.startsWith('vk_')) {
-          const sz = (localStorage.getItem(k) || '').length;
-          totalSize += sz;
-          keys.push({ k, sz });
-        }
-      }
-      if (totalSize > 2 * 1024 * 1024) {
-        keys.sort((a, b) => a.sz - b.sz);
-        for (const item of keys) {
-          if (totalSize <= 1 * 1024 * 1024) break;
-          localStorage.removeItem(item.k);
-          totalSize -= item.sz;
-        }
-      }
+      _cleanLocalStorage();
     } catch(e) { /* quota exceeded */ }
     fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
       .then(r => r.json()).then(d => {
@@ -691,6 +684,9 @@ function loadConfig() {
       if (!STATE._themeAuto) {
         applyTheme(cfg.theme);
       }
+    } else {
+      // 无配置时默认自动主题
+      STATE._themeAuto = true;
     }
   } catch(e) {}
 }
@@ -702,7 +698,25 @@ async function fetchIntraday() {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
   const fetchTs = Date.now(); STATE._intraFetchTs = fetchTs;
-  const loading = !STATE.intradayData;
+  const _cacheKey = `vi_${symbol}_1m_${STATE.macdMode}`;
+
+  // ── 浏览器缓存 ──
+  let cacheHit = false;
+  if (!STATE.intradayData) {
+    try {
+      const raw = localStorage.getItem(_cacheKey);
+      if (raw) {
+        const cached = JSON.parse(raw);
+        if (Date.now() - cached.ts < 120000 && cached.data) {  // 120s TTL
+          STATE.intradayData = cached.data;
+          renderIntraday(cached.data);
+          cacheHit = true;
+        }
+      }
+    } catch(e) { /* ignore */ }
+  }
+
+  const loading = !cacheHit && !STATE.intradayData;
   if (loading) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
     const macd13 = STATE.macdMode === 'macd13' ? '&macd13=true' : '';
@@ -718,6 +732,11 @@ async function fetchIntraday() {
     STATE.intradayData = id;
     updateQuoteDisplay(quote);
     renderIntraday(STATE.intradayData);
+    // 保存到 localStorage
+    try {
+      localStorage.setItem(_cacheKey, JSON.stringify({ ts: Date.now(), data: id }));
+      _cleanLocalStorage();
+    } catch(e) { /* ignore */ }
   } catch(e) { if (loading) alert('分时数据获取失败: ' + e.message); }
   finally { if (loading) STATE.chart.hideLoading(); }
 }
@@ -856,13 +875,13 @@ function renderIntraday(data) {
   // 分时面板名称标签 (graphic)
   const igraphics = [];
   const iLabels = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR' };
-  const iColors = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr };
+  const iColors = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().macdDif };
   let gIdx = showVolume ? 1 : 0;
   subList.forEach((p, pi) => {
     const gTop = parseFloat(grids[gIdx + 1 + pi].top) / 100 * chart.getHeight();
     igraphics.push({
       type: 'text', left: 10, top: gTop + 2,
-      style: { text: iLabels[p] || p, fill: iColors[p] || C().text, font: 'bold 10px monospace' },
+      style: { text: iLabels[p] || p, fill: iColors[p] || C().text, font: 'bold 11px monospace' },
       z: 100,
     });
   });
@@ -871,7 +890,7 @@ function renderIntraday(data) {
     const vgTop = parseFloat(grids[1].top) / 100 * chart.getHeight();
     igraphics.push({
       type: 'text', left: 10, top: vgTop + 2,
-      style: { text: 'VOL', fill: C().text, font: 'bold 10px monospace' },
+      style: { text: 'VOL', fill: C().macdDif, font: 'bold 11px monospace' },
       z: 100,
     });
   }
@@ -1155,7 +1174,7 @@ function updateChart(reTheme) {
 
       // ── Helper ──
       const pc = prev ? prev.close : k.close; // 前一根收盘价
-      const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${k.date}</div>`;
+      const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${escHtml(k.date)}</div>`;
       const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'};font-weight:700">${v.toFixed(2)}</span>`;
 
       // Grid 0: K-line — full detail
@@ -1214,7 +1233,6 @@ function updateChart(reTheme) {
     backgroundColor: C().bg,
     animation: reTheme ? false : true,
     tooltip: tooltip,
-    axisPointer: { link: [{ xAxisIndex: 'all' }] },
     grid: grids,
     xAxis: xAxes,
     yAxis: yAxes,
@@ -1283,7 +1301,7 @@ function updateChart(reTheme) {
 
   // 每个指标面板左上角放名称标签 (graphic)
   const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', premium: '溢价%' };
-  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr, premium: C().up };
+  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().macdDif, premium: C().macdDif };
   const graphics = [];
   panels.forEach((p, i) => {
     const gridTop = parseFloat(grids[indicatorStartGi + i].top) / 100 * ch;
@@ -1298,11 +1316,13 @@ function updateChart(reTheme) {
     const volGridTop = parseFloat(grids[1].top) / 100 * ch;
     graphics.push({
       type: 'text', left: 10, top: volGridTop + 2,
-      style: { text: 'VOL', fill: C().text, font: 'bold 10px monospace' },
+      style: { text: 'VOL', fill: C().macdDif, font: 'bold 11px monospace' },
       z: 100,
     });
   }
   chart.setOption({ graphic: graphics });
+  // 首次渲染延迟 resize，解决底部日期轴被截断
+  if (!STATE._initResized) { STATE._initResized = true; setTimeout(() => chart.resize(), 100); }
 }
 
 // ═══════════════════════════════════════════════════════════════

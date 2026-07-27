@@ -76,7 +76,31 @@ def get_af():
 
 
 # ── 指标计算 ──
-from indicators import compute_all_indicators, _safe_list
+from indicators import compute_all_indicators, _safe_list, force_index
+
+# ── 请求速率限制 (令牌桶) ──
+RATE_LIMIT_PER_MIN = 120
+RATE_LIMIT_TOKENS = RATE_LIMIT_PER_MIN
+RATE_LIMIT_LOCK = threading.Lock()
+_rate_limit_last_refill = time.time()
+
+def _check_rate_limit():
+    """基于令牌桶的请求频率限制，返回 True=允许, False=拒绝"""
+    global RATE_LIMIT_TOKENS, _rate_limit_last_refill
+    with RATE_LIMIT_LOCK:
+        now = time.time()
+        elapsed = now - _rate_limit_last_refill
+        # 每秒补充令牌
+        RATE_LIMIT_TOKENS = min(RATE_LIMIT_PER_MIN,
+                                RATE_LIMIT_TOKENS + elapsed * (RATE_LIMIT_PER_MIN / 60.0))
+        _rate_limit_last_refill = now
+        if RATE_LIMIT_TOKENS >= 1:
+            RATE_LIMIT_TOKENS -= 1
+            return True
+        return False
+
+# CSP: 'unsafe-inline' 是必需的，因为 index.html 使用内联 <script> 标签
+CSP_HEADER = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
 
 # ── 磁盘缓存 ──
 CACHE_DIR = SCRIPT_DIR / ".cache" / "klines"
@@ -141,27 +165,40 @@ _disk_cache = DiskCache()
 
 # ── 内存缓存 ──
 class TTLCache:
-    """简单的 TTL 内存缓存"""
+    """简单的 TTL 内存缓存 (基于 OrderedDict 的 LRU 淘汰)"""
 
     def __init__(self, ttl_seconds=60):
-        self._cache = {}
+        from collections import OrderedDict
+        self._cache = OrderedDict()
         self._ttl = ttl_seconds
+        self._max_entries = 500
         self._lock = threading.Lock()
 
     def get(self, key):
         with self._lock:
             entry = self._cache.get(key)
             if entry and time.time() - entry["time"] < self._ttl:
+                # 移到末尾 (LRU)
+                self._cache.move_to_end(key)
                 return entry["data"]
+            if entry:
+                # 过期删除
+                del self._cache[key]
         return None
 
     def set(self, key, data):
         with self._lock:
-            # 限制最大条目数，超过时淘汰最旧的一半
-            if len(self._cache) >= 500:
-                items = sorted(self._cache.items(), key=lambda x: x[1]["time"])
-                for old_key, _ in items[:250]:
-                    del self._cache[old_key]
+            # 如果已存在, 更新并移到末尾
+            if key in self._cache:
+                self._cache[key] = {"data": data, "time": time.time()}
+                self._cache.move_to_end(key)
+                return
+            # 超过上限: 淘汰最旧的 (OrderedDict popitem(last=False))
+            if len(self._cache) >= self._max_entries:
+                try:
+                    self._cache.popitem(last=False)
+                except KeyError:
+                    pass
             self._cache[key] = {"data": data, "time": time.time()}
 
     def clear(self):
@@ -474,17 +511,21 @@ def _sanitize_error(e):
 class VisualHandler(BaseHTTPRequestHandler):
     """HTTP 请求处理器"""
 
-    def log_message(self, *_args):
+    def log_message(self, fmt, *args):
         # 简洁日志
-        print(f"[Visual] {_args[0]}", flush=True)
+        if args:
+            print(f"[Visual] {fmt % args[:3]}", flush=True)
+        else:
+            print(f"[Visual] {fmt}", flush=True)
 
     def _send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False, cls=NumpyEncoder).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", self._get_cors_origin())
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Security-Policy", CSP_HEADER)
         self.end_headers()
         self.wfile.write(body)
 
@@ -493,6 +534,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", len(body))
+        self.send_header("Content-Security-Policy", CSP_HEADER)
         self.end_headers()
         self.wfile.write(body)
 
@@ -504,7 +546,11 @@ class VisualHandler(BaseHTTPRequestHandler):
         path = parsed.path
         params = parse_qs(parsed.query)
 
-        # ── API 路由 ──
+        # ── API 路由: 所有 /api/* 做速率限制 ──
+        if path.startswith("/api/"):
+            if not _check_rate_limit():
+                return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+
         if path == "/api/kline":
             return self._handle_kline(params)
         elif path == "/api/quote":
@@ -525,9 +571,17 @@ class VisualHandler(BaseHTTPRequestHandler):
             # 默认返回 index.html (SPA fallback)
             return self._serve_static("index.html")
 
+    def _get_cors_origin(self):
+        """限制 CORS 来源：仅允许相同源（未配置 0.0.0.0 时）"""
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return ""
+        # 仅允许同源请求
+        return origin
+
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", self._get_cors_origin())
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
@@ -552,6 +606,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", f"{ct}; charset=utf-8")
         self.send_header("Content-Length", len(body))
+        self.send_header("Content-Security-Policy", CSP_HEADER)
         self.end_headers()
         self.wfile.write(body)
 
@@ -641,10 +696,14 @@ class VisualHandler(BaseHTTPRequestHandler):
             }
             klines.append(entry)
 
-        # 把溢价率写回 klines
+        # 把溢价率写回 klines (加上长度保护断言)
         if premium_data:
+            prem_vals = premium_data["values"]
             for i, k in enumerate(klines):
-                k["premium"] = premium_data["values"][i] if i < len(premium_data["values"]) else None
+                if i < len(prem_vals) and prem_vals[i] is not None:
+                    k["premium"] = prem_vals[i]
+                else:
+                    k["premium"] = None
 
         resp = {
             "symbol": symbol,
@@ -781,8 +840,17 @@ def main():
 ║   📈 Visual K线图 股票可视化              ║
 ║   数据源: AlphaFeed 实时接口              ║
 ║   地址: http://{args.host}:{args.port}             ║
+║   速率限制: {RATE_LIMIT_PER_MIN} 次/分钟           ║
 ╚══════════════════════════════════════════╝
 """, flush=True)
+
+    # 后台预热: 异步加载全量股票列表
+    def _warmup():
+        import threading
+        t = threading.Thread(target=_load_stock_list, daemon=True)
+        t.start()
+        return t
+    _warmup()
 
     try:
         server.serve_forever()
