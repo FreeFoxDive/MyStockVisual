@@ -1207,7 +1207,11 @@ function switchPeriod(period) {
 }
 
 function onIndicatorChange() {
-  if (STATE.klineData) { updateChart(false); }
+  if (STATE.period === 'intraday' && STATE.intradayData) {
+    renderIntraday(STATE.intradayData);
+  } else if (STATE.klineData) {
+    updateChart(false);
+  }
 }
 
 let _macdMode = 'default';
