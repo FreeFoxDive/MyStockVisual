@@ -732,7 +732,8 @@ function renderIntraday(data) {
         const idx = ps[0] && ps[0].dataIndex;
         const b = data.bars[idx];
         if (!b) return '';
-        const pc = data.prev_close || b.open;
+        const prevBar = idx > 0 ? data.bars[idx - 1] : null;
+        const pc = prevBar ? prevBar.close : b.open;
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
         let h = `<div><b>${b.time}</b></div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
