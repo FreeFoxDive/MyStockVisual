@@ -558,8 +558,10 @@ class VisualHandler(BaseHTTPRequestHandler):
             df = _normalize(df)
             if df is None:
                 return self._send_error("数据不足", 404)
+            # 计算分时指标
+            df, indicators = compute_all_indicators(df, period="1d", with_atr_val=True)
             bars = []
-            for idx, row in df.iterrows():
+            for i, (idx, row) in enumerate(df.iterrows()):
                 ts = str(idx)
                 if hasattr(idx, "strftime"):
                     ts = idx.strftime("%H:%M")
@@ -570,6 +572,14 @@ class VisualHandler(BaseHTTPRequestHandler):
                     "low": _safe_float(row.get("low")),
                     "close": _safe_float(row.get("close")),
                     "volume": _safe_int(row.get("volume")),
+                    "macd_dif": indicators["macd"]["dif"][i],
+                    "macd_dea": indicators["macd"]["dea"][i],
+                    "macd_hist": indicators["macd"]["hist"][i],
+                    "kdj_k": indicators["kdj"]["k"][i] if "kdj" in indicators else None,
+                    "kdj_d": indicators["kdj"]["d"][i] if "kdj" in indicators else None,
+                    "kdj_j": indicators["kdj"]["j"][i] if "kdj" in indicators else None,
+                    "rsi6": indicators["rsi"]["rsi6"][i] if "rsi" in indicators else None,
+                    "atr14": indicators["atr"]["values"][i] if "atr" in indicators else None,
                 })
             self._send_json({"symbol": symbol, "period": period, "bars": bars})
         except Exception as e:

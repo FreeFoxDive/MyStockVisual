@@ -298,8 +298,8 @@ body {
     <span class="change" id="info-change">—</span>
     <span style="color:var(--text-secondary);font-size:11px" id="info-time"></span>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
-    <span id="info-hilo" style="font-size:12px;color:var(--text-secondary);display:none">
-      <span id="info-high"></span> <span id="info-low"></span>
+    <span id="info-hilo" style="display:none">
+      <span id="info-high" style="font-size:16px;font-weight:700"></span> <span id="info-low" style="font-size:16px;font-weight:700"></span>
     </span>
   </div>
 </div>
@@ -619,13 +619,70 @@ async function fetchIntraday(full) {
 
 function renderIntraday(data) {
   const chart = STATE.chart;
-  const times = data.bars.map(b => b.time);
-  const ohlc = data.bars.map(b => [b.open, b.close, b.low, b.high]);
-  const vols = data.bars.map(b => {
+  const bars = data.bars;
+  const times = bars.map(b => b.time);
+  const ohlc = bars.map(b => [b.open, b.close, b.low, b.high]);
+  const vols = bars.map(b => {
     const up = (b.close || 0) >= (b.open || 0);
     return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
   });
-  const prevClose = data.bars[0]?.open; // approx prev close from first bar
+
+  // 分时指标面板
+  const showMacd = document.getElementById('chk-macd').checked;
+  const showKdj = document.getElementById('chk-kdj').checked;
+  const showRsi = document.getElementById('chk-rsi').checked;
+  const subPanels = [showMacd, showKdj, showRsi].filter(Boolean).length;
+  const klineH = subPanels > 0 ? 45 : 65;
+  const volTop = 12 + klineH + 3;
+  const subStart = volTop + 14;
+
+  const grids = [
+    { left: '8%', right: '2%', top: '12%', height: `${klineH}%` },
+    { left: '8%', right: '2%', top: `${volTop}%`, height: '12%' }
+  ];
+  const xAxes = [
+    { gridIndex: 0, type: 'category', data: times, show: false },
+    { gridIndex: 1, type: 'category', data: times, show: !subPanels, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } }
+  ];
+  const yAxes = [
+    { gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } },
+    { gridIndex: 1, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } }
+  ];
+  const series = [
+    { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
+      itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down } },
+    { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols },
+  ];
+  const zoomIndices = [0, 1];
+  let gi = 2;
+  const subList = [showMacd && 'macd', showKdj && 'kdj', showRsi && 'rsi'].filter(Boolean);
+  const perSubH = subPanels > 0 ? Math.min(15, (93 - subStart) / subPanels) : 0;
+
+  subList.forEach(p => {
+    const top = subStart + (gi - 2) * perSubH;
+    grids.push({ left: '8%', right: '2%', top: `${top}%`, height: `${perSubH - 1}%` });
+    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: gi === 2 + subPanels - 1, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
+    yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 9 } });
+    zoomIndices.push(gi);
+    if (p === 'macd') {
+      series.push(
+        { name: 'DIF', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.macd_dif), symbol: 'none', lineStyle: { color: C().macdDif, width: 1 } },
+        { name: 'DEA', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.macd_dea), symbol: 'none', lineStyle: { color: C().macdDea, width: 1 } },
+        { name: 'MACD柱', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => ({ value: b.macd_hist, itemStyle: { color: (b.macd_hist || 0) >= 0 ? C().up : C().down } })) },
+      );
+    } else if (p === 'kdj') {
+      series.push(
+        { name: 'K', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.kdj_k), symbol: 'none', lineStyle: { color: C().kdjK, width: 1 } },
+        { name: 'D', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.kdj_d), symbol: 'none', lineStyle: { color: C().kdjD, width: 1 } },
+        { name: 'J', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.kdj_j), symbol: 'none', lineStyle: { color: C().kdjJ, width: 1 } },
+      );
+    } else if (p === 'rsi') {
+      series.push(
+        { name: 'RSI6', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.rsi6), symbol: 'none', lineStyle: { color: C().rsi6, width: 1 } },
+      );
+    }
+    gi++;
+  });
 
   const option = {
     backgroundColor: C().bg,
@@ -639,33 +696,20 @@ function renderIntraday(data) {
         const idx = ps[0]?.dataIndex;
         const b = data.bars[idx];
         if (!b) return '';
-        return `<div><b>${b.time}</b></div><div>开 ${b.open?.toFixed(2)} 高 ${b.high?.toFixed(2)} 低 ${b.low?.toFixed(2)} 收 ${b.close?.toFixed(2)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
+        let h = `<div><b>${b.time}</b></div><div>开 ${b.open?.toFixed(2)} 高 ${b.high?.toFixed(2)} 低 ${b.low?.toFixed(2)} 收 ${b.close?.toFixed(2)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
+        if (b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif?.toFixed(3)} DEA ${b.macd_dea?.toFixed(3)}</div>`;
+        return h;
       }
     },
-    grid: [
-      { left: '8%', right: '2%', top: '12%', height: '65%' },
-      { left: '8%', right: '2%', top: '79%', height: '13%' }
-    ],
-    xAxis: [
-      { gridIndex: 0, type: 'category', data: times, show: false },
-      { gridIndex: 1, type: 'category', data: times, show: true, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } }
-    ],
-    yAxis: [
-      { gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } },
-      { gridIndex: 1, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } }
-    ],
+    grid: grids, xAxis: xAxes, yAxis: yAxes,
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0,1], start: 0, end: 100 },
-      { type: 'slider', xAxisIndex: [0,1], top: 2, height: 16,
+      { type: 'inside', xAxisIndex: zoomIndices, start: 0, end: 100 },
+      { type: 'slider', xAxisIndex: zoomIndices, top: 2, height: 16,
         borderColor: C().gridLine, backgroundColor: 'transparent',
         fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().text },
         textStyle: { color: C().text, fontSize: 10 } }
     ],
-    series: [
-      { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
-        itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down } },
-      { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols },
-    ]
+    series: series,
   };
   chart.setOption(option, true);
 }
@@ -690,8 +734,11 @@ function updateQuoteDisplay(quote) {
     document.getElementById('info-price').className = 'price ' + cls;
   }
   if (quote.high != null) {
+    const upCls = quote.change_pct >= 0 ? 'up' : 'down';
     document.getElementById('info-high').textContent = '高 ' + quote.high.toFixed(2);
+    document.getElementById('info-high').className = upCls;
     document.getElementById('info-low').textContent = '低 ' + quote.low.toFixed(2);
+    document.getElementById('info-low').className = upCls;
     document.getElementById('info-hilo').style.display = '';
   }
 }
@@ -1101,9 +1148,7 @@ function switchPeriod(period) {
     const btn = document.getElementById('btn-' + p);
     if (btn) btn.classList.toggle('active', p === period);
   });
-  // 分时模式隐藏指标面板配置
   const isIntra = period === 'intraday';
-  document.getElementById('indicator-bar').style.display = isIntra ? 'none' : '';
   if (isIntra) {
     fetchIntraday(true);
   } else {
@@ -1264,7 +1309,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchIntraday(false); // 增量
       }
     }
-  }, 2000);
+  }, 1200);
 });
 </script>
 </body>
