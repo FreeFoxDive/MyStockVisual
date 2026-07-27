@@ -1422,12 +1422,16 @@ document.addEventListener('DOMContentLoaded', () => {
     STATE.symbol = last.symbol;
   }
 
-  // First load (等待容器布局稳定)
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      setTimeout(refresh, 100);
-    });
-  });
+  // First load: 等容器高度确定后再渲染 (解决F11前后高度不准)
+  const container = document.getElementById('chart-container');
+  let initDone = false;
+  const initRender = () => { if (!initDone) { initDone = true; refresh(); } };
+  if (container.clientHeight > 0) {
+    requestAnimationFrame(() => requestAnimationFrame(initRender));
+  } else {
+    const ro = new ResizeObserver(() => { if (container.clientHeight > 0) { ro.disconnect(); initRender(); } });
+    ro.observe(container);
+  }
 
   // 时间 1s 刷新
   setInterval(() => {
