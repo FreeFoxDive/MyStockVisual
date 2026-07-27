@@ -167,6 +167,7 @@ body {
 .info-group .change { font-size: 13px; font-weight: 600; }
 .info-group .up { color: var(--up-color); }
 .info-group .down { color: var(--down-color); }
+.info-group .oh { font-size: 13px; font-weight: 500; white-space: nowrap; }
 
 /* ═══════════════ History bar ═══════════ */
 #history-bar {
@@ -294,13 +295,13 @@ body {
 
   <div class="info-group">
     <span class="name" id="info-name">—</span>
+    <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
     <span class="price" id="info-price">—</span>
     <span class="change" id="info-change">—</span>
+    <span class="oh" id="info-open">开 —</span>
+    <span class="oh" id="info-high">高 —</span>
+    <span class="oh" id="info-low">低 —</span>
     <span style="color:var(--text-secondary);font-size:11px" id="info-time"></span>
-    <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
-    <span id="info-hilo" style="display:none">
-      <span id="info-high" style="font-size:16px;font-weight:700"></span> <span id="info-low" style="font-size:16px;font-weight:700"></span>
-    </span>
   </div>
 </div>
 
@@ -724,23 +725,25 @@ function onConfigChange() {
 // ═══════════════════════════════════════════════════════════════
 function updateQuoteDisplay(quote) {
   if (!quote || !quote.last_price) return;
-  const p = quote.last_price;
-  document.getElementById('info-price').textContent = p.toFixed(2);
+  const p = quote.last_price, pc = quote.prev_close || p;
+  const colorCls = p > pc ? 'up' : (p < pc ? 'down' : ''); // 红涨 绿跌 黑平
+  const chgPct = pc > 0 ? ((p - pc) / pc * 100) : 0;
+
   document.getElementById('info-name').textContent = quote.name || '';
-  if (quote.change_pct != null) {
-    const cls = quote.change_pct >= 0 ? 'up' : 'down';
-    document.getElementById('info-change').textContent = (quote.change_pct >= 0 ? '+' : '') + quote.change_pct.toFixed(2) + '%';
-    document.getElementById('info-change').className = 'change ' + cls;
-    document.getElementById('info-price').className = 'price ' + cls;
-  }
-  if (quote.high != null) {
-    const upCls = quote.change_pct >= 0 ? 'up' : 'down';
+  document.getElementById('info-price').textContent = p.toFixed(2);
+  document.getElementById('info-price').className = 'price ' + colorCls;
+  document.getElementById('info-change').textContent = (chgPct >= 0 ? '+' : '') + chgPct.toFixed(2) + '%';
+  document.getElementById('info-change').className = 'change ' + colorCls;
+  if (quote.open != null) {
+    const oCls = quote.open > pc ? 'up' : (quote.open < pc ? 'down' : '');
+    document.getElementById('info-open').textContent = '开 ' + quote.open.toFixed(2);
+    document.getElementById('info-open').className = 'oh ' + oCls;
     document.getElementById('info-high').textContent = '高 ' + quote.high.toFixed(2);
-    document.getElementById('info-high').className = upCls;
+    document.getElementById('info-high').className = 'oh ' + colorCls;
     document.getElementById('info-low').textContent = '低 ' + quote.low.toFixed(2);
-    document.getElementById('info-low').className = upCls;
-    document.getElementById('info-hilo').style.display = '';
+    document.getElementById('info-low').className = 'oh ' + colorCls;
   }
+  document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
 }
 
 // ═══════════════════════════════════════════════════════════════
