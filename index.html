@@ -877,7 +877,16 @@ function updateQuoteDisplay(quote) {
 function initChart() {
   const dom = document.getElementById('chart-container');
   STATE.chart = echarts.init(dom, null, { renderer: 'canvas' });
-  window.addEventListener('resize', () => STATE.chart.resize());
+  // resize 时重渲染 (解决全屏/窗口变化后日期被截断)
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    STATE.chart.resize();
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (STATE.period === 'intraday' && STATE.intradayData) renderIntraday(STATE.intradayData);
+      else if (STATE.klineData) updateChart(false);
+    }, 150);
+  });
   // 用底层 zrender canvas 追踪鼠标在哪个 grid 面板上 (解决细线 mousemove 不触发问题)
   STATE.chart.getZr().on('mousemove', function(e) {
     const y = e.offsetY;
@@ -1436,8 +1445,8 @@ document.addEventListener('DOMContentLoaded', () => {
     STATE.symbol = last.symbol;
   }
 
-  // First load
-  refresh();
+  // First load (延迟一帧等容器布局完成)
+  requestAnimationFrame(() => setTimeout(refresh, 50));
 
   // 时间 1s 刷新
   setInterval(() => {
