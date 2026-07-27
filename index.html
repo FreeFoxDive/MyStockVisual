@@ -917,74 +917,42 @@ function getIndicatorPanels() {
 
 function calcGridLayout(panels) {
   const showVolume = document.getElementById('chk-volume').checked;
-  // 获取容器实际像素高度用于响应式适配(平板等小屏)
-  const ch = document.getElementById('chart-container').clientHeight || 800;
-  // 最小像素高度: K线>200, 成交量>40, 指标面板>55, 顶部+底部>50
-  const minKlinePx = 200, minVolPx = showVolume ? 40 : 0, minIndPx = panels.length * 55;
-  const overheadPx = 45; // dataZoom滑块 + 边距
-  const totalNeeded = minKlinePx + minVolPx + minIndPx + overheadPx;
-  const availPx = ch - overheadPx;
-  // 如果空间不够, 按比例压缩 (K线多压一点)
-  let klinePx = minKlinePx, volPx = minVolPx, indPx = minIndPx;
-  if (totalNeeded > ch) {
-    const scale = availPx / (totalNeeded - overheadPx);
-    klinePx = Math.max(120, Math.floor(minKlinePx * scale * 0.85));
-    volPx = showVolume ? Math.max(25, Math.floor(minVolPx * scale)) : 0;
-    indPx = Math.max(panels.length * 35, Math.floor(minIndPx * scale * 1.1));
-  } else {
-    // 空间充裕时, 指标面板多分点
-    const extra = availPx - minKlinePx - minVolPx - minIndPx;
-    klinePx = minKlinePx + Math.floor(extra * 0.5);
-    indPx = minIndPx + Math.floor(extra * 0.4);
-    volPx = showVolume ? minVolPx + Math.floor(extra * 0.1) : 0;
-  }
-  // 转百分比
-  const toPct = px => (px / ch * 100);
-  const klineTopPct = toPct(14);
-  const bottomPct = 7; // 底部留给日期标签
-  // 确保底部有足够空间, 不够则压缩K线
-  let cursor = klineTopPct + toPct(klinePx);
-  const maxEndPct = 100 - bottomPct;
-  if (cursor + toPct(volPx + indPx) > maxEndPct) {
-    // 压K线腾空间
-    const needSpace = cursor + toPct(volPx + indPx) - maxEndPct;
-    const newKlinePx = Math.max(100, klinePx - needSpace / toPct(1));
-    klinePx = newKlinePx;
-    cursor = klineTopPct + toPct(klinePx);
-  }
+  const topGap = 2, bottomGap = 8, volPct = showVolume ? 10 : 0;
+  const nPanels = panels.length;
+  // 指标面板: 每面板最少8%, 最多14%
+  const indEach = nPanels > 0 ? Math.max(8, Math.min(14, (100 - topGap - bottomGap - volPct - 30) / nPanels)) : 0;
+  const indTotal = indEach * nPanels;
+  // K线占剩余空间
+  const klinePct = 100 - topGap - bottomGap - volPct - indTotal - (nPanels > 0 ? nPanels : 0);
 
   const grids = [];
   const xAxes = [];
   const yAxes = [];
 
-  // K线 grid (index 0)
-  const klineHPct = toPct(klinePx);
-  grids.push({ left: '8%', right: '2%', top: `${klineTopPct}%`, height: `${klineHPct}%` });
+  // K-line grid (index 0)
+  grids.push({ left: '8%', right: '2%', top: `${topGap}%`, height: `${klinePct}%` });
   xAxes.push({ gridIndex: 0, type: 'category', data: [], show: false });
   yAxes.push({ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } });
 
+  let cursor = topGap + klinePct;
   let nextGi = 1;
   const hasVolume = showVolume;
 
   // 成交量 grid
   if (hasVolume) {
-    const vtPct = cursor + 0.5;
-    const vhPct = toPct(volPx);
-    grids.push({ left: '8%', right: '2%', top: `${vtPct}%`, height: `${vhPct}%` });
+    grids.push({ left: '8%', right: '2%', top: `${cursor}%`, height: `${volPct}%` });
     xAxes.push({ gridIndex: nextGi, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
-    cursor = vtPct + vhPct;
+    cursor += volPct;
     nextGi++;
   }
 
   // 指标面板
-  const perPanelPct = panels.length > 0 ? toPct(Math.floor(indPx / panels.length)) : 0;
   panels.forEach((p, i) => {
-    const top = cursor + 0.5;
-    grids.push({ left: '8%', right: '2%', top: `${top}%`, height: `${perPanelPct}%` });
+    grids.push({ left: '8%', right: '2%', top: `${cursor}%`, height: `${indEach}%` });
     xAxes.push({ gridIndex: nextGi + i, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi + i, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 10 } });
-    cursor = top + perPanelPct;
+    cursor += indEach;
   });
 
   // 最后一个 grid 显示日期标签
