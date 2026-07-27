@@ -720,11 +720,22 @@ function renderIntraday(data) {
     };
   }
 
+  // 参考线：RSI 30/70, KDJ 20/80, MACD 零轴
+  series.forEach(s => {
+    if (showRsi && s.name === 'RSI6') {
+      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
+        data: [{ yAxis: 70, label: { show: true, formatter: '70', color: C().text, fontSize: 10 } }, { yAxis: 30, label: { show: true, formatter: '30', color: C().text, fontSize: 10 }, lineStyle: { color: C().oversold } }] };
+    }
+    if (showKdj && s.name === 'K') {
+      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
+        data: [{ yAxis: 80, label: { show: true, formatter: '80', color: C().text, fontSize: 10 } }, { yAxis: 20, label: { show: true, formatter: '20', color: C().text, fontSize: 10 }, lineStyle: { color: C().oversold } }] };
+    }
+    if (showMacd && s.name === 'DIF') {
+      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().zeroLine, type: 'solid', width: 1 }, data: [{ yAxis: 0 }] };
+    }
+  });
+
   const option = {
-    backgroundColor: C().bg,
-    animation: false,
-    tooltip: {
-      trigger: 'axis',
       axisPointer: { type: 'cross' },
       backgroundColor: 'rgba(0,0,0,0.85)',
       textStyle: { color: '#eee', fontSize: 12, fontFamily: 'monospace' },
@@ -776,26 +787,6 @@ function renderIntraday(data) {
       z: 100,
     });
   }
-  // 参考线：RSI 30/70, KDJ 20/80, MACD 零轴
-  series.forEach(s => {
-    if (showRsi && s.name === 'RSI6') {
-      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
-        data: [
-          { yAxis: 70, label: { show: true, formatter: '70', color: C().text, fontSize: 10 } },
-          { yAxis: 30, label: { show: true, formatter: '30', color: C().text, fontSize: 10 }, lineStyle: { color: C().oversold } },
-        ]};
-    }
-    if (showKdj && s.name === 'K') {
-      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
-        data: [
-          { yAxis: 80, label: { show: true, formatter: '80', color: C().text, fontSize: 10 } },
-          { yAxis: 20, label: { show: true, formatter: '20', color: C().text, fontSize: 10 }, lineStyle: { color: C().oversold } },
-        ]};
-    }
-    if (showMacd && s.name === 'DIF') {
-      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().zeroLine, type: 'solid', width: 1 }, data: [{ yAxis: 0 }] };
-    }
-  });
   chart.setOption({ graphic: igraphics });
 }
 
