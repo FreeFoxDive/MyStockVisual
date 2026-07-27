@@ -71,7 +71,7 @@ def get_af():
 
 
 # ── 指标计算 ──
-from visual.indicators import compute_all_indicators
+from visual.indicators import compute_all_indicators, _safe_list
 
 # ── 缓存 ──
 class TTLCache:
@@ -107,6 +107,31 @@ class TTLCache:
 kline_cache = TTLCache(ttl_seconds=120)
 kline_cache_long = TTLCache(ttl_seconds=300)
 quote_cache = TTLCache(ttl_seconds=30)
+
+
+# ── ETF 溢价 ──
+
+def _is_etf(symbol):
+    """判断是否为境内ETF (代码前缀: 51, 58, 15, 16, 56, 11, 18等)"""
+    code = symbol.split(".")[0]
+    return code[:2] in ("51", "58", "15", "16", "56", "11", "18") or code.startswith("5")
+
+
+def _fetch_etf_nav(symbol):
+    """从 akshare 获取 ETF 历史净值 (单位净值)"""
+    code = symbol.split(".")[0]
+    try:
+        import akshare as ak
+        df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
+        if df is None or len(df) == 0:
+            return None
+        df = df.rename(columns={"净值日期": "date", "单位净值": "nav"})
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"]).set_index("date").sort_index()
+        return df[["nav"]]
+    except Exception as e:
+        print(f"[Visual] 获取 {symbol} 净值失败: {e}", flush=True)
+        return None
 
 
 # ── 数据获取 ──
@@ -410,6 +435,30 @@ class VisualHandler(BaseHTTPRequestHandler):
         # 计算指标
         df, indicators = compute_all_indicators(df, period, use_macd13)
 
+        # ETF 溢价率
+        premium_data = None
+        is_etf = _is_etf(symbol)
+        if is_etf:
+            nav_df = _fetch_etf_nav(symbol)
+            if nav_df is not None and len(nav_df) > 0:
+                # 对齐日期: 取最近匹配的净值
+                df_sorted = df.sort_index()
+                premiums = []
+                for idx in df_sorted.index:
+                    # 找 idx 当天或之前最近的净值
+                    nav_date = idx.date() if hasattr(idx, 'date') else idx
+                    nav_matches = nav_df[nav_df.index <= idx]
+                    if len(nav_matches) > 0:
+                        nav_val = float(nav_matches.iloc[-1]["nav"])
+                        close_val = float(df_sorted.loc[idx, "close"])
+                        prem = (close_val - nav_val) / nav_val * 100 if nav_val > 0 else None
+                    else:
+                        prem = None
+                    premiums.append(prem)
+                # 回填到 df (按原始顺序)
+                prem_series = pd.Series(premiums, index=df_sorted.index)
+                premium_data = {"values": _safe_list(prem_series), "params": {"source": "akshare fund_open_fund_info_em"}}
+
         # 构建响应
         klines = []
         for idx, row in df.iterrows():
@@ -442,11 +491,17 @@ class VisualHandler(BaseHTTPRequestHandler):
             }
             klines.append(entry)
 
+        # 把溢价率写回 klines
+        if premium_data:
+            for i, k in enumerate(klines):
+                k["premium"] = premium_data["values"][i] if i < len(premium_data["values"]) else None
+
         resp = {
             "symbol": symbol,
             "name": name,
             "period": period,
             "count": len(klines),
+            "is_etf": is_etf,
             "macd_params": indicators["macd"]["params"],
             "klines": klines,
             "indicators": indicators,

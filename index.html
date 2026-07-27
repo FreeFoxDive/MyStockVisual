@@ -296,6 +296,7 @@ body {
     <span class="price" id="info-price">—</span>
     <span class="change" id="info-change">—</span>
     <span style="color:var(--text-secondary);font-size:11px" id="info-time"></span>
+    <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
   </div>
 </div>
 
@@ -313,6 +314,7 @@ body {
   <label><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
   <label><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
+  <label><input type="checkbox" id="chk-premium" onchange="onConfigChange()" style="display:none">溢价</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>MACD:</span>
   <div class="macd-mode" id="macd-mode-group">
@@ -402,6 +404,7 @@ async function fetchData() {
   const useMacd13 = STATE.macdMode === 'macd13';
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=300&macd13=${useMacd13}`;
 
+  STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
   showLoading(true);
   try {
     const resp = await fetch(url);
@@ -418,6 +421,7 @@ async function fetchData() {
     console.error('获取数据失败:', e);
     alert('❌ 获取数据失败: ' + e.message);
   } finally {
+    STATE.chart.hideLoading();
     showLoading(false);
   }
 }
@@ -469,6 +473,24 @@ function updateInfo(data) {
     }
   }
   document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
+
+  // 溢价率显示 (ETF)
+  const premChk = document.getElementById('chk-premium');
+  if (data.is_etf) {
+    premChk.style.display = '';
+    const last = data.klines[data.klines.length - 1];
+    if (last && last.premium != null) {
+      const p = last.premium;
+      const pcls = p >= 0 ? 'up' : 'down';
+      document.getElementById('info-premium').textContent = `溢价 ${p>=0?'+':''}${p.toFixed(2)}%`;
+      document.getElementById('info-premium').className = pcls;
+      document.getElementById('info-premium').style.display = '';
+    }
+  } else {
+    premChk.style.display = 'none';
+    document.getElementById('chk-premium').checked = false;
+    document.getElementById('info-premium').style.display = 'none';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -596,6 +618,7 @@ function getIndicatorPanels() {
   if (document.getElementById('chk-kdj').checked) panels.push('kdj');
   if (document.getElementById('chk-rsi').checked) panels.push('rsi');
   if (document.getElementById('chk-atr').checked) panels.push('atr');
+  if (document.getElementById('chk-premium').checked) panels.push('premium');
   return panels;
 }
 
@@ -748,6 +771,15 @@ function updateChart(reTheme) {
           symbol: 'none', areaStyle: { color: 'rgba(144,164,174,0.08)' },
           lineStyle: { color: C().atr, width: 1 } }
       );
+    } else if (p === 'premium') {
+      const premVals = klines.map(x => {
+        const v = x.premium;
+        if (v == null) return null;
+        return { value: v, itemStyle: { color: v >= 0 ? C().up : C().down } };
+      });
+      series.push(
+        { name: '溢价率', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: premVals }
+      );
     }
   });
 
@@ -804,6 +836,7 @@ function updateChart(reTheme) {
           extras.push(`KDJ K ${k.kdj_k?.toFixed(2)||'—'} D ${k.kdj_d?.toFixed(2)||'—'} J ${k.kdj_j?.toFixed(2)||'—'}`);
         }
         if (extras.length > 0) html += `<div>${extras.join(' | ')}</div>`;
+        if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?'#ef5350':'#26a69a'}">${k.premium>=0?'+':''}${k.premium.toFixed(2)}%</span></div>`;
         return html;
       }
 
@@ -824,6 +857,9 @@ function updateChart(reTheme) {
       }
       if (panel === 'atr') {
         return hdr + `<div>ATR(14) ${k.atr14?.toFixed(3)||'—'}</div>`;
+      }
+      if (panel === 'premium') {
+        return hdr + `<div>溢价率 <span style="color:${(k.premium||0)>=0?'#ef5350':'#26a69a'}">${k.premium!=null?(k.premium>=0?'+':'')+k.premium.toFixed(2)+'%':'—'}</span></div>`;
       }
 
       // fallback
@@ -879,9 +915,10 @@ function updateChart(reTheme) {
         }
       }
     }
-    if (p === 'macd') {
+    if (p === 'macd' || p === 'premium') {
       for (let s = 0; s < series.length; s++) {
-        if (series[s].name === 'DIF' && series[s].xAxisIndex === gi) {
+        const name = p === 'macd' ? 'DIF' : '溢价率';
+        if (series[s].name === name && series[s].xAxisIndex === gi) {
           series[s].markLine = {
             silent: true, symbol: 'none',
             lineStyle: { color: C().zeroLine, type: 'solid', width: 1 },
@@ -902,8 +939,8 @@ function updateChart(reTheme) {
   });
 
   // 每个指标面板左上角放名称标签 (graphic)
-  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR' };
-  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr };
+  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', premium: '溢价%' };
+  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr, premium: C().up };
   const graphics = [];
   panels.forEach((p, i) => {
     const gridTop = parseFloat(grids[indicatorStartGi + i].top) / 100 * ch;
