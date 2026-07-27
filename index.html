@@ -675,8 +675,6 @@ function renderIntraday(data) {
     zoomIndices.push(gi);
     gi++;
   }
-  xAxisShowBase = gi - 1; // 记录基础最后面板
-  let gi = 2;
   const subList = [showMacd && 'macd', showKdj && 'kdj', showRsi && 'rsi', showAtr && 'atr'].filter(Boolean);
   const perSubH = subPanels > 0 ? Math.min(15, (93 - subStart) / subPanels) : 0;
 
