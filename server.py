@@ -12,9 +12,11 @@ Visual K线图 HTTP 服务器
 """
 
 import argparse
+import gzip
 import io
 import json
 import os
+import shutil
 import sys
 import time
 import threading
@@ -76,7 +78,68 @@ def get_af():
 # ── 指标计算 ──
 from visual.indicators import compute_all_indicators, _safe_list
 
-# ── 缓存 ──
+# ── 磁盘缓存 ──
+CACHE_DIR = SCRIPT_DIR / ".cache" / "klines"
+CACHE_MAX_MB = 50
+
+
+class DiskCache:
+    """K线数据磁盘缓存 (JSON.gz, TTL + 总大小限制)"""
+
+    def __init__(self):
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _key(self, symbol, period, count):
+        return CACHE_DIR / f"{symbol}_{period}_{count}.json.gz"
+
+    def get(self, symbol, period, count, ttl_seconds):
+        fp = self._key(symbol, period, count)
+        if not fp.exists():
+            return None
+        age = time.time() - fp.stat().st_mtime
+        if age > ttl_seconds:
+            return None
+        try:
+            with gzip.open(fp, "rt", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def set(self, symbol, period, count, data):
+        fp = self._key(symbol, period, count)
+        try:
+            with gzip.open(fp, "wt", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, cls=NumpyEncoder)
+        except Exception:
+            pass
+
+    def cleanup(self):
+        """删除过期文件和超出配额的最旧文件"""
+        now = time.time()
+        files = sorted(CACHE_DIR.glob("*.json.gz"), key=lambda f: f.stat().st_mtime)
+        total_size = 0
+        kept = []
+        for fp in files:
+            size = fp.stat().st_size
+            age = now - fp.stat().st_mtime
+            if age > 86400:  # 超过24小时直接删
+                fp.unlink(missing_ok=True)
+                continue
+            kept.append((fp, size))
+            total_size += size
+        # 超配额删最旧
+        max_bytes = CACHE_MAX_MB * 1024 * 1024
+        for fp, size in kept:
+            if total_size <= max_bytes:
+                break
+            fp.unlink(missing_ok=True)
+            total_size -= size
+
+
+_disk_cache = DiskCache()
+
+
+# ── 内存缓存 ──
 class TTLCache:
     """简单的 TTL 内存缓存"""
 
@@ -180,20 +243,43 @@ def _fetch_etf_nav(symbol):
 
 # ── 数据获取 ──
 def fetch_kline(symbol, period, count):
-    """从 AlphaFeed 获取 K 线数据，返回标准化 DataFrame"""
+    """从 AlphaFeed 获取 K 线数据（优先磁盘缓存），返回标准化 DataFrame"""
+    # 检查磁盘缓存 (日K 60s/非交易 300s, 周月K 600s)
+    now = datetime.now()
+    in_trading = 9 <= now.hour < 15 and now.weekday() < 5
+    ttl = 60 if (period == "1d" and in_trading) else (300 if period == "1d" else 600)
+    cached = _disk_cache.get(symbol, period, count, ttl)
+    if cached:
+        df = pd.DataFrame(cached["data"])
+        if "trade_date" in cached:
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            df = df.set_index("trade_date")
+        elif "trade_time" in cached:
+            df["trade_time"] = pd.to_datetime(df["trade_time"])
+            df = df.set_index("trade_time")
+        df = df.sort_index()
+        return df, cached.get("name", symbol)
+
+    # AlphaFeed 拉取
     af = get_af()
     raw = af.klines.get(symbol=symbol, period=period, count=count,
                         adjust="forward", to_dataframe=True)
     if raw is None or len(raw) == 0:
         return None, None
 
-    # 标准化
     df = _normalize(raw)
     if df is None:
         return None, None
 
-    # 获取名称
     name = raw.iloc[0].get("name", symbol) if "name" in raw.columns else symbol
+
+    # 存入磁盘缓存
+    cache_data = {"name": name, "data": json.loads(df.reset_index().to_json(orient="records", date_format="iso"))}
+    try:
+        _disk_cache.set(symbol, period, count, cache_data)
+    except Exception:
+        pass
+
     return df, name
 
 
@@ -680,6 +766,13 @@ def main():
     args = parser.parse_args()
 
     server = HTTPServer((args.host, args.port), VisualHandler)
+
+    # 启动时清理磁盘缓存
+    try:
+        _disk_cache.cleanup()
+        print(f"[Visual] 磁盘缓存已清理 (上限 {CACHE_MAX_MB}MB)", flush=True)
+    except Exception:
+        pass
 
     print(f"""
 ╔══════════════════════════════════════════╗

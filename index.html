@@ -407,14 +407,32 @@ function toggleTheme() {
 // ═══════════════════════════════════════════════════════════════
 async function fetchData() {
   const symbol = STATE.symbol;
-  // 分时模式走独立 fetchIntraday，这里兜底防止 period 残留
   if (STATE.period === 'intraday') STATE.period = '1d';
   const period = STATE.period;
   const useMacd13 = STATE.macdMode === 'macd13';
-  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=300&macd13=${useMacd13}`;
+  const cacheKey = `vk_${symbol}_${period}_${useMacd13}`;
 
-  STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
-  showLoading(true);
+  // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
+  let cacheHit = false;
+  try {
+    const raw = localStorage.getItem(cacheKey);
+    if (raw) {
+      const cached = JSON.parse(raw);
+      const ttl = period === '1d' ? 120 : 300;
+      if (Date.now() - cached.ts < ttl * 1000 && cached.data) {
+        STATE.klineData = cached.data;
+        updateInfo(cached.data);
+        updateChart(false);
+        cacheHit = true;
+      }
+    }
+  } catch(e) { /* ignore */ }
+
+  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=300&macd13=${useMacd13}`;
+  if (!cacheHit) {
+    STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
+    showLoading(true);
+  }
   try {
     const resp = await fetch(url);
     if (!resp.ok) {
@@ -423,7 +441,30 @@ async function fetchData() {
     }
     const data = await resp.json();
     STATE.klineData = data;
-    // 质押数据
+    // 保存到 localStorage (限制 2MB 总大小)
+    try {
+      const entry = JSON.stringify({ ts: Date.now(), data });
+      localStorage.setItem(cacheKey, entry);
+      // 清理最旧缓存
+      let totalSize = 0;
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k.startsWith('vk_')) {
+          const sz = (localStorage.getItem(k) || '').length;
+          totalSize += sz;
+          keys.push({ k, sz });
+        }
+      }
+      if (totalSize > 2 * 1024 * 1024) {
+        keys.sort((a, b) => a.sz - b.sz);
+        for (const item of keys) {
+          if (totalSize <= 1 * 1024 * 1024) break;
+          localStorage.removeItem(item.k);
+          totalSize -= item.sz;
+        }
+      }
+    } catch(e) { /* quota exceeded */ }
     fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
       .then(r => r.json()).then(d => {
         if (d.pledge) {
@@ -433,7 +474,8 @@ async function fetchData() {
       }).catch(() => {});
     addToHistory(data.symbol, data.name);
     updateInfo(data);
-    updateChart(false);
+    if (cacheHit) updateChart(false); // 后台刷新
+    else updateChart(false);
   } catch (e) {
     console.error('获取数据失败:', e);
     alert('❌ 获取数据失败: ' + e.message);
