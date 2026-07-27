@@ -298,6 +298,9 @@ body {
     <span class="change" id="info-change">—</span>
     <span style="color:var(--text-secondary);font-size:11px" id="info-time"></span>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
+    <span id="info-hilo" style="font-size:12px;color:var(--text-secondary);display:none">
+      <span id="info-high"></span> <span id="info-low"></span>
+    </span>
   </div>
 </div>
 
@@ -434,10 +437,8 @@ async function fetchQuote() {
     const resp = await fetch(`/api/quote?symbol=${encodeURIComponent(STATE.symbol)}`);
     if (resp.ok) {
       const q = await resp.json();
-      if (STATE.klineData) {
-        STATE.klineData.quote = q;
-        updateInfo(STATE.klineData);
-      }
+      updateQuoteDisplay(q);
+      if (STATE.klineData) STATE.klineData.quote = q;
     }
   } catch (e) { /* ignore */ }
 }
@@ -588,29 +589,32 @@ function loadConfig() {
 // ═══════════════════════════════════════════════════════════════
 // INTRADAY (分时图)
 // ═══════════════════════════════════════════════════════════════
-async function fetchIntraday() {
+async function fetchIntraday(full) {
   if (STATE.period !== 'intraday') return; // 已切走，不刷新
   const symbol = STATE.symbol;
-  STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
+  const count = full ? 240 : 10; // 全量240 or 增量10
+  if (full) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
     const [idResp, qResp] = await Promise.all([
-      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
+      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=${count}`),
       fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`)
     ]);
     const id = await idResp.json();
     const quote = await qResp.json();
-    if (!id.bars || id.bars.length === 0) { alert('无分时数据'); return; }
-    STATE.intradayData = id;
-    document.getElementById('info-name').textContent = quote.name || symbol;
-    document.getElementById('info-price').textContent = quote.last_price?.toFixed(2) || '—';
-    if (quote.change_pct != null) {
-      const cls = quote.change_pct >= 0 ? 'up' : 'down';
-      document.getElementById('info-change').textContent = (quote.change_pct >= 0 ? '+' : '') + quote.change_pct.toFixed(2) + '%';
-      document.getElementById('info-change').className = 'change ' + cls;
+    if (!id.bars || id.bars.length === 0) { if (full) alert('无分时数据'); return; }
+    // 增量模式: 合并尾部 bars
+    if (!full && STATE.intradayData?.bars) {
+      const old = STATE.intradayData.bars;
+      const existing = new Set(old.map(b => b.time));
+      for (const b of id.bars) { if (!existing.has(b.time)) old.push(b); }
+      if (old.length > 240) STATE.intradayData.bars = old.slice(-240);
+    } else {
+      STATE.intradayData = id;
     }
-    renderIntraday(id);
-  } catch(e) { alert('分时数据获取失败: ' + e.message); }
-  finally { STATE.chart.hideLoading(); }
+    updateQuoteDisplay(quote);
+    renderIntraday(STATE.intradayData);
+  } catch(e) { if (full) alert('分时数据获取失败: ' + e.message); }
+  finally { if (full) STATE.chart.hideLoading(); }
 }
 
 function renderIntraday(data) {
@@ -669,6 +673,27 @@ function renderIntraday(data) {
 function onConfigChange() {
   saveConfig();
   onIndicatorChange();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED QUOTE DISPLAY
+// ═══════════════════════════════════════════════════════════════
+function updateQuoteDisplay(quote) {
+  if (!quote || !quote.last_price) return;
+  const p = quote.last_price;
+  document.getElementById('info-price').textContent = p.toFixed(2);
+  document.getElementById('info-name').textContent = quote.name || '';
+  if (quote.change_pct != null) {
+    const cls = quote.change_pct >= 0 ? 'up' : 'down';
+    document.getElementById('info-change').textContent = (quote.change_pct >= 0 ? '+' : '') + quote.change_pct.toFixed(2) + '%';
+    document.getElementById('info-change').className = 'change ' + cls;
+    document.getElementById('info-price').className = 'price ' + cls;
+  }
+  if (quote.high != null) {
+    document.getElementById('info-high').textContent = '高 ' + quote.high.toFixed(2);
+    document.getElementById('info-low').textContent = '低 ' + quote.low.toFixed(2);
+    document.getElementById('info-hilo').style.display = '';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1080,7 +1105,7 @@ function switchPeriod(period) {
   const isIntra = period === 'intraday';
   document.getElementById('indicator-bar').style.display = isIntra ? 'none' : '';
   if (isIntra) {
-    fetchIntraday();
+    fetchIntraday(true);
   } else {
     refresh();
   }
@@ -1224,20 +1249,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // First load
   refresh();
 
-  // Auto-refresh in trading hours: 30s快照, 60s分时图
+  // Auto-refresh in trading hours: 2s快照, 60s分时增量
   let intraTick = 0;
   setInterval(() => {
     const now = new Date();
     const hour = now.getHours(), minute = now.getMinutes();
     const inTrading = (hour > 9 || (hour === 9 && minute >= 30)) && hour < 15;
-    if (!inTrading || !STATE.klineData) return;
+    if (!inTrading) return;
     fetchQuote();
-    intraTick++;
-    if (intraTick >= 2 && STATE.period === 'intraday') {
-      intraTick = 0;
-      if (STATE.period === 'intraday') fetchIntraday();
+    if (STATE.period === 'intraday') {
+      intraTick++;
+      if (intraTick >= 30) { // 每30个tick=60s
+        intraTick = 0;
+        fetchIntraday(false); // 增量
+      }
     }
-  }, 30000);
+  }, 2000);
 });
 </script>
 </body>
