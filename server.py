@@ -251,10 +251,11 @@ def fetch_kline(symbol, period, count):
     cached = _disk_cache.get(symbol, period, count, ttl)
     if cached:
         df = pd.DataFrame(cached["data"])
-        if "trade_date" in cached:
+        # trade_date/trade_time 在 data 行内, 不在顶层
+        if "trade_date" in df.columns:
             df["trade_date"] = pd.to_datetime(df["trade_date"])
             df = df.set_index("trade_date")
-        elif "trade_time" in cached:
+        elif "trade_time" in df.columns:
             df["trade_time"] = pd.to_datetime(df["trade_time"])
             df = df.set_index("trade_time")
         df = df.sort_index()
