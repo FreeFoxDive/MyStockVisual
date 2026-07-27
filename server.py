@@ -119,7 +119,19 @@ def _load_pledge():
         return _pledge_cache
     try:
         import akshare as ak
-        df = ak.stock_gpzy_pledge_ratio_em()
+        from datetime import date, timedelta
+        # 尝试最近5个交易日，找到有数据的日期
+        df = None
+        for offset in range(5):
+            d = (date.today() - timedelta(days=offset)).strftime("%Y%m%d")
+            try:
+                df = ak.stock_gpzy_pledge_ratio_em(date=d)
+                if df is not None and len(df) > 0:
+                    break
+            except Exception:
+                continue
+        if df is None:
+            df = ak.stock_gpzy_pledge_ratio_em()  # fallback: default date
         pledge = {}
         for _, r in df.iterrows():
             code = str(r["股票代码"]).strip()
