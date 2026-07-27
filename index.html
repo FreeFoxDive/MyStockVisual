@@ -678,15 +678,15 @@ function renderIntraday(data) {
     gi++;
   });
 
-  // 竞价盘 9:15-9:25 虚线区域
-  let aucS = -1, aucE = -1;
-  times.forEach((t, i) => { if (t >= '09:15' && aucS < 0) aucS = i; if (t >= '09:25' && aucE < 0) aucE = i; });
-  if (aucS >= 0 && aucE >= 0) {
+  // 开盘前竞价区域: 标记前 N 根 bar (数据从 9:31 开始, 竞价 9:15-9:25 无K线数据)
+  const aucCount = Math.min(15, times.length);
+  if (aucCount > 0) {
+    const aucS = 0, aucE = aucCount - 1;
     series[0].markArea = {
       silent: true,
-      label: { show: true, position: 'insideTop', color: C().text, fontSize: 10, formatter: '竞价' },
-      itemStyle: { color: 'rgba(128,128,128,0.06)', borderColor: 'rgba(128,128,128,0.2)', borderType: 'dashed', borderWidth: 1 },
-      data: [[{ xAxis: times[aucS] }, { xAxis: times[aucE] }]]
+      label: { show: true, position: 'insideTop', color: C().text, fontSize: 10, formatter: '竞价 9:15-9:25' },
+      itemStyle: { color: 'rgba(128,128,128,0.05)', borderColor: 'rgba(128,128,128,0.15)', borderType: 'dashed', borderWidth: 1 },
+      data: [[{ xAxis: times[0] }, { xAxis: times[aucCount - 1] }]]
     };
   }
 
