@@ -187,30 +187,34 @@ _stock_list_time = 0
 
 
 def _load_stock_list():
-    """加载全量A股列表 (缓存1小时, 失败重试1次)"""
+    """加载全量A股+ETF列表 (缓存1小时, 失败重试1次)"""
     global _stock_list, _stock_list_time
     now = time.time()
     if _stock_list is not None and now - _stock_list_time < 3600:
         return _stock_list
-    print("[Visual] 加载全量A股列表...", flush=True)
+    print("[Visual] 加载全量A股+ETF列表...", flush=True)
     for attempt in range(2):
         try:
             af = get_af()
-            df = af.quotes.get(universes="CN_Stock", to_dataframe=True)
             stocks = []
-            for _, r in df.iterrows():
-                sym = r.get("symbol", "")
-                name = r.get("ext.name", "")
-                if not sym or not name or pd.isna(name):
-                    continue
-                code = sym.split(".")[0] if "." in sym else sym
-                stocks.append({"symbol": sym, "name": str(name), "code": code})
+            for universe in ("CN_Stock", "CN_ETF"):
+                try:
+                    df = af.quotes.get(universes=universe, to_dataframe=True)
+                    for _, r in df.iterrows():
+                        sym = r.get("symbol", "")
+                        name = r.get("ext.name", "")
+                        if not sym or not name or pd.isna(name):
+                            continue
+                        code = sym.split(".")[0] if "." in sym else sym
+                        stocks.append({"symbol": sym, "name": str(name), "code": code})
+                except Exception as e:
+                    print(f"[Visual] {universe} 加载失败: {e}", flush=True)
             _stock_list = stocks
             _stock_list_time = now
-            print(f"[Visual] 已加载 {len(stocks)} 只股票", flush=True)
+            print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+ETF)", flush=True)
             return _stock_list
         except Exception as e:
-            print(f"[Visual] 加载股票列表({attempt+1}/2)失败: {e}", flush=True)
+            print(f"[Visual] 加载列表({attempt+1}/2)失败: {e}", flush=True)
             if attempt == 0:
                 time.sleep(3)
             else:
