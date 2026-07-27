@@ -314,7 +314,7 @@ body {
   <label><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
   <label><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
-  <label><input type="checkbox" id="chk-premium" onchange="onConfigChange()" style="display:none">溢价</label>
+  <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>MACD:</span>
   <div class="macd-mode" id="macd-mode-group">
@@ -475,9 +475,9 @@ function updateInfo(data) {
   document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
 
   // 溢价率显示 (ETF)
-  const premChk = document.getElementById('chk-premium');
+  const premLabel = document.getElementById('lbl-premium');
   if (data.is_etf) {
-    premChk.style.display = '';
+    premLabel.style.display = '';
     const last = data.klines[data.klines.length - 1];
     if (last && last.premium != null) {
       const p = last.premium;
@@ -487,7 +487,7 @@ function updateInfo(data) {
       document.getElementById('info-premium').style.display = '';
     }
   } else {
-    premChk.style.display = 'none';
+    premLabel.style.display = 'none';
     document.getElementById('chk-premium').checked = false;
     document.getElementById('info-premium').style.display = 'none';
   }
