@@ -1233,11 +1233,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (intraTick >= 2 && STATE.period === 'intraday') {
       intraTick = 0;
       fetchIntraday();
-        .then(r => r.json()).then(d => {
-          if (!d.bars) return;
-          STATE.intradayData = d;
-          updateChart(false);
-        }).catch(() => {});
     }
   }, 30000);
 });
