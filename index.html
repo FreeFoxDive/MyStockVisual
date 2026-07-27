@@ -796,8 +796,10 @@ function renderIntraday(data) {
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
         let h = `<div><b>${b.time}</b></div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
-        if (showKdj && b.kdj_k != null) h += `<div>KDJ K ${b.kdj_k.toFixed(2)} D ${b.kdj_d.toFixed(2)} J ${b.kdj_j.toFixed(2)}</div>`;
-        if (showRsi && b.rsi6 != null) h += `<div>RSI1 ${b.rsi6.toFixed(1)} RSI2 ${(b.rsi12!=null?b.rsi12.toFixed(1):'—')} RSI3 ${(b.rsi24!=null?b.rsi24.toFixed(1):'—')}</div>`;
+        const cKdj = v => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
+        const cRsi = v => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':'#eee'}">${v.toFixed(1)}</span>`;
+        if (showKdj && b.kdj_k != null) h += `<div>KDJ K ${cKdj(b.kdj_k)} D ${cKdj(b.kdj_d)} J ${cKdj(b.kdj_j)}</div>`;
+        if (showRsi && b.rsi6 != null) h += `<div>RSI1 ${cRsi(b.rsi6)} RSI2 ${cRsi(b.rsi12)} RSI3 ${cRsi(b.rsi24)}</div>`;
         if (showAtr && b.atr14 != null) h += `<div>ATR ${b.atr14.toFixed(3)}</div>`;
         return h;
       }
