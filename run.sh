@@ -4,8 +4,7 @@
 
 set -e
 PORT=${1:-8888}
-HOST=${2:-$(hostname -I 2>/dev/null | awk '{print $1}')}
-HOST=${HOST:-localhost}
+HOST=${2:-127.0.0.1}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 cd "$SCRIPT_DIR"
