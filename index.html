@@ -797,7 +797,7 @@ function renderIntraday(data) {
         let h = `<div><b>${b.time}</b></div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         if (showKdj && b.kdj_k != null) h += `<div>KDJ K ${b.kdj_k.toFixed(2)} D ${b.kdj_d.toFixed(2)} J ${b.kdj_j.toFixed(2)}</div>`;
-        if (showRsi && b.rsi6 != null) h += `<div>RSI6 ${b.rsi6.toFixed(1)} RSI12 ${(b.rsi12!=null?b.rsi12.toFixed(1):'—')} RSI24 ${(b.rsi24!=null?b.rsi24.toFixed(1):'—')}</div>`;
+        if (showRsi && b.rsi6 != null) h += `<div>RSI1 ${b.rsi6.toFixed(1)} RSI2 ${(b.rsi12!=null?b.rsi12.toFixed(1):'—')} RSI3 ${(b.rsi24!=null?b.rsi24.toFixed(1):'—')}</div>`;
         if (showAtr && b.atr14 != null) h += `<div>ATR ${b.atr14.toFixed(3)}</div>`;
         return h;
       }
@@ -1141,7 +1141,7 @@ function updateChart(reTheme) {
         html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
         let extras = [];
         if (document.getElementById('tip-rsi').checked) {
-          extras.push(`RSI6 ${k.rsi6?.toFixed(1)||'—'} RSI12 ${k.rsi12?.toFixed(1)||'—'} RSI24 ${k.rsi24?.toFixed(1)||'—'}`);
+          extras.push(`RSI1 ${k.rsi6?.toFixed(1)||'—'} RSI2 ${k.rsi12?.toFixed(1)||'—'} RSI3 ${k.rsi24?.toFixed(1)||'—'}`);
         }
         if (document.getElementById('tip-kdj').checked) {
           extras.push(`KDJ K ${k.kdj_k?.toFixed(2)||'—'} D ${k.kdj_d?.toFixed(2)||'—'} J ${k.kdj_j?.toFixed(2)||'—'}`);
@@ -1164,7 +1164,7 @@ function updateChart(reTheme) {
         return hdr + `<div>K <span style="color:${C().kdjK}">${k.kdj_k?.toFixed(2)||'—'}</span> D <span style="color:${C().kdjD}">${k.kdj_d?.toFixed(2)||'—'}</span> J <span style="color:${C().kdjJ}">${k.kdj_j?.toFixed(2)||'—'}</span></div>`;
       }
       if (panel === 'rsi') {
-        return hdr + `<div>RSI6 <span style="color:${C().rsi6}">${k.rsi6?.toFixed(1)||'—'}</span> RSI12 <span style="color:${C().rsi12}">${k.rsi12?.toFixed(1)||'—'}</span> RSI24 <span style="color:${C().rsi24}">${k.rsi24?.toFixed(1)||'—'}</span></div>`;
+        return hdr + `<div>RSI1 <span style="color:${C().rsi6}">${k.rsi6?.toFixed(1)||'—'}</span> RSI2 <span style="color:${C().rsi12}">${k.rsi12?.toFixed(1)||'—'}</span> RSI3 <span style="color:${C().rsi24}">${k.rsi24?.toFixed(1)||'—'}</span></div>`;
       }
       if (panel === 'atr') {
         return hdr + `<div>ATR(14) ${k.atr14?.toFixed(3)||'—'}</div>`;
