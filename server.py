@@ -548,7 +548,7 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._send_error("缺少 symbol 参数")
         symbol = normalize_symbol(symbol_raw)
         period = params.get("period", ["5m"])[0]
-        count = min(int(params.get("count", ["80"])[0]), 240)
+        count = min(int(params.get("count", ["120"])[0]), 250)
         try:
             af = get_af()
             dfs = af.klines.batch([symbol], period=period, count=count, adjust="forward", to_dataframe=True)

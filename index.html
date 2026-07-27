@@ -417,7 +417,7 @@ async function fetchData() {
     STATE.klineData = data;
     // 日内分时数据
     if (document.getElementById('chk-intraday').checked && data.period === '1d') {
-      fetch(`/api/intraday?symbol=${encodeURIComponent(data.symbol)}&period=5m&count=80`)
+      fetch(`/api/intraday?symbol=${encodeURIComponent(data.symbol)}&period=1m&count=240`)
         .then(r => r.json()).then(d => { STATE.intradayData = d; updateChart(false); }).catch(() => {});
     } else { STATE.intradayData = null; }
     addToHistory(data.symbol, data.name);
@@ -817,7 +817,7 @@ function updateChart(reTheme) {
         // 简化：用索引对齐，覆盖日期xAxis data
         xAxes[gi].data = times;
         xAxes[gi].show = true;
-        xAxes[gi].axisLabel = { color: C().text, fontSize: 9, rotate: 30, interval: 11 };
+        xAxes[gi].axisLabel = { color: C().text, fontSize: 9, rotate: 30, interval: 29 };
         series.push(
           { name: '分时', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: closes,
             symbol: 'none', areaStyle: { color: 'rgba(66,133,244,0.15)' },
