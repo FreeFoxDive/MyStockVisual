@@ -17,6 +17,11 @@ import numpy as np
 import pandas as pd
 
 
+def sma(s, window):
+    """SMA 简单移动平均 (算术平均), 对标东方财富/同花顺/通达信 MA 线"""
+    return s.rolling(window=window).mean()
+
+
 def ema(s, span):
     """EMA 指数移动平均: ewm(span, adjust=False)"""
     return s.ewm(span=span, adjust=False).mean()
@@ -128,15 +133,15 @@ def compute_all_indicators(df, period="1d", use_macd13=False,
     """
     o, h, l, c, v = df["open"], df["high"], df["low"], df["close"], df["volume"]
 
-    # MA
+    # MA (SMA 简单移动平均, 对标东方财富)
     result_df = df.copy()
-    result_df["ma5"] = ema(c, 5)
-    result_df["ma10"] = ema(c, 10)
-    result_df["ma20"] = ema(c, 20)
+    result_df["ma5"] = sma(c, 5)
+    result_df["ma10"] = sma(c, 10)
+    result_df["ma20"] = sma(c, 20)
 
     # 成交量MA
-    result_df["vol_ma5"] = ema(v, 5)
-    result_df["vol_ma10"] = ema(v, 10)
+    result_df["vol_ma5"] = sma(v, 5)
+    result_df["vol_ma10"] = sma(v, 10)
 
     # MACD
     mp = get_macd_params(period, use_macd13)

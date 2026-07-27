@@ -324,6 +324,8 @@ body {
   <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
+  <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">📏 MA=SMA</span>
+  <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>MACD:</span>
   <div class="macd-mode" id="macd-mode-group">
     <button class="active" data-mode="default" onclick="onMacdMode('default')">默认</button>
@@ -358,6 +360,8 @@ const STATE = {
 // ═══════════════════════════════════════════════════════════════
 // COLORS
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════ 东财对标配色 (series-grouped) ═══════════
+// 白色系(MA5/DIF/K/RSI1) → 黄色系(MA10/DEA/D/RSI2) → 玫红系(MA20/J/RSI3)
 const COLORS = {
   light: {
     bg: '#ffffff',
@@ -365,11 +369,13 @@ const COLORS = {
     gridLine: '#eeeeee',
     crossLine: '#cccccc',
     up: '#ef232a', down: '#14b143',
-    ma5: '#f5a623', ma10: '#4a90d9', ma20: '#ab47bc',
-    macdDif: '#4a90d9', macdDea: '#f5a623',
-    rsi6: '#4a90d9', rsi12: '#f5a623', rsi24: '#ab47bc',
-    kdjK: '#4a90d9', kdjD: '#f5a623', kdjJ: '#ab47bc',
-    atr: '#90a4ae',
+    // ── 白/黑系: MA5 / DIF / K / RSI1 ──
+    ma5: '#1a1a1a', macdDif: '#1a1a1a', kdjK: '#1a1a1a', rsi6: '#1a1a1a',
+    // ── 黄色系: MA10 / DEA / D / RSI2 ──
+    ma10: '#d4a017', macdDea: '#d4a017', kdjD: '#d4a017', rsi12: '#d4a017',
+    // ── 玫红系: MA20 / J / RSI3 ──
+    ma20: '#c2185b', kdjJ: '#c2185b', rsi24: '#c2185b',
+    atr: '#888888',
     overbought: '#ef5350', oversold: '#26a69a',
     zeroLine: '#cccccc',
   },
@@ -379,11 +385,13 @@ const COLORS = {
     gridLine: '#1e2130',
     crossLine: '#363a45',
     up: '#ef5350', down: '#26a69a',
-    ma5: '#ffd54f', ma10: '#42a5f5', ma20: '#ab47bc',
-    macdDif: '#42a5f5', macdDea: '#ffd54f',
-    rsi6: '#42a5f5', rsi12: '#ffd54f', rsi24: '#ce93d8',
-    kdjK: '#42a5f5', kdjD: '#ffd54f', kdjJ: '#ce93d8',
-    atr: '#616e88',
+    // ── 白色系: MA5 / DIF / K / RSI1 ──
+    ma5: '#eeeeee', macdDif: '#eeeeee', kdjK: '#eeeeee', rsi6: '#eeeeee',
+    // ── 黄色系: MA10 / DEA / D / RSI2 ──
+    ma10: '#f5c542', macdDea: '#f5c542', kdjD: '#f5c542', rsi12: '#f5c542',
+    // ── 玫红系: MA20 / J / RSI3 ──
+    ma20: '#e84698', kdjJ: '#e84698', rsi24: '#e84698',
+    atr: '#5a5a5a',
     overbought: '#ef5350', oversold: '#26a69a',
     zeroLine: '#363a45',
   }
@@ -392,15 +400,41 @@ const COLORS = {
 function C() { return COLORS[STATE.theme]; }
 
 // ═══════════════════════════════════════════════════════════════
-// THEME
+// THEME — 自动: 系统偏好 > 时间(6-18亮/18-6暗), 手动点切换后锁定
 // ═══════════════════════════════════════════════════════════════
-function toggleTheme() {
-  STATE.theme = STATE.theme === 'light' ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', STATE.theme);
+function detectSystemTheme() {
+  // 1. 系统暗色模式
+  if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+  if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+  // 2. 时间回退: 6:00-18:00 亮色, 其余暗色
+  const h = new Date().getHours();
+  return (h >= 6 && h < 18) ? 'light' : 'dark';
+}
+
+function applyTheme(theme) {
+  STATE.theme = theme;
+  document.documentElement.setAttribute('data-theme', theme);
   const btn = document.getElementById('btn-theme');
-  btn.textContent = STATE.theme === 'dark' ? '☀️' : '🌙';
+  btn.textContent = STATE._themeAuto ? (theme === 'dark' ? '🌙 auto' : '☀️ auto') : (theme === 'dark' ? '☀️' : '🌙');
+  btn.title = STATE._themeAuto ? '自动模式(点击锁定)' : '手动模式(点击切换)';
+}
+
+function toggleTheme() {
+  STATE._themeAuto = false;  // 手动操作=锁定, 不再跟随系统/时间
+  STATE.theme = STATE.theme === 'light' ? 'dark' : 'light';
+  applyTheme(STATE.theme);
   saveConfig();
   if (STATE.klineData) { updateChart(true); }
+}
+
+function onSystemThemeChange() {
+  if (!STATE._themeAuto) return;
+  const sys = detectSystemTheme();
+  if (sys !== STATE.theme) {
+    applyTheme(sys);
+    saveConfig();
+    if (STATE.klineData) { updateChart(true); }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -628,6 +662,7 @@ function saveConfig() {
     tipRsi: document.getElementById('tip-rsi').checked,
     tipKdj: document.getElementById('tip-kdj').checked,
     theme: STATE.theme,
+    themeAuto: STATE._themeAuto,
     macdMode: STATE.macdMode,
   };
   try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch(e) {}
@@ -644,13 +679,18 @@ function loadConfig() {
     document.getElementById('chk-atr').checked = !!cfg.atr;
     document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
     document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
-    if (cfg.theme === 'dark' && STATE.theme !== 'dark') toggleTheme();
-    else if (cfg.theme !== 'dark' && STATE.theme === 'dark') toggleTheme();
     if (cfg.macdMode) {
       STATE.macdMode = cfg.macdMode;
       document.querySelectorAll('#macd-mode-group button').forEach(b => {
         b.classList.toggle('active', b.dataset.mode === cfg.macdMode);
       });
+    }
+    // 主题: themeAuto=true → 自动; 否则 → 锁定 (旧配置无themeAuto视为手动)
+    if (cfg.theme) {
+      STATE._themeAuto = cfg.themeAuto === true;
+      if (!STATE._themeAuto) {
+        applyTheme(cfg.theme);
+      }
     }
   } catch(e) {}
 }
@@ -1320,6 +1360,21 @@ document.addEventListener('DOMContentLoaded', () => {
   // Restore saved config (theme, panels, etc.)
   loadConfig();
   _macdMode = STATE.macdMode;
+
+  // ── 自动主题: 系统偏好 > 时间 ──
+  if (STATE._themeAuto) {
+    applyTheme(detectSystemTheme());
+    // 监听系统主题变化
+    if (window.matchMedia) {
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', onSystemThemeChange);
+    }
+    // 每30分钟检查时间触发切换 (6:00→亮, 18:00→暗)
+    setInterval(() => {
+      if (!STATE._themeAuto) return;
+      const sys = detectSystemTheme();
+      if (sys !== STATE.theme) { applyTheme(sys); saveConfig(); }
+    }, 30 * 60 * 1000);
+  }
 
   // Search autocomplete
   const symInput = document.getElementById('symbol-input');
