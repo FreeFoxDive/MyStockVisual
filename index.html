@@ -627,8 +627,8 @@ function calcGridLayout(panels) {
   const klineTop = 15;
   const indicatorEnd = 93;  // 留底部给日期标签
 
-  // K线高度: 有成交量时 41%, 无成交量时 70%
-  const klineBottom = showVolume ? 56 : 80;
+  // K线高度: 有成交量时 41%, 无成交量时 70% (面板多时自动压缩)
+  let klineBottom = showVolume ? 56 : 80;
   const klineH = klineBottom - klineTop;
 
   const grids = [];
@@ -653,8 +653,23 @@ function calcGridLayout(panels) {
   }
 
   // 指标面板 (indexes 1+ or 2+)
-  const indicatorStart = hasVolume ? (klineBottom + 3 + 11 + 3) : (klineBottom + 3);
-  const indicatorSpace = indicatorEnd - indicatorStart;
+  // 面板多时自动压缩 K线/成交量区域，保证每个面板有足够空间
+  const minPerPanel = 10;
+  let panelSpaceNeeded = panels.length * minPerPanel;
+  let indicatorStart = hasVolume ? (klineBottom + 17) : (klineBottom + 3);
+  let panelEnd = indicatorEnd;
+  const avail = panelEnd - indicatorStart;
+  if (panels.length > 0 && avail < panelSpaceNeeded) {
+    // 压 K线腾空间
+    const shortfall = panelSpaceNeeded - avail;
+    klineBottom = Math.max(klineTop + 12, klineBottom - shortfall);
+    grids[0].height = `${klineBottom - klineTop}%`;
+    if (hasVolume) {
+      grids[1].top = `${klineBottom + 3}%`;
+    }
+    indicatorStart = hasVolume ? (klineBottom + 17) : (klineBottom + 3);
+  }
+  const indicatorSpace = panelEnd - indicatorStart;
   if (panels.length > 0) {
     const perPanel = indicatorSpace / panels.length;
     panels.forEach((p, i) => {
