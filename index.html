@@ -736,6 +736,10 @@ function renderIntraday(data) {
   });
 
   const option = {
+    backgroundColor: C().bg,
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
       axisPointer: { type: 'cross' },
       backgroundColor: 'rgba(0,0,0,0.85)',
       textStyle: { color: '#eee', fontSize: 12, fontFamily: 'monospace' },
