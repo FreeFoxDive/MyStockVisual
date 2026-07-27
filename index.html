@@ -551,7 +551,12 @@ function renderHistoryTags() {
 function switchToHistory(symbol) {
   document.getElementById('symbol-input').value = symbol.replace(/\.(SH|SZ|BJ)$/, '');
   STATE.symbol = symbol;
-  fetchData();
+  if (STATE.period === 'intraday') {
+    STATE.intradayData = null;
+    fetchIntraday();
+  } else {
+    fetchData();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1287,11 +1292,15 @@ document.addEventListener('DOMContentLoaded', () => {
   function selectResult(idx) {
     if (idx < 0 || idx >= searchResults.length) return;
     const r = searchResults[idx];
-    console.log('selectResult:', r);
     symInput.value = r.code;
     STATE.symbol = r.symbol;
     closeDropdown();
-    refresh();
+    if (STATE.period === 'intraday') {
+      STATE.intradayData = null;
+      fetchIntraday();
+    } else {
+      refresh();
+    }
   }
 
   symInput.addEventListener('input', () => {
