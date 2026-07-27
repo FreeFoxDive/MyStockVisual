@@ -756,18 +756,6 @@ function renderIntraday(data) {
     gi++;
   });
 
-  // 开盘前竞价区域: 标记前 N 根 bar (数据从 9:31 开始, 竞价 9:15-9:25 无K线数据)
-  const aucCount = Math.min(15, times.length);
-  if (aucCount > 0) {
-    const aucS = 0, aucE = aucCount - 1;
-    series[0].markArea = {
-      silent: true,
-      label: { show: true, position: 'insideTop', color: C().text, fontSize: 10, formatter: '竞价区 9:15-9:30' },
-      itemStyle: { color: 'rgba(128,128,128,0.05)', borderColor: 'rgba(128,128,128,0.15)', borderType: 'dashed', borderWidth: 1 },
-      data: [[{ xAxis: times[0] }, { xAxis: times[aucCount - 1] }]]
-    };
-  }
-
   // 参考线：RSI 30/70, KDJ 20/80, MACD 零轴
   series.forEach(s => {
     if (showRsi && s.name === 'RSI1') {
@@ -1193,7 +1181,7 @@ function updateChart(reTheme) {
     backgroundColor: C().bg,
     animation: reTheme ? false : true,
     tooltip: tooltip,
-    axisPointer: { link: [{ xAxisIndex: 'all' }], label: { show: false } },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
     grid: grids,
     xAxis: xAxes,
     yAxis: yAxes,
