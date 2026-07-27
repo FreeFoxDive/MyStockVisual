@@ -917,13 +917,11 @@ function getIndicatorPanels() {
 
 function calcGridLayout(panels) {
   const showVolume = document.getElementById('chk-volume').checked;
-  const topGap = 2, bottomGap = 8, gap = 1.5, volPct = showVolume ? 10 : 0;
-  const nPanels = panels.length, totalGaps = (showVolume ? 1 : 0) + nPanels; // 面板间隔数
-  const gapTotal = gap * totalGaps;
-  // 指标面板: 每面板最少8%, 最多14%
+  const topGap = 2, bottomGap = 8, mGap = 2, volPct = showVolume ? 10 : 0;
+  const nPanels = panels.length, totalGaps = (showVolume ? 1 : 0) + nPanels;
+  const gapTotal = mGap * totalGaps;
   const indEach = nPanels > 0 ? Math.max(8, Math.min(14, (100 - topGap - bottomGap - volPct - gapTotal - 20) / nPanels)) : 0;
   const indTotal = indEach * nPanels;
-  // K线占剩余空间
   const klinePct = 100 - topGap - bottomGap - volPct - indTotal - gapTotal;
 
   const grids = [];
@@ -935,7 +933,7 @@ function calcGridLayout(panels) {
   xAxes.push({ gridIndex: 0, type: 'category', data: [], show: false });
   yAxes.push({ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } });
 
-  let cursor = topGap + klinePct + gap;
+  let cursor = topGap + klinePct + mGap;
   let nextGi = 1;
   const hasVolume = showVolume;
 
@@ -944,7 +942,7 @@ function calcGridLayout(panels) {
     grids.push({ left: '8%', right: '2%', top: `${cursor}%`, height: `${volPct}%` });
     xAxes.push({ gridIndex: nextGi, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
-    cursor += volPct + gap;
+    cursor += volPct + mGap;
     nextGi++;
   }
 
@@ -953,7 +951,7 @@ function calcGridLayout(panels) {
     grids.push({ left: '8%', right: '2%', top: `${cursor}%`, height: `${indEach}%` });
     xAxes.push({ gridIndex: nextGi + i, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi + i, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 10 } });
-    cursor += indEach + gap;
+    cursor += indEach + mGap;
   });
 
   // 最后一个 grid 显示日期标签
@@ -1424,8 +1422,12 @@ document.addEventListener('DOMContentLoaded', () => {
     STATE.symbol = last.symbol;
   }
 
-  // First load (延迟一帧等容器布局完成)
-  requestAnimationFrame(() => setTimeout(refresh, 50));
+  // First load (等待容器布局稳定)
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      setTimeout(refresh, 100);
+    });
+  });
 
   // 时间 1s 刷新
   setInterval(() => {
