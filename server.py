@@ -39,7 +39,7 @@ if sys.platform == "win32":
 # ── 项目路径 ──
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-sys.path.insert(0, str(PROJECT_DIR))  # 确保能 import visual.indicators
+sys.path.insert(0, str(SCRIPT_DIR))  # 独立部署时当前目录即 visual/
 
 # ── 加载 .env (优先 visual/ 目录, 其次项目根目录) ──
 for _env_dir in (SCRIPT_DIR, PROJECT_DIR):
@@ -76,7 +76,7 @@ def get_af():
 
 
 # ── 指标计算 ──
-from visual.indicators import compute_all_indicators, _safe_list
+from indicators import compute_all_indicators, _safe_list
 
 # ── 磁盘缓存 ──
 CACHE_DIR = SCRIPT_DIR / ".cache" / "klines"
