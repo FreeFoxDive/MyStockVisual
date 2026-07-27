@@ -533,6 +533,8 @@ function updateInfo(data) {
     }
   }
   document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
+  // 初始加载也显示开高低 (非仅靠2s刷新)
+  if (data.quote) updateQuoteDisplay(data.quote);
 
   // 溢价率显示 (ETF)
   const premLabel = document.getElementById('lbl-premium');
