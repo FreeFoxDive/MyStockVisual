@@ -590,32 +590,24 @@ function loadConfig() {
 // ═══════════════════════════════════════════════════════════════
 // INTRADAY (分时图)
 // ═══════════════════════════════════════════════════════════════
-async function fetchIntraday(full) {
-  if (STATE.period !== 'intraday') return; // 已切走，不刷新
+async function fetchIntraday() {
+  if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
-  const count = full ? 240 : 10; // 全量240 or 增量10
-  if (full) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
+  const loading = !STATE.intradayData;
+  if (loading) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
     const [idResp, qResp] = await Promise.all([
-      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=${count}`),
+      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
       fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`)
     ]);
     const id = await idResp.json();
     const quote = await qResp.json();
-    if (!id.bars || id.bars.length === 0) { if (full) alert('无分时数据'); return; }
-    // 增量模式: 合并尾部 bars
-    if (!full && STATE.intradayData?.bars) {
-      const old = STATE.intradayData.bars;
-      const existing = new Set(old.map(b => b.time));
-      for (const b of id.bars) { if (!existing.has(b.time)) old.push(b); }
-      if (old.length > 240) STATE.intradayData.bars = old.slice(-240);
-    } else {
-      STATE.intradayData = id;
-    }
+    if (!id.bars || id.bars.length === 0) { if (loading) alert('无分时数据'); return; }
+    STATE.intradayData = id;
     updateQuoteDisplay(quote);
     renderIntraday(STATE.intradayData);
-  } catch(e) { if (full) alert('分时数据获取失败: ' + e.message); }
-  finally { if (full) STATE.chart.hideLoading(); }
+  } catch(e) { if (loading) alert('分时数据获取失败: ' + e.message); }
+  finally { if (loading) STATE.chart.hideLoading(); }
 }
 
 function renderIntraday(data) {
@@ -685,6 +677,18 @@ function renderIntraday(data) {
     gi++;
   });
 
+  // 竞价盘 9:15-9:25 虚线区域
+  let aucS = -1, aucE = -1;
+  times.forEach((t, i) => { if (t >= '09:15' && aucS < 0) aucS = i; if (t >= '09:25' && aucE < 0) aucE = i; });
+  if (aucS >= 0 && aucE >= 0) {
+    series[0].markArea = {
+      silent: true,
+      label: { show: true, position: 'insideTop', color: C().text, fontSize: 10, formatter: '竞价' },
+      itemStyle: { color: 'rgba(128,128,128,0.06)', borderColor: 'rgba(128,128,128,0.2)', borderType: 'dashed', borderWidth: 1 },
+      data: [[{ xAxis: times[aucS] }, { xAxis: times[aucE] }]]
+    };
+  }
+
   const option = {
     backgroundColor: C().bg,
     animation: false,
@@ -736,12 +740,14 @@ function updateQuoteDisplay(quote) {
   document.getElementById('info-change').className = 'change ' + colorCls;
   if (quote.open != null) {
     const oCls = quote.open > pc ? 'up' : (quote.open < pc ? 'down' : '');
+    const hCls = quote.high > pc ? 'up' : (quote.high < pc ? 'down' : '');
+    const lCls = quote.low > pc ? 'up' : (quote.low < pc ? 'down' : '');
     document.getElementById('info-open').textContent = '开 ' + quote.open.toFixed(2);
     document.getElementById('info-open').className = 'oh ' + oCls;
     document.getElementById('info-high').textContent = '高 ' + quote.high.toFixed(2);
-    document.getElementById('info-high').className = 'oh ' + colorCls;
+    document.getElementById('info-high').className = 'oh ' + hCls;
     document.getElementById('info-low').textContent = '低 ' + quote.low.toFixed(2);
-    document.getElementById('info-low').className = 'oh ' + colorCls;
+    document.getElementById('info-low').className = 'oh ' + lCls;
   }
   document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
 }
@@ -1153,7 +1159,7 @@ function switchPeriod(period) {
   });
   const isIntra = period === 'intraday';
   if (isIntra) {
-    fetchIntraday(true);
+    fetchIntraday();
   } else {
     refresh();
   }

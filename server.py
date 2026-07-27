@@ -555,6 +555,9 @@ class VisualHandler(BaseHTTPRequestHandler):
             df = dfs.get(symbol)
             if df is None or len(df) == 0:
                 return self._send_error(f"无法获取 {symbol} 的分钟线", 404)
+            # 保存原始时间列再标准化
+            time_col = "trade_time" if "trade_time" in df.columns else "trade_date"
+            raw_times = df[time_col].astype(str).str[-8:-3] if time_col in df.columns else None
             df = _normalize(df)
             if df is None:
                 return self._send_error("数据不足", 404)
@@ -562,9 +565,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             df, indicators = compute_all_indicators(df, period="1d", with_atr_val=True)
             bars = []
             for i, (idx, row) in enumerate(df.iterrows()):
-                ts = str(idx)
-                if hasattr(idx, "strftime"):
-                    ts = idx.strftime("%H:%M")
+                ts = raw_times.iloc[i] if raw_times is not None and i < len(raw_times) else str(idx)
+                if ts and not ts[0].isdigit(): ts = str(idx)[-8:-3]
                 bars.append({
                     "time": ts,
                     "open": _safe_float(row.get("open")),
