@@ -681,7 +681,7 @@ function renderIntraday(data) {
   subList.forEach((p, pi) => {
     const top = subStart + pi * perSubH;
     grids.push({ left: '8%', right: '2%', top: `${top}%`, height: `${perSubH - 1}%` });
-    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: gi === 2 + subPanels - 1, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
+    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
     yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 9 } });
     zoomIndices.push(gi);
     if (p === 'macd') {
@@ -749,8 +749,8 @@ function renderIntraday(data) {
     ],
     series: series,
   };
-  // 最后面板显示日期
-  xAxes[xAxes.length - 1].show = true;
+  // 最后面板显示日期（setOption 之前设置）
+  if (xAxes.length > 0) xAxes[xAxes.length - 1].show = true;
   chart.setOption({ graphic: [] });
   chart.setOption(option, { notMerge: false });
   // 分时面板名称标签 (graphic)
