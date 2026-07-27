@@ -796,10 +796,10 @@ function renderIntraday(data) {
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
         let h = `<div><b>${b.time}</b></div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
-        const cKdj = v => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
-        const cRsi = v => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':'#eee'}">${v.toFixed(1)}</span>`;
-        if (showKdj && b.kdj_k != null) h += `<div>KDJ K ${cKdj(b.kdj_k)} D ${cKdj(b.kdj_d)} J ${cKdj(b.kdj_j)}</div>`;
-        if (showRsi && b.rsi6 != null) h += `<div>RSI1 ${cRsi(b.rsi6)} RSI2 ${cRsi(b.rsi12)} RSI3 ${cRsi(b.rsi24)}</div>`;
+        const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
+        const cRsiV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr}">${v.toFixed(1)}</span>`;
+        if (showKdj && b.kdj_k != null) h += `<div><span style="color:${C().kdjK}">K</span> ${cKdjV(b.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cKdjV(b.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cKdjV(b.kdj_j,C().kdjJ)}</div>`;
+        if (showRsi && b.rsi6 != null) h += `<div><span style="color:${C().rsi6}">RSI1</span> ${cRsiV(b.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cRsiV(b.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cRsiV(b.rsi24,C().rsi24)}</div>`;
         if (showAtr && b.atr14 != null) h += `<div>ATR ${b.atr14.toFixed(3)}</div>`;
         return h;
       }
@@ -1143,12 +1143,12 @@ function updateChart(reTheme) {
         html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
         let extras = [];
         if (document.getElementById('tip-rsi').checked) {
-          const cRsi = v => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':'#eee'}">${v.toFixed(1)}</span>`;
-          extras.push(`RSI1 ${cRsi(k.rsi6)} RSI2 ${cRsi(k.rsi12)} RSI3 ${cRsi(k.rsi24)}`);
+          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr}">${v.toFixed(1)}</span>`;
+          extras.push(`<span style="color:${C().rsi6}">RSI1</span> ${cV(k.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cV(k.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cV(k.rsi24,C().rsi24)}`);
         }
         if (document.getElementById('tip-kdj').checked) {
-          const cKdj = v => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
-          extras.push(`KDJ K ${cKdj(k.kdj_k)} D ${cKdj(k.kdj_d)} J ${cKdj(k.kdj_j)}`);
+          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
+          extras.push(`<span style="color:${C().kdjK}">K</span> ${cV(k.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cV(k.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cV(k.kdj_j,C().kdjJ)}`);
         }
         if (extras.length > 0) html += `<div>${extras.join(' | ')}</div>`;
         if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?'#ef5350':'#26a69a'}">${k.premium>=0?'+':''}${k.premium.toFixed(2)}%</span></div>`;
@@ -1165,12 +1165,12 @@ function updateChart(reTheme) {
         return hdr + `<div>DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
       }
       if (panel === 'kdj') {
-        const cKdj = v => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':'#eee'};font-weight:700">${v.toFixed(2)}</span>`;
-        return hdr + `<div>K ${cKdj(k.kdj_k)} D ${cKdj(k.kdj_d)} J ${cKdj(k.kdj_j)}</div>`;
+        const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr};font-weight:700">${v.toFixed(2)}</span>`;
+        return hdr + `<div><span style="color:${C().kdjK}">K</span> ${cV(k.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cV(k.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cV(k.kdj_j,C().kdjJ)}</div>`;
       }
       if (panel === 'rsi') {
-        const cRsi = v => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':'#eee'};font-weight:700">${v.toFixed(1)}</span>`;
-        return hdr + `<div>RSI1 ${cRsi(k.rsi6)} RSI2 ${cRsi(k.rsi12)} RSI3 ${cRsi(k.rsi24)}</div>`;
+        const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr};font-weight:700">${v.toFixed(1)}</span>`;
+        return hdr + `<div><span style="color:${C().rsi6}">RSI1</span> ${cV(k.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cV(k.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cV(k.rsi24,C().rsi24)}</div>`;
       }
       if (panel === 'atr') {
         return hdr + `<div>ATR(14) ${k.atr14?.toFixed(3)||'—'}</div>`;
