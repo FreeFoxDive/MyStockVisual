@@ -1160,13 +1160,23 @@ document.addEventListener('DOMContentLoaded', () => {
   // First load
   refresh();
 
-  // Auto-refresh quote in trading hours (every 30s)
+  // Auto-refresh in trading hours: 30s快照, 60s分时图
+  let intraTick = 0;
   setInterval(() => {
     const now = new Date();
     const hour = now.getHours(), minute = now.getMinutes();
     const inTrading = (hour > 9 || (hour === 9 && minute >= 30)) && hour < 15;
-    if (inTrading && STATE.klineData) {
-      fetchQuote();
+    if (!inTrading || !STATE.klineData) return;
+    fetchQuote();
+    intraTick++;
+    if (intraTick >= 2 && document.getElementById('chk-intraday').checked) {
+      intraTick = 0;
+      fetch(`/api/intraday?symbol=${encodeURIComponent(STATE.symbol)}&period=1m&count=240`)
+        .then(r => r.json()).then(d => {
+          if (!d.bars) return;
+          STATE.intradayData = d;
+          updateChart(false);
+        }).catch(() => {});
     }
   }, 30000);
 });
