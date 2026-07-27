@@ -109,6 +109,34 @@ kline_cache_long = TTLCache(ttl_seconds=300)
 quote_cache = TTLCache(ttl_seconds=30)
 
 
+# ── 质押数据缓存 ──
+_pledge_cache = None
+
+
+def _load_pledge():
+    global _pledge_cache
+    if _pledge_cache is not None:
+        return _pledge_cache
+    try:
+        import akshare as ak
+        df = ak.stock_gpzy_pledge_ratio_em()
+        pledge = {}
+        for _, r in df.iterrows():
+            code = str(r["股票代码"]).strip()
+            pledge[code] = {
+                "ratio": float(r.get("质押比例", 0) or 0),
+                "shares": float(r.get("质押股数", 0) or 0),
+                "market_value": float(r.get("质押市值", 0) or 0),
+                "count": int(r.get("质押笔数", 0) or 0),
+            }
+        _pledge_cache = pledge
+        print(f"[Visual] 已加载 {len(pledge)} 条质押数据", flush=True)
+    except Exception as e:
+        print(f"[Visual] 质押数据加载失败: {e}", flush=True)
+        _pledge_cache = {}
+    return _pledge_cache
+
+
 # ── ETF 溢价 ──
 
 def _is_etf(symbol):
@@ -376,6 +404,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_quote(params)
         elif path == "/api/intraday":
             return self._handle_intraday(params)
+        elif path == "/api/pledge":
+            return self._handle_pledge(params)
         elif path == "/api/search":
             return self._handle_search(params)
         elif path == "/api/ping":
@@ -599,6 +629,20 @@ class VisualHandler(BaseHTTPRequestHandler):
             self._send_json({"symbol": symbol, "period": period, "bars": bars})
         except Exception as e:
             self._send_error(f"获取分钟线失败: {_sanitize_error(e)}", 500)
+
+    # ── API: 质押数据 ──
+    def _handle_pledge(self, params):
+        symbol_raw = params.get("symbol", [None])[0]
+        if not symbol_raw:
+            return self._send_error("缺少 symbol 参数")
+        symbol = normalize_symbol(symbol_raw)
+        code = symbol.split(".")[0]
+        pledge = _load_pledge()
+        data = pledge.get(code)
+        if data:
+            self._send_json({"symbol": symbol, "pledge": data})
+        else:
+            self._send_json({"symbol": symbol, "pledge": None})
 
     # ── API: 搜索 ──
     def _handle_search(self, params):

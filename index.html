@@ -296,6 +296,7 @@ body {
   <div class="info-group">
     <span class="name" id="info-name">—</span>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
+    <span id="info-pledge" style="font-size:12px;color:var(--text-secondary);display:none"></span>
     <span class="price" id="info-price">—</span>
     <span class="change" id="info-change">—</span>
     <span class="oh" id="info-open">开 —</span>
@@ -421,6 +422,14 @@ async function fetchData() {
     }
     const data = await resp.json();
     STATE.klineData = data;
+    // 质押数据
+    fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
+      .then(r => r.json()).then(d => {
+        if (d.pledge) {
+          document.getElementById('info-pledge').textContent = '质押 ' + d.pledge.ratio.toFixed(2) + '%';
+          document.getElementById('info-pledge').style.display = '';
+        }
+      }).catch(() => {});
     addToHistory(data.symbol, data.name);
     updateInfo(data);
     updateChart(false);
@@ -1330,18 +1339,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // First load
   refresh();
 
-  // Auto-refresh: 2s快照全天候, 分时仅交易时段(9:30-15:00)
+  // Auto-refresh: 仅交易时段(9:30-15:00) 2s快照 + 60s分时
   let intraTick = 0;
   setInterval(() => {
-    fetchQuote();
-    if (STATE.period !== 'intraday') return;
     const now = new Date();
     const h = now.getHours(), m = now.getMinutes();
-    if (h < 9 || (h === 9 && m < 30) || h >= 15) return; // 非交易时段
-    intraTick++;
-    if (intraTick >= 30) {
-      intraTick = 0;
-      fetchIntraday();
+    if (h < 9 || (h === 9 && m < 30) || h >= 15) return;
+    fetchQuote();
+    if (STATE.period === 'intraday') {
+      intraTick++;
+      if (intraTick >= 30) { intraTick = 0; fetchIntraday(); }
     }
   }, 2000);
 });
