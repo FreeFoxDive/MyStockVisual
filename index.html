@@ -809,7 +809,7 @@ function renderIntraday(data) {
   };
   // 最后面板显示日期（setOption 之前设置）
   if (xAxes.length > 0) xAxes[xAxes.length - 1].show = true;
-  chart.setOption({ graphic: [] });
+  chart.clear();
   chart.setOption(option, true);
   // 分时面板名称标签 (graphic)
   const igraphics = [];
