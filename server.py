@@ -71,7 +71,7 @@ def get_af():
 
 
 # ── 指标计算 ──
-from visual.indicators import compute_all_indicators, MACD_PARAMS
+from visual.indicators import compute_all_indicators
 
 # ── 缓存 ──
 class TTLCache:
@@ -297,9 +297,9 @@ def normalize_symbol(raw):
 class VisualHandler(BaseHTTPRequestHandler):
     """HTTP 请求处理器"""
 
-    def log_message(self, format, *args):
+    def log_message(self, *_args):
         # 简洁日志
-        print(f"[Visual] {args[0]}", flush=True)
+        print(f"[Visual] {_args[0]}", flush=True)
 
     def _send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False, cls=NumpyEncoder).encode("utf-8")
