@@ -287,6 +287,7 @@ body {
   <button id="btn-1d" class="active" onclick="switchPeriod('1d')">日K</button>
   <button id="btn-1w" onclick="switchPeriod('1w')">周K</button>
   <button id="btn-1M" onclick="switchPeriod('1M')">月K</button>
+  <button id="btn-intraday" onclick="switchPeriod('intraday')">分时</button>
   <span class="separator"></span>
   <button id="btn-refresh" onclick="refresh()" title="手动刷新数据">🔄 刷新</button>
   <button id="btn-theme" onclick="toggleTheme()" title="切换暗色/亮色主题">🌙</button>
@@ -315,7 +316,6 @@ body {
   <label><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
-  <label><input type="checkbox" id="chk-intraday" onchange="onConfigChange()">分时</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>MACD:</span>
   <div class="macd-mode" id="macd-mode-group">
@@ -415,11 +415,6 @@ async function fetchData() {
     }
     const data = await resp.json();
     STATE.klineData = data;
-    // 日内分时数据
-    if (document.getElementById('chk-intraday').checked && data.period === '1d') {
-      fetch(`/api/intraday?symbol=${encodeURIComponent(data.symbol)}&period=1m&count=240`)
-        .then(r => r.json()).then(d => { STATE.intradayData = d; updateChart(false); }).catch(() => {});
-    } else { STATE.intradayData = null; }
     addToHistory(data.symbol, data.name);
     updateInfo(data);
     updateChart(false);
@@ -588,6 +583,86 @@ function loadConfig() {
   } catch(e) {}
 }
 
+// ═══════════════════════════════════════════════════════════════
+// INTRADAY (分时图)
+// ═══════════════════════════════════════════════════════════════
+async function fetchIntraday() {
+  const symbol = STATE.symbol;
+  STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
+  try {
+    const [idResp, qResp] = await Promise.all([
+      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
+      fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`)
+    ]);
+    const id = await idResp.json();
+    const quote = await qResp.json();
+    if (!id.bars || id.bars.length === 0) { alert('无分时数据'); return; }
+    STATE.intradayData = id;
+    document.getElementById('info-name').textContent = quote.name || symbol;
+    document.getElementById('info-price').textContent = quote.last_price?.toFixed(2) || '—';
+    if (quote.change_pct != null) {
+      const cls = quote.change_pct >= 0 ? 'up' : 'down';
+      document.getElementById('info-change').textContent = (quote.change_pct >= 0 ? '+' : '') + quote.change_pct.toFixed(2) + '%';
+      document.getElementById('info-change').className = 'change ' + cls;
+    }
+    renderIntraday(id);
+  } catch(e) { alert('分时数据获取失败: ' + e.message); }
+  finally { STATE.chart.hideLoading(); }
+}
+
+function renderIntraday(data) {
+  const chart = STATE.chart;
+  const times = data.bars.map(b => b.time);
+  const ohlc = data.bars.map(b => [b.open, b.close, b.low, b.high]);
+  const vols = data.bars.map(b => {
+    const up = (b.close || 0) >= (b.open || 0);
+    return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
+  });
+  const prevClose = data.bars[0]?.open; // approx prev close from first bar
+
+  const option = {
+    backgroundColor: C().bg,
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      backgroundColor: 'rgba(0,0,0,0.85)',
+      textStyle: { color: '#eee', fontSize: 12, fontFamily: 'monospace' },
+      formatter: function(ps) {
+        const idx = ps[0]?.dataIndex;
+        const b = data.bars[idx];
+        if (!b) return '';
+        return `<div><b>${b.time}</b></div><div>开 ${b.open?.toFixed(2)} 高 ${b.high?.toFixed(2)} 低 ${b.low?.toFixed(2)} 收 ${b.close?.toFixed(2)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
+      }
+    },
+    grid: [
+      { left: '8%', right: '2%', top: '12%', height: '65%' },
+      { left: '8%', right: '2%', top: '79%', height: '13%' }
+    ],
+    xAxis: [
+      { gridIndex: 0, type: 'category', data: times, show: false },
+      { gridIndex: 1, type: 'category', data: times, show: true, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } }
+    ],
+    yAxis: [
+      { gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } },
+      { gridIndex: 1, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } }
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0,1], start: 0, end: 100 },
+      { type: 'slider', xAxisIndex: [0,1], top: 2, height: 16,
+        borderColor: C().gridLine, backgroundColor: 'transparent',
+        fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().text },
+        textStyle: { color: C().text, fontSize: 10 } }
+    ],
+    series: [
+      { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
+        itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down } },
+      { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols },
+    ]
+  };
+  chart.setOption(option, true);
+}
+
 function onConfigChange() {
   saveConfig();
   onIndicatorChange();
@@ -625,7 +700,6 @@ function getIndicatorPanels() {
   if (document.getElementById('chk-rsi').checked) panels.push('rsi');
   if (document.getElementById('chk-atr').checked) panels.push('atr');
   if (document.getElementById('chk-premium').checked) panels.push('premium');
-  if (document.getElementById('chk-intraday').checked) panels.push('intraday');
   return panels;
 }
 
@@ -808,38 +882,18 @@ function updateChart(reTheme) {
       series.push(
         { name: '溢价率', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: premVals }
       );
-    } else if (p === 'intraday') {
-      const id = STATE.intradayData;
-      if (id && id.bars && id.bars.length > 0) {
-        const times = id.bars.map(b => b.time);
-        const closes = id.bars.map(b => b.close);
-        // 分时需要自己的 xAxis (时间刻度)
-        // 简化：用索引对齐，覆盖日期xAxis data
-        xAxes[gi].data = times;
-        xAxes[gi].show = true;
-        xAxes[gi].axisLabel = { color: C().text, fontSize: 9, rotate: 30, interval: 29 };
-        series.push(
-          { name: '分时', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: closes,
-            symbol: 'none', areaStyle: { color: 'rgba(66,133,244,0.15)' },
-            lineStyle: { color: '#42a5f5', width: 1.5 } }
-        );
-      }
     }
   });
 
-  // ── xAxis data (跳过 intraday: 它有独立时间轴) ──
-  xAxes.forEach((x, xi) => {
-    const pIdx = xi - indicatorStartGi;
-    if (pIdx < 0 || panels[pIdx] !== 'intraday') x.data = dates;
-  });
+  // ── xAxis data ──
+  xAxes.forEach(x => { x.data = dates; });
 
-  // ── DataZoom (排除分时图: 它有独立时间轴) ──
+  // ── DataZoom ──
   const startPct = Math.max(0, Math.min(100, (1 - 80 / dates.length) * 100));
-  const zoomIndices = [0, ...(hasVolume ? [1] : [])];
-  panels.forEach((p, i) => { if (p !== 'intraday') zoomIndices.push(indicatorStartGi + i); });
+  const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
   const dataZoom = [
-    { type: 'inside', xAxisIndex: zoomIndices, start: startPct, end: 100 },
-    { type: 'slider', xAxisIndex: zoomIndices, top: 2, height: 16,
+    { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100 },
+    { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16,
       borderColor: C().gridLine, backgroundColor: 'transparent',
       fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().text },
       textStyle: { color: C().text, fontSize: 10 } }
@@ -987,8 +1041,8 @@ function updateChart(reTheme) {
   });
 
   // 每个指标面板左上角放名称标签 (graphic)
-  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', premium: '溢价%', intraday: '分时' };
-  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr, premium: C().up, intraday: '#42a5f5' };
+  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', premium: '溢价%' };
+  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr, premium: C().up };
   const graphics = [];
   panels.forEach((p, i) => {
     const gridTop = parseFloat(grids[indicatorStartGi + i].top) / 100 * ch;
@@ -1015,11 +1069,18 @@ function updateChart(reTheme) {
 // ═══════════════════════════════════════════════════════════════
 function switchPeriod(period) {
   STATE.period = period;
-  ['1d','1w','1M'].forEach(p => {
+  ['1d','1w','1M','intraday'].forEach(p => {
     const btn = document.getElementById('btn-' + p);
-    btn.classList.toggle('active', p === period);
+    if (btn) btn.classList.toggle('active', p === period);
   });
-  refresh();
+  // 分时模式隐藏指标面板配置
+  const isIntra = period === 'intraday';
+  document.getElementById('indicator-bar').style.display = isIntra ? 'none' : '';
+  if (isIntra) {
+    fetchIntraday();
+  } else {
+    refresh();
+  }
 }
 
 function onIndicatorChange() {
@@ -1169,9 +1230,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!inTrading || !STATE.klineData) return;
     fetchQuote();
     intraTick++;
-    if (intraTick >= 2 && document.getElementById('chk-intraday').checked) {
+    if (intraTick >= 2 && STATE.period === 'intraday') {
       intraTick = 0;
-      fetch(`/api/intraday?symbol=${encodeURIComponent(STATE.symbol)}&period=1m&count=240`)
+      fetchIntraday();
         .then(r => r.json()).then(d => {
           if (!d.bars) return;
           STATE.intradayData = d;
