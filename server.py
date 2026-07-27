@@ -322,6 +322,19 @@ def normalize_symbol(raw):
     return f"{raw}.SH"
 
 
+def _sanitize_error(e):
+    """限流/安全错误信息过滤"""
+    msg = str(e)
+    low = msg.lower()
+    if any(k in low for k in ("rate", "limit", "too many", "throttle")):
+        return "请求过于频繁，请稍后重试"
+    if any(k in low for k in ("api", "key", "auth", "token", "permission")):
+        return "服务暂不可用，请稍后重试"
+    if len(msg) > 120:
+        return msg[:120] + "..."
+    return msg
+
+
 # ── HTTP Handler ──
 class VisualHandler(BaseHTTPRequestHandler):
     """HTTP 请求处理器"""
@@ -429,7 +442,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         try:
             df, name = fetch_kline(symbol, period, count)
         except Exception as e:
-            return self._send_error(f"获取K线失败: {e}", 500)
+            return self._send_error(f"获取K线失败: {_sanitize_error(e)}", 500)
 
         if df is None:
             return self._send_error(f"无法获取 {symbol} 的K线数据", 404)
@@ -585,7 +598,7 @@ class VisualHandler(BaseHTTPRequestHandler):
                 })
             self._send_json({"symbol": symbol, "period": period, "bars": bars})
         except Exception as e:
-            self._send_error(f"获取分钟线失败: {e}", 500)
+            self._send_error(f"获取分钟线失败: {_sanitize_error(e)}", 500)
 
     # ── API: 搜索 ──
     def _handle_search(self, params):

@@ -720,6 +720,26 @@ function renderIntraday(data) {
     series: series,
   };
   chart.setOption(option, true);
+  // 分时面板名称标签 (graphic)
+  const igraphics = [];
+  const iLabels = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI' };
+  const iColors = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6 };
+  subList.forEach((p, pi) => {
+    const gTop = parseFloat(grids[2 + pi].top) / 100 * chart.getHeight();
+    igraphics.push({
+      type: 'text', left: 10, top: gTop + 2,
+      style: { text: iLabels[p] || p, fill: iColors[p] || C().text, font: 'bold 10px monospace' },
+      z: 100,
+    });
+  });
+  // 成交量标签
+  const vgTop = parseFloat(grids[1].top) / 100 * chart.getHeight();
+  igraphics.push({
+    type: 'text', left: 10, top: vgTop + 2,
+    style: { text: 'VOL', fill: C().text, font: 'bold 10px monospace' },
+    z: 100,
+  });
+  chart.setOption({ graphic: igraphics });
 }
 
 function onConfigChange() {
@@ -1007,12 +1027,14 @@ function updateChart(reTheme) {
       const panel = g >= indicatorStartGi ? panels[g - indicatorStartGi] : null;
 
       // ── Helper ──
+      const pc = (data.quote && data.quote.prev_close) || (prev ? prev.close : k.close);
       const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${k.date}</div>`;
+      const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'};font-weight:700">${v.toFixed(2)}</span>`;
 
       // Grid 0: K-line — full detail
       if (g === 0) {
         let html = hdr;
-        html += `<div>开 <b>${k.open?.toFixed(2)}</b> 高 <b>${k.high?.toFixed(2)}</b> 低 <b>${k.low?.toFixed(2)}</b> 收 <b>${k.close?.toFixed(2)}</b>`;
+        html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)} 低 ${cfn(k.low)} 收 ${cfn(k.close)}`;
         if (chgPct != null) html += ` <span style="color:${chgPct>=0?'#ef5350':'#26a69a'}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
         html += `</div><div>MA5 <span style="color:${C().ma5}">${k.ma5?.toFixed(2)||'—'}</span> MA10 <span style="color:${C().ma10}">${k.ma10?.toFixed(2)||'—'}</span> MA20 <span style="color:${C().ma20}">${k.ma20?.toFixed(2)||'—'}</span></div>`;
         html += `<div>量 ${fmtVolume(k.volume)} 额 ${(k.amount/1e8)?.toFixed(2)||'—'}亿</div>`;
@@ -1162,6 +1184,8 @@ function switchPeriod(period) {
   });
   const isIntra = period === 'intraday';
   if (isIntra) {
+    STATE.intradayData = null; // 清缓存，强制重新加载
+    STATE.chart.clear();
     fetchIntraday();
   } else {
     refresh();
