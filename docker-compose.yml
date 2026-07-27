@@ -1,0 +1,11 @@
+services:
+  stock-visual:
+    build: .
+    container_name: stock-visual
+    ports:
+      - "8888:8888"
+    env_file:
+      - .env
+    volumes:
+      - ./.cache:/app/.cache
+    restart: unless-stopped
