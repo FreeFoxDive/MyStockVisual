@@ -401,6 +401,8 @@ function toggleTheme() {
 // ═══════════════════════════════════════════════════════════════
 async function fetchData() {
   const symbol = STATE.symbol;
+  // 分时模式走独立 fetchIntraday，这里兜底防止 period 残留
+  if (STATE.period === 'intraday') STATE.period = '1d';
   const period = STATE.period;
   const useMacd13 = STATE.macdMode === 'macd13';
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=300&macd13=${useMacd13}`;
@@ -587,6 +589,7 @@ function loadConfig() {
 // INTRADAY (分时图)
 // ═══════════════════════════════════════════════════════════════
 async function fetchIntraday() {
+  if (STATE.period !== 'intraday') return; // 已切走，不刷新
   const symbol = STATE.symbol;
   STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
@@ -1232,7 +1235,7 @@ document.addEventListener('DOMContentLoaded', () => {
     intraTick++;
     if (intraTick >= 2 && STATE.period === 'intraday') {
       intraTick = 0;
-      fetchIntraday();
+      if (STATE.period === 'intraday') fetchIntraday();
     }
   }, 30000);
 });
