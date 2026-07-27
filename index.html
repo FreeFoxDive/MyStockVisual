@@ -410,6 +410,7 @@ async function fetchData() {
   if (STATE.period === 'intraday') STATE.period = '1d';
   const period = STATE.period;
   const useMacd13 = STATE.macdMode === 'macd13';
+  const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
   const cacheKey = `vk_${symbol}_${period}_${useMacd13}`;
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
@@ -440,6 +441,7 @@ async function fetchData() {
       throw new Error(err.error || `HTTP ${resp.status}`);
     }
     const data = await resp.json();
+    if (STATE._fetchTs !== fetchTs) return; // 竞态: 已切到新股票, 丢弃旧响应
     STATE.klineData = data;
     // 保存到 localStorage (限制 2MB 总大小)
     try {
@@ -546,7 +548,6 @@ function updateInfo(data) {
     }
   } else {
     premLabel.style.display = 'none';
-    document.getElementById('chk-premium').checked = false;
     document.getElementById('info-premium').style.display = 'none';
   }
 }
@@ -657,15 +658,18 @@ function loadConfig() {
 async function fetchIntraday() {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
+  const fetchTs = Date.now(); STATE._intraFetchTs = fetchTs;
   const loading = !STATE.intradayData;
   if (loading) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
+    const macd13 = STATE.macdMode === 'macd13' ? '&macd13=true' : '';
     const [idResp, qResp] = await Promise.all([
-      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
+      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240${macd13}`),
       fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`)
     ]);
     const id = await idResp.json();
     const quote = await qResp.json();
+    if (STATE._intraFetchTs !== fetchTs) return;
     if (!id.bars || id.bars.length === 0) { if (loading) alert('无分时数据'); return; }
     id.prev_close = quote.prev_close;
     STATE.intradayData = id;
@@ -758,7 +762,7 @@ function renderIntraday(data) {
     const aucS = 0, aucE = aucCount - 1;
     series[0].markArea = {
       silent: true,
-      label: { show: true, position: 'insideTop', color: C().text, fontSize: 10, formatter: '竞价 9:15-9:25' },
+      label: { show: true, position: 'insideTop', color: C().text, fontSize: 10, formatter: '开盘区 9:31-9:45' },
       itemStyle: { color: 'rgba(128,128,128,0.05)', borderColor: 'rgba(128,128,128,0.15)', borderType: 'dashed', borderWidth: 1 },
       data: [[{ xAxis: times[0] }, { xAxis: times[aucCount - 1] }]]
     };
@@ -1068,11 +1072,11 @@ function updateChart(reTheme) {
       const r12 = klines.map(x => x.rsi12);
       const r24 = klines.map(x => x.rsi24);
       series.push(
-        { name: 'RSI6', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: r6,
+        { name: 'RSI1', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: r6,
           symbol: 'none', lineStyle: { color: C().rsi6, width: 1 } },
-        { name: 'RSI12', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: r12,
+        { name: 'RSI2', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: r12,
           symbol: 'none', lineStyle: { color: C().rsi12, width: 1 } },
-        { name: 'RSI24', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: r24,
+        { name: 'RSI3', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: r24,
           symbol: 'none', lineStyle: { color: C().rsi24, width: 1 } }
       );
     } else if (p === 'atr') {
@@ -1139,7 +1143,7 @@ function updateChart(reTheme) {
         html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)} 低 ${cfn(k.low)} 收 ${cfn(k.close)}`;
         if (chgPct != null) html += ` <span style="color:${chgPct>=0?'#ef5350':'#26a69a'}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
         html += `</div><div>MA5 <span style="color:${C().ma5}">${k.ma5?.toFixed(2)||'—'}</span> MA10 <span style="color:${C().ma10}">${k.ma10?.toFixed(2)||'—'}</span> MA20 <span style="color:${C().ma20}">${k.ma20?.toFixed(2)||'—'}</span></div>`;
-        html += `<div>量 ${fmtVolume(k.volume)} 额 ${(k.amount/1e8)?.toFixed(2)||'—'}亿</div>`;
+        html += `<div>量 ${fmtVolume(k.volume)} 额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
         html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
         let extras = [];
         if (document.getElementById('tip-rsi').checked) {
@@ -1157,7 +1161,7 @@ function updateChart(reTheme) {
 
       // Volume (only if enabled)
       if (hasVolume && g === 1) {
-        return hdr + `<div>成交量 ${fmtVolume(k.volume)}</div><div>成交额 ${(k.amount/1e8)?.toFixed(2)||'—'}亿</div>`;
+        return hdr + `<div>成交量 ${fmtVolume(k.volume)}</div><div>成交额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
       }
 
       // Grid 2+: Indicator panels
@@ -1202,7 +1206,7 @@ function updateChart(reTheme) {
     const gi = 2 + i;
     if (p === 'rsi') {
       for (let s = 0; s < series.length; s++) {
-        if (series[s].name === 'RSI6' && series[s].xAxisIndex === gi) {
+        if (series[s].name === 'RSI1' && series[s].xAxisIndex === gi) {
           series[s].markLine = {
             silent: true,
             symbol: 'none',
@@ -1334,6 +1338,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();
+  _macdMode = STATE.macdMode;
 
   // Search autocomplete
   const symInput = document.getElementById('symbol-input');

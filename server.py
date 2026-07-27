@@ -628,8 +628,6 @@ class VisualHandler(BaseHTTPRequestHandler):
                 "ma5": _safe_float(row.get("ma5")),
                 "ma10": _safe_float(row.get("ma10")),
                 "ma20": _safe_float(row.get("ma20")),
-                "vol_ma5": _safe_float(row.get("vol_ma5")),
-                "vol_ma10": _safe_float(row.get("vol_ma10")),
                 "macd_dif": _safe_float(row.get("macd_dif")),
                 "macd_dea": _safe_float(row.get("macd_dea")),
                 "macd_hist": _safe_float(row.get("macd_hist")),
@@ -698,6 +696,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         symbol = normalize_symbol(symbol_raw)
         period = params.get("period", ["5m"])[0]
         count = min(int(params.get("count", ["120"])[0]), 250)
+        use_macd13 = params.get("macd13", ["false"])[0].lower() == "true"
         try:
             af = get_af()
             dfs = af.klines.batch([symbol], period=period, count=count, adjust="forward", to_dataframe=True)
@@ -711,7 +710,7 @@ class VisualHandler(BaseHTTPRequestHandler):
             if df is None:
                 return self._send_error("数据不足", 404)
             # 计算分时指标
-            df, indicators = compute_all_indicators(df, period="1d", with_atr_val=True)
+            df, indicators = compute_all_indicators(df, period="1d", use_macd13=use_macd13, with_atr_val=True)
             bars = []
             for i, (idx, row) in enumerate(df.iterrows()):
                 ts = raw_times.iloc[i] if raw_times is not None and i < len(raw_times) else str(idx)
