@@ -729,6 +729,8 @@ class VisualHandler(BaseHTTPRequestHandler):
                     "kdj_d": indicators["kdj"]["d"][i] if "kdj" in indicators else None,
                     "kdj_j": indicators["kdj"]["j"][i] if "kdj" in indicators else None,
                     "rsi6": indicators["rsi"]["rsi6"][i] if "rsi" in indicators else None,
+                    "rsi12": indicators["rsi"]["rsi12"][i] if "rsi" in indicators else None,
+                    "rsi24": indicators["rsi"]["rsi24"][i] if "rsi" in indicators else None,
                     "atr14": indicators["atr"]["values"][i] if "atr" in indicators else None,
                 })
             self._send_json({"symbol": symbol, "period": period, "bars": bars})
