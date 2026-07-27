@@ -1064,7 +1064,7 @@ function updateChart(reTheme) {
       const panel = g >= indicatorStartGi ? panels[g - indicatorStartGi] : null;
 
       // ── Helper ──
-      const pc = (data.quote && data.quote.prev_close) || (prev ? prev.close : k.close);
+      const pc = prev ? prev.close : k.close; // 前一根收盘价
       const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${k.date}</div>`;
       const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'};font-weight:700">${v.toFixed(2)}</span>`;
 
