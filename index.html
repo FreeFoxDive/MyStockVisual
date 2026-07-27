@@ -933,6 +933,11 @@ function calcGridLayout(panels) {
   const toPct = px => (px / ch * 100);
   const klineTopPct = toPct(14);
   let cursor = klineTopPct + toPct(klinePx);
+
+  const grids = [];
+  const xAxes = [];
+  const yAxes = [];
+
   // K线 grid (index 0)
   const klineHPct = toPct(klinePx);
   grids.push({ left: '8%', right: '2%', top: `${klineTopPct}%`, height: `${klineHPct}%` });
