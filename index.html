@@ -638,45 +638,50 @@ function renderIntraday(data) {
   const bars = data.bars;
   const times = bars.map(b => b.time);
   const ohlc = bars.map(b => [b.open, b.close, b.low, b.high]);
-  const vols = bars.map(b => {
-    const up = (b.close || 0) >= (b.open || 0);
-    return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
-  });
 
-  // 分时指标面板
+  const showVolume = document.getElementById('chk-volume').checked;
   const showMacd = document.getElementById('chk-macd').checked;
   const showKdj = document.getElementById('chk-kdj').checked;
   const showRsi = document.getElementById('chk-rsi').checked;
   const showAtr = document.getElementById('chk-atr').checked;
   const subPanels = [showMacd, showKdj, showRsi, showAtr].filter(Boolean).length;
-  const klineH = subPanels > 0 ? 45 : 65;
-  const volTop = 12 + klineH + 3;
-  const subStart = volTop + 14;
 
-  const grids = [
-    { left: '8%', right: '2%', top: '12%', height: `${klineH}%` },
-    { left: '8%', right: '2%', top: `${volTop}%`, height: '12%' }
-  ];
-  const xAxes = [
-    { gridIndex: 0, type: 'category', data: times, show: false },
-    { gridIndex: 1, type: 'category', data: times, show: !subPanels, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } }
-  ];
-  const yAxes = [
-    { gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } },
-    { gridIndex: 1, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } }
-  ];
+  // 有成交量时 K线 45%, 无成交量时 K线 70%
+  const klineH = showVolume ? (subPanels > 0 ? 40 : 65) : (subPanels > 0 ? 55 : 78);
+  const nextTop = 12 + klineH + 3;
+  const subStart = showVolume ? (nextTop + 13) : nextTop;
+
+  const grids = [{ left: '8%', right: '2%', top: '12%', height: `${klineH}%` }];
+  const xAxes = [{ gridIndex: 0, type: 'category', data: times, show: false }];
+  const yAxes = [{ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } }];
   const series = [
     { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
       itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down } },
-    { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols },
   ];
-  const zoomIndices = [0, 1];
+  const zoomIndices = [0];
+  let gi = 1;
+  let xAxisShowBase = false; // 最后才设 true
+
+  // 成交量（可关闭）
+  if (showVolume) {
+    const vols = bars.map(b => {
+      const up = (b.close || 0) >= (b.open || 0);
+      return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
+    });
+    grids.push({ left: '8%', right: '2%', top: `${nextTop}%`, height: '11%' });
+    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
+    yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
+    series.push({ name: '成交量', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: vols });
+    zoomIndices.push(gi);
+    gi++;
+  }
+  xAxisShowBase = gi - 1; // 记录基础最后面板
   let gi = 2;
   const subList = [showMacd && 'macd', showKdj && 'kdj', showRsi && 'rsi', showAtr && 'atr'].filter(Boolean);
   const perSubH = subPanels > 0 ? Math.min(15, (93 - subStart) / subPanels) : 0;
 
-  subList.forEach(p => {
-    const top = subStart + (gi - 2) * perSubH;
+  subList.forEach((p, pi) => {
+    const top = subStart + pi * perSubH;
     grids.push({ left: '8%', right: '2%', top: `${top}%`, height: `${perSubH - 1}%` });
     xAxes.push({ gridIndex: gi, type: 'category', data: times, show: gi === 2 + subPanels - 1, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
     yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 9 } });
@@ -732,7 +737,7 @@ function renderIntraday(data) {
         const pc = data.prev_close || b.open;
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
         let h = `<div><b>${b.time}</b></div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
-        if (b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
+        if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         return h;
       }
     },
@@ -746,14 +751,17 @@ function renderIntraday(data) {
     ],
     series: series,
   };
-  chart.setOption({ graphic: [] }); // 清旧标签
+  // 最后面板显示日期
+  xAxes[xAxes.length - 1].show = true;
+  chart.setOption({ graphic: [] });
   chart.setOption(option, { notMerge: false });
   // 分时面板名称标签 (graphic)
   const igraphics = [];
   const iLabels = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR' };
   const iColors = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr };
+  let gIdx = showVolume ? 1 : 0;
   subList.forEach((p, pi) => {
-    const gTop = parseFloat(grids[2 + pi].top) / 100 * chart.getHeight();
+    const gTop = parseFloat(grids[gIdx + 1 + pi].top) / 100 * chart.getHeight();
     igraphics.push({
       type: 'text', left: 10, top: gTop + 2,
       style: { text: iLabels[p] || p, fill: iColors[p] || C().text, font: 'bold 10px monospace' },
@@ -761,12 +769,14 @@ function renderIntraday(data) {
     });
   });
   // 成交量标签
-  const vgTop = parseFloat(grids[1].top) / 100 * chart.getHeight();
-  igraphics.push({
-    type: 'text', left: 10, top: vgTop + 2,
-    style: { text: 'VOL', fill: C().text, font: 'bold 10px monospace' },
-    z: 100,
-  });
+  if (showVolume) {
+    const vgTop = parseFloat(grids[1].top) / 100 * chart.getHeight();
+    igraphics.push({
+      type: 'text', left: 10, top: vgTop + 2,
+      style: { text: 'VOL', fill: C().text, font: 'bold 10px monospace' },
+      z: 100,
+    });
+  }
   chart.setOption({ graphic: igraphics });
 }
 
