@@ -315,6 +315,7 @@ body {
   <label><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
+  <label><input type="checkbox" id="chk-intraday" onchange="onConfigChange()">分时</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>MACD:</span>
   <div class="macd-mode" id="macd-mode-group">
@@ -414,6 +415,11 @@ async function fetchData() {
     }
     const data = await resp.json();
     STATE.klineData = data;
+    // 日内分时数据
+    if (document.getElementById('chk-intraday').checked && data.period === '1d') {
+      fetch(`/api/intraday?symbol=${encodeURIComponent(data.symbol)}&period=5m&count=80`)
+        .then(r => r.json()).then(d => { STATE.intradayData = d; updateChart(false); }).catch(() => {});
+    } else { STATE.intradayData = null; }
     addToHistory(data.symbol, data.name);
     updateInfo(data);
     updateChart(false);
@@ -619,6 +625,7 @@ function getIndicatorPanels() {
   if (document.getElementById('chk-rsi').checked) panels.push('rsi');
   if (document.getElementById('chk-atr').checked) panels.push('atr');
   if (document.getElementById('chk-premium').checked) panels.push('premium');
+  if (document.getElementById('chk-intraday').checked) panels.push('intraday');
   return panels;
 }
 
@@ -801,18 +808,38 @@ function updateChart(reTheme) {
       series.push(
         { name: '溢价率', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: premVals }
       );
+    } else if (p === 'intraday') {
+      const id = STATE.intradayData;
+      if (id && id.bars && id.bars.length > 0) {
+        const times = id.bars.map(b => b.time);
+        const closes = id.bars.map(b => b.close);
+        // 分时需要自己的 xAxis (时间刻度)
+        // 简化：用索引对齐，覆盖日期xAxis data
+        xAxes[gi].data = times;
+        xAxes[gi].show = true;
+        xAxes[gi].axisLabel = { color: C().text, fontSize: 9, rotate: 30, interval: 11 };
+        series.push(
+          { name: '分时', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: closes,
+            symbol: 'none', areaStyle: { color: 'rgba(66,133,244,0.15)' },
+            lineStyle: { color: '#42a5f5', width: 1.5 } }
+        );
+      }
     }
   });
 
-  // ── xAxis data ──
-  xAxes.forEach(x => { x.data = dates; });
+  // ── xAxis data (跳过 intraday: 它有独立时间轴) ──
+  xAxes.forEach((x, xi) => {
+    const pIdx = xi - indicatorStartGi;
+    if (pIdx < 0 || panels[pIdx] !== 'intraday') x.data = dates;
+  });
 
-  // ── DataZoom ──
+  // ── DataZoom (排除分时图: 它有独立时间轴) ──
   const startPct = Math.max(0, Math.min(100, (1 - 80 / dates.length) * 100));
-  const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
+  const zoomIndices = [0, ...(hasVolume ? [1] : [])];
+  panels.forEach((p, i) => { if (p !== 'intraday') zoomIndices.push(indicatorStartGi + i); });
   const dataZoom = [
-    { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100 },
-    { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16,
+    { type: 'inside', xAxisIndex: zoomIndices, start: startPct, end: 100 },
+    { type: 'slider', xAxisIndex: zoomIndices, top: 2, height: 16,
       borderColor: C().gridLine, backgroundColor: 'transparent',
       fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().text },
       textStyle: { color: C().text, fontSize: 10 } }
@@ -960,8 +987,8 @@ function updateChart(reTheme) {
   });
 
   // 每个指标面板左上角放名称标签 (graphic)
-  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', premium: '溢价%' };
-  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr, premium: C().up };
+  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', premium: '溢价%', intraday: '分时' };
+  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().atr, premium: C().up, intraday: '#42a5f5' };
   const graphics = [];
   panels.forEach((p, i) => {
     const gridTop = parseFloat(grids[indicatorStartGi + i].top) / 100 * ch;

@@ -361,6 +361,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_kline(params)
         elif path == "/api/quote":
             return self._handle_quote(params)
+        elif path == "/api/intraday":
+            return self._handle_intraday(params)
         elif path == "/api/search":
             return self._handle_search(params)
         elif path == "/api/ping":
@@ -538,6 +540,40 @@ class VisualHandler(BaseHTTPRequestHandler):
             self._send_json(quote)
         except Exception as e:
             self._send_error(f"获取快照失败: {e}", 500)
+
+    # ── API: 日内分钟线 (用 batch 绕过单点权限限制) ──
+    def _handle_intraday(self, params):
+        symbol_raw = params.get("symbol", [None])[0]
+        if not symbol_raw:
+            return self._send_error("缺少 symbol 参数")
+        symbol = normalize_symbol(symbol_raw)
+        period = params.get("period", ["5m"])[0]
+        count = min(int(params.get("count", ["80"])[0]), 240)
+        try:
+            af = get_af()
+            dfs = af.klines.batch([symbol], period=period, count=count, adjust="forward", to_dataframe=True)
+            df = dfs.get(symbol)
+            if df is None or len(df) == 0:
+                return self._send_error(f"无法获取 {symbol} 的分钟线", 404)
+            df = _normalize(df)
+            if df is None:
+                return self._send_error("数据不足", 404)
+            bars = []
+            for idx, row in df.iterrows():
+                ts = str(idx)
+                if hasattr(idx, "strftime"):
+                    ts = idx.strftime("%H:%M")
+                bars.append({
+                    "time": ts,
+                    "open": _safe_float(row.get("open")),
+                    "high": _safe_float(row.get("high")),
+                    "low": _safe_float(row.get("low")),
+                    "close": _safe_float(row.get("close")),
+                    "volume": _safe_int(row.get("volume")),
+                })
+            self._send_json({"symbol": symbol, "period": period, "bars": bars})
+        except Exception as e:
+            self._send_error(f"获取分钟线失败: {e}", 500)
 
     # ── API: 搜索 ──
     def _handle_search(self, params):
