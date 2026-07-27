@@ -625,7 +625,7 @@ function getIndicatorPanels() {
 function calcGridLayout(panels) {
   const showVolume = document.getElementById('chk-volume').checked;
   const klineTop = 15;
-  const indicatorEnd = 97;
+  const indicatorEnd = 93;  // 留底部给日期标签
 
   // K线高度: 有成交量时 41%, 无成交量时 70%
   const klineBottom = showVolume ? 56 : 80;
@@ -660,9 +660,15 @@ function calcGridLayout(panels) {
     panels.forEach((p, i) => {
       const top = indicatorStart + i * perPanel;
       grids.push({ left: '8%', right: '2%', top: `${top}%`, height: `${perPanel - 1}%` });
-      xAxes.push({ gridIndex: nextGi + i, type: 'category', data: [], show: i === panels.length - 1, axisLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 10, rotate: 30 } });
+      xAxes.push({ gridIndex: nextGi + i, type: 'category', data: [], show: false, axisLine: { lineStyle: { color: C().gridLine } } });
       yAxes.push({ gridIndex: nextGi + i, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 10 } });
     });
+  }
+
+  // 最后一个 grid 显示日期标签
+  if (xAxes.length > 0) {
+    xAxes[xAxes.length - 1].show = true;
+    xAxes[xAxes.length - 1].axisLabel = { color: C().text, fontSize: 10, rotate: 30 };
   }
 
   return { grids, xAxes, yAxes, panels, hasVolume, indicatorStartGi: nextGi };
