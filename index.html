@@ -603,6 +603,7 @@ async function fetchIntraday() {
     const id = await idResp.json();
     const quote = await qResp.json();
     if (!id.bars || id.bars.length === 0) { if (loading) alert('无分时数据'); return; }
+    id.prev_close = quote.prev_close;
     STATE.intradayData = id;
     updateQuoteDisplay(quote);
     renderIntraday(STATE.intradayData);
@@ -698,11 +699,13 @@ function renderIntraday(data) {
       backgroundColor: 'rgba(0,0,0,0.85)',
       textStyle: { color: '#eee', fontSize: 12, fontFamily: 'monospace' },
       formatter: function(ps) {
-        const idx = ps[0]?.dataIndex;
+        const idx = ps[0] && ps[0].dataIndex;
         const b = data.bars[idx];
         if (!b) return '';
-        let h = `<div><b>${b.time}</b></div><div>开 ${b.open?.toFixed(2)} 高 ${b.high?.toFixed(2)} 低 ${b.low?.toFixed(2)} 收 ${b.close?.toFixed(2)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
-        if (b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif?.toFixed(3)} DEA ${b.macd_dea?.toFixed(3)}</div>`;
+        const pc = data.prev_close || b.open;
+        const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
+        let h = `<div><b>${b.time}</b></div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
+        if (b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         return h;
       }
     },
@@ -1303,16 +1306,18 @@ document.addEventListener('DOMContentLoaded', () => {
   // First load
   refresh();
 
-  // Auto-refresh: 2s快照, 60s分时增量 (全天候, 不做交易时段判断)
+  // Auto-refresh: 2s快照全天候, 分时仅交易时段(9:30-15:00)
   let intraTick = 0;
   setInterval(() => {
     fetchQuote();
-    if (STATE.period === 'intraday') {
-      intraTick++;
-      if (intraTick >= 30) { // 每30个tick=60s
-        intraTick = 0;
-        fetchIntraday(false);
-      }
+    if (STATE.period !== 'intraday') return;
+    const now = new Date();
+    const h = now.getHours(), m = now.getMinutes();
+    if (h < 9 || (h === 9 && m < 30) || h >= 15) return; // 非交易时段
+    intraTick++;
+    if (intraTick >= 30) {
+      intraTick = 0;
+      fetchIntraday();
     }
   }, 2000);
 });
