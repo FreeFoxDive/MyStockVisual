@@ -39,17 +39,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_DIR))  # 确保能 import visual.indicators
 
-# ── 加载 .env ──
-_ENV_FILE = PROJECT_DIR / ".env"
-if _ENV_FILE.exists():
-    with open(_ENV_FILE, "r", encoding="utf-8") as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _v = _line.split("=", 1)
-                _k, _v = _k.strip(), _v.strip()
-                if _k not in os.environ:
-                    os.environ[_k] = _v
+# ── 加载 .env (优先 visual/ 目录, 其次项目根目录) ──
+for _env_dir in (SCRIPT_DIR, PROJECT_DIR):
+    _env_file = _env_dir / ".env"
+    if _env_file.exists():
+        with open(_env_file, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    _k, _v = _k.strip(), _v.strip()
+                    if _k not in os.environ:
+                        os.environ[_k] = _v
 
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
