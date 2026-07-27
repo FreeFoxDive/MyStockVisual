@@ -986,11 +986,16 @@ document.addEventListener('DOMContentLoaded', () => {
       }).catch(() => closeDropdown());
   }
 
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
   function renderDropdown() {
     if (searchResults.length === 0) { closeDropdown(); return; }
     dropdown.innerHTML = searchResults.map((r, i) =>
       `<div class="item${i === activeIdx ? ' active' : ''}" data-idx="${i}">
-        ${r.name}<span class="code">${r.code}</span>
+        ${esc(r.name)}<span class="code">${esc(r.code)}</span>
       </div>`
     ).join('');
     dropdown.classList.add('show');

@@ -56,7 +56,7 @@ AF_API_KEY = os.environ.get("AF_API_KEY", "")
 if not AF_API_KEY:
     print("[Visual] ⚠️  未设置 AF_API_KEY 环境变量", flush=True)
 else:
-    print(f"[Visual] AF_API_KEY: {AF_API_KEY[:8]}...", flush=True)
+    print("[Visual] AF_API_KEY 已加载", flush=True)
 
 _af = None
 
@@ -90,6 +90,11 @@ class TTLCache:
 
     def set(self, key, data):
         with self._lock:
+            # 限制最大条目数，超过时淘汰最旧的一半
+            if len(self._cache) >= 500:
+                items = sorted(self._cache.items(), key=lambda x: x[1]["time"])
+                for old_key, _ in items[:250]:
+                    del self._cache[old_key]
             self._cache[key] = {"data": data, "time": time.time()}
 
     def clear(self):
@@ -97,15 +102,10 @@ class TTLCache:
             self._cache.clear()
 
 
-# 不同 TTL: 日K缓存 120s, 周/月K缓存 300s, 快照缓存 30s
-kline_cache = {}
+# 缓存: 日K 120s, 周/月K 300s, 快照 30s, 上限 500 条目
+kline_cache = TTLCache(ttl_seconds=120)
+kline_cache_long = TTLCache(ttl_seconds=300)
 quote_cache = TTLCache(ttl_seconds=30)
-
-
-def get_cache_ttl(period):
-    if period in ("1w", "1M"):
-        return 300
-    return 120
 
 
 # ── 数据获取 ──
@@ -352,8 +352,12 @@ class VisualHandler(BaseHTTPRequestHandler):
 
     # ── 静态文件 ──
     def _serve_static(self, filename):
-        filepath = SCRIPT_DIR / filename
-        if not filepath.exists():
+        filepath = (SCRIPT_DIR / filename).resolve()
+        # 防止路径穿越: 确保解析后仍在 visual/ 目录内
+        if not str(filepath).startswith(str(SCRIPT_DIR.resolve())):
+            self._send_error("Forbidden", 403)
+            return
+        if not filepath.is_file():
             self._send_error("File not found", 404)
             return
         content = filepath.read_text(encoding="utf-8")
@@ -382,12 +386,10 @@ class VisualHandler(BaseHTTPRequestHandler):
 
         # 检查缓存
         cache_key = f"{symbol}:{period}:{count}:{use_macd13}"
-        ttl = get_cache_ttl(period)
-        if cache_key not in kline_cache:
-            kline_cache[cache_key] = {"data": None, "time": 0}
-        entry = kline_cache[cache_key]
-        if entry["data"] and time.time() - entry["time"] < ttl:
-            resp = entry["data"].copy()
+        cache = kline_cache_long if period in ("1w", "1M") else kline_cache
+        cached = cache.get(cache_key)
+        if cached:
+            resp = cached.copy()
             resp["meta"]["cached"] = True
             return self._send_json(resp)
 
@@ -451,7 +453,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         }
 
         # 缓存
-        kline_cache[cache_key] = {"data": resp, "time": time.time()}
+        cache.set(cache_key, resp)
 
         # 同时获取快照
         try:
