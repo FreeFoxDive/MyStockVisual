@@ -535,6 +535,12 @@ function addToHistory(symbol, name) {
   renderHistoryTags();
 }
 
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
 function renderHistoryTags() {
   const list = loadHistory();
   const bar = document.getElementById('history-bar');
@@ -1259,11 +1265,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }).catch(() => closeDropdown());
   }
 
-  function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-  }
   function renderDropdown() {
     if (searchResults.length === 0) { closeDropdown(); return; }
     dropdown.innerHTML = searchResults.map((r, i) =>
