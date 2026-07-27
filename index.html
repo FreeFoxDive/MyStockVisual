@@ -1297,22 +1297,18 @@ document.addEventListener('DOMContentLoaded', () => {
   // First load
   refresh();
 
-  // Auto-refresh in trading hours: 2s快照, 60s分时增量
+  // Auto-refresh: 2s快照, 60s分时增量 (全天候, 不做交易时段判断)
   let intraTick = 0;
   setInterval(() => {
-    const now = new Date();
-    const hour = now.getHours(), minute = now.getMinutes();
-    const inTrading = (hour > 9 || (hour === 9 && minute >= 30)) && hour < 15;
-    if (!inTrading) return;
     fetchQuote();
     if (STATE.period === 'intraday') {
       intraTick++;
       if (intraTick >= 30) { // 每30个tick=60s
         intraTick = 0;
-        fetchIntraday(false); // 增量
+        fetchIntraday(false);
       }
     }
-  }, 1200);
+  }, 2000);
 });
 </script>
 </body>
