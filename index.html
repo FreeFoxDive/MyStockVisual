@@ -1339,10 +1339,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // First load
   refresh();
 
-  // Auto-refresh: 时间始终刷新, 行情+分时仅交易时段(9:30-15:00)
-  let intraTick = 0;
+  // 时间 1s 刷新
   setInterval(() => {
     document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
+  }, 1000);
+
+  // 行情 2s + 分时 60s (仅交易时段 9:30-15:00)
+  let intraTick = 0;
+  setInterval(() => {
     const now = new Date();
     const h = now.getHours(), m = now.getMinutes();
     if (h < 9 || (h === 9 && m < 30) || h >= 15) return;
