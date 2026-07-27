@@ -941,7 +941,17 @@ function calcGridLayout(panels) {
   // 转百分比
   const toPct = px => (px / ch * 100);
   const klineTopPct = toPct(14);
+  const bottomPct = 7; // 底部留给日期标签
+  // 确保底部有足够空间, 不够则压缩K线
   let cursor = klineTopPct + toPct(klinePx);
+  const maxEndPct = 100 - bottomPct;
+  if (cursor + toPct(volPx + indPx) > maxEndPct) {
+    // 压K线腾空间
+    const needSpace = cursor + toPct(volPx + indPx) - maxEndPct;
+    const newKlinePx = Math.max(100, klinePx - needSpace / toPct(1));
+    klinePx = newKlinePx;
+    cursor = klineTopPct + toPct(klinePx);
+  }
 
   const grids = [];
   const xAxes = [];
