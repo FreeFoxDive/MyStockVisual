@@ -1367,7 +1367,24 @@ function onMacdMode(mode) {
 
 function refresh() {
   const input = document.getElementById('symbol-input').value.trim();
-  STATE.symbol = input || '600519';
+  if (!input) { STATE.symbol = '600519'; fetchData(); return; }
+  // 如果输入包含非数字/字母字符（如中文名），触发搜索而不是直接请求
+  if (/[^\w.]/.test(input)) {
+    fetch(`/api/search?q=${encodeURIComponent(input)}`)
+      .then(r => r.json())
+      .then(data => {
+        const results = data.results || [];
+        if (results.length > 0) {
+          const r = results[0];
+          document.getElementById('symbol-input').value = r.code;
+          STATE.symbol = r.symbol;
+          fetchData();
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+  STATE.symbol = input;
   fetchData();
 }
 
