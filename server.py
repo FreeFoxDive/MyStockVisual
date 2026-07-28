@@ -768,7 +768,15 @@ class VisualHandler(BaseHTTPRequestHandler):
             df = _normalize(df)
             if df is None:
                 return self._send_error("数据不足", 404)
-            # 计算分时指标
+            # 过滤非当天数据（分时图只显示当日）
+            today = pd.Timestamp.now().normalize()
+            mask = df.index.normalize() == today
+            df = df[mask]
+            if raw_times is not None:
+                raw_times = raw_times[mask]
+            if len(df) == 0:
+                return self._send_error("无当日分时数据", 404)
+            # 基于过滤后的数据重新计算指标
             df, indicators = compute_all_indicators(df, period="1d", use_macd13=use_macd13, with_atr_val=True)
             bars = []
             for i, (idx, row) in enumerate(df.iterrows()):
