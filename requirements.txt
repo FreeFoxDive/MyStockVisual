@@ -1,4 +1,4 @@
 alphafeed>=0.1.0
-stock-indicators-cn>=0.1.1
+stock-indicators-cn>=0.1.2
 numpy>=1.24.0
 pandas>=2.0.0

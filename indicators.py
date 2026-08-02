@@ -3,47 +3,18 @@
 Technical indicator calculation module - based on stock-indicators-cn package
 =============================================================================
 All indicators align with East Money/Tonghuashun/TDX standard algorithms.
+
+Thin wrapper around stock_indicators_cn — atr, macd, MACD_PARAMS, get_macd_params
+are imported directly from the library. Only compute_all_indicators and _safe_list
+are local (convenience aggregator + JSON-safe serialization).
 """
 
 import numpy as np
 import pandas as pd
-from stock_indicators_cn import ema, sma, kdj, rsi, force_index
-
-
-def atr(high, low, close, period=14):
-    """ATR Average True Range (period=14)
-    TR = max(H-L, |H-C_-1|, |L-C_-1|), then SMA(period) of TR"""
-    tr = pd.concat([high - low, (high - close.shift(1)).abs(),
-                    (low - close.shift(1)).abs()], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def macd(close, fast=12, slow=26, signal=9):
-    """MACD Moving Average Convergence Divergence
-    DIF = EMA(close, fast) - EMA(close, slow)
-    DEA = EMA(DIF, signal)
-    Histogram = 2 x (DIF - DEA)
-    Returns: (dif, dea, histogram)"""
-    ef, es = ema(close, fast), ema(close, slow)
-    ml = ef - es
-    return ml, ema(ml, signal), 2 * (ml - ema(ml, signal))
-
-
-# MACD parameter presets
-
-MACD_PARAMS = {
-    "1d": {"fast": 12, "slow": 26, "signal": 9},
-    "1w": {"fast": 6, "slow": 13, "signal": 5},
-    "1M": {"fast": 6, "slow": 13, "signal": 5},
-    "macd13": {"fast": 13, "slow": 30, "signal": 10},
-}
-
-
-def get_macd_params(period, use_macd13=False):
-    """Return MACD parameters based on period and option"""
-    if use_macd13:
-        return MACD_PARAMS["macd13"]
-    return MACD_PARAMS.get(period, MACD_PARAMS["1d"])
+from stock_indicators_cn import (
+    ema, sma, kdj, rsi, force_index,
+    atr, macd, MACD_PARAMS, get_macd_params,
+)
 
 
 def compute_all_indicators(df, period="1d", use_macd13=False,
