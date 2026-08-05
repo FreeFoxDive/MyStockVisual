@@ -352,13 +352,17 @@ def fetch_quote(symbol):
     return None
 
 
-def _normalize(df):
+def _normalize(df, prefer_time=False):
     """标准化 K 线 DataFrame: 设置日期索引，确保 OHLCV 列存在"""
     if df is None or len(df) < 5:
         return None
-    # 选择正确的日期列
+    # 选择正确的日期列 (分钟线优先用 trade_time，避免同日 bar 索引重复)
+    if prefer_time:
+        cols = ["trade_time", "trade_date"]
+    else:
+        cols = ["trade_date", "trade_time"]
     date_col = None
-    for col in ["trade_date", "trade_time"]:
+    for col in cols:
         if col in df.columns:
             date_col = col
             break
@@ -765,7 +769,7 @@ class VisualHandler(BaseHTTPRequestHandler):
             # 保存原始时间列再标准化
             time_col = "trade_time" if "trade_time" in df.columns else "trade_date"
             raw_times = df[time_col].astype(str).str[-8:-3] if time_col in df.columns else None
-            df = _normalize(df)
+            df = _normalize(df, prefer_time=True)
             if df is None:
                 return self._send_error("数据不足", 404)
             # 过滤非当天数据（分时图只显示当日）

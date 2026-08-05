@@ -282,7 +282,7 @@ body {
 <!-- ═══════════════ Toolbar ═══════════ -->
 <div id="toolbar">
   <span class="search-wrap">
-    <input type="text" id="symbol-input" value="600519" placeholder="输入代码或名称搜索..."
+    <input type="text" id="symbol-input" value="000001.SH" placeholder="输入代码或名称搜索..."
            autocomplete="off">
     <div class="search-dropdown" id="search-dropdown"></div>
   </span>
@@ -357,7 +357,7 @@ function escHtml(str) {
 // STATE
 // ═══════════════════════════════════════════════════════════════
 const STATE = {
-  symbol: '600519',
+  symbol: '000001.SH',
   period: '1d',
   macdMode: 'default',   // 'default' | 'macd13'
   theme: 'light',
@@ -489,6 +489,7 @@ async function fetchData() {
     const data = await resp.json();
     if (STATE._fetchTs !== fetchTs) return; // 竞态: 已切到新股票, 丢弃旧响应
     STATE.klineData = data;
+    document.getElementById('symbol-input').value = data.symbol; // 同步服务端标准化后的 symbol
     // 保存到 localStorage (限制 2MB 总大小)
     try {
       const entry = JSON.stringify({ ts: Date.now(), data });
@@ -630,7 +631,7 @@ function renderHistoryTags() {
 }
 
 function switchToHistory(symbol) {
-  document.getElementById('symbol-input').value = symbol.replace(/\.(SH|SZ|BJ)$/, '');
+  document.getElementById('symbol-input').value = symbol;
   STATE.symbol = symbol;
   if (STATE.period === 'intraday') {
     STATE.intradayData = null;
@@ -1367,7 +1368,7 @@ function onMacdMode(mode) {
 
 function refresh() {
   const input = document.getElementById('symbol-input').value.trim();
-  if (!input) { STATE.symbol = '600519'; fetchData(); return; }
+  if (!input) { STATE.symbol = '000001.SH'; fetchData(); return; }
   // 如果输入包含非数字/字母字符（如中文名），触发搜索而不是直接请求
   if (/[^\w.]/.test(input)) {
     fetch(`/api/search?q=${encodeURIComponent(input)}`)
@@ -1376,7 +1377,7 @@ function refresh() {
         const results = data.results || [];
         if (results.length > 0) {
           const r = results[0];
-          document.getElementById('symbol-input').value = r.code;
+          document.getElementById('symbol-input').value = r.symbol;
           STATE.symbol = r.symbol;
           fetchData();
         }
@@ -1511,7 +1512,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const hist = loadHistory();
   if (hist.length > 0) {
     const last = hist[0];
-    document.getElementById('symbol-input').value = last.symbol.replace(/\.(SH|SZ|BJ)$/, '');
+    document.getElementById('symbol-input').value = last.symbol;
     STATE.symbol = last.symbol;
   }
 
