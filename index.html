@@ -335,6 +335,7 @@ body {
   <span>🔧 提示框:</span>
   <label><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
+  <label><input type="checkbox" id="tip-atr" checked onchange="onConfigChange()">ATR</label>
 </div>
 
 <!-- ═══════════════ Chart ═══════════ -->
@@ -655,6 +656,7 @@ function saveConfig() {
     atr: document.getElementById('chk-atr').checked,
     tipRsi: document.getElementById('tip-rsi').checked,
     tipKdj: document.getElementById('tip-kdj').checked,
+    tipAtr: document.getElementById('tip-atr').checked,
     theme: STATE.theme,
     themeAuto: STATE._themeAuto,
     macdMode: STATE.macdMode,
@@ -673,6 +675,7 @@ function loadConfig() {
     document.getElementById('chk-atr').checked = !!cfg.atr;
     document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
     document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
+    document.getElementById('tip-atr').checked = cfg.tipAtr !== false;
     if (cfg.macdMode) {
       STATE.macdMode = cfg.macdMode;
       document.querySelectorAll('#macd-mode-group button').forEach(b => {
@@ -853,9 +856,9 @@ function renderIntraday(data) {
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
         const cRsiV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr}">${v.toFixed(1)}</span>`;
-        if (showKdj && b.kdj_k != null) h += `<div><span style="color:${C().kdjK}">K</span> ${cKdjV(b.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cKdjV(b.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cKdjV(b.kdj_j,C().kdjJ)}</div>`;
-        if (showRsi && b.rsi6 != null) h += `<div><span style="color:${C().rsi6}">RSI1</span> ${cRsiV(b.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cRsiV(b.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cRsiV(b.rsi24,C().rsi24)}</div>`;
-        if (showAtr && b.atr14 != null) h += `<div>ATR ${b.atr14.toFixed(3)}</div>`;
+        if (document.getElementById('tip-kdj').checked && b.kdj_k != null) h += `<div><span style="color:${C().kdjK}">K</span> ${cKdjV(b.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cKdjV(b.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cKdjV(b.kdj_j,C().kdjJ)}</div>`;
+        if (document.getElementById('tip-rsi').checked && b.rsi6 != null) h += `<div><span style="color:${C().rsi6}">RSI1</span> ${cRsiV(b.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cRsiV(b.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cRsiV(b.rsi24,C().rsi24)}</div>`;
+        if (document.getElementById('tip-atr').checked && b.atr14 != null) h += `<div><span style="color:${C().atr}">ATR</span> ${b.atr14.toFixed(3)}</div>`;
         return h;
       }
     },
@@ -1185,7 +1188,9 @@ function updateChart(reTheme) {
         if (chgPct != null) html += ` <span style="color:${chgPct>=0?'#ef5350':'#26a69a'}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
         html += `</div><div>MA5 <span style="color:${C().ma5}">${k.ma5?.toFixed(2)||'—'}</span> MA10 <span style="color:${C().ma10}">${k.ma10?.toFixed(2)||'—'}</span> MA20 <span style="color:${C().ma20}">${k.ma20?.toFixed(2)||'—'}</span></div>`;
         html += `<div>量 ${fmtVolume(k.volume)} 额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
-        html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
+        if (document.getElementById('chk-macd').checked) {
+          html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
+        }
         let extras = [];
         if (document.getElementById('tip-rsi').checked) {
           const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr}">${v.toFixed(1)}</span>`;
@@ -1194,6 +1199,9 @@ function updateChart(reTheme) {
         if (document.getElementById('tip-kdj').checked) {
           const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
           extras.push(`<span style="color:${C().kdjK}">K</span> ${cV(k.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cV(k.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cV(k.kdj_j,C().kdjJ)}`);
+        }
+        if (document.getElementById('tip-atr').checked) {
+          extras.push(`<span style="color:${C().atr}">ATR</span> ${k.atr14?.toFixed(3)||'—'}`);
         }
         if (extras.length > 0) html += `<div>${extras.join(' | ')}</div>`;
         if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?'#ef5350':'#26a69a'}">${k.premium>=0?'+':''}${k.premium.toFixed(2)}%</span></div>`;
