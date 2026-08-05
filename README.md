@@ -108,10 +108,10 @@ visual/
 
 ```bash
 # 1. 创建 .env 文件 (填入 AlphaFeed API Key)
-echo AF_API_KEY=your_key_here > visual/.env
+echo AF_API_KEY=your_key_here > .env
 
 # 2. 构建并启动
-docker compose -f visual/docker-compose.yml up -d --build
+docker compose up -d --build
 
 # 3. 浏览器打开
 # http://localhost:8888
@@ -119,17 +119,17 @@ docker compose -f visual/docker-compose.yml up -d --build
 
 ```bash
 # 查看日志
-docker compose -f visual/docker-compose.yml logs -f
+docker compose logs -f
 
 # 停止
-docker compose -f visual/docker-compose.yml down
+docker compose down
 ```
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | 端口 | `127.0.0.1:8888` | 仅本地访问 |
 | 缓存卷 | `.cache` | Docker volume 持久化 |
-| 环境变量 | `visual/.env` | 通过 `env_file` 注入 |
+| 环境变量 | `.env` | 通过 `env_file` 注入 |
 | 用户 | `appuser` (非 root) | 降低容器逃逸风险 |
 
 ## 配色
