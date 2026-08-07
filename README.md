@@ -39,7 +39,7 @@ python -u visual/server.py
 visual/
 ├── server.py          # HTTP服务器 (http.server) + AlphaFeed API 代理
 ├── index.html         # 前端单页面 (ECharts 5 CDN)
-├── indicators.py      # 从 triple_screen_v5.py 提取的指标函数
+├── indicators.py      # 指标计算函数 (ema / atr / macd / kdj / rsi / force_index)
 │                      #   ema / atr / macd / kdj / rsi / force_index
 ├── Dockerfile         # Docker 构建文件
 ├── docker-compose.yml # Docker Compose 配置
