@@ -326,6 +326,9 @@ body {
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">📏 MA=SMA</span>
   <span class="separator" style="height:18px;background:var(--border)"></span>
+  <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
+  <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
+  <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>MACD:</span>
   <div class="macd-mode" id="macd-mode-group">
     <button class="active" data-mode="default" onclick="onMacdMode('default')">默认</button>
@@ -367,6 +370,8 @@ const STATE = {
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
   _gridRects: null,      // cached grid pixel rects
   _themeAuto: true,      // 默认自动主题(系统偏好 > 时间)
+  impulseEnabled: false, // 动力系统(Elder)
+  channelEnabled: false, // ATR通道(Elder)
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -389,6 +394,8 @@ const COLORS = {
     ma20: '#c2185b', kdjJ: '#c2185b', rsi24: '#c2185b',
     atr: '#888888',
     overbought: '#ef5350', oversold: '#26a69a',
+    impulse_neutral: '#5b8ff9',  // Elder impulse neutral blue
+    ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
     zeroLine: '#cccccc',
   },
   dark: {
@@ -405,6 +412,8 @@ const COLORS = {
     ma20: '#e84698', kdjJ: '#e84698', rsi24: '#e84698',
     atr: '#5a5a5a',
     overbought: '#ef5350', oversold: '#26a69a',
+    impulse_neutral: '#5b8ff9',  // Elder impulse neutral blue
+    ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
     zeroLine: '#363a45',
   }
 };
@@ -660,6 +669,8 @@ function saveConfig() {
     theme: STATE.theme,
     themeAuto: STATE._themeAuto,
     macdMode: STATE.macdMode,
+    impulse: document.getElementById('chk-impulse').checked,
+    channel: document.getElementById('chk-channel').checked,
   };
   try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch(e) {}
 }
@@ -676,6 +687,12 @@ function loadConfig() {
     document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
     document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
     document.getElementById('tip-atr').checked = cfg.tipAtr !== false;
+    const chkImpulse = document.getElementById('chk-impulse');
+    chkImpulse.checked = !!cfg.impulse;
+    STATE.impulseEnabled = !!cfg.impulse;
+    const chkChannel = document.getElementById('chk-channel');
+    chkChannel.checked = !!cfg.channel;
+    STATE.channelEnabled = !!cfg.channel;
     if (cfg.macdMode) {
       STATE.macdMode = cfg.macdMode;
       document.querySelectorAll('#macd-mode-group button').forEach(b => {
@@ -902,6 +919,8 @@ function renderIntraday(data) {
 }
 
 function onConfigChange() {
+  STATE.impulseEnabled = document.getElementById('chk-impulse').checked;
+  STATE.channelEnabled = document.getElementById('chk-channel').checked;
   saveConfig();
   onIndicatorChange();
 }
@@ -1046,7 +1065,15 @@ function updateChart(reTheme) {
   const { grids, xAxes, yAxes, hasVolume, indicatorStartGi } = calcGridLayout(panels);
 
   // ── Readonly series data ──
-  const ohlc = klines.map(k => [k.open, k.close, k.low, k.high]);
+  const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
+  const ohlc = klines.map((k, i) => {
+    if (!impulseOn) return [k.open, k.close, k.low, k.high];
+    let c;
+    if (k.impulse === 1) c = C().up;
+    else if (k.impulse === -1) c = C().down;
+    else c = C().impulse_neutral;
+    return { value: [k.open, k.close, k.low, k.high], itemStyle: { color: c, color0: c, borderColor: c, borderColor0: c } };
+  });
   const vols = klines.map((k, i) => {
     const close = k.close || 0;
     const prevClose = i > 0 ? (klines[i - 1].close || close) : close;
@@ -1074,6 +1101,33 @@ function updateChart(reTheme) {
       symbol: 'none', smooth: true, lineStyle: { color: C().ma20, width: 1 },
       itemStyle: { color: C().ma20 } }
   );
+
+  // ── ATR Channel (Elder, daily only) ──
+  if (STATE.channelEnabled && STATE.period === '1d') {
+    const ema13Arr = klines.map(k => k.ema13);
+    const atrArr = klines.map(k => k.atr14);
+    const bands = [
+      { mult: 1, key: 'ch_1atr' },
+      { mult: 2, key: 'ch_2atr' },
+      { mult: 3, key: 'ch_3atr' },
+    ];
+    bands.forEach(({ mult, key }) => {
+      const upper = klines.map((k, i) => (ema13Arr[i] != null && atrArr[i] != null) ? ema13Arr[i] + mult * atrArr[i] : null);
+      const lower = klines.map((k, i) => (ema13Arr[i] != null && atrArr[i] != null) ? ema13Arr[i] - mult * atrArr[i] : null);
+      const color = C()[key];
+      const labelCfg = { show: true, position: 'end', fontSize: 10, offset: [4, 0] };
+      series.push(
+        { name: `+${mult}ATR`, type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: upper,
+          symbol: 'none', smooth: false,
+          lineStyle: { color, width: 1, type: 'dashed' },
+          endLabel: { ...labelCfg, color, formatter: `+${mult}ATR` } },
+        { name: `-${mult}ATR`, type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: lower,
+          symbol: 'none', smooth: false,
+          lineStyle: { color, width: 1, type: 'dashed' },
+          endLabel: { ...labelCfg, color, formatter: `-${mult}ATR` } },
+      );
+    });
+  }
 
   // ── Grid 1: Volume (only if enabled) ──
   if (hasVolume) {
@@ -1344,6 +1398,11 @@ function switchPeriod(period) {
     if (btn) btn.classList.toggle('active', p === period);
   });
   const isIntra = period === 'intraday';
+  // Show/hide impulse & channel checkboxes (daily only)
+  const lblImpulse = document.getElementById('lbl-impulse');
+  if (lblImpulse) lblImpulse.style.display = period === '1d' ? '' : 'none';
+  const lblChannel = document.getElementById('lbl-channel');
+  if (lblChannel) lblChannel.style.display = period === '1d' ? '' : 'none';
   if (isIntra) {
     STATE.intradayData = null; // 清缓存，强制重新加载
     STATE.chart.clear();

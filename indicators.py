@@ -41,6 +41,10 @@ def compute_all_indicators(df, period="1d", use_macd13=False,
     result_df["macd_dea"] = dea
     result_df["macd_hist"] = hist
 
+    # Elder Impulse System: EMA 13
+    e13 = ema(c, 13)
+    result_df["ema13"] = e13
+
     indicators = {
         "macd": {
             "params": mp,
@@ -86,6 +90,27 @@ def compute_all_indicators(df, period="1d", use_macd13=False,
             "params": {"period": 14},
             "values": _safe_list(a),
         }
+
+    # Elder Impulse System: 1=bullish(红), -1=bearish(绿), 0=neutral(蓝)
+    impulse = pd.Series(0, index=c.index, dtype=int)
+    for i in range(1, len(c)):
+        e13_i = e13.iloc[i]
+        e13_prev = e13.iloc[i - 1]
+        hist_i = hist.iloc[i]
+        hist_prev = hist.iloc[i - 1]
+        if pd.isna(e13_i) or pd.isna(e13_prev) or pd.isna(hist_i) or pd.isna(hist_prev):
+            continue
+        ema_up = e13_i > e13_prev
+        hist_up = hist_i > hist_prev
+        if ema_up and hist_up:
+            impulse.iloc[i] = 1
+        elif not ema_up and not hist_up:
+            impulse.iloc[i] = -1
+    result_df["impulse"] = impulse
+    indicators["impulse"] = {
+        "params": {"ema_period": 13},
+        "values": _safe_list(impulse),
+    }
 
     return result_df, indicators
 

@@ -646,6 +646,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         # 计算指标
         df, indicators = compute_all_indicators(df, period, use_macd13)
 
+
         # ETF 溢价率
         premium_data = None
         is_etf = _is_etf(symbol)
@@ -697,6 +698,8 @@ class VisualHandler(BaseHTTPRequestHandler):
                 "kdj_d": _safe_float(row.get("kdj_d")),
                 "kdj_j": _safe_float(row.get("kdj_j")),
                 "atr14": _safe_float(row.get("atr14")),
+                "ema13": _safe_float(row.get("ema13")),
+                "impulse": _safe_int(row.get("impulse")),
             }
             klines.append(entry)
 
