@@ -39,7 +39,7 @@ python -u visual/server.py
 
 ```
 visual/
-├── server.py          # HTTP服务器 (http.server) + AlphaFeed API 代理
+├── server.py          # HTTP服务器 (ThreadingHTTPServer 多线程) + AlphaFeed API 代理
 ├── index.html         # 前端单页面 (ECharts 5 CDN)
 ├── indicators.py      # 指标计算函数 (ema / atr / macd / kdj / rsi / force_index)
 │                      #   ema / atr / macd / kdj / rsi / force_index
@@ -56,7 +56,7 @@ visual/
 | `GET /` | 提供 index.html |
 | `GET /api/kline?symbol=600519.SH&period=1d&count=300` | K线数据 + 全部预计算指标 |
 | `GET /api/quote?symbol=600519.SH` | 实时快照 |
-| `GET /api/search?q=茅台` | 模糊搜索 (内存缓存全量A股，1小时刷新) |
+| `GET /api/search?q=茅台` | 模糊搜索 (全量A股+ETF，内存+磁盘双层缓存，24h刷新) |
 | `GET /api/ping` | 健康检查 |
 
 ## 技术细节
@@ -77,7 +77,10 @@ visual/
 - 日K: 120s TTL
 - 周/月K: 300s TTL
 - 快照: 30s TTL
-- 全量股票搜索列表: 1小时 TTL
+- 全量股票搜索列表: 24h TTL，内存 + 磁盘双层缓存；过期后 stale-while-revalidate（立即返回旧数据 + 后台刷新，不阻塞请求）
+
+### 并发
+- 服务端 `ThreadingHTTPServer` 多线程处理请求，多个 K线/搜索/快照请求并行互不阻塞
 
 ### 限流
 - AlphaFeed 30次/分钟硬限制

@@ -21,7 +21,7 @@ import sys
 import time
 import threading
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -382,45 +382,136 @@ def _normalize(df, prefer_time=False):
 _stock_list = None
 _stock_list_time = 0
 _stock_lock = threading.Lock()
+_refreshing = False  # 后台刷新是否进行中 (stale-while-revalidate)
+
+STOCK_LIST_FILE = SCRIPT_DIR / ".cache" / "stock_list.json"
+STOCK_LIST_TTL = 24 * 3600  # 股票列表变化缓慢, 24h 刷新一次即可
+
+
+def _stock_list_from_disk():
+    """读磁盘股票列表, 返回 (stocks, ts); 失败/无则 (None, 0)"""
+    try:
+        if STOCK_LIST_FILE.exists():
+            data = json.loads(STOCK_LIST_FILE.read_text(encoding="utf-8"))
+            stocks = data.get("stocks")
+            ts = data.get("ts", 0)
+            if stocks:
+                return stocks, ts
+    except Exception as e:
+        print(f"[Visual] 读取股票列表缓存失败: {e}", flush=True)
+    return None, 0
+
+
+def _stock_list_to_disk(stocks, ts):
+    """原子写入磁盘股票列表 (临时文件 + replace)"""
+    try:
+        STOCK_LIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STOCK_LIST_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"stocks": stocks, "ts": ts}, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(STOCK_LIST_FILE)
+    except Exception as e:
+        print(f"[Visual] 写入股票列表缓存失败: {e}", flush=True)
+
+
+def _fetch_stock_list():
+    """从 AlphaFeed 拉取 symbol+name 列表 (跳过 DataFrame, 直接读 dict)"""
+    af = get_af()
+    stocks = []
+    for universe in ("CN_Stock", "CN_ETF"):
+        try:
+            quotes = af.quotes.get(universes=universe, to_dataframe=False)
+            for q in quotes:
+                sym = q.get("symbol", "")
+                name = (q.get("ext") or {}).get("name", "")
+                if not sym or not name or pd.isna(name):
+                    continue
+                code = sym.split(".")[0] if "." in sym else sym
+                stocks.append({"symbol": sym, "name": str(name), "code": code})
+        except Exception as e:
+            print(f"[Visual] {universe} 加载失败: {e}", flush=True)
+    return stocks
+
+
+def _refresh_stock_list_async():
+    """后台异步刷新股票列表 (stale-while-revalidate), 同一时刻只跑一个"""
+    global _refreshing, _stock_list, _stock_list_time
+    with _stock_lock:
+        if _refreshing:
+            return
+        _refreshing = True
+
+    def _worker():
+        global _refreshing, _stock_list, _stock_list_time
+        try:
+            stocks = _fetch_stock_list()
+            if stocks:
+                ts = time.time()
+                _stock_list_to_disk(stocks, ts)
+                with _stock_lock:
+                    _stock_list = stocks
+                    _stock_list_time = ts
+                print(f"[Visual] 后台刷新股票列表完成: {len(stocks)} 只标的", flush=True)
+        except Exception as e:
+            print(f"[Visual] 后台刷新股票列表失败: {e}", flush=True)
+        finally:
+            with _stock_lock:
+                _refreshing = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _load_stock_list():
-    """加载全量A股+ETF列表 (缓存1小时, 失败重试1次, 线程安全)"""
+    """加载全量A股+ETF列表 (内存+磁盘双层缓存, stale-while-revalidate)
+
+    有旧数据时绝不阻塞: 立即返回旧列表, 同时后台刷新。
+    仅在无任何缓存 (首次运行) 时才同步拉取 API。
+    """
     global _stock_list, _stock_list_time
     now = time.time()
-    if _stock_list is not None and now - _stock_list_time < 3600:
+
+    # 1) 内存缓存新鲜 → 直接返回
+    if _stock_list is not None and now - _stock_list_time < STOCK_LIST_TTL:
         return _stock_list
+
+    # 2) 内存有但过期 → 返回旧数据 + 后台刷新 (不阻塞)
+    if _stock_list is not None:
+        _refresh_stock_list_async()
+        return _stock_list
+
+    # 3) 磁盘缓存 → 加载返回; 过期则后台刷新 (不阻塞)
+    stocks, ts = _stock_list_from_disk()
+    if stocks:
+        with _stock_lock:
+            if _stock_list is None:
+                _stock_list, _stock_list_time = stocks, ts
+        if now - ts < STOCK_LIST_TTL:
+            return stocks
+        _refresh_stock_list_async()
+        return stocks
+
+    # 4) 无任何缓存 (首次运行) → 同步拉取, 加锁避免并发重复拉取
     with _stock_lock:
-        if _stock_list is not None and now - _stock_list_time < 3600:  # double-check
+        if _stock_list is not None:
             return _stock_list
-        print("[Visual] 加载全量A股+ETF列表...", flush=True)
+        print("[Visual] 首次加载全量A股+ETF列表...", flush=True)
+        stocks = []
         for attempt in range(2):
             try:
-                af = get_af()
-                stocks = []
-                for universe in ("CN_Stock", "CN_ETF"):
-                    try:
-                        df = af.quotes.get(universes=universe, to_dataframe=True)
-                        for _, r in df.iterrows():
-                            sym = r.get("symbol", "")
-                            name = r.get("ext.name", "")
-                            if not sym or not name or pd.isna(name):
-                                continue
-                            code = sym.split(".")[0] if "." in sym else sym
-                            stocks.append({"symbol": sym, "name": str(name), "code": code})
-                    except Exception as e:
-                        print(f"[Visual] {universe} 加载失败: {e}", flush=True)
-                _stock_list = stocks
-                _stock_list_time = time.time()
-                print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+ETF)", flush=True)
-                return _stock_list
+                stocks = _fetch_stock_list()
+                if stocks:
+                    break
             except Exception as e:
                 print(f"[Visual] 加载列表({attempt+1}/2)失败: {e}", flush=True)
-                if attempt == 0:
-                    time.sleep(3)
-                else:
-                    if _stock_list is None:
-                        _stock_list = []
+            if attempt == 0:
+                time.sleep(3)
+        if stocks:
+            ts = time.time()
+            _stock_list, _stock_list_time = stocks, ts
+            _stock_list_to_disk(stocks, ts)
+            print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+ETF)", flush=True)
+        else:
+            _stock_list = []
         return _stock_list
 
 
@@ -841,7 +932,7 @@ def main():
     parser.add_argument("--host", type=str, default="localhost", help="监听地址 (default: localhost)")
     args = parser.parse_args()
 
-    server = HTTPServer((args.host, args.port), VisualHandler)
+    server = ThreadingHTTPServer((args.host, args.port), VisualHandler)
 
     # 启动时清理磁盘缓存
     try:
