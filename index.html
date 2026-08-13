@@ -1075,9 +1075,7 @@ function updateChart(reTheme) {
     return { value: [k.open, k.close, k.low, k.high], itemStyle: { color: c, color0: c, borderColor: c, borderColor0: c } };
   });
   const vols = klines.map((k, i) => {
-    const close = k.close || 0;
-    const prevClose = i > 0 ? (klines[i - 1].close || close) : close;
-    const up = close >= prevClose;
+    const up = (k.close || 0) >= (k.open || 0);
     return { value: k.volume || 0, itemStyle: { color: up ? C().up : C().down } };
   });
   const ma5 = klines.map(k => k.ma5);
