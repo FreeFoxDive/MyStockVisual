@@ -2,3 +2,5 @@
 .cache/
 # 交易记录数据库
 data/
+# 环境变量 (AF_API_KEY / ADMIN_USERNAME / ADMIN_PASSWORD)
+.env
