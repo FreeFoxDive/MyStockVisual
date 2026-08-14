@@ -245,6 +245,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
   <div class="charts">
     <div class="chart-box"><div class="chart-title">按期间盈亏</div><div class="chart" id="pnl-chart"></div></div>
     <div class="chart-box"><div class="chart-title">按股票盈亏</div><div class="chart" id="symbol-chart"></div></div>
+    <div class="chart-box"><div class="chart-title">按模型盈亏</div><div class="chart" id="model-chart"></div></div>
   </div>
 
   <div class="section-title"><span class="bar"></span>交易记录
@@ -269,7 +270,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
     <table>
       <thead>
         <tr>
-          <th>代码 / 名称</th><th>状态</th><th>买入价</th><th>退出价</th><th>数量</th>
+          <th>代码 / 名称</th><th>状态</th><th>模型</th><th>买入价</th><th>退出价</th><th>数量</th>
           <th>买入日</th><th>卖出日</th><th>买入理由</th><th>卖出理由</th><th>盈亏</th><th>操作</th>
         </tr>
       </thead>
@@ -296,6 +297,19 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <tbody id="admin-tbody"></tbody>
       </table>
     </div>
+
+    <div class="section-title"><span class="bar"></span>量化模型管理
+      <span style="flex:1"></span>
+      <button class="primary" onclick="openModelModal()">＋ 添加模型</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>名称</th><th>策略描述</th><th>状态</th><th style="width:180px">操作</th></tr>
+        </thead>
+        <tbody id="model-tbody"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -315,6 +329,10 @@ td.neg { color: var(--down-color); font-weight: 600; }
           <option value="open">持仓中 (未结束)</option>
           <option value="closed">已平仓 (已结束)</option>
         </select>
+      </div>
+      <div>
+        <label>模型推荐</label>
+        <select id="t-model"><option value="">无</option></select>
       </div>
       <div>
         <label>数量 (股) <span style="color:var(--up-color)">*</span></label>
@@ -380,6 +398,20 @@ td.neg { color: var(--down-color); font-weight: 600; }
   </div>
 </div>
 
+<!-- ═══════════════ 量化模型管理弹窗 (仅 admin) ═══════════════ -->
+<div class="modal-mask" id="model-modal-mask">
+  <div class="modal">
+    <h2 id="model-modal-title">添加模型</h2>
+    <div class="field" style="margin-bottom:14px"><label>模型名称</label><input id="m-name" autocomplete="off" maxlength="64"></div>
+    <div class="field" style="margin-bottom:14px"><label>策略描述</label><textarea id="m-description" placeholder="可选，说明该模型的选股/买卖策略"></textarea></div>
+    <div class="err" id="model-modal-err"></div>
+    <div class="actions">
+      <button onclick="closeModelModal()">取消</button>
+      <button class="primary" onclick="saveModel()">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ═══════════════════════════════════════════════════════════════
 // 交易记录 SPA
@@ -387,6 +419,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
 const state = {
   user: null,
   reasons: { entry: [], exit: [] },
+  models: [],
   stats: null,
   granularity: 'month',
   statRange: 'all',
@@ -398,6 +431,7 @@ const state = {
   selectedSymbol: null,   // {symbol, name}
   pnlChart: null,
   symbolChart: null,
+  modelChart: null,
 };
 
 function escHtml(s) {
@@ -453,7 +487,7 @@ async function checkAuth() {
     const data = await api('/api/auth/me');
     state.user = { username: data.username, is_admin: data.is_admin };
     showMain();
-    await Promise.all([loadReasons(), loadStats(), loadTrades()]);
+    await Promise.all([loadReasons(), loadModels(), loadStats(), loadTrades()]);
   } catch (e) {
     state.user = null;
     showLogin();
@@ -484,6 +518,35 @@ async function loadReasons() {
   const exit = document.getElementById('t-exit-reason');
   entry.innerHTML = '<option value="">请选择...</option>' + data.entry.map(r => `<option>${escHtml(r)}</option>`).join('');
   exit.innerHTML = '<option value="">请选择...</option>' + data.exit.map(r => `<option>${escHtml(r)}</option>`).join('');
+}
+
+async function loadModels() {
+  const models = await api('/api/models');
+  state.models = models || [];
+  if (state.user && state.user.is_admin) renderAdminModels();
+}
+
+// 模型下拉 (含「无」首项; 编辑停用模型时插入 disabled 项保持追溯)
+function renderModelSelect(selectedId) {
+  const sel = document.getElementById('t-model');
+  const active = state.models.filter(m => m.active);
+  let html = '<option value="">无</option>' + active.map(m =>
+    `<option value="${m.id}" title="${escHtml(m.description)}">${escHtml(m.name)}</option>`).join('');
+  if (selectedId !== null && selectedId !== undefined) {
+    const m = state.models.find(x => x.id === selectedId);
+    if (m && !m.active) {
+      html += `<option value="${m.id}" selected>${escHtml(m.name)}（已删除）</option>`;
+    }
+  }
+  sel.innerHTML = html;
+  sel.value = (selectedId === null || selectedId === undefined) ? '' : String(selectedId);
+}
+
+function modelLabel(modelId) {
+  if (modelId === null || modelId === undefined) return '无';
+  const m = state.models.find(x => x.id === modelId);
+  if (!m) return '无';
+  return m.active ? m.name : `${m.name}（已删除）`;
 }
 
 function statQuery() {
@@ -517,6 +580,7 @@ async function loadStats() {
   renderStatCards(data.summary);
   renderPnlChart();
   renderSymbolChart();
+  renderModelChart();
 }
 
 function fmtMoney(v, signed = false) {
@@ -598,6 +662,27 @@ function renderSymbolChart() {
   });
 }
 
+function renderModelChart() {
+  const el = document.getElementById('model-chart');
+  if (!state.modelChart) state.modelChart = echarts.init(el);
+  const data = (state.stats && state.stats.by_model) || [];
+  const sorted = [...data].sort((a, b) => a.pnl - b.pnl); // 横向条形, 小到大
+  state.modelChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 10, right: 30, top: 8, bottom: 8, containLabel: true },
+    tooltip: { trigger: 'axis', formatter: p => {
+      const s = sorted[p[0].dataIndex];
+      return `${s.name}<br/>盈亏: ${fmtMoney(s.pnl, true)}<br/>笔数: ${s.count}<br/>胜率: ${s.win_rate === null ? '—' : s.win_rate + '%'}`;
+    }},
+    xAxis: { type: 'value', axisLabel: { color: chartTheme() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    yAxis: { type: 'category', data: sorted.map(s => s.name), axisLabel: { color: chartTheme() } },
+    series: [{
+      type: 'bar',
+      data: sorted.map(s => ({ value: s.pnl, itemStyle: { color: s.pnl >= 0 ? 'var(--up-color,#ef232a)' : 'var(--down-color,#14b143)' } })),
+    }],
+  });
+}
+
 // ═══════════════ 交易列表 ═══════════════
 function listQuery() {
   const q = new URLSearchParams();
@@ -626,7 +711,7 @@ async function loadTrades() {
 function renderTable() {
   const tbody = document.getElementById('trade-tbody');
   if (!state.trades.length) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
   } else {
     tbody.innerHTML = state.trades.map(t => {
       const pnl = t.pnl;
@@ -641,6 +726,7 @@ function renderTable() {
       return `<tr>
         <td class="sym">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></td>
         <td>${badge}</td>
+        <td>${escHtml(modelLabel(t.model_id))}</td>
         <td>${t.entry_price}</td>
         <td>${t.exit_price === null ? '—' : t.exit_price}</td>
         <td>${t.quantity}</td>
@@ -770,6 +856,93 @@ bindEnter('au-username', saveAdminAction);
 bindEnter('au-password', saveAdminAction);
 bindEnter('au-reset-password', saveAdminAction);
 
+// ═══════════════ 量化模型管理 (仅 admin) ═══════════════
+let modelModalMode = 'add';   // 'add' | 'edit'
+let modelModalTargetId = null;
+
+function renderAdminModels() {
+  const tbody = document.getElementById('model-tbody');
+  if (!state.models.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无模型</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.models.map(m => `
+    <tr>
+      <td>${escHtml(m.name)}</td>
+      <td class="reason-cell">${escHtml(m.description || '')}</td>
+      <td>${m.active ? '<span class="badge closed">启用</span>' : '<span class="badge open">已删除</span>'}</td>
+      <td>${m.active ? `
+        <button onclick="openModelModal(${m.id})">编辑</button>
+        <button class="danger" onclick="deleteModel(${m.id})">删除</button>` : `
+        <button onclick="restoreModel(${m.id})">恢复</button>`}
+      </td>
+    </tr>`).join('');
+}
+
+function openModelModal(id) {
+  modelModalMode = id ? 'edit' : 'add';
+  modelModalTargetId = id || null;
+  const m = id ? state.models.find(x => x.id === id) : null;
+  document.getElementById('model-modal-title').textContent = id ? '编辑模型' : '添加模型';
+  document.getElementById('m-name').value = m ? m.name : '';
+  document.getElementById('m-description').value = m ? (m.description || '') : '';
+  document.getElementById('model-modal-err').textContent = '';
+  document.getElementById('model-modal-mask').classList.add('show');
+}
+
+function closeModelModal() {
+  document.getElementById('model-modal-mask').classList.remove('show');
+  modelModalTargetId = null;
+}
+
+async function saveModel() {
+  document.getElementById('model-modal-err').textContent = '';
+  const body = {
+    name: document.getElementById('m-name').value.trim(),
+    description: document.getElementById('m-description').value.trim(),
+  };
+  try {
+    if (modelModalMode === 'add') {
+      await api('/api/models', { method: 'POST', body: JSON.stringify(body) });
+    } else {
+      await api('/api/models/' + modelModalTargetId, { method: 'PUT', body: JSON.stringify(body) });
+    }
+    closeModelModal();
+    await loadModels();
+    await Promise.all([loadTrades(), loadStats()]);
+  } catch (e) {
+    document.getElementById('model-modal-err').textContent = e.message;
+  }
+}
+
+async function deleteModel(id) {
+  const m = state.models.find(x => x.id === id);
+  const name = m ? m.name : '该模型';
+  if (!confirm(`确认删除模型「${name}」？将标记为停用，其名下交易记录与统计历史不受影响。`)) return;
+  try {
+    await api('/api/models/' + id, { method: 'DELETE' });
+    await loadModels();
+    await Promise.all([loadTrades(), loadStats()]);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function restoreModel(id) {
+  try {
+    await api('/api/models/' + id + '/restore', { method: 'POST' });
+    await loadModels();
+    await Promise.all([loadTrades(), loadStats()]);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+document.getElementById('model-modal-mask').addEventListener('click', function (e) {
+  if (e.target === this) closeModelModal();
+});
+bindEnter('m-name', saveModel);
+
 // ═══════════════ 录入/编辑弹窗 ═══════════════
 function openModal(id) {
   state.editingId = id || null;
@@ -789,6 +962,7 @@ function openModal(id) {
   document.getElementById('t-exit-reason').value = t ? (t.exit_reason || '') : '';
   document.getElementById('t-entry-note').value = t ? (t.entry_note || '') : '';
   document.getElementById('t-exit-note').value = t ? (t.exit_note || '') : '';
+  renderModelSelect(t ? t.model_id : null);
   if (t) state.selectedSymbol = { symbol: t.symbol, name: t.name };
 
   onStatusChange();
@@ -860,6 +1034,8 @@ async function saveTrade() {
 
   if (!state.selectedSymbol) { document.getElementById('modal-err').textContent = '请先搜索并选择股票'; return; }
 
+  const modelId = document.getElementById('t-model').value;
+
   const body = {
     symbol: state.selectedSymbol.symbol,
     name: state.selectedSymbol.name,
@@ -869,6 +1045,7 @@ async function saveTrade() {
     entry_date: entryDate,
     entry_reason: entryReason,
     entry_note: document.getElementById('t-entry-note').value.trim(),
+    model_id: modelId ? parseInt(modelId, 10) : null,
   };
 
   if (status === 'closed') {
@@ -915,6 +1092,7 @@ try {
 window.addEventListener('resize', () => {
   if (state.pnlChart) state.pnlChart.resize();
   if (state.symbolChart) state.symbolChart.resize();
+  if (state.modelChart) state.modelChart.resize();
 });
 
 checkAuth();

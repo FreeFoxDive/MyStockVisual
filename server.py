@@ -755,6 +755,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_trades_list(params)
         elif path == "/api/trade-reasons":
             return self._send_json({"entry": trades.ENTRY_REASONS, "exit": trades.EXIT_REASONS})
+        elif path == "/api/models":
+            return self._handle_models_list()
         elif path == "/" or path == "/index.html":
             return self._serve_static("index.html")
         elif path.endswith(".html") or path.endswith(".js") or path.endswith(".css"):
@@ -822,6 +824,13 @@ class VisualHandler(BaseHTTPRequestHandler):
             if uid.isdigit():
                 return self._handle_admin_users_reset(int(uid))
             return self._send_error("Not Found", 404)
+        elif path == "/api/models":
+            return self._handle_models_create()
+        elif path.startswith("/api/models/") and path.endswith("/restore"):
+            mid = path[len("/api/models/"):-len("/restore")]
+            if mid.isdigit():
+                return self._handle_models_restore(int(mid))
+            return self._send_error("Not Found", 404)
         elif path == "/api/trades":
             return self._handle_trades_create()
         else:
@@ -832,6 +841,11 @@ class VisualHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             if not _check_rate_limit():
                 return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+        # /api/models/{id}
+        if path.startswith("/api/models/"):
+            mid = path[len("/api/models/"):]
+            if mid.isdigit():
+                return self._handle_models_update(int(mid))
         # /api/trades/{id}
         if path.startswith("/api/trades/"):
             tid = path[len("/api/trades/"):]
@@ -849,6 +863,10 @@ class VisualHandler(BaseHTTPRequestHandler):
             if uid.isdigit():
                 return self._handle_admin_users_delete(int(uid))
             return self._send_error("Not Found", 404)
+        if path.startswith("/api/models/"):
+            mid = path[len("/api/models/"):]
+            if mid.isdigit():
+                return self._handle_models_delete(int(mid))
         if path.startswith("/api/trades/"):
             tid = path[len("/api/trades/"):]
             if tid.isdigit():
@@ -967,6 +985,56 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._send_error(str(e), 400)
         if not updated:
             return self._send_error("用户不存在", 404)
+        return self._send_json({"ok": True})
+
+    # ── API: 量化模型 (读: 登录用户; 写: 仅 admin) ──
+    def _handle_models_list(self):
+        if not self._require_user():
+            return
+        return self._send_json(trades.list_models(active_only=False))
+
+    def _handle_models_create(self):
+        if not self._require_admin():
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        try:
+            mid = trades.create_model(body.get("name"), body.get("description", ""))
+        except ValueError as e:
+            return self._send_error(str(e), 409)
+        return self._send_json({"ok": True, "id": mid})
+
+    def _handle_models_update(self, mid):
+        if not self._require_admin():
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        try:
+            updated = trades.update_model(mid, body.get("name"), body.get("description", ""))
+        except ValueError as e:
+            return self._send_error(str(e), 409)
+        if not updated:
+            return self._send_error("模型不存在", 404)
+        return self._send_json({"ok": True})
+
+    def _handle_models_delete(self, mid):
+        if not self._require_admin():
+            return
+        if not trades.delete_model(mid):
+            return self._send_error("模型不存在", 404)
+        return self._send_json({"ok": True})
+
+    def _handle_models_restore(self, mid):
+        if not self._require_admin():
+            return
+        try:
+            restored = trades.restore_model(mid)
+        except ValueError as e:
+            return self._send_error(str(e), 409)
+        if not restored:
+            return self._send_error("模型不存在", 404)
         return self._send_json({"ok": True})
 
     def _handle_trades_list(self, params):

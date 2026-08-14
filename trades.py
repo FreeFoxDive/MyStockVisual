@@ -8,7 +8,8 @@ SQLite 持久化的多账户交易日志：注册/登录、买卖记录增删改
 数据表:
   - users    用户账户 (PBKDF2-SHA256 口令哈希)
   - sessions 会话令牌 (30 天过期)
-  - trades   交易记录 (open 持仓 / closed 平仓)
+  - models   量化模型 (全局共享, 软删除)
+  - trades   交易记录 (open 持仓 / closed 平仓, 可选关联 model_id)
 
 数据库文件默认位于 `visual/data/trades.db`。
 """
@@ -43,6 +44,8 @@ ENTRY_REASONS = [
     "估值低估",
     "政策利好/行业景气",
     "题材热点/消息面",
+    "动力红转",
+    "动力蓝转",
     "其他",
 ]
 
@@ -56,7 +59,19 @@ EXIT_REASONS = [
     "资金流出/放量下跌",
     "调仓换股",
     "时间止损(持有超期)",
+    "动力绿转",
+    "动力蓝转",
     "其他",
+]
+
+# ── 量化模型种子 (对齐回测管线 A–E) ──
+# 策略描述默认留空，不暴露内部策略细节
+SEED_MODELS = [
+    ("A 60分钟超短", ""),
+    ("B 日线波段", ""),
+    ("C 日线波段·阳包阴", ""),
+    ("D 动力管线", ""),
+    ("E K线反转管线", ""),
 ]
 
 # ── 数据库表结构 ──
@@ -79,6 +94,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
+CREATE TABLE IF NOT EXISTS models (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    deleted_at  TEXT
+);
+-- 启用中的模型名唯一 (软删后同名可复用)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_models_name_active
+    ON models(name) WHERE active = 1;
+
 CREATE TABLE IF NOT EXISTS trades (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id      INTEGER NOT NULL,
@@ -94,9 +121,11 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_note   TEXT,
     exit_reason  TEXT,                    -- open 时为空
     exit_note    TEXT,
+    model_id     INTEGER,                 -- 量化模型 (可空, 软删不影响历史)
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trades_user_exit   ON trades(user_id, exit_date);
 CREATE INDEX IF NOT EXISTS idx_trades_user_symbol ON trades(user_id, symbol);
@@ -123,6 +152,20 @@ def init_db(db_path=None):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
         if "is_admin" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        # 迁移: 旧库 trades 表补 model_id 列
+        tcols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+        if "model_id" not in tcols:
+            conn.execute(
+                "ALTER TABLE trades ADD COLUMN model_id INTEGER "
+                "REFERENCES models(id) ON DELETE SET NULL"
+            )
+        # 种子模型 A–E (仅当 models 表为空时插入, 含停用行也计入)
+        n = conn.execute("SELECT COUNT(*) FROM models").fetchone()[0]
+        if n == 0:
+            conn.executemany(
+                "INSERT INTO models (name, description, created_at) VALUES (?,?,?)",
+                [(name, desc, _now_iso()) for name, desc in SEED_MODELS],
+            )
         conn.commit()
     finally:
         conn.close()
@@ -313,6 +356,122 @@ def reset_password(user_id, new_password):
         conn.close()
 
 
+# ── 量化模型管理 (全局共享, 软删除) ──
+def list_models(active_only=True):
+    """返回模型列表 {id, name, description, active, created_at, deleted_at}。
+
+    active_only=True 只返回启用中的 (供交易下拉); False 返回全部 (供管理员列表)。
+    """
+    sql = "SELECT id, name, description, active, created_at, deleted_at FROM models"
+    if active_only:
+        sql += " WHERE active=1"
+    sql += " ORDER BY id"
+    conn = get_conn()
+    try:
+        rows = conn.execute(sql).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "description": r["description"],
+                "active": bool(r["active"]),
+                "created_at": r["created_at"],
+                "deleted_at": r["deleted_at"],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def create_model(name, description):
+    """新增模型并返回 model_id。名称非空/启用中重名抛 ValueError。"""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("模型名称不能为空")
+    if len(name) > 64:
+        raise ValueError("模型名称过长")
+    description = (description or "").strip()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO models(name, description, active, created_at) VALUES(?,?,1,?)",
+            (name, description, _now_iso()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.IntegrityError:
+        raise ValueError("模型名已存在")
+    finally:
+        conn.close()
+
+
+def update_model(model_id, name, description):
+    """更新模型名称/描述。模型不存在返回 False；启用中重名抛 ValueError。"""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("模型名称不能为空")
+    if len(name) > 64:
+        raise ValueError("模型名称过长")
+    description = (description or "").strip()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE models SET name=?, description=? WHERE id=?",
+            (name, description, model_id),
+        )
+        if cur.rowcount == 0:
+            return False
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        raise ValueError("模型名已存在")
+    finally:
+        conn.close()
+
+
+def delete_model(model_id):
+    """软删除模型 (置 active=0, 不物理删行, 交易记录不受影响)。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE models SET active=0, deleted_at=? WHERE id=?",
+            (_now_iso(), model_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def restore_model(model_id):
+    """恢复停用模型 (置 active=1)。恢复后与启用中重名抛 ValueError。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE models SET active=1, deleted_at=NULL WHERE id=?",
+            (model_id,),
+        )
+        if cur.rowcount == 0:
+            return False
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        raise ValueError("模型名与启用中的模型重复")
+    finally:
+        conn.close()
+
+
+def _model_exists(model_id):
+    """模型存在 (含停用行) 返回 True, 否则 False。"""
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT 1 FROM models WHERE id=?", (model_id,)).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 # ── 交易记录 CRUD ──
 def _valid_date(s):
     try:
@@ -369,6 +528,16 @@ def _clean(data, existing=None):
     entry_note = s(merged.get("entry_note")) or None
     exit_note = s(merged.get("exit_note")) or None
 
+    # 量化模型: 允许空/空串 → None (「无」); 非空须为存在模型的 id (含停用行)
+    model_id = None
+    if merged.get("model_id") not in (None, ""):
+        try:
+            model_id = int(merged["model_id"])
+        except (TypeError, ValueError):
+            return None, "模型无效"
+        if not _model_exists(model_id):
+            return None, "模型不存在"
+
     clean = {
         "symbol": symbol,
         "name": name,
@@ -378,6 +547,7 @@ def _clean(data, existing=None):
         "entry_date": entry_date,
         "entry_reason": entry_reason,
         "entry_note": entry_note,
+        "model_id": model_id,
     }
 
     if status == "closed":
@@ -498,14 +668,14 @@ def create_trade(user_id, data):
         cur = conn.execute(
             "INSERT INTO trades(user_id, symbol, name, status, entry_price, exit_price, "
             "quantity, entry_date, exit_date, entry_reason, entry_note, exit_reason, "
-            "exit_note, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "exit_note, model_id, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 user_id, clean["symbol"], clean["name"], clean["status"],
                 clean["entry_price"], clean["exit_price"], clean["quantity"],
                 clean["entry_date"], clean["exit_date"], clean["entry_reason"],
                 clean["entry_note"], clean["exit_reason"], clean["exit_note"],
-                now, now,
+                clean["model_id"], now, now,
             ),
         )
         conn.commit()
@@ -527,12 +697,13 @@ def update_trade(user_id, tid, data):
         conn.execute(
             "UPDATE trades SET symbol=?, name=?, status=?, entry_price=?, exit_price=?, "
             "quantity=?, entry_date=?, exit_date=?, entry_reason=?, entry_note=?, "
-            "exit_reason=?, exit_note=?, updated_at=? WHERE id=? AND user_id=?",
+            "exit_reason=?, exit_note=?, model_id=?, updated_at=? WHERE id=? AND user_id=?",
             (
                 clean["symbol"], clean["name"], clean["status"], clean["entry_price"],
                 clean["exit_price"], clean["quantity"], clean["entry_date"],
                 clean["exit_date"], clean["entry_reason"], clean["entry_note"],
-                clean["exit_reason"], clean["exit_note"], _now_iso(), tid, user_id,
+                clean["exit_reason"], clean["exit_note"], clean["model_id"],
+                _now_iso(), tid, user_id,
             ),
         )
         conn.commit()
@@ -699,4 +870,44 @@ def compute_stats(user_id, start=None, end=None):
         for s in sorted(by_symbol.values(), key=lambda x: -x["pnl"])
     ]
 
-    return {"summary": summary, "series": series, "by_symbol": by_symbol}
+    # 按模型汇总 (model_id=None 归入「无」; 停用模型历史仍计入并标注)
+    model_names = {}
+    conn = get_conn()
+    try:
+        for r in conn.execute("SELECT id, name, active FROM models"):
+            model_names[r["id"]] = (r["name"], bool(r["active"]))
+    finally:
+        conn.close()
+
+    by_model = {}
+    for t in trades:
+        mid = t.get("model_id")
+        m = by_model.setdefault(
+            mid, {"model_id": mid, "pnl": 0.0, "count": 0, "wins": 0, "losses": 0}
+        )
+        m["pnl"] += t["pnl"]
+        m["count"] += 1
+        if t["pnl"] > 0:
+            m["wins"] += 1
+        elif t["pnl"] < 0:
+            m["losses"] += 1
+
+    def _model_label(mid):
+        if mid is None:
+            return "无"
+        name, active = model_names.get(mid, ("未知模型", True))
+        return name if active else f"{name}（已删除）"
+
+    by_model = [
+        {
+            "model_id": m["model_id"],
+            "name": _model_label(m["model_id"]),
+            "active": m["model_id"] is None or model_names.get(m["model_id"], (None, True))[1],
+            "pnl": round(m["pnl"], 2),
+            "count": m["count"],
+            "win_rate": _win_rate(m["wins"], m["losses"]),
+        }
+        for m in sorted(by_model.values(), key=lambda x: -x["pnl"])
+    ]
+
+    return {"summary": summary, "series": series, "by_symbol": by_symbol, "by_model": by_model}

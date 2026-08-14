@@ -1,6 +1,6 @@
 # 交易记录统计功能文档
 
-> 面向 `visual` 项目的多账户交易日志：登录注册、买卖记录增删改查、按周/月/年统计盈亏与胜率。
+> 面向 `visual` 项目的多账户交易日志：登录注册、买卖记录增删改查、量化模型关联、按周/月/年统计盈亏与胜率、按股票/模型归因。
 > 仅使用 Python 标准库（`sqlite3` / `hashlib` / `secrets`），不引入任何新依赖。
 
 - 入口：主页（`index.html`）左上角「📒 交易记录」按钮，点击跳转 `/trades.html`。
@@ -37,6 +37,21 @@
 
 索引：`idx_sessions_user(user_id)`。
 
+### 表 `models` — 量化模型（全局共享，软删除）
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | 模型 ID |
+| `name` | TEXT | NOT NULL | 模型名称（启用中唯一，见下） |
+| `description` | TEXT | NOT NULL DEFAULT '' | 策略描述 |
+| `active` | INTEGER | NOT NULL DEFAULT 1 | 是否启用（0=已软删除） |
+| `created_at` | TEXT | NOT NULL | 创建时间 |
+| `deleted_at` | TEXT | 可空 | 软删除时间（恢复时置空） |
+
+- **名称唯一性**：部分唯一索引 `idx_models_name_active`（`UNIQUE(name) WHERE active=1`），仅启用中的模型名不可重复；停用后可复用同名。
+- **软删除**：管理员「删除」仅置 `active=0` 并记录 `deleted_at`，**不物理删除、不动交易记录**，历史交易与按模型统计永久可追溯；同名模型可「恢复」。
+- **种子数据**：首次建库自动播种 A–E 五个模型（对应回测管线）：`A 60分钟超短`、`B 日线波段`、`C 日线波段·阳包阴`、`D 动力管线`、`E K线反转管线`；策略描述默认留空，不暴露内部策略细节。
+
 ### 表 `trades` — 交易记录
 
 | 字段 | 类型 | 约束 | 说明 |
@@ -55,6 +70,7 @@
 | `entry_note` | TEXT | 可空 | 买入理由自由文本补充 |
 | `exit_reason` | TEXT | 可空（open 时为空） | 卖出理由分类 |
 | `exit_note` | TEXT | 可空 | 卖出理由自由文本补充 |
+| `model_id` | INTEGER | 可空，FK→models(id) ON DELETE SET NULL | 关联量化模型（`NULL`=无；软删不触发置空） |
 | `created_at` | TEXT | NOT NULL | 创建时间 |
 | `updated_at` | TEXT | NOT NULL | 更新时间 |
 
@@ -97,11 +113,16 @@
 | POST | `/api/admin/users` | 管理员 | 添加用户 `{username,password}` → 普通用户，重名 409 |
 | DELETE | `/api/admin/users/{id}` | 管理员 | 删除用户（管理员拒绝 400，不存在 404） |
 | POST | `/api/admin/users/{id}/reset-password` | 管理员 | 重置密码 `{password}`（至少 6 位） |
+| GET | `/api/models` | 是 | 模型列表 `[{id,name,description,active,created_at,deleted_at}]`（含停用项，前端过滤） |
+| POST | `/api/models` | 管理员 | 新增模型 `{name,description}`，重名 409 |
+| PUT | `/api/models/{id}` | 管理员 | 更新模型 `{name,description}`（不存在 404） |
+| DELETE | `/api/models/{id}` | 管理员 | 软删除模型（置 `active=0`，交易记录不受影响） |
+| POST | `/api/models/{id}/restore` | 管理员 | 恢复停用模型（启用中重名 409） |
 | GET | `/api/trades` | 是 | 列表，参数 `status,symbol,q,from,to,limit,offset` |
 | POST | `/api/trades` | 是 | 新建（body 见 `trades` 字段） |
 | PUT | `/api/trades/{id}` | 是 | 更新（部分字段合并） |
 | DELETE | `/api/trades/{id}` | 是 | 删除 |
-| GET | `/api/trades/stats?from=&to=` | 是 | 统计汇总 + 时序序列 + 按股票汇总 |
+| GET | `/api/trades/stats?from=&to=` | 是 | 统计汇总 + 时序序列 + 按股票汇总 + 按模型汇总 |
 | GET | `/api/trade-reasons` | 否 | 返回 `{entry:[...], exit:[...]}` 预设分类 |
 
 - `GET /api/trades` 的 `from`/`to` 作用于 `COALESCE(exit_date, entry_date)`（即平仓用卖出日、持仓用买入日作为归属日期）；`q` 对 `symbol`/`name` 模糊匹配。
@@ -137,19 +158,29 @@
 
 按 `symbol` 聚合 `{symbol, name, pnl, count, win_rate}`，按盈亏金额降序。
 
+### 按模型汇总（`by_model`）
+
+按 `model_id` 聚合 `{model_id, name, active, pnl, count, win_rate}`，按盈亏金额降序。
+
+- `model_id=NULL` 归入「无」。
+- 停用（软删）模型的历史交易仍计入，`name` 带「（已删除）」后缀，`active=false`。
+- 与 `by_symbol` 相同的盈亏/胜率口径，仅分组维度不同。
+
 ---
 
 ## 5. 预设理由分类
 
 ### 买入理由 `ENTRY_REASONS`
 
-突破买入、均线金叉、MACD金叉、回踩支撑、超跌反弹、趋势跟随、形态突破、放量上涨/资金流入、业绩增长/基本面改善、估值低估、政策利好/行业景气、题材热点/消息面、其他。
+突破买入、均线金叉、MACD金叉、回踩支撑、超跌反弹、趋势跟随、形态突破、放量上涨/资金流入、业绩增长/基本面改善、估值低估、政策利好/行业景气、题材热点/消息面、动力红转、动力蓝转、其他。
 
 ### 卖出理由 `EXIT_REASONS`
 
-止盈(达到目标价)、止损(跌破止损位)、均线死叉/MACD死叉、跌破支撑/破位、基本面恶化、利空消息/政策风险、资金流出/放量下跌、调仓换股、时间止损(持有超期)、其他。
+止盈(达到目标价)、止损(跌破止损位)、均线死叉/MACD死叉、跌破支撑/破位、基本面恶化、利空消息/政策风险、资金流出/放量下跌、调仓换股、时间止损(持有超期)、动力绿转、动力蓝转、其他。
 
 > 分类参考券商/交易社区（东方财富、雪球、淘股吧等）常用口径；每条记录可在分类之外补充自由文本说明。
+>
+> 「动力红转 / 动力绿转 / 动力蓝转」来自管线 D（动力管线）的颜色转换信号：「动力蓝转」为双向过渡信号，同时出现在买入与卖出理由列表中，方向由用户在录入时自选。
 
 ---
 
@@ -166,8 +197,8 @@
 
 | 文件 | 说明 |
 |------|------|
-| `visual/trades.py` | 后端模块：DB 建表/连接、口令哈希、会话、交易 CRUD、统计 |
-| `visual/trades.html` | 前端 SPA：登录、概览卡片、盈亏图表、记录表格、录入编辑弹窗、用户管理（仅 admin） |
+| `visual/trades.py` | 后端模块：DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、统计 |
+| `visual/trades.html` | 前端 SPA：登录、概览卡片、盈亏图表（含按模型）、记录表格、录入编辑弹窗、用户/模型管理（仅 admin） |
 | `visual/server.py` | 新增 `do_POST/PUT/DELETE`、Cookie/body 解析、鉴权助手、路由分发 |
 | `visual/index.html` | 左上角新增「📒 交易记录」入口按钮 |
 | `visual/data/trades.db` | SQLite 数据库文件（运行时自动创建，不入库） |
