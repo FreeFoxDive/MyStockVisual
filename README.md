@@ -34,6 +34,7 @@ python -u visual/server.py
 | 请求频率限制 | 服务端令牌桶 120次/分钟 |
 | 安全头 | CSP 限制脚本来源 + CORS 同源限制 |
 | 速率限制 | 服务端令牌桶 120次/分钟，超限返回 429 |
+| 交易记录 | 多账户登录，买卖记录增删改查，按周/月/年统计盈亏与胜率（详见 [docs/trades.md](docs/trades.md)） |
 
 ## 文件结构
 
@@ -46,6 +47,10 @@ visual/
 ├── Dockerfile         # Docker 构建文件
 ├── docker-compose.yml # Docker Compose 配置
 ├── requirements.txt   # Python 依赖
+├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
+├── trades.html        # 交易记录前端 (登录注册 + 统计界面)
+├── docs/
+│   └── trades.md      # 交易记录功能文档 (数据表 / API / 统计口径)
 └── README.md          # 本文件
 ```
 
@@ -58,6 +63,19 @@ visual/
 | `GET /api/quote?symbol=600519.SH` | 实时快照 |
 | `GET /api/search?q=茅台` | 模糊搜索 (全量A股+ETF，内存+磁盘双层缓存，24h刷新) |
 | `GET /api/ping` | 健康检查 |
+| `POST /api/auth/login` | 登录，返回 `Set-Cookie: session` |
+| `POST /api/auth/logout` | 登出（需登录） |
+| `GET /api/auth/me` | 当前用户，返回 `{username,is_admin}`（未登录 401） |
+| `GET /api/admin/users` | 用户列表（仅管理员） |
+| `POST /api/admin/users` | 添加用户 `{username,password}`（仅管理员） |
+| `DELETE /api/admin/users/{id}` | 删除用户（仅管理员） |
+| `POST /api/admin/users/{id}/reset-password` | 重置密码 `{password}`（仅管理员） |
+| `GET /api/trades` | 交易记录列表（需登录，`status/symbol/q/from/to/limit/offset`） |
+| `POST /api/trades` | 新建交易记录 |
+| `PUT /api/trades/{id}` | 更新交易记录 |
+| `DELETE /api/trades/{id}` | 删除交易记录 |
+| `GET /api/trades/stats?from=&to=` | 盈亏/胜率统计（按周/月/年分桶 + 按股票汇总） |
+| `GET /api/trade-reasons` | 预设买卖理由分类 |
 
 ## 技术细节
 
@@ -111,6 +129,19 @@ visual/
 ### 错误信息过滤
 敏感关键词（api key, token, auth 等）在错误响应中被过滤。
 
+## 交易记录
+
+主页左上角「📒 交易记录」入口，未登录须先登录，数据按账户隔离。支持录入股票代码/名称、买入价、退出价、数量、买卖日期、买卖理由；`closed` 平仓记录须填全卖出字段才算一笔交易完整结束。
+
+**账户管理**：已关闭公开自助注册，新用户只能由管理员添加。管理员在「用户管理」区可添加 / 列表 / 删除 / 重置密码用户；仅单一管理员，由环境变量在首次启动时引导创建。
+
+统计维度：按周/月/年查看总盈亏、胜率、盈亏比、最大单笔盈利/亏损、平均持仓天数，及按股票汇总。完整的数据表结构、API 端点、统计公式见 [docs/trades.md](docs/trades.md)。
+
+- 数据库：SQLite，文件 `data/trades.db`（运行时自动创建，`data/` 不入库）
+- 口令：PBKDF2-SHA256（20 万次迭代）+ 随机盐
+- 会话：`secrets.token_hex(32)`，30 天过期，`HttpOnly` + `SameSite=Lax` Cookie
+- 管理员：`.env` 中配置 `ADMIN_USERNAME` / `ADMIN_PASSWORD`，服务启动时若无管理员则自动创建（仅一次，不覆盖已改口令）
+
 ## Docker 部署
 
 ```bash
@@ -136,7 +167,9 @@ docker compose down
 |--------|--------|------|
 | 端口 | `127.0.0.1:8888` | 仅本地访问 |
 | 缓存卷 | `.cache` | Docker volume 持久化 |
+| 数据卷 | `data` | 交易记录数据库 `trades.db` 持久化 |
 | 环境变量 | `.env` | 通过 `env_file` 注入 |
+| 管理员账号 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 首次启动自动创建管理员（仅一次） |
 | 用户 | `appuser` (非 root) | 降低容器逃逸风险 |
 
 ## 配色

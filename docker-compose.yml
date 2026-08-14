@@ -8,4 +8,6 @@ services:
       - .env
     volumes:
       - ./.cache:/app/.cache
+      - ./data:/app/data
     restart: unless-stopped
+    user: "0:0"

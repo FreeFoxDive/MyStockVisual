@@ -78,6 +78,12 @@ def get_af():
 # ── 指标计算 ──
 from indicators import compute_all_indicators, _safe_list, force_index
 
+# ── 交易记录 ──
+import trades
+
+SESSION_COOKIE = "session"
+SESSION_MAX_AGE = trades.SESSION_TTL_DAYS * 24 * 3600
+
 # ── 请求速率限制 (令牌桶) ──
 RATE_LIMIT_PER_MIN = 120
 RATE_LIMIT_TOKENS = RATE_LIMIT_PER_MIN
@@ -98,6 +104,86 @@ def _check_rate_limit():
             RATE_LIMIT_TOKENS -= 1
             return True
         return False
+
+
+# ── 登录爆破防护 ──
+LOGIN_FAIL_MAX = 5                 # 连续失败次数上限，达到即锁定账号
+LOGIN_LOCK_SECONDS = 15 * 60       # 账号锁定时长 (秒)
+LOGIN_PER_IP_LIMIT = 5             # 每 IP 每分钟登录尝试上限
+LOGIN_PER_IP_CAP = 1000            # per-IP 字典条目硬上限 (防内存膨胀)
+LOGIN_FAIL_CAP = 1000              # 失败记录字典条目硬上限
+LOGIN_STATE_TTL = 1800             # 无活动条目清理阈值 (秒)
+
+LOGIN_BF_LOCK = threading.Lock()
+# username -> [失败次数, 锁定截止时间戳, 最近活动时间戳]
+_login_failures = {}
+# ip -> [令牌数, 上次补充时间戳]
+_login_attempts = {}
+
+
+def _check_login_ip(ip):
+    """登录接口独立 per-IP 限流。返回 True=允许, False=拒绝。"""
+    now = time.time()
+    with LOGIN_BF_LOCK:
+        tokens, last = _login_attempts.get(ip, (LOGIN_PER_IP_LIMIT, now))
+        tokens = min(LOGIN_PER_IP_LIMIT, tokens + (now - last) * (LOGIN_PER_IP_LIMIT / 60.0))
+        if tokens < 1:
+            _login_attempts[ip] = (tokens, now)
+            return False
+        _login_attempts[ip] = (tokens - 1, now)
+        return True
+
+
+def _login_lock_remaining(username):
+    """返回账号剩余锁定时长(秒)，未锁定返回 0。"""
+    now = time.time()
+    with LOGIN_BF_LOCK:
+        entry = _login_failures.get(username)
+        if not entry:
+            return 0
+        _, locked_until, _ = entry
+        if locked_until and locked_until > now:
+            return int(locked_until - now)
+        return 0
+
+
+def _record_login_failure(username):
+    """记录一次登录失败，连续达到阈值则锁定账号。"""
+    now = time.time()
+    with LOGIN_BF_LOCK:
+        count, _, _ = _login_failures.get(username, (0, 0, now))
+        count += 1
+        locked_until = now + LOGIN_LOCK_SECONDS if count >= LOGIN_FAIL_MAX else 0
+        _login_failures[username] = (count, locked_until, now)
+        _prune_login_state_locked(now)
+
+
+def _clear_login_failure(username):
+    with LOGIN_BF_LOCK:
+        _login_failures.pop(username, None)
+
+
+def _prune_login_state_locked(now):
+    """清理过期条目，防字典被随机用户名/来源 IP 撑爆。"""
+    stale_users = [
+        u for u, (_, lt, seen) in _login_failures.items()
+        if (lt and lt <= now) or (now - seen > LOGIN_STATE_TTL)
+    ]
+    for u in stale_users:
+        _login_failures.pop(u, None)
+    if len(_login_failures) > LOGIN_FAIL_CAP:
+        ordered = sorted(_login_failures.items(), key=lambda kv: kv[1][2])
+        for u, _ in ordered[: len(ordered) - LOGIN_FAIL_CAP]:
+            _login_failures.pop(u, None)
+
+    stale_ips = [ip for ip, (_, last) in _login_attempts.items() if now - last > LOGIN_STATE_TTL]
+    for ip in stale_ips:
+        _login_attempts.pop(ip, None)
+    if len(_login_attempts) > LOGIN_PER_IP_CAP:
+        ordered = sorted(_login_attempts.items(), key=lambda kv: kv[1][1])
+        for ip, _ in ordered[: len(ordered) - LOGIN_PER_IP_CAP]:
+            _login_attempts.pop(ip, None)
+
 
 # CSP: 'unsafe-inline' 是必需的，因为 index.html 使用内联 <script> 标签
 CSP_HEADER = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
@@ -613,14 +699,15 @@ class VisualHandler(BaseHTTPRequestHandler):
         else:
             print(f"[Visual] {fmt}", flush=True)
 
-    def _send_json(self, data, code=200):
+    def _send_json(self, data, code=200, headers=None):
         body = json.dumps(data, ensure_ascii=False, cls=NumpyEncoder).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
-        self.send_header("Access-Control-Allow-Origin", self._get_cors_origin())
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Security-Policy", CSP_HEADER)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -658,6 +745,16 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_search(params)
         elif path == "/api/ping":
             return self._send_json({"ok": True, "time": str(datetime.now())})
+        elif path == "/api/auth/me":
+            return self._handle_auth_me()
+        elif path == "/api/admin/users":
+            return self._handle_admin_users_list()
+        elif path == "/api/trades/stats":
+            return self._handle_trades_stats(params)
+        elif path == "/api/trades":
+            return self._handle_trades_list(params)
+        elif path == "/api/trade-reasons":
+            return self._send_json({"entry": trades.ENTRY_REASONS, "exit": trades.EXIT_REASONS})
         elif path == "/" or path == "/index.html":
             return self._serve_static("index.html")
         elif path.endswith(".html") or path.endswith(".js") or path.endswith(".css"):
@@ -666,20 +763,271 @@ class VisualHandler(BaseHTTPRequestHandler):
             # 默认返回 index.html (SPA fallback)
             return self._serve_static("index.html")
 
-    def _get_cors_origin(self):
-        """限制 CORS 来源：仅允许相同源（未配置 0.0.0.0 时）"""
-        origin = self.headers.get("Origin", "")
-        if not origin:
-            return ""
-        # 仅允许同源请求
-        return origin
+    # ── 鉴权与 body 解析助手 ──
+    def _client_ip(self):
+        """识别真实客户端 IP：Cloudflare/反代头优先，回退到 socket 对端。"""
+        cf = self.headers.get("CF-Connecting-IP")
+        if cf:
+            return cf.strip().split(",")[0].strip()
+        xff = self.headers.get("X-Forwarded-For")
+        if xff:
+            return xff.split(",")[0].strip()
+        return self.client_address[0]
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", self._get_cors_origin())
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+    def _get_cookie(self, name):
+        from http.cookies import SimpleCookie
+        cookies = SimpleCookie(self.headers.get("Cookie", ""))
+        if name in cookies:
+            return cookies[name].value
+        return None
+
+    def _current_user(self):
+        token = self._get_cookie(SESSION_COOKIE)
+        if not token:
+            return None
+        return trades.get_session(token)
+
+    def _set_session_cookie(self, token, clear=False):
+        if clear:
+            return f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        return f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}"
+
+    def _read_json_body(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 1_000_000:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/"):
+            if not _check_rate_limit():
+                return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+        if path == "/api/auth/login":
+            return self._handle_login()
+        elif path == "/api/auth/logout":
+            return self._handle_logout()
+        elif path == "/api/admin/users":
+            return self._handle_admin_users_create()
+        elif path.startswith("/api/admin/users/") and path.endswith("/reset-password"):
+            uid = path[len("/api/admin/users/"):-len("/reset-password")]
+            if uid.isdigit():
+                return self._handle_admin_users_reset(int(uid))
+            return self._send_error("Not Found", 404)
+        elif path == "/api/trades":
+            return self._handle_trades_create()
+        else:
+            return self._send_error("Not Found", 404)
+
+    def do_PUT(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/"):
+            if not _check_rate_limit():
+                return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+        # /api/trades/{id}
+        if path.startswith("/api/trades/"):
+            tid = path[len("/api/trades/"):]
+            if tid.isdigit():
+                return self._handle_trades_update(int(tid))
+        return self._send_error("Not Found", 404)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/"):
+            if not _check_rate_limit():
+                return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+        if path.startswith("/api/admin/users/"):
+            uid = path[len("/api/admin/users/"):]
+            if uid.isdigit():
+                return self._handle_admin_users_delete(int(uid))
+            return self._send_error("Not Found", 404)
+        if path.startswith("/api/trades/"):
+            tid = path[len("/api/trades/"):]
+            if tid.isdigit():
+                return self._handle_trades_delete(int(tid))
+        return self._send_error("Not Found", 404)
+
+    # ── API: 鉴权 ──
+    def _handle_login(self):
+        # 登录接口独立 per-IP 限流 (区别于全局令牌桶)
+        if not _check_login_ip(self._client_ip()):
+            return self._send_error("登录尝试过于频繁，请稍后重试", 429)
+
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+        if not username or not password:
+            return self._send_error("用户名和密码不能为空")
+
+        # 账号锁定：锁定期间即使密码正确也拒绝
+        remaining = _login_lock_remaining(username)
+        if remaining > 0:
+            return self._send_error(f"账号已锁定，请 {remaining // 60 + 1} 分钟后重试", 429)
+
+        result = trades.login(username, password)
+        if not result:
+            _record_login_failure(username)
+            time.sleep(0.5)  # 拖慢自动化爆破
+            return self._send_error("用户名或密码错误", 401)
+
+        _clear_login_failure(username)
+        token, expires = result
+        return self._send_json(
+            {"ok": True, "username": username, "expires_at": expires},
+            headers={"Set-Cookie": self._set_session_cookie(token)},
+        )
+
+    def _handle_logout(self):
+        token = self._get_cookie(SESSION_COOKIE)
+        if token:
+            trades.delete_session(token)
+        return self._send_json(
+            {"ok": True},
+            headers={"Set-Cookie": self._set_session_cookie(None, clear=True)},
+        )
+
+    def _handle_auth_me(self):
+        user = self._current_user()
+        if not user:
+            return self._send_error("未登录", 401)
+        return self._send_json({"username": user["username"], "is_admin": user["is_admin"]})
+
+    # ── API: 交易记录 ──
+    def _require_user(self):
+        user = self._current_user()
+        if not user:
+            self._send_error("未登录", 401)
+        return user
+
+    def _require_admin(self):
+        user = self._current_user()
+        if not user:
+            self._send_error("未登录", 401)
+            return None
+        if not user.get("is_admin"):
+            self._send_error("无权限", 403)
+            return None
+        return user
+
+    # ── API: 用户管理 (仅 admin) ──
+    def _handle_admin_users_list(self):
+        if not self._require_admin():
+            return
+        return self._send_json(trades.list_users())
+
+    def _handle_admin_users_create(self):
+        if not self._require_admin():
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+        if not username or not password:
+            return self._send_error("用户名和密码不能为空")
+        try:
+            user_id = trades.create_user(username, password, is_admin=False)
+        except ValueError as e:
+            return self._send_error(str(e), 409)
+        return self._send_json({"ok": True, "id": user_id, "username": username})
+
+    def _handle_admin_users_delete(self, user_id):
+        if not self._require_admin():
+            return
+        try:
+            deleted = trades.delete_user(user_id)
+        except ValueError as e:
+            return self._send_error(str(e), 400)
+        if not deleted:
+            return self._send_error("用户不存在", 404)
+        return self._send_json({"ok": True})
+
+    def _handle_admin_users_reset(self, user_id):
+        if not self._require_admin():
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        password = body.get("password") or ""
+        if not password:
+            return self._send_error("密码不能为空")
+        try:
+            updated = trades.reset_password(user_id, password)
+        except ValueError as e:
+            return self._send_error(str(e), 400)
+        if not updated:
+            return self._send_error("用户不存在", 404)
+        return self._send_json({"ok": True})
+
+    def _handle_trades_list(self, params):
+        user = self._require_user()
+        if not user:
+            return
+        filters = {
+            "status": params.get("status", [None])[0],
+            "symbol": params.get("symbol", [None])[0],
+            "q": params.get("q", [None])[0],
+            "from": params.get("from", [None])[0],
+            "to": params.get("to", [None])[0],
+            "limit": params.get("limit", [None])[0],
+            "offset": params.get("offset", [None])[0],
+        }
+        records, total = trades.list_trades(user["id"], filters)
+        return self._send_json({"trades": records, "total": total})
+
+    def _handle_trades_create(self):
+        user = self._require_user()
+        if not user:
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        try:
+            trade = trades.create_trade(user["id"], body)
+        except ValueError as e:
+            return self._send_error(str(e), 400)
+        return self._send_json({"trade": trade}, 201)
+
+    def _handle_trades_update(self, tid):
+        user = self._require_user()
+        if not user:
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        try:
+            trade = trades.update_trade(user["id"], tid, body)
+        except ValueError as e:
+            return self._send_error(str(e), 400)
+        if trade is None:
+            return self._send_error("记录不存在", 404)
+        return self._send_json({"trade": trade})
+
+    def _handle_trades_delete(self, tid):
+        user = self._require_user()
+        if not user:
+            return
+        if not trades.delete_trade(user["id"], tid):
+            return self._send_error("记录不存在", 404)
+        return self._send_json({"ok": True})
+
+    def _handle_trades_stats(self, params):
+        user = self._require_user()
+        if not user:
+            return
+        start = params.get("from", [None])[0]
+        end = params.get("to", [None])[0]
+        return self._send_json(trades.compute_stats(user["id"], start, end))
 
     # ── 静态文件 ──
     def _serve_static(self, filename):
@@ -933,6 +1281,30 @@ def main():
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), VisualHandler)
+
+    # 初始化交易记录数据库
+    try:
+        trades.init_db()
+        print(f"[Visual] 交易记录数据库已就绪: {trades._db_path}", flush=True)
+    except Exception as e:
+        print(f"[Visual] ⚠️  交易记录数据库初始化失败: {e}", flush=True)
+
+    # 引导首个管理员 (仅当库中无 admin 时创建，绝不覆盖已有口令)
+    admin_user = os.environ.get("ADMIN_USERNAME", "").strip()
+    admin_pass = os.environ.get("ADMIN_PASSWORD", "")
+    if admin_user and admin_pass:
+        try:
+            if trades.count_admins() == 0:
+                trades.create_user(admin_user, admin_pass, is_admin=True)
+                print(f"[Visual] 已创建管理员账号: {admin_user}", flush=True)
+            else:
+                print("[Visual] 管理员已存在，跳过自动创建", flush=True)
+        except Exception as e:
+            print(f"[Visual] ⚠️  管理员账号创建失败: {e}", flush=True)
+    elif admin_user or admin_pass:
+        print("[Visual] ⚠️  ADMIN_USERNAME 与 ADMIN_PASSWORD 需同时设置", flush=True)
+    else:
+        print("[Visual] ⚠️  未设置 ADMIN_USERNAME/ADMIN_PASSWORD，无管理员时无法创建用户", flush=True)
 
     # 启动时清理磁盘缓存
     try:

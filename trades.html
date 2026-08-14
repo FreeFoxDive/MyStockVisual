@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📒 交易记录统计 — Visual</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+/* ═══════════════ CSS Variables (与 index.html 对齐) ═══════════════ */
+:root {
+  --bg: #ffffff;
+  --bg-panel: #f8f9fa;
+  --bg-card: #ffffff;
+  --text: #2c3e50;
+  --text-secondary: #6c757d;
+  --border: #e9ecef;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --toolbar-bg: #f1f3f5;
+  --input-bg: #ffffff;
+  --input-border: #dee2e6;
+  --btn-bg: #ffffff;
+  --btn-hover: #e9ecef;
+  --btn-active: #007bff;
+  --btn-active-text: #ffffff;
+  --up-color: #ef232a;
+  --down-color: #14b143;
+  --scrollbar-thumb: #c1c1c1;
+}
+
+[data-theme="dark"] {
+  --bg: #0f1117;
+  --bg-panel: #14171f;
+  --bg-card: #1a1d26;
+  --text: #d1d4dc;
+  --text-secondary: #787b86;
+  --border: #2a2e39;
+  --shadow: 0 1px 3px rgba(0,0,0,0.3);
+  --toolbar-bg: #1a1d26;
+  --input-bg: #2a2e39;
+  --input-border: #363a45;
+  --btn-bg: #2a2e39;
+  --btn-hover: #363a45;
+  --btn-active: #2962ff;
+  --btn-active-text: #ffffff;
+  --scrollbar-thumb: #363a45;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  transition: background 0.3s, color 0.3s;
+}
+
+/* ═══════════════ Toolbar ═══════════════ */
+#toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  background: var(--toolbar-bg);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 20;
+}
+#toolbar .title { font-weight: 700; font-size: 15px; }
+#toolbar .spacer { flex: 1; }
+#toolbar .user { color: var(--text-secondary); font-size: 13px; }
+
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--btn-bg);
+  color: var(--text);
+  font-size: 13px; cursor: pointer;
+  transition: all 0.15s; white-space: nowrap;
+}
+button:hover { background: var(--btn-hover); }
+button.primary { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
+button.danger { color: var(--up-color); }
+button.active { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, select, textarea {
+  padding: 6px 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 13px; outline: none;
+  transition: border-color 0.2s;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
+
+/* ═══════════════ 登录视图 ═══════════════ */
+#login-view {
+  max-width: 380px; margin: 60px auto; padding: 28px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow);
+}
+#login-view h1 { font-size: 20px; margin-bottom: 6px; }
+#login-view .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+#login-view .field { margin-bottom: 14px; }
+#login-view label { display: block; font-size: 13px; margin-bottom: 4px; color: var(--text-secondary); }
+#login-view input { width: 100%; }
+#login-view .row { display: flex; gap: 10px; margin-top: 18px; }
+#login-view .err { color: var(--up-color); font-size: 13px; margin-top: 12px; min-height: 18px; }
+.tab-switch { display: flex; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+.tab-switch button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 8px 14px; }
+.tab-switch button.active { border-bottom-color: var(--btn-active); color: var(--btn-active); background: transparent; }
+
+/* ═══════════════ 主视图 ═══════════════ */
+#main-view { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+
+.section-title { font-size: 15px; font-weight: 700; margin: 26px 0 12px; display: flex; align-items: center; gap: 8px; }
+.section-title .bar { width: 4px; height: 16px; background: var(--btn-active); border-radius: 2px; }
+
+/* 概览卡片 */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow);
+}
+.card .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+.card .value { font-size: 22px; font-weight: 700; }
+.card .value.pos { color: var(--up-color); }
+.card .value.neg { color: var(--down-color); }
+.card .sub { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+
+/* 图表面板 */
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.chart-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.chart-box .chart-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-secondary); }
+.chart { width: 100%; height: 280px; }
+@media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+
+/* 过滤栏 */
+.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.filter-bar input[type="date"] { width: 150px; }
+.filter-bar .grow { flex: 1; }
+
+/* 表格 */
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 980px; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--btn-hover); }
+td.sym .code { color: var(--text-secondary); font-size: 12px; }
+.badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+.badge.open { background: rgba(239,35,42,0.12); color: var(--up-color); }
+.badge.closed { background: rgba(20,177,67,0.12); color: var(--down-color); }
+td.pos { color: var(--up-color); font-weight: 600; }
+td.neg { color: var(--down-color); font-weight: 600; }
+.reason-cell { max-width: 220px; white-space: normal; font-size: 12px; color: var(--text-secondary); }
+.empty { text-align: center; color: var(--text-secondary); padding: 30px 0; }
+
+.pagination { display: flex; align-items: center; gap: 10px; margin-top: 12px; justify-content: flex-end; }
+.pagination .info { color: var(--text-secondary); font-size: 13px; }
+
+/* 弹窗 */
+.modal-mask {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45); z-index: 100;
+  align-items: flex-start; justify-content: center;
+  padding: 40px 16px; overflow-y: auto;
+}
+.modal-mask.show { display: flex; }
+.modal {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 10px; width: 100%; max-width: 560px; padding: 20px 24px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.25);
+}
+.modal h2 { font-size: 17px; margin-bottom: 16px; }
+.modal .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.modal .full { grid-column: 1 / -1; }
+.modal label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+.modal input, .modal select, .modal textarea { width: 100%; }
+.modal textarea { resize: vertical; min-height: 50px; }
+.modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.modal .err { color: var(--up-color); font-size: 13px; margin-top: 10px; }
+
+/* 搜索补全 */
+.autocomplete { position: relative; }
+.autocomplete .dropdown {
+  display: none; position: absolute; top: 100%; left: 0; right: 0;
+  max-height: 220px; overflow-y: auto; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 200;
+}
+.autocomplete .dropdown.show { display: block; }
+.autocomplete .dropdown .item { padding: 6px 10px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--border); }
+.autocomplete .dropdown .item:hover { background: var(--btn-active); color: var(--btn-active-text); }
+.autocomplete .dropdown .item .code { color: var(--text-secondary); font-size: 12px; margin-left: 6px; }
+.autocomplete .dropdown .item:hover .code { color: rgba(255,255,255,0.7); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ 顶栏 ═══════════════ -->
+<div id="toolbar">
+  <span class="title">📒 交易记录统计</span>
+  <button onclick="location.href='/'" title="返回K线主页">← 主页</button>
+  <span class="spacer"></span>
+  <span class="user" id="toolbar-user"></span>
+  <button onclick="toggleTheme()" title="切换主题">🌙</button>
+  <button id="btn-logout" class="danger" onclick="doLogout()" style="display:none">退出登录</button>
+</div>
+
+<!-- ═══════════════ 登录视图 ═══════════════ -->
+<div id="login-view" style="display:none">
+  <h1>📒 交易记录</h1>
+  <div class="sub">登录后可录入与统计你的交易记录，数据按账户独立存储。</div>
+  <div id="form-login">
+    <div class="field"><label>用户名</label><input id="login-username" autocomplete="username"></div>
+    <div class="field"><label>密码</label><input id="login-password" type="password" autocomplete="current-password"></div>
+    <div class="row"><button class="primary" style="flex:1" onclick="doLogin()">登 录</button></div>
+  </div>
+  <div class="err" id="auth-err"></div>
+</div>
+
+<!-- ═══════════════ 主视图 ═══════════════ -->
+<div id="main-view" style="display:none">
+
+  <div class="section-title"><span class="bar"></span>概览统计
+    <span style="flex:1"></span>
+    <button class="active" id="g-all" onclick="setStatRange('all')">全部</button>
+    <input type="date" id="stat-from" onchange="setStatRange('custom')">
+    <span style="color:var(--text-secondary)">至</span>
+    <input type="date" id="stat-to" onchange="setStatRange('custom')">
+  </div>
+  <div class="cards" id="stat-cards"></div>
+
+  <div class="section-title"><span class="bar"></span>盈亏走势
+    <span style="flex:1"></span>
+    <div style="display:flex;gap:4px">
+      <button id="g-week" onclick="setGranularity('week')">周</button>
+      <button id="g-month" class="active" onclick="setGranularity('month')">月</button>
+      <button id="g-year" onclick="setGranularity('year')">年</button>
+    </div>
+  </div>
+  <div class="charts">
+    <div class="chart-box"><div class="chart-title">按期间盈亏</div><div class="chart" id="pnl-chart"></div></div>
+    <div class="chart-box"><div class="chart-title">按股票盈亏</div><div class="chart" id="symbol-chart"></div></div>
+  </div>
+
+  <div class="section-title"><span class="bar"></span>交易记录
+    <span style="flex:1"></span>
+    <button class="primary" onclick="openModal()">＋ 新增记录</button>
+  </div>
+  <div class="filter-bar">
+    <select id="f-status" onchange="resetAndLoad()">
+      <option value="">全部状态</option>
+      <option value="open">持仓中</option>
+      <option value="closed">已平仓</option>
+    </select>
+    <input type="text" id="f-q" placeholder="代码 / 名称 搜索..." style="width:200px" onkeydown="if(event.key==='Enter')resetAndLoad()">
+    <input type="date" id="f-from">
+    <span style="color:var(--text-secondary)">至</span>
+    <input type="date" id="f-to">
+    <button onclick="resetAndLoad()">查询</button>
+    <span class="grow"></span>
+    <span style="color:var(--text-secondary);font-size:12px" id="list-count"></span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>代码 / 名称</th><th>状态</th><th>买入价</th><th>退出价</th><th>数量</th>
+          <th>买入日</th><th>卖出日</th><th>买入理由</th><th>卖出理由</th><th>盈亏</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="trade-tbody"></tbody>
+    </table>
+  </div>
+  <div class="pagination">
+    <span class="info" id="page-info"></span>
+    <button id="btn-prev" onclick="changePage(-1)">上一页</button>
+    <button id="btn-next" onclick="changePage(1)">下一页</button>
+  </div>
+
+  <!-- ═══════════════ 用户管理 (仅 admin) ═══════════════ -->
+  <div id="admin-section" style="display:none">
+    <div class="section-title"><span class="bar"></span>用户管理
+      <span style="flex:1"></span>
+      <button class="primary" onclick="openAddUserModal()">＋ 添加用户</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>用户名</th><th>角色</th><th>创建时间</th><th style="width:180px">操作</th></tr>
+        </thead>
+        <tbody id="admin-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 录入/编辑弹窗 ═══════════════ -->
+<div class="modal-mask" id="modal-mask">
+  <div class="modal">
+    <h2 id="modal-title">新增交易记录</h2>
+    <div class="grid">
+      <div class="full autocomplete">
+        <label>股票代码 / 名称 <span style="color:var(--up-color)">*</span></label>
+        <input type="text" id="t-symbol-input" placeholder="输入代码或名称搜索..." autocomplete="off">
+        <div class="dropdown" id="t-symbol-dropdown"></div>
+      </div>
+      <div>
+        <label>状态</label>
+        <select id="t-status" onchange="onStatusChange()">
+          <option value="open">持仓中 (未结束)</option>
+          <option value="closed">已平仓 (已结束)</option>
+        </select>
+      </div>
+      <div>
+        <label>数量 (股) <span style="color:var(--up-color)">*</span></label>
+        <input type="number" id="t-quantity" min="1" step="1" placeholder="如 100">
+      </div>
+      <div>
+        <label>买入价 <span style="color:var(--up-color)">*</span></label>
+        <input type="number" id="t-entry-price" min="0" step="0.01" placeholder="如 10.50">
+      </div>
+      <div>
+        <label>买入日期 <span style="color:var(--up-color)">*</span></label>
+        <input type="date" id="t-entry-date">
+      </div>
+      <div id="exit-price-wrap">
+        <label>退出价 <span style="color:var(--up-color)">*</span></label>
+        <input type="number" id="t-exit-price" min="0" step="0.01" placeholder="如 12.00">
+      </div>
+      <div id="exit-date-wrap">
+        <label>卖出日期 <span style="color:var(--up-color)">*</span></label>
+        <input type="date" id="t-exit-date">
+      </div>
+      <div>
+        <label>买入理由 <span style="color:var(--up-color)">*</span></label>
+        <select id="t-entry-reason"></select>
+      </div>
+      <div>
+        <label>卖出理由 <span style="color:var(--up-color)" id="exit-reason-star">*</span></label>
+        <select id="t-exit-reason"></select>
+      </div>
+      <div>
+        <label>买入理由补充</label>
+        <textarea id="t-entry-note" placeholder="可选，自由文本补充"></textarea>
+      </div>
+      <div>
+        <label>卖出理由补充</label>
+        <textarea id="t-exit-note" placeholder="可选，自由文本补充"></textarea>
+      </div>
+    </div>
+    <div class="err" id="modal-err"></div>
+    <div class="actions">
+      <button onclick="closeModal()">取消</button>
+      <button class="primary" onclick="saveTrade()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 用户管理弹窗 (仅 admin) ═══════════════ -->
+<div class="modal-mask" id="admin-modal-mask">
+  <div class="modal">
+    <h2 id="admin-modal-title">添加用户</h2>
+    <div id="admin-add-form">
+      <div class="field" style="margin-bottom:14px"><label>用户名 (2~32字符)</label><input id="au-username" autocomplete="off"></div>
+      <div class="field" style="margin-bottom:14px"><label>密码 (至少6位)</label><input id="au-password" type="password" autocomplete="new-password"></div>
+    </div>
+    <div id="admin-reset-form" style="display:none">
+      <div class="field" style="margin-bottom:14px"><label>为 <b id="au-reset-username"></b> 设置新密码 (至少6位)</label><input id="au-reset-password" type="password" autocomplete="new-password"></div>
+    </div>
+    <div class="err" id="admin-modal-err"></div>
+    <div class="actions">
+      <button onclick="closeAdminModal()">取消</button>
+      <button class="primary" onclick="saveAdminAction()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// 交易记录 SPA
+// ═══════════════════════════════════════════════════════════════
+const state = {
+  user: null,
+  reasons: { entry: [], exit: [] },
+  stats: null,
+  granularity: 'month',
+  statRange: 'all',
+  trades: [],
+  total: 0,
+  page: 1,
+  pageSize: 20,
+  editingId: null,
+  selectedSymbol: null,   // {symbol, name}
+  pnlChart: null,
+  symbolChart: null,
+};
+
+function escHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+async function api(path, options = {}) {
+  const opts = {
+    credentials: 'same-origin',
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+  };
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty body */ }
+  if (!res.ok) {
+    throw new Error((data && data.error) || ('请求失败 (' + res.status + ')'));
+  }
+  return data;
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('trades-theme', next); } catch (e) {}
+}
+
+function showLogin() {
+  document.getElementById('login-view').style.display = '';
+  document.getElementById('main-view').style.display = 'none';
+  document.getElementById('btn-logout').style.display = 'none';
+  document.getElementById('toolbar-user').textContent = '';
+  document.getElementById('admin-section').style.display = 'none';
+}
+
+function showMain() {
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('main-view').style.display = '';
+  document.getElementById('btn-logout').style.display = '';
+  document.getElementById('toolbar-user').textContent = '👤 ' + state.user.username;
+  document.getElementById('admin-section').style.display = state.user.is_admin ? '' : 'none';
+  if (state.user.is_admin) loadUsers();
+}
+
+function setAuthErr(msg) { document.getElementById('auth-err').textContent = msg || ''; }
+
+async function checkAuth() {
+  try {
+    const data = await api('/api/auth/me');
+    state.user = { username: data.username, is_admin: data.is_admin };
+    showMain();
+    await Promise.all([loadReasons(), loadStats(), loadTrades()]);
+  } catch (e) {
+    state.user = null;
+    showLogin();
+  }
+}
+
+async function doLogin() {
+  setAuthErr('');
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  try {
+    await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+    await checkAuth();
+  } catch (e) { setAuthErr(e.message); }
+}
+
+async function doLogout() {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  state.user = null;
+  showLogin();
+}
+
+// ═══════════════ 理由与统计 ═══════════════
+async function loadReasons() {
+  const data = await api('/api/trade-reasons');
+  state.reasons = data;
+  const entry = document.getElementById('t-entry-reason');
+  const exit = document.getElementById('t-exit-reason');
+  entry.innerHTML = '<option value="">请选择...</option>' + data.entry.map(r => `<option>${escHtml(r)}</option>`).join('');
+  exit.innerHTML = '<option value="">请选择...</option>' + data.exit.map(r => `<option>${escHtml(r)}</option>`).join('');
+}
+
+function statQuery() {
+  const q = new URLSearchParams();
+  if (state.statRange === 'custom') {
+    const from = document.getElementById('stat-from').value;
+    const to = document.getElementById('stat-to').value;
+    if (from) q.set('from', from);
+    if (to) q.set('to', to);
+  }
+  const s = q.toString();
+  return s ? '?' + s : '';
+}
+
+function setStatRange(mode) {
+  state.statRange = mode;
+  document.getElementById('g-all').classList.toggle('active', mode === 'all');
+  loadStats();
+}
+
+function setGranularity(g) {
+  state.granularity = g;
+  ['week', 'month', 'year'].forEach(x =>
+    document.getElementById('g-' + x).classList.toggle('active', x === g));
+  renderPnlChart();
+}
+
+async function loadStats() {
+  const data = await api('/api/trades/stats' + statQuery());
+  state.stats = data;
+  renderStatCards(data.summary);
+  renderPnlChart();
+  renderSymbolChart();
+}
+
+function fmtMoney(v, signed = false) {
+  if (v === null || v === undefined) return '—';
+  const sign = signed && v > 0 ? '+' : '';
+  return sign + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+}
+
+function pnlClass(v) {
+  if (v > 0) return 'pos';
+  if (v < 0) return 'neg';
+  return '';
+}
+
+function renderStatCards(s) {
+  const cards = [
+    { label: '总盈亏', value: fmtMoney(s.total_pnl, true), cls: pnlClass(s.total_pnl), sub: '总收益率 ' + (s.total_return_pct === null ? '—' : (s.total_return_pct > 0 ? '+' : '') + s.total_return_pct + '%') },
+    { label: '胜率', value: s.win_rate === null ? '—' : s.win_rate + '%', cls: '', sub: `${s.win_count}胜 / ${s.loss_count}负 / ${s.break_even_count}平` },
+    { label: '盈亏比', value: s.profit_factor === null ? '∞' : s.profit_factor, cls: '', sub: s.avg_win === null ? '' : `均盈 ${fmtMoney(s.avg_win)} / 均亏 ${fmtMoney(s.avg_loss)}` },
+    { label: '最大单笔盈利', value: s.max_win ? fmtMoney(s.max_win.pnl, true) : '—', cls: 'pos', sub: s.max_win ? `${s.max_win.name} +${s.max_win.return_pct}%` : '' },
+    { label: '最大单笔亏损', value: s.max_loss ? fmtMoney(s.max_loss.pnl, true) : '—', cls: 'neg', sub: s.max_loss ? `${s.max_loss.name} ${s.max_loss.return_pct}%` : '' },
+    { label: '已平仓笔数', value: s.closed_count, cls: '', sub: `持仓中 ${s.open_count} 笔` },
+    { label: '平均持仓天数', value: s.avg_holding_days === null ? '—' : s.avg_holding_days, cls: '', sub: '买入 → 卖出' },
+  ];
+  document.getElementById('stat-cards').innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="label">${c.label}</div>
+      <div class="value ${c.cls}">${c.value}</div>
+      <div class="sub">${c.sub}</div>
+    </div>`).join('');
+}
+
+function chartTheme() {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  return dark ? '#787b86' : '#6c757d';
+}
+
+function renderPnlChart() {
+  const el = document.getElementById('pnl-chart');
+  if (!state.pnlChart) state.pnlChart = echarts.init(el);
+  const series = (state.stats && state.stats.series[state.granularity]) || [];
+  const labels = series.map(x => x.label);
+  const values = series.map(x => x.pnl);
+  state.pnlChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 10, right: 10, top: 24, bottom: 8, containLabel: true },
+    tooltip: { trigger: 'axis', formatter: p => {
+      const d = p[0];
+      const s = series[d.dataIndex];
+      return `${s.label}<br/>盈亏: ${fmtMoney(s.pnl, true)}<br/>笔数: ${s.count}<br/>胜率: ${s.win_rate === null ? '—' : s.win_rate + '%'}`;
+    }},
+    xAxis: { type: 'category', data: labels, axisLabel: { color: chartTheme() } },
+    yAxis: { type: 'value', axisLabel: { color: chartTheme() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    series: [{
+      type: 'bar',
+      data: values.map(v => ({ value: v, itemStyle: { color: v >= 0 ? 'var(--up-color,#ef232a)' : 'var(--down-color,#14b143)' } })),
+    }],
+  });
+}
+
+function renderSymbolChart() {
+  const el = document.getElementById('symbol-chart');
+  if (!state.symbolChart) state.symbolChart = echarts.init(el);
+  const data = (state.stats && state.stats.by_symbol) || [];
+  const sorted = [...data].sort((a, b) => a.pnl - b.pnl); // 横向条形, 小到大
+  state.symbolChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 10, right: 30, top: 8, bottom: 8, containLabel: true },
+    tooltip: { trigger: 'axis', formatter: p => {
+      const s = sorted[p[0].dataIndex];
+      return `${s.symbol} ${s.name}<br/>盈亏: ${fmtMoney(s.pnl, true)}<br/>笔数: ${s.count}<br/>胜率: ${s.win_rate === null ? '—' : s.win_rate + '%'}`;
+    }},
+    xAxis: { type: 'value', axisLabel: { color: chartTheme() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    yAxis: { type: 'category', data: sorted.map(s => s.name), axisLabel: { color: chartTheme() } },
+    series: [{
+      type: 'bar',
+      data: sorted.map(s => ({ value: s.pnl, itemStyle: { color: s.pnl >= 0 ? 'var(--up-color,#ef232a)' : 'var(--down-color,#14b143)' } })),
+    }],
+  });
+}
+
+// ═══════════════ 交易列表 ═══════════════
+function listQuery() {
+  const q = new URLSearchParams();
+  const status = document.getElementById('f-status').value;
+  const kw = document.getElementById('f-q').value.trim();
+  const from = document.getElementById('f-from').value;
+  const to = document.getElementById('f-to').value;
+  if (status) q.set('status', status);
+  if (kw) q.set('q', kw);
+  if (from) q.set('from', from);
+  if (to) q.set('to', to);
+  q.set('limit', state.pageSize);
+  q.set('offset', (state.page - 1) * state.pageSize);
+  return '?' + q.toString();
+}
+
+function resetAndLoad() { state.page = 1; loadTrades(); }
+
+async function loadTrades() {
+  const data = await api('/api/trades' + listQuery());
+  state.trades = data.trades;
+  state.total = data.total;
+  renderTable();
+}
+
+function renderTable() {
+  const tbody = document.getElementById('trade-tbody');
+  if (!state.trades.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
+  } else {
+    tbody.innerHTML = state.trades.map(t => {
+      const pnl = t.pnl;
+      const pnlHtml = t.status === 'closed'
+        ? `<span class="${pnlClass(pnl)}">${fmtMoney(pnl, true)}</span><br><span style="color:var(--text-secondary);font-size:12px">${t.return_pct > 0 ? '+' : ''}${t.return_pct}%</span>`
+        : '<span style="color:var(--text-secondary)">—</span>';
+      const badge = t.status === 'closed'
+        ? '<span class="badge closed">已平仓</span>'
+        : '<span class="badge open">持仓中</span>';
+      const entryReason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
+      const exitReason = [t.exit_reason, t.exit_note].filter(Boolean).join('；');
+      return `<tr>
+        <td class="sym">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></td>
+        <td>${badge}</td>
+        <td>${t.entry_price}</td>
+        <td>${t.exit_price === null ? '—' : t.exit_price}</td>
+        <td>${t.quantity}</td>
+        <td>${escHtml(t.entry_date)}</td>
+        <td>${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
+        <td class="reason-cell">${escHtml(entryReason)}</td>
+        <td class="reason-cell">${escHtml(exitReason || '—')}</td>
+        <td class="${pnlClass(pnl)}">${pnlHtml}</td>
+        <td>
+          <button onclick="openModal(${t.id})">编辑</button>
+          <button class="danger" onclick="removeTrade(${t.id})">删除</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  document.getElementById('list-count').textContent = `共 ${state.total} 笔`;
+  document.getElementById('page-info').textContent = `第 ${state.page} / ${pages} 页`;
+  document.getElementById('btn-prev').disabled = state.page <= 1;
+  document.getElementById('btn-next').disabled = state.page >= pages;
+}
+
+function changePage(delta) {
+  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  const next = state.page + delta;
+  if (next < 1 || next > pages) return;
+  state.page = next;
+  loadTrades();
+}
+
+async function removeTrade(id) {
+  const t = state.trades.find(x => x.id === id);
+  const name = t ? `${t.name} ${t.symbol}` : '该记录';
+  if (!confirm(`确认删除 ${name} 的交易记录？此操作不可撤销。`)) return;
+  await api('/api/trades/' + id, { method: 'DELETE' });
+  await Promise.all([loadTrades(), loadStats()]);
+}
+
+// ═══════════════ 用户管理 (仅 admin) ═══════════════
+let adminModalMode = 'add';   // 'add' | 'reset'
+let adminModalTargetId = null;
+let adminUsers = [];
+
+async function loadUsers() {
+  try {
+    const users = await api('/api/admin/users');
+    adminUsers = users;
+    document.getElementById('admin-tbody').innerHTML = users.map(u => `
+      <tr>
+        <td>${escHtml(u.username)}${u.is_admin ? ' <span class="badge">管理员</span>' : ''}</td>
+        <td>${u.is_admin ? '管理员' : '普通用户'}</td>
+        <td>${escHtml(u.created_at)}</td>
+        <td>${u.is_admin ? '' : `
+          <button onclick="openResetModal(${u.id})">重置密码</button>
+          <button class="danger" onclick="deleteUser(${u.id})">删除</button>`}
+        </td>
+      </tr>`).join('');
+  } catch (e) {
+    document.getElementById('admin-tbody').innerHTML = `<tr><td colspan="4">加载失败：${escHtml(e.message)}</td></tr>`;
+  }
+}
+
+function openAddUserModal() {
+  adminModalMode = 'add';
+  adminModalTargetId = null;
+  document.getElementById('admin-modal-title').textContent = '添加用户';
+  document.getElementById('admin-add-form').style.display = '';
+  document.getElementById('admin-reset-form').style.display = 'none';
+  document.getElementById('au-username').value = '';
+  document.getElementById('au-password').value = '';
+  document.getElementById('admin-modal-err').textContent = '';
+  document.getElementById('admin-modal-mask').classList.add('show');
+}
+
+function openResetModal(id) {
+  const u = adminUsers.find(x => x.id === id);
+  adminModalMode = 'reset';
+  adminModalTargetId = id;
+  document.getElementById('admin-modal-title').textContent = '重置密码';
+  document.getElementById('admin-add-form').style.display = 'none';
+  document.getElementById('admin-reset-form').style.display = '';
+  document.getElementById('au-reset-username').textContent = u ? u.username : '';
+  document.getElementById('au-reset-password').value = '';
+  document.getElementById('admin-modal-err').textContent = '';
+  document.getElementById('admin-modal-mask').classList.add('show');
+}
+
+function closeAdminModal() {
+  document.getElementById('admin-modal-mask').classList.remove('show');
+  adminModalTargetId = null;
+}
+
+async function saveAdminAction() {
+  document.getElementById('admin-modal-err').textContent = '';
+  try {
+    if (adminModalMode === 'add') {
+      const username = document.getElementById('au-username').value.trim();
+      const password = document.getElementById('au-password').value;
+      await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username, password }) });
+    } else {
+      const password = document.getElementById('au-reset-password').value;
+      await api('/api/admin/users/' + adminModalTargetId + '/reset-password', { method: 'POST', body: JSON.stringify({ password }) });
+    }
+    closeAdminModal();
+    await loadUsers();
+  } catch (e) {
+    document.getElementById('admin-modal-err').textContent = e.message;
+  }
+}
+
+async function deleteUser(id) {
+  const u = adminUsers.find(x => x.id === id);
+  const username = u ? u.username : '该用户';
+  if (!confirm(`确认删除用户「${username}」？其全部交易记录将被级联删除，此操作不可撤销。`)) return;
+  try {
+    await api('/api/admin/users/' + id, { method: 'DELETE' });
+    await loadUsers();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+document.getElementById('admin-modal-mask').addEventListener('click', function (e) {
+  if (e.target === this) closeAdminModal();
+});
+bindEnter('au-username', saveAdminAction);
+bindEnter('au-password', saveAdminAction);
+bindEnter('au-reset-password', saveAdminAction);
+
+// ═══════════════ 录入/编辑弹窗 ═══════════════
+function openModal(id) {
+  state.editingId = id || null;
+  state.selectedSymbol = null;
+  document.getElementById('modal-err').textContent = '';
+  document.getElementById('modal-title').textContent = id ? '编辑交易记录' : '新增交易记录';
+
+  const t = id ? state.trades.find(x => x.id === id) : null;
+  document.getElementById('t-symbol-input').value = t ? `${t.name} (${t.symbol})` : '';
+  document.getElementById('t-status').value = t ? t.status : 'open';
+  document.getElementById('t-quantity').value = t ? t.quantity : '';
+  document.getElementById('t-entry-price').value = t ? t.entry_price : '';
+  document.getElementById('t-entry-date').value = t ? t.entry_date : '';
+  document.getElementById('t-exit-price').value = t && t.exit_price !== null ? t.exit_price : '';
+  document.getElementById('t-exit-date').value = t ? (t.exit_date || '') : '';
+  document.getElementById('t-entry-reason').value = t ? t.entry_reason : '';
+  document.getElementById('t-exit-reason').value = t ? (t.exit_reason || '') : '';
+  document.getElementById('t-entry-note').value = t ? (t.entry_note || '') : '';
+  document.getElementById('t-exit-note').value = t ? (t.exit_note || '') : '';
+  if (t) state.selectedSymbol = { symbol: t.symbol, name: t.name };
+
+  onStatusChange();
+  document.getElementById('modal-mask').classList.add('show');
+  hideSymbolDropdown();
+}
+
+function closeModal() {
+  document.getElementById('modal-mask').classList.remove('show');
+  state.editingId = null;
+}
+
+function onStatusChange() {
+  const closed = document.getElementById('t-status').value === 'closed';
+  document.getElementById('exit-price-wrap').style.display = closed ? '' : 'none';
+  document.getElementById('exit-date-wrap').style.display = closed ? '' : 'none';
+  document.getElementById('t-exit-reason').style.display = closed ? '' : 'none';
+  document.getElementById('t-exit-note').style.display = closed ? '' : 'none';
+  // 卖出理由标签所在 grid cell 也需要隐藏
+  const exitReasonCell = document.getElementById('t-exit-reason').closest('div');
+  const exitNoteCell = document.getElementById('t-exit-note').closest('div');
+  exitReasonCell.style.display = closed ? '' : 'none';
+  exitNoteCell.style.display = closed ? '' : 'none';
+}
+
+// 搜索补全
+let searchTimer = null;
+function onSymbolInput() {
+  clearTimeout(searchTimer);
+  const q = document.getElementById('t-symbol-input').value.trim();
+  searchTimer = setTimeout(async () => {
+    if (!q) { hideSymbolDropdown(); return; }
+    try {
+      const data = await api('/api/search?q=' + encodeURIComponent(q));
+      renderSymbolDropdown(data.results || []);
+    } catch (e) { /* 忽略搜索错误 */ }
+  }, 200);
+}
+
+function renderSymbolDropdown(results) {
+  const dd = document.getElementById('t-symbol-dropdown');
+  if (!results.length) { hideSymbolDropdown(); return; }
+  dd.innerHTML = results.map(r =>
+    `<div class="item" data-symbol="${escHtml(r.symbol)}" data-name="${escHtml(r.name)}" onclick="selectSymbol(this)">
+       ${escHtml(r.name)}<span class="code">${escHtml(r.symbol)}</span>
+     </div>`).join('');
+  dd.classList.add('show');
+}
+
+function hideSymbolDropdown() {
+  document.getElementById('t-symbol-dropdown').classList.remove('show');
+}
+
+function selectSymbol(el) {
+  const symbol = el.getAttribute('data-symbol');
+  const name = el.getAttribute('data-name');
+  state.selectedSymbol = { symbol, name };
+  document.getElementById('t-symbol-input').value = `${name} (${symbol})`;
+  hideSymbolDropdown();
+}
+
+async function saveTrade() {
+  document.getElementById('modal-err').textContent = '';
+  const status = document.getElementById('t-status').value;
+  const quantity = document.getElementById('t-quantity').value;
+  const entryPrice = document.getElementById('t-entry-price').value;
+  const entryDate = document.getElementById('t-entry-date').value;
+  const entryReason = document.getElementById('t-entry-reason').value;
+
+  if (!state.selectedSymbol) { document.getElementById('modal-err').textContent = '请先搜索并选择股票'; return; }
+
+  const body = {
+    symbol: state.selectedSymbol.symbol,
+    name: state.selectedSymbol.name,
+    status,
+    quantity: parseInt(quantity, 10),
+    entry_price: parseFloat(entryPrice),
+    entry_date: entryDate,
+    entry_reason: entryReason,
+    entry_note: document.getElementById('t-entry-note').value.trim(),
+  };
+
+  if (status === 'closed') {
+    body.exit_price = parseFloat(document.getElementById('t-exit-price').value);
+    body.exit_date = document.getElementById('t-exit-date').value;
+    body.exit_reason = document.getElementById('t-exit-reason').value;
+    body.exit_note = document.getElementById('t-exit-note').value.trim();
+  }
+
+  try {
+    if (state.editingId) {
+      await api('/api/trades/' + state.editingId, { method: 'PUT', body: JSON.stringify(body) });
+    } else {
+      await api('/api/trades', { method: 'POST', body: JSON.stringify(body) });
+    }
+    closeModal();
+    await Promise.all([loadTrades(), loadStats()]);
+  } catch (e) {
+    document.getElementById('modal-err').textContent = e.message;
+  }
+}
+
+// 点击弹窗外关闭
+document.getElementById('modal-mask').addEventListener('click', function (e) {
+  if (e.target === this) closeModal();
+});
+
+document.getElementById('t-symbol-input').addEventListener('input', onSymbolInput);
+
+// 回车登录
+function bindEnter(id, fn) {
+  document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
+}
+bindEnter('login-username', doLogin);
+bindEnter('login-password', doLogin);
+
+// 初始化主题
+try {
+  const saved = localStorage.getItem('trades-theme');
+  if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+} catch (e) {}
+
+// 窗口缩放时重绘图表
+window.addEventListener('resize', () => {
+  if (state.pnlChart) state.pnlChart.resize();
+  if (state.symbolChart) state.symbolChart.resize();
+});
+
+checkAuth();
+</script>
+</body>
+</html>

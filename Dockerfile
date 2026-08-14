@@ -8,8 +8,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-# 确保 .cache 目录可写
-RUN mkdir -p .cache && chown -R appuser:appuser /app
+# 确保 .cache / data 目录可写
+RUN mkdir -p .cache data && chown -R appuser:appuser /app
 
 EXPOSE 8888
 USER appuser
