@@ -176,6 +176,8 @@ td.neg { color: var(--down-color); font-weight: 600; }
   position: fixed;
   z-index: 1000;
   min-width: 200px;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
   padding: 10px 12px;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -242,6 +244,40 @@ td.neg { color: var(--down-color); font-weight: 600; }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+/* ═══════════════ 响应式适配 ═══════════════ */
+.btn-group { display: flex; flex-wrap: wrap; gap: 4px; }
+.date-range { display: flex; align-items: center; gap: 4px; }
+.section-title { flex-wrap: wrap; }
+
+@media (max-width: 640px) {
+  #toolbar { flex-wrap: wrap; }
+  #main-view { padding: 14px 12px; }
+
+  .filter-bar > * { flex: 1 1 auto; }
+  .filter-bar #f-q { width: 100% !important; flex-basis: 100%; }
+  .filter-bar input[type="date"] { width: auto; }
+  .filter-bar .date-range { flex: 1 1 100%; }
+  .filter-bar .date-range input { flex: 1; min-width: 0; }
+
+  .modal { padding: 16px; }
+  .modal .grid { grid-template-columns: 1fr; }
+  .modal .trade-panels { grid-template-columns: 1fr; }
+
+  /* 表格 → 卡片 */
+  .table-wrap { border: none; background: transparent; overflow: visible; }
+  .table-wrap table { min-width: 0; }
+  .table-wrap thead { display: none; }
+  .table-wrap tbody { display: block; }
+  .table-wrap tr { display: block; margin-bottom: 10px; padding: 4px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); box-shadow: var(--shadow); }
+  .table-wrap tr:hover td { background: transparent; }
+  .table-wrap td { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 7px 12px; white-space: normal; border-bottom: 1px solid var(--border); text-align: right; }
+  .table-wrap td::before { content: attr(data-label); color: var(--text-secondary); font-size: 12px; font-weight: 600; flex-shrink: 0; }
+  .table-wrap td.sym { flex-direction: column; align-items: flex-start; text-align: left; }
+  .table-wrap td.sym::before, .table-wrap td.row-actions::before { content: none; }
+  .table-wrap td.row-actions { justify-content: flex-end; border-bottom: none; }
+  .table-wrap td.empty { display: block; text-align: center; }
+}
 </style>
 </head>
 <body>
@@ -281,7 +317,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
   <div class="section-title"><span class="bar"></span>概览统计
     <span style="flex:1"></span>
     <label class="fee-toggle" title="统计盈亏时扣除佣金/印花税/过户费"><input type="checkbox" id="deduct-fees" checked> 扣除佣金</label>
-    <span style="display:flex;gap:4px">
+    <span class="btn-group">
       <button id="g-all" onclick="setStatRange('all')">全部</button>
       <button id="g-1w" onclick="setStatRange('1w')">近一周</button>
       <button id="g-1m" onclick="setStatRange('1m')">近一月</button>
@@ -290,15 +326,17 @@ td.neg { color: var(--down-color); font-weight: 600; }
       <button id="g-1y" onclick="setStatRange('1y')">近一年</button>
       <button id="g-3y" onclick="setStatRange('3y')">近三年</button>
     </span>
-    <input type="date" id="stat-from" onchange="setStatRange('custom')">
-    <span style="color:var(--text-secondary)">至</span>
-    <input type="date" id="stat-to" onchange="setStatRange('custom')">
+    <span class="date-range">
+      <input type="date" id="stat-from" onchange="setStatRange('custom')">
+      <span style="color:var(--text-secondary)">至</span>
+      <input type="date" id="stat-to" onchange="setStatRange('custom')">
+    </span>
   </div>
   <div class="cards" id="stat-cards"></div>
 
   <div class="section-title"><span class="bar"></span>盈亏走势
     <span style="flex:1"></span>
-    <div style="display:flex;gap:4px">
+    <div class="btn-group">
       <button id="g-week" onclick="setGranularity('week')">周</button>
       <button id="g-month" class="active" onclick="setGranularity('month')">月</button>
       <button id="g-year" onclick="setGranularity('year')">年</button>
@@ -314,7 +352,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
     <span style="flex:1"></span>
     <button class="primary" onclick="openModal()">＋ 新增记录</button>
   </div>
-  <div style="display:flex;gap:4px;margin-bottom:8px">
+  <div class="btn-group" style="margin-bottom:8px">
     <button id="f-all" onclick="setListRange('all')">全部</button>
     <button id="f-1w" onclick="setListRange('1w')">近一周</button>
     <button id="f-1m" onclick="setListRange('1m')">近一月</button>
@@ -330,9 +368,11 @@ td.neg { color: var(--down-color); font-weight: 600; }
       <option value="closed">已平仓</option>
     </select>
     <input type="text" id="f-q" placeholder="代码 / 名称 搜索..." style="width:200px" onkeydown="if(event.key==='Enter')resetAndLoad()">
-    <input type="date" id="f-from" onchange="setListRange('custom')">
-    <span style="color:var(--text-secondary)">至</span>
-    <input type="date" id="f-to" onchange="setListRange('custom')">
+    <span class="date-range">
+      <input type="date" id="f-from" onchange="setListRange('custom')">
+      <span style="color:var(--text-secondary)">至</span>
+      <input type="date" id="f-to" onchange="setListRange('custom')">
+    </span>
     <button onclick="resetAndLoad()">查询</button>
     <span class="grow"></span>
     <span style="color:var(--text-secondary);font-size:12px" id="list-count"></span>
@@ -514,6 +554,49 @@ function presetFromTo(key) {
   if (p.days) d.setDate(d.getDate() - p.days);
   else d.setMonth(d.getMonth() - (p.months || 0));
   return { from: toYMD(d), to };
+}
+
+// ═══════════════ 时间范围偏好持久化 (localStorage) ═══════════════
+const RANGE_KEYS = RANGE_PRESETS.map(p => p.key).concat('custom');
+
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+function saveRangePrefs() {
+  lsSet('trades-stat-range', state.statRange);
+  lsSet('trades-stat-from', document.getElementById('stat-from').value);
+  lsSet('trades-stat-to', document.getElementById('stat-to').value);
+  lsSet('trades-list-range', state.listRange);
+  lsSet('trades-list-from', document.getElementById('f-from').value);
+  lsSet('trades-list-to', document.getElementById('f-to').value);
+}
+
+// 由范围 key 得到 {from,to}; custom 恢复已保存的自定义日期
+function rangeToInputs(mode, customFrom, customTo) {
+  if (mode === 'custom') return { from: customFrom || '', to: customTo || '' };
+  if (mode === 'all') return { from: '', to: '' };
+  return presetFromTo(mode);
+}
+
+function initRanges() {
+  let sr = lsGet('trades-stat-range');
+  let lr = lsGet('trades-list-range');
+  if (!RANGE_KEYS.includes(sr)) sr = '3m';
+  if (!RANGE_KEYS.includes(lr)) lr = '3m';
+  state.statRange = sr;
+  state.listRange = lr;
+
+  RANGE_PRESETS.forEach(p => {
+    document.getElementById('g-' + p.key).classList.toggle('active', p.key === sr);
+    document.getElementById('f-' + p.key).classList.toggle('active', p.key === lr);
+  });
+
+  const s = rangeToInputs(sr, lsGet('trades-stat-from'), lsGet('trades-stat-to'));
+  const l = rangeToInputs(lr, lsGet('trades-list-from'), lsGet('trades-list-to'));
+  document.getElementById('stat-from').value = s.from;
+  document.getElementById('stat-to').value = s.to;
+  document.getElementById('f-from').value = l.from;
+  document.getElementById('f-to').value = l.to;
 }
 
 function escHtml(s) {
@@ -782,6 +865,7 @@ function setStatRange(mode) {
     document.getElementById('stat-from').value = r.from;
     document.getElementById('stat-to').value = r.to;
   }
+  saveRangePrefs();
   loadStats();
 }
 
@@ -887,12 +971,26 @@ function hidePnlTip() {
 
 function positionPnlTip(cell, tip) {
   const r = cell.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
   const tw = tip.offsetWidth || 180;
   const th = tip.offsetHeight || 130;
+  const pad = 8;
+  if (vw <= 640) {
+    // 手机端: 提示框显示在单元格正下方, 左缘对齐单元格并钳制在视口内; 下方放不下则移到上方
+    let x = Math.max(pad, Math.min(r.left, vw - tw - pad));
+    let y = r.bottom + pad;
+    if (y + th > vh - pad) y = r.top - th - pad;
+    y = Math.max(pad, Math.min(y, vh - th - pad));
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+    return;
+  }
   let x = r.right + 8;
-  if (x + tw > window.innerWidth - 8) x = Math.max(8, r.left - tw - 8);
+  if (x + tw > vw - 8) x = r.left - tw - 8;
+  x = Math.max(8, Math.min(x, vw - tw - 8));
   let y = r.top;
-  if (y + th > window.innerHeight - 8) y = Math.max(8, window.innerHeight - th - 8);
+  if (y + th > vh - 8) y = Math.max(8, vh - th - 8);
   tip.style.left = x + 'px';
   tip.style.top = y + 'px';
 }
@@ -906,8 +1004,8 @@ function renderStatCards(s) {
     { label: '持仓浮盈亏', value: fmtMoney(agg.floatPnl, true), cls: pnlClass(agg.floatPnl), sub: floatPctStr, subCls: pnlClass(agg.floatPnl) },
     { label: '胜率', value: s.win_rate === null ? '—' : s.win_rate + '%', cls: s.win_rate === null ? '' : pnlClass(s.win_rate - 50), sub: `${s.win_count}胜 / ${s.loss_count}负 / ${s.break_even_count}平` },
     { label: '盈亏比', value: s.profit_factor === null ? '∞' : s.profit_factor, cls: '', sub: s.avg_win === null ? '' : `均盈 ${fmtMoney(s.avg_win)} / 均亏 ${fmtMoney(s.avg_loss)}` },
-    { label: '最大单笔盈利', value: s.max_win ? fmtMoney(s.max_win.pnl, true) : '—', cls: 'pos', sub: s.max_win ? `${s.max_win.name} +${s.max_win.return_pct}%` : '' },
-    { label: '最大单笔亏损', value: s.max_loss ? fmtMoney(s.max_loss.pnl, true) : '—', cls: 'neg', sub: s.max_loss ? `${s.max_loss.name} ${s.max_loss.return_pct}%` : '' },
+    { label: '最大单笔盈利', value: s.max_win ? fmtMoney(s.max_win.pnl, true) : '—', cls: 'pos', sub: s.max_win ? `${s.max_win.name} +${s.max_win.return_pct}%` : '', subCls: 'pos' },
+    { label: '最大单笔亏损', value: s.max_loss ? fmtMoney(s.max_loss.pnl, true) : '—', cls: 'neg', sub: s.max_loss ? `${s.max_loss.name} ${s.max_loss.return_pct}%` : '', subCls: 'neg' },
     { duo: { top: { label: '持仓中', value: s.open_count, cls: 'accent' }, bottom: { label: '已平仓', value: s.closed_count, cls: '' } } },
     { label: '平均持仓天数', value: s.avg_holding_days === null ? '—' : s.avg_holding_days, cls: '', sub: '买入 → 卖出' },
   ];
@@ -1038,6 +1136,7 @@ function setListRange(mode) {
     document.getElementById('f-from').value = r.from;
     document.getElementById('f-to').value = r.to;
   }
+  saveRangePrefs();
   resetAndLoad();   // 已含 state.page = 1 + loadTrades()
 }
 
@@ -1101,19 +1200,19 @@ function renderTable() {
       const entryReason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
       const exitReason = [t.exit_reason, t.exit_note].filter(Boolean).join('；');
       return `<tr>
-        <td class="sym"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
-        <td>${badge}</td>
-        <td>${escHtml(modelLabel(t.model_id))}</td>
-        <td>${t.entry_price}</td>
-        <td class="${exitCls}">${t.exit_price === null ? '—' : t.exit_price}</td>
-        <td class="${curCls}">${curPrice != null ? curPrice : '—'}</td>
-        <td>${t.quantity}</td>
-        <td>${escHtml(t.entry_date)}</td>
-        <td>${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
-        <td class="reason-cell">${escHtml(entryReason)}</td>
-        <td class="reason-cell">${escHtml(exitReason || '—')}</td>
-        <td class="${pnlCls}"><span class="pnl-cell" data-tip-id="${t.id}">${pnlHtml}</span></td>
-        <td>
+        <td class="sym" data-label="代码"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
+        <td data-label="状态">${badge}</td>
+        <td data-label="模型">${escHtml(modelLabel(t.model_id))}</td>
+        <td data-label="买入价">${t.entry_price}</td>
+        <td class="${exitCls}" data-label="退出价">${t.exit_price === null ? '—' : t.exit_price}</td>
+        <td class="${curCls}" data-label="现价">${curPrice != null ? curPrice : '—'}</td>
+        <td data-label="数量">${t.quantity}</td>
+        <td data-label="买入日">${escHtml(t.entry_date)}</td>
+        <td data-label="卖出日">${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
+        <td class="reason-cell" data-label="买入理由">${escHtml(entryReason)}</td>
+        <td class="reason-cell" data-label="卖出理由">${escHtml(exitReason || '—')}</td>
+        <td class="${pnlCls}" data-label="盈亏"><span class="pnl-cell" data-tip-id="${t.id}">${pnlHtml}</span></td>
+        <td class="row-actions">
           <button onclick="openModal(${t.id})">编辑</button>
           <button class="danger" onclick="removeTrade(${t.id})">删除</button>
         </td>
@@ -1328,14 +1427,8 @@ window.addEventListener('resize', () => {
   window.addEventListener('scroll', hidePnlTip, true);
 })();
 
-// 默认「近三月」范围回显到四个日期框(纯视觉; 查询串仍由 presetFromTo 计算)
-(function () {
-  const r = presetFromTo('3m');
-  document.getElementById('stat-from').value = r.from;
-  document.getElementById('stat-to').value = r.to;
-  document.getElementById('f-from').value = r.from;
-  document.getElementById('f-to').value = r.to;
-})();
+// 时间范围选择从 localStorage 恢复 (概览统计 + 交易查询)
+initRanges();
 
 checkAuth();
 
