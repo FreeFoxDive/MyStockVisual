@@ -4,7 +4,7 @@ Technical indicator calculation module - based on stock-indicators-cn package
 =============================================================================
 All indicators align with East Money/Tonghuashun/TDX standard algorithms.
 
-Thin wrapper around stock_indicators_cn — atr, macd, MACD_PARAMS, get_macd_params
+Thin wrapper around stock_indicators_cn — atr, macd, get_macd_params
 are imported directly from the library. Only compute_all_indicators and _safe_list
 are local (convenience aggregator + JSON-safe serialization).
 """
@@ -13,11 +13,11 @@ import numpy as np
 import pandas as pd
 from stock_indicators_cn import (
     ema, sma, kdj, rsi, force_index,
-    atr, macd, MACD_PARAMS, get_macd_params,
+    atr, macd, get_macd_params,
 )
 
 
-def compute_all_indicators(df, period="1d", use_macd13=False,
+def compute_all_indicators(df, period="1d",
                            with_rsi=True, with_kdj=True, with_atr_val=True):
     """Compute all indicators on OHLCV DataFrame
     Returns: (enhanced_df, indicators_dict)
@@ -35,7 +35,7 @@ def compute_all_indicators(df, period="1d", use_macd13=False,
     result_df["vol_ma10"] = sma(v, 10)
 
     # MACD
-    mp = get_macd_params(period, use_macd13)
+    mp = get_macd_params(period)
     dif, dea, hist = macd(c, mp["fast"], mp["slow"], mp["signal"])
     result_df["macd_dif"] = dif
     result_df["macd_dea"] = dea

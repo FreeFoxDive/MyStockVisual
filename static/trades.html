@@ -131,12 +131,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 12px; box-shadow: var(--shadow);
 }
-.card .label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; white-space: nowrap; }
+.card .label { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px; white-space: nowrap; }
 .card .value { font-size: 18px; font-weight: 700; }
 .card .value.pos { color: var(--up-color); }
 .card .value.neg { color: var(--down-color); }
 .card .value.accent { color: var(--btn-active); }
 .card .sub { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+.card .sub.pos { color: var(--up-color); }
+.card .sub.neg { color: var(--down-color); }
 
 /* 图表面板 */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -158,6 +160,8 @@ th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--btn-hover); }
 td.sym .code { color: var(--text-secondary); font-size: 12px; }
+td.sym a.sym-link { color: inherit; text-decoration: none; display: block; cursor: pointer; }
+td.sym a.sym-link:hover, td.sym a.sym-link:hover .code { text-decoration: underline; color: var(--btn-active); }
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
 .badge.open { background: rgba(239,35,42,0.12); color: var(--up-color); }
 .badge.closed { background: rgba(20,177,67,0.12); color: var(--down-color); }
@@ -166,8 +170,35 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .reason-cell { max-width: 220px; white-space: normal; font-size: 12px; color: var(--text-secondary); }
 .empty { text-align: center; color: var(--text-secondary); padding: 30px 0; }
 
+.pnl-cell { cursor: help; }
+#pnl-tip {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  min-width: 200px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  pointer-events: none;
+}
+#pnl-tip .tip-title { font-weight: 600; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+#pnl-tip .tip-row { display: flex; justify-content: space-between; gap: 20px; }
+#pnl-tip .tip-k { color: var(--text-secondary); }
+#pnl-tip .tip-v { font-variant-numeric: tabular-nums; }
+#pnl-tip .tip-v.pos { color: var(--up-color); font-weight: 600; }
+#pnl-tip .tip-v.neg { color: var(--down-color); font-weight: 600; }
+#pnl-tip .tip-sep { border-top: 1px solid var(--border); margin: 6px 0; }
+
 .pagination { display: flex; align-items: center; gap: 10px; margin-top: 12px; justify-content: flex-end; }
 .pagination .info { color: var(--text-secondary); font-size: 13px; }
+
+.fee-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }
+.fee-toggle input { width: auto; margin: 0; }
 
 /* 弹窗 */
 .modal-mask {
@@ -228,6 +259,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
     </div>
   </div>
   <button onclick="toggleTheme()" title="切换主题">🌙</button>
+  <button id="btn-fees" onclick="openFeesModal()" style="display:none">⚙ 费率</button>
   <button id="btn-logout" class="danger" onclick="doLogout()" style="display:none">退出登录</button>
 </div>
 
@@ -248,7 +280,16 @@ td.neg { color: var(--down-color); font-weight: 600; }
 
   <div class="section-title"><span class="bar"></span>概览统计
     <span style="flex:1"></span>
-    <button class="active" id="g-all" onclick="setStatRange('all')">全部</button>
+    <label class="fee-toggle" title="统计盈亏时扣除佣金/印花税/过户费"><input type="checkbox" id="deduct-fees" checked> 扣除佣金</label>
+    <span style="display:flex;gap:4px">
+      <button id="g-all" onclick="setStatRange('all')">全部</button>
+      <button id="g-1w" onclick="setStatRange('1w')">近一周</button>
+      <button id="g-1m" onclick="setStatRange('1m')">近一月</button>
+      <button class="active" id="g-3m" onclick="setStatRange('3m')">近三月</button>
+      <button id="g-6m" onclick="setStatRange('6m')">近半年</button>
+      <button id="g-1y" onclick="setStatRange('1y')">近一年</button>
+      <button id="g-3y" onclick="setStatRange('3y')">近三年</button>
+    </span>
     <input type="date" id="stat-from" onchange="setStatRange('custom')">
     <span style="color:var(--text-secondary)">至</span>
     <input type="date" id="stat-to" onchange="setStatRange('custom')">
@@ -273,6 +314,15 @@ td.neg { color: var(--down-color); font-weight: 600; }
     <span style="flex:1"></span>
     <button class="primary" onclick="openModal()">＋ 新增记录</button>
   </div>
+  <div style="display:flex;gap:4px;margin-bottom:8px">
+    <button id="f-all" onclick="setListRange('all')">全部</button>
+    <button id="f-1w" onclick="setListRange('1w')">近一周</button>
+    <button id="f-1m" onclick="setListRange('1m')">近一月</button>
+    <button class="active" id="f-3m" onclick="setListRange('3m')">近三月</button>
+    <button id="f-6m" onclick="setListRange('6m')">近半年</button>
+    <button id="f-1y" onclick="setListRange('1y')">近一年</button>
+    <button id="f-3y" onclick="setListRange('3y')">近三年</button>
+  </div>
   <div class="filter-bar">
     <select id="f-status" onchange="resetAndLoad()">
       <option value="">全部状态</option>
@@ -280,9 +330,9 @@ td.neg { color: var(--down-color); font-weight: 600; }
       <option value="closed">已平仓</option>
     </select>
     <input type="text" id="f-q" placeholder="代码 / 名称 搜索..." style="width:200px" onkeydown="if(event.key==='Enter')resetAndLoad()">
-    <input type="date" id="f-from">
+    <input type="date" id="f-from" onchange="setListRange('custom')">
     <span style="color:var(--text-secondary)">至</span>
-    <input type="date" id="f-to">
+    <input type="date" id="f-to" onchange="setListRange('custom')">
     <button onclick="resetAndLoad()">查询</button>
     <span class="grow"></span>
     <span style="color:var(--text-secondary);font-size:12px" id="list-count"></span>
@@ -384,6 +434,33 @@ td.neg { color: var(--down-color); font-weight: 600; }
   </div>
 </div>
 
+<!-- ═══════════════ 费率设置弹窗 ═══════════════ -->
+<div class="modal-mask" id="fee-modal-mask">
+  <div class="modal" style="max-width:640px">
+    <h2>⚙ 交易费率设置</h2>
+    <div class="grid">
+      <div><label>沪深股票 佣金率 (%)</label><input type="number" id="fee-comm-stock" min="0" step="0.0001"></div>
+      <div><label>ETF 佣金率 (%)</label><input type="number" id="fee-comm-etf" min="0" step="0.0001"></div>
+      <div><label>港股通 佣金率 (%)</label><input type="number" id="fee-comm-hk" min="0" step="0.0001"></div>
+      <div><label>A股/ETF 每笔最低佣金 (元)</label><input type="number" id="fee-min-comm" min="0" step="0.01"></div>
+      <div><label>印花税 (%) 仅卖出</label><input type="number" id="fee-stamp" min="0" step="0.0001"></div>
+      <div><label>过户费 (%) 双向</label><input type="number" id="fee-transfer" min="0" step="0.0001"></div>
+    </div>
+    <div style="margin-top:14px">
+      <label style="font-size:13px;font-weight:600">国债逆回购 佣金率 (十万分之)</label>
+      <div class="grid" style="grid-template-columns:repeat(3,1fr);margin-top:4px" id="fee-repo-grid"></div>
+    </div>
+    <div class="err" id="fee-err"></div>
+    <div class="actions">
+      <button onclick="resetFees()">恢复默认</button>
+      <button onclick="closeFeesModal()">取消</button>
+      <button class="primary" onclick="saveFees()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="pnl-tip"></div>
+
 <script>
 // ═══════════════════════════════════════════════════════════════
 // 交易记录 SPA
@@ -394,7 +471,8 @@ const state = {
   models: [],
   stats: null,
   granularity: 'month',
-  statRange: 'all',
+  statRange: '3m',
+  listRange: '3m',
   trades: [],
   total: 0,
   page: 1,
@@ -402,10 +480,41 @@ const state = {
   editingId: null,
   selectedSymbol: null,   // {symbol, name}
   quotes: {},             // {symbol: quote|null} 持仓股票现价 (null=超时/失败, 显示 —)
+  deductFees: true,       // 统计是否扣除佣金 (localStorage: trades-deduct-fees)
+  fees: null,             // 当前用户费率配置 (来自 /api/fees)
   pnlChart: null,
   symbolChart: null,
   modelChart: null,
 };
+
+function toYMD(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+
+const RANGE_PRESETS = [
+  { key: 'all', label: '全部' },
+  { key: '1w',  label: '近一周', days: 7 },
+  { key: '1m',  label: '近一月', months: 1 },
+  { key: '3m',  label: '近三月', months: 3 },
+  { key: '6m',  label: '近半年', months: 6 },
+  { key: '1y',  label: '近一年', months: 12 },
+  { key: '3y',  label: '近三年', months: 36 },
+];
+
+// 返回 {from,to}; key 为 all 时两者为空
+function presetFromTo(key) {
+  const now = new Date();
+  const to = toYMD(now);
+  if (key === 'all') return { from: '', to: '' };
+  const p = RANGE_PRESETS.find(x => x.key === key);
+  const d = new Date();
+  if (p.days) d.setDate(d.getDate() - p.days);
+  else d.setMonth(d.getMonth() - (p.months || 0));
+  return { from: toYMD(d), to };
+}
 
 function escHtml(s) {
   if (s === null || s === undefined) return '';
@@ -433,13 +542,17 @@ function toggleTheme() {
   const cur = document.documentElement.getAttribute('data-theme');
   const next = cur === 'dark' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
-  try { localStorage.setItem('trades-theme', next); } catch (e) {}
+  try {
+    localStorage.setItem('visual-theme', JSON.stringify({ theme: next, auto: false }));
+    localStorage.setItem('trades-theme', next);  // 兼容旧键
+  } catch (e) {}
 }
 
 function showLogin() {
   document.getElementById('login-view').style.display = '';
   document.getElementById('main-view').style.display = 'none';
   document.getElementById('btn-logout').style.display = 'none';
+  document.getElementById('btn-fees').style.display = 'none';
   document.getElementById('toolbar-user').textContent = '';
   document.getElementById('user-wrap').style.display = 'none';
   document.getElementById('user-menu').style.display = 'none';
@@ -449,6 +562,7 @@ function showMain() {
   document.getElementById('login-view').style.display = 'none';
   document.getElementById('main-view').style.display = '';
   document.getElementById('btn-logout').style.display = '';
+  document.getElementById('btn-fees').style.display = '';
   document.getElementById('user-wrap').style.display = '';
   const userBtn = document.getElementById('toolbar-user');
   userBtn.textContent = '👤 ' + state.user.username;
@@ -477,7 +591,7 @@ async function checkAuth() {
     const data = await api('/api/auth/me');
     state.user = { username: data.username, is_admin: data.is_admin };
     showMain();
-    await Promise.all([loadReasons(), loadModels(), loadStats(), loadTrades()]);
+    await Promise.all([loadReasons(), loadModels(), loadStats(), loadTrades(), loadFees()]);
     await refreshQuotes(true);  // 进入页面强刷一次持仓现价
   } catch (e) {
     state.user = null;
@@ -500,6 +614,109 @@ async function doLogout() {
   state.user = null;
   showLogin();
 }
+
+// ═══════════════ 费率设置 ═══════════════
+// 与后端 DEFAULT_FEES 保持一致, 供「恢复默认」与初次渲染使用
+const DEFAULT_FEES_UI = {
+  commission_rate_stock: 0.0001,
+  commission_rate_etf: 0.0001,
+  commission_rate_hk: 0.0001,
+  min_commission: 5.0,
+  stamp_duty_rate: 0.0005,
+  transfer_fee_rate: 0.00001,
+  reverse_repo_rates: { '1': 0.00001, '2': 0.00002, '3': 0.00003, '4': 0.00004, '7': 0.00005, '14': 0.00010, '28': 0.00020, '91': 0.00030, '182': 0.00030 },
+};
+const REPO_TENORS = ['1', '2', '3', '4', '7', '14', '28', '91', '182'];
+
+function pctToInput(v) { return Number((v * 100).toFixed(6)); }        // dec → %
+function inputToPct(v) { return Number(v) / 100; }
+function repoToInput(v) { return Number((v * 100000).toFixed(2)); }    // dec → 十万分之X
+function inputToRepo(v) { return Number(v) / 100000; }
+
+function renderFeesForm(fees) {
+  const f = fees || DEFAULT_FEES_UI;
+  document.getElementById('fee-comm-stock').value = pctToInput(f.commission_rate_stock);
+  document.getElementById('fee-comm-etf').value = pctToInput(f.commission_rate_etf);
+  document.getElementById('fee-comm-hk').value = pctToInput(f.commission_rate_hk);
+  document.getElementById('fee-min-comm').value = f.min_commission;
+  document.getElementById('fee-stamp').value = pctToInput(f.stamp_duty_rate);
+  document.getElementById('fee-transfer').value = pctToInput(f.transfer_fee_rate);
+  const repo = f.reverse_repo_rates || {};
+  document.getElementById('fee-repo-grid').innerHTML = REPO_TENORS.map(t =>
+    `<div><label>${t} 天</label><input type="number" id="fee-repo-${t}" min="0" step="0.01" value="${repoToInput(repo[t] || 0)}"></div>`
+  ).join('');
+}
+
+async function loadFees() {
+  try {
+    const data = await api('/api/fees');
+    state.fees = data.fees;
+  } catch (e) {
+    state.fees = null;
+  }
+}
+
+function openFeesModal() {
+  renderFeesForm(state.fees || DEFAULT_FEES_UI);
+  document.getElementById('fee-err').textContent = '';
+  document.getElementById('fee-modal-mask').classList.add('show');
+}
+
+function closeFeesModal() {
+  document.getElementById('fee-modal-mask').classList.remove('show');
+}
+
+function readFeesForm() {
+  return {
+    commission_rate_stock: inputToPct(document.getElementById('fee-comm-stock').value),
+    commission_rate_etf: inputToPct(document.getElementById('fee-comm-etf').value),
+    commission_rate_hk: inputToPct(document.getElementById('fee-comm-hk').value),
+    min_commission: Number(document.getElementById('fee-min-comm').value),
+    stamp_duty_rate: inputToPct(document.getElementById('fee-stamp').value),
+    transfer_fee_rate: inputToPct(document.getElementById('fee-transfer').value),
+    reverse_repo_rates: Object.fromEntries(REPO_TENORS.map(t =>
+      [t, inputToRepo(document.getElementById('fee-repo-' + t).value)]
+    )),
+  };
+}
+
+async function saveFees() {
+  document.getElementById('fee-err').textContent = '';
+  const body = readFeesForm();
+  for (const k in body) {
+    if (k === 'reverse_repo_rates') {
+      for (const t in body[k]) {
+        if (!(body[k][t] >= 0)) { document.getElementById('fee-err').textContent = '逆回购费率必须 ≥ 0'; return; }
+      }
+    } else if (!(body[k] >= 0)) {
+      document.getElementById('fee-err').textContent = '费率必须 ≥ 0'; return;
+    }
+  }
+  try {
+    const data = await api('/api/fees', { method: 'PUT', body: JSON.stringify(body) });
+    state.fees = data.fees;
+    closeFeesModal();
+    if (state.deductFees) await loadStats();   // 已勾选扣佣则刷新统计, 新费率立即生效
+  } catch (e) {
+    document.getElementById('fee-err').textContent = e.message;
+  }
+}
+
+async function resetFees() {
+  renderFeesForm(DEFAULT_FEES_UI);
+  try {
+    const data = await api('/api/fees', { method: 'PUT', body: JSON.stringify(DEFAULT_FEES_UI) });
+    state.fees = data.fees;
+    closeFeesModal();
+    if (state.deductFees) await loadStats();
+  } catch (e) {
+    document.getElementById('fee-err').textContent = e.message;
+  }
+}
+
+document.getElementById('fee-modal-mask').addEventListener('click', function (e) {
+  if (e.target === this) closeFeesModal();
+});
 
 // ═══════════════ 理由与统计 ═══════════════
 async function loadReasons() {
@@ -546,14 +763,25 @@ function statQuery() {
     const to = document.getElementById('stat-to').value;
     if (from) q.set('from', from);
     if (to) q.set('to', to);
+  } else if (state.statRange !== 'all') {
+    const r = presetFromTo(state.statRange);
+    if (r.from) q.set('from', r.from);
+    if (r.to) q.set('to', r.to);
   }
+  if (state.deductFees) q.set('deduct_fees', '1');
   const s = q.toString();
   return s ? '?' + s : '';
 }
 
 function setStatRange(mode) {
   state.statRange = mode;
-  document.getElementById('g-all').classList.toggle('active', mode === 'all');
+  RANGE_PRESETS.forEach(p =>
+    document.getElementById('g-' + p.key).classList.toggle('active', p.key === mode));
+  if (mode !== 'custom') {          // 回显到日期框, 便于查看/再微调
+    const r = mode === 'all' ? { from: '', to: '' } : presetFromTo(mode);
+    document.getElementById('stat-from').value = r.from;
+    document.getElementById('stat-to').value = r.to;
+  }
   loadStats();
 }
 
@@ -573,11 +801,12 @@ async function loadStats() {
   renderModelChart();
 }
 
-// 持仓股票现价：每次重新拉取全部持仓(及时更新现价/浮盈亏), 失败保留旧值, 仅首次就失败的记 null
+// 现价：持仓优先全量 + 当前页平仓 (受筛选/分页影响), 失败保留旧值, 仅首次就失败的记 null
 async function refreshQuotes(fresh) {
   if (!state.stats) return;
-  const positions = state.stats.open_positions || [];
-  const symbols = [...new Set(positions.map(p => p.symbol))];
+  const openSyms = (state.stats.open_positions || []).map(p => p.symbol);
+  const closedSyms = (state.trades || []).filter(t => t.status === 'closed').map(t => t.symbol);
+  const symbols = [...new Set([...openSyms, ...closedSyms])];
   if (!symbols.length) return;
   try {
     const data = await api(`/api/quotes?symbols=${encodeURIComponent(symbols.join(','))}&fresh=${fresh ? 1 : 0}`);
@@ -627,14 +856,55 @@ function pnlClass(v) {
   return '';
 }
 
+function buildPnlTip(t, gross, fees, netPnl, pct) {
+  const fb = t.fee_breakdown;
+  let feeRows = '';
+  if (fb) {
+    const items = [
+      ['buy_comm', '买入佣金'],
+      ['sell_comm', '卖出佣金'],
+      ['stamp', '印花税'],
+      ['transfer', '过户费'],
+    ].filter(([k]) => (fb[k] || 0) > 0)
+      .map(([k, label]) => `<div class="tip-row"><span class="tip-k">${label}</span><span class="tip-v">−${fmtMoney(fb[k])}</span></div>`);
+    feeRows = items.join('') + `<div class="tip-row"><span class="tip-k">费用合计</span><span class="tip-v">−${fmtMoney(fees)}</span></div>`;
+  } else {
+    feeRows = `<div class="tip-row"><span class="tip-k">费用</span><span class="tip-v">未扣除</span></div>`;
+  }
+  const pctStr = (pct == null) ? '—' : (pct > 0 ? '+' : '') + pct.toFixed(2) + '%';
+  return `<div class="tip-title">盈亏明细</div>`
+    + `<div class="tip-row"><span class="tip-k">股价变动</span><span class="tip-v ${pnlClass(gross)}">${fmtMoney(gross, true)}</span></div>`
+    + feeRows
+    + `<div class="tip-sep"></div>`
+    + `<div class="tip-row"><span class="tip-k">最终盈亏</span><span class="tip-v ${pnlClass(netPnl)}">${fmtMoney(netPnl, true)}</span></div>`
+    + `<div class="tip-row"><span class="tip-k">收益率</span><span class="tip-v ${pnlClass(netPnl)}">${pctStr}</span></div>`;
+}
+
+function hidePnlTip() {
+  const tip = document.getElementById('pnl-tip');
+  if (tip) tip.style.display = 'none';
+}
+
+function positionPnlTip(cell, tip) {
+  const r = cell.getBoundingClientRect();
+  const tw = tip.offsetWidth || 180;
+  const th = tip.offsetHeight || 130;
+  let x = r.right + 8;
+  if (x + tw > window.innerWidth - 8) x = Math.max(8, r.left - tw - 8);
+  let y = r.top;
+  if (y + th > window.innerHeight - 8) y = Math.max(8, window.innerHeight - th - 8);
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+}
+
 function renderStatCards(s) {
   const agg = openPositionAggregates();
   const floatPctStr = agg.floatPct > 0 ? '+' + agg.floatPct.toFixed(2) + '%' : agg.floatPct.toFixed(2) + '%';
   const cards = [
-    { label: '总盈亏', value: fmtMoney(s.total_pnl, true), cls: pnlClass(s.total_pnl), sub: (s.total_return_pct === null ? '—' : (s.total_return_pct > 0 ? '+' : '') + s.total_return_pct + '%') },
+    { label: '总盈亏', value: fmtMoney(s.total_pnl, true), cls: pnlClass(s.total_pnl), sub: (s.total_return_pct === null ? '—' : (s.total_return_pct > 0 ? '+' : '') + s.total_return_pct + '%'), subCls: pnlClass(s.total_pnl) },
     { label: '持仓金额', value: fmtMoney(agg.marketValue), cls: '', sub: `成本 ${fmtMoney(agg.cost)}` },
-    { label: '持仓浮盈亏', value: fmtMoney(agg.floatPnl, true), cls: pnlClass(agg.floatPnl), sub: floatPctStr },
-    { label: '胜率', value: s.win_rate === null ? '—' : s.win_rate + '%', cls: '', sub: `${s.win_count}胜 / ${s.loss_count}负 / ${s.break_even_count}平` },
+    { label: '持仓浮盈亏', value: fmtMoney(agg.floatPnl, true), cls: pnlClass(agg.floatPnl), sub: floatPctStr, subCls: pnlClass(agg.floatPnl) },
+    { label: '胜率', value: s.win_rate === null ? '—' : s.win_rate + '%', cls: s.win_rate === null ? '' : pnlClass(s.win_rate - 50), sub: `${s.win_count}胜 / ${s.loss_count}负 / ${s.break_even_count}平` },
     { label: '盈亏比', value: s.profit_factor === null ? '∞' : s.profit_factor, cls: '', sub: s.avg_win === null ? '' : `均盈 ${fmtMoney(s.avg_win)} / 均亏 ${fmtMoney(s.avg_loss)}` },
     { label: '最大单笔盈利', value: s.max_win ? fmtMoney(s.max_win.pnl, true) : '—', cls: 'pos', sub: s.max_win ? `${s.max_win.name} +${s.max_win.return_pct}%` : '' },
     { label: '最大单笔亏损', value: s.max_loss ? fmtMoney(s.max_loss.pnl, true) : '—', cls: 'neg', sub: s.max_loss ? `${s.max_loss.name} ${s.max_loss.return_pct}%` : '' },
@@ -653,7 +923,7 @@ function renderStatCards(s) {
     return `<div class="card">
       <div class="label">${c.label}</div>
       <div class="value ${c.cls}">${c.value}</div>
-      <div class="sub">${c.sub}</div>
+      <div class="sub ${c.subCls || ''}">${c.sub}</div>
     </div>`;
   }).join('');
 }
@@ -741,15 +1011,34 @@ function listQuery() {
   const q = new URLSearchParams();
   const status = document.getElementById('f-status').value;
   const kw = document.getElementById('f-q').value.trim();
-  const from = document.getElementById('f-from').value;
-  const to = document.getElementById('f-to').value;
+  let from = '', to = '';
+  if (state.listRange === 'custom') {
+    from = document.getElementById('f-from').value;
+    to = document.getElementById('f-to').value;
+  } else if (state.listRange !== 'all') {
+    const r = presetFromTo(state.listRange);
+    from = r.from; to = r.to;
+  }
   if (status) q.set('status', status);
   if (kw) q.set('q', kw);
   if (from) q.set('from', from);
   if (to) q.set('to', to);
   q.set('limit', state.pageSize);
   q.set('offset', (state.page - 1) * state.pageSize);
+  if (state.deductFees) q.set('deduct_fees', '1');
   return '?' + q.toString();
+}
+
+function setListRange(mode) {
+  state.listRange = mode;
+  RANGE_PRESETS.forEach(p =>
+    document.getElementById('f-' + p.key).classList.toggle('active', p.key === mode));
+  if (mode !== 'custom') {
+    const r = mode === 'all' ? { from: '', to: '' } : presetFromTo(mode);
+    document.getElementById('f-from').value = r.from;
+    document.getElementById('f-to').value = r.to;
+  }
+  resetAndLoad();   // 已含 state.page = 1 + loadTrades()
 }
 
 function resetAndLoad() { state.page = 1; loadTrades(); }
@@ -763,50 +1052,74 @@ async function loadTrades() {
 
 function renderTable() {
   const tbody = document.getElementById('trade-tbody');
+  const tips = {};
   if (!state.trades.length) {
     tbody.innerHTML = '<tr><td colspan="13" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
+    state.tips = {};
   } else {
     tbody.innerHTML = state.trades.map(t => {
-      const q = t.status === 'open' ? state.quotes[t.symbol] : null;
+      const q = state.quotes[t.symbol];
       const curPrice = (q && q.last_price != null) ? q.last_price : null;
-      const pnl = t.pnl;
+      const fees = t.fees || 0;
+      let gross = null, netPnl = null, pct = null;
       let pnlHtml, pnlCls;
       if (t.status === 'closed') {
-        pnlHtml = `<span class="${pnlClass(pnl)}">${fmtMoney(pnl, true)}</span><br><span style="color:var(--text-secondary);font-size:12px">${t.return_pct > 0 ? '+' : ''}${t.return_pct}%</span>`;
-        pnlCls = pnlClass(pnl);
+        gross = (t.exit_price != null && t.entry_price != null)
+          ? (t.exit_price - t.entry_price) * t.quantity : null;
+        netPnl = t.pnl;
+        pct = t.return_pct;
+        pnlHtml = `<span class="${pnlClass(netPnl)}">${fmtMoney(netPnl, true)}</span><br><span class="${pnlClass(netPnl)}" style="font-size:12px">${pct > 0 ? '+' : ''}${pct}%</span>`;
+        pnlCls = pnlClass(netPnl);
       } else if (curPrice != null) {
-        const fp = (curPrice - t.entry_price) * t.quantity;
-        const fpct = t.entry_price ? (curPrice / t.entry_price - 1) * 100 : 0;
-        pnlHtml = `<span class="${pnlClass(fp)}">${fmtMoney(fp, true)}</span><br><span style="color:var(--text-secondary);font-size:12px">${fpct > 0 ? '+' : ''}${fpct.toFixed(2)}%</span>`;
-        pnlCls = pnlClass(fp);
+        gross = (curPrice - t.entry_price) * t.quantity;
+        netPnl = gross - fees;
+        const cost = t.entry_price * t.quantity;
+        pct = cost ? (netPnl / cost * 100) : 0;
+        pnlHtml = `<span class="${pnlClass(netPnl)}">${fmtMoney(netPnl, true)}</span><br><span class="${pnlClass(netPnl)}" style="font-size:12px">${pct > 0 ? '+' : ''}${pct.toFixed(2)}%</span>`;
+        pnlCls = pnlClass(netPnl);
       } else {
         pnlHtml = '<span style="color:var(--text-secondary)">—</span>';
         pnlCls = '';
       }
+      // 退出价配色: 退出 vs 买入 (红涨绿跌, 平价无色)
+      const exitCls = (t.status === 'closed' && t.exit_price != null)
+        ? pnlClass(t.exit_price - t.entry_price) : '';
+      // 现价配色: 持仓 vs 买入价, 平仓 vs 昨收
+      let curCls = '';
+      if (curPrice != null) {
+        if (t.status === 'closed') {
+          const prevClose = (q && q.prev_close != null) ? q.prev_close : null;
+          if (prevClose != null) curCls = pnlClass(curPrice - prevClose);
+        } else {
+          curCls = pnlClass(curPrice - t.entry_price);
+        }
+      }
+      if (gross != null) tips[t.id] = buildPnlTip(t, gross, fees, netPnl, pct);
       const badge = t.status === 'closed'
         ? '<span class="badge closed">已平仓</span>'
         : '<span class="badge open">持仓中</span>';
       const entryReason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
       const exitReason = [t.exit_reason, t.exit_note].filter(Boolean).join('；');
       return `<tr>
-        <td class="sym">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></td>
+        <td class="sym"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
         <td>${badge}</td>
         <td>${escHtml(modelLabel(t.model_id))}</td>
         <td>${t.entry_price}</td>
-        <td>${t.exit_price === null ? '—' : t.exit_price}</td>
-        <td>${t.status === 'open' ? (curPrice != null ? curPrice : '—') : '—'}</td>
+        <td class="${exitCls}">${t.exit_price === null ? '—' : t.exit_price}</td>
+        <td class="${curCls}">${curPrice != null ? curPrice : '—'}</td>
         <td>${t.quantity}</td>
         <td>${escHtml(t.entry_date)}</td>
         <td>${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
         <td class="reason-cell">${escHtml(entryReason)}</td>
         <td class="reason-cell">${escHtml(exitReason || '—')}</td>
-        <td class="${pnlCls}">${pnlHtml}</td>
+        <td class="${pnlCls}"><span class="pnl-cell" data-tip-id="${t.id}">${pnlHtml}</span></td>
         <td>
           <button onclick="openModal(${t.id})">编辑</button>
           <button class="danger" onclick="removeTrade(${t.id})">删除</button>
         </td>
       </tr>`;
     }).join('');
+    state.tips = tips;
   }
   const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
   document.getElementById('list-count').textContent = `共 ${state.total} 笔`;
@@ -965,11 +1278,28 @@ function bindEnter(id, fn) {
 bindEnter('login-username', doLogin);
 bindEnter('login-password', doLogin);
 
-// 初始化主题
+// 初始化主题 (与主页共享 visual-theme 键)
 try {
-  const saved = localStorage.getItem('trades-theme');
-  if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+  let theme = null;
+  const shared = localStorage.getItem('visual-theme');
+  if (shared) {
+    try { theme = JSON.parse(shared).theme; } catch (e) { theme = null; }
+  }
+  if (!theme) theme = localStorage.getItem('trades-theme');  // 兼容旧键
+  if (theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
 } catch (e) {}
+
+// 初始化佣金扣除开关 (默认勾选, localStorage 持久化)
+try {
+  if (localStorage.getItem('trades-deduct-fees') === '0') state.deductFees = false;
+} catch (e) {}
+document.getElementById('deduct-fees').checked = state.deductFees;
+document.getElementById('deduct-fees').addEventListener('change', function (e) {
+  state.deductFees = e.target.checked;
+  try { localStorage.setItem('trades-deduct-fees', state.deductFees ? '1' : '0'); } catch (err) {}
+  loadTrades();
+  loadStats();
+});
 
 // 窗口缩放时重绘图表
 window.addEventListener('resize', () => {
@@ -977,6 +1307,35 @@ window.addEventListener('resize', () => {
   if (state.symbolChart) state.symbolChart.resize();
   if (state.modelChart) state.modelChart.resize();
 });
+
+// 盈亏明细 tooltip (事件委托; 固定定位避免被 .table-wrap 的 overflow 裁切)
+(function () {
+  const tipEl = document.getElementById('pnl-tip');
+  const tbody = document.getElementById('trade-tbody');
+  tbody.addEventListener('mouseover', function (e) {
+    const cell = e.target.closest ? e.target.closest('.pnl-cell') : null;
+    const html = cell && state.tips ? state.tips[cell.getAttribute('data-tip-id')] : null;
+    if (!html) { hidePnlTip(); return; }
+    tipEl.innerHTML = html;
+    tipEl.style.display = 'block';
+    positionPnlTip(cell, tipEl);
+  });
+  tbody.addEventListener('mouseout', function (e) {
+    const cell = e.target.closest ? e.target.closest('.pnl-cell') : null;
+    if (cell && e.relatedTarget && cell.contains(e.relatedTarget)) return;
+    hidePnlTip();
+  });
+  window.addEventListener('scroll', hidePnlTip, true);
+})();
+
+// 默认「近三月」范围回显到四个日期框(纯视觉; 查询串仍由 presetFromTo 计算)
+(function () {
+  const r = presetFromTo('3m');
+  document.getElementById('stat-from').value = r.from;
+  document.getElementById('stat-to').value = r.to;
+  document.getElementById('f-from').value = r.from;
+  document.getElementById('f-to').value = r.to;
+})();
 
 checkAuth();
 

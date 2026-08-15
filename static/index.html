@@ -234,29 +234,6 @@ body {
 #indicator-bar label.dim { color: var(--text-secondary); }
 #indicator-bar input[type="checkbox"] { accent-color: var(--btn-active); }
 
-#indicator-bar .macd-mode {
-  display: flex;
-  gap: 0;
-  border: 1px solid var(--input-border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-#indicator-bar .macd-mode button {
-  padding: 4px 10px;
-  border: none;
-  border-radius: 0;
-  font-size: 12px;
-  background: var(--btn-bg);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-#indicator-bar .macd-mode button.active {
-  background: var(--btn-active);
-  color: var(--btn-active-text);
-}
-#indicator-bar .macd-mode button:hover:not(.active) { background: var(--btn-hover); }
-
 /* ═══════════════ Chart ═══════════ */
 #chart-container {
   flex: 1;
@@ -334,12 +311,6 @@ body {
   <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
   <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
-  <span>MACD:</span>
-  <div class="macd-mode" id="macd-mode-group">
-    <button class="active" data-mode="default" onclick="onMacdMode('default')">默认</button>
-    <button data-mode="macd13" onclick="onMacdMode('macd13')">MACD(13)</button>
-  </div>
-  <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>🔧 提示框:</span>
   <label><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
@@ -368,7 +339,6 @@ function escHtml(str) {
 const STATE = {
   symbol: '000001.SH',
   period: '1d',
-  macdMode: 'default',   // 'default' | 'macd13'
   theme: 'light',
   klineData: null,       // raw JSON from server
   chart: null,
@@ -443,6 +413,9 @@ function applyTheme(theme) {
   const btn = document.getElementById('btn-theme');
   btn.textContent = STATE._themeAuto ? (theme === 'dark' ? '🌙 auto' : '☀️ auto') : (theme === 'dark' ? '☀️' : '🌙');
   btn.title = STATE._themeAuto ? '自动模式(点击锁定)' : '手动模式(点击切换)';
+  try {
+    localStorage.setItem('visual-theme', JSON.stringify({ theme: theme, auto: STATE._themeAuto }));
+  } catch (e) {}
 }
 
 function toggleTheme() {
@@ -470,9 +443,8 @@ async function fetchData() {
   const symbol = STATE.symbol;
   if (STATE.period === 'intraday') STATE.period = '1d';
   const period = STATE.period;
-  const useMacd13 = STATE.macdMode === 'macd13';
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
-  const cacheKey = `vk_${symbol}_${period}_${useMacd13}`;
+  const cacheKey = `vk_${symbol}_${period}`;
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
   let cacheHit = false;
@@ -490,7 +462,7 @@ async function fetchData() {
     }
   } catch(e) { /* ignore */ }
 
-  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=300&macd13=${useMacd13}`;
+  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=300`;
   if (!cacheHit) {
     STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
     showLoading(true);
@@ -673,7 +645,6 @@ function saveConfig() {
     tipAtr: document.getElementById('tip-atr').checked,
     theme: STATE.theme,
     themeAuto: STATE._themeAuto,
-    macdMode: STATE.macdMode,
     impulse: document.getElementById('chk-impulse').checked,
     channel: document.getElementById('chk-channel').checked,
   };
@@ -698,14 +669,20 @@ function loadConfig() {
     const chkChannel = document.getElementById('chk-channel');
     chkChannel.checked = !!cfg.channel;
     STATE.channelEnabled = !!cfg.channel;
-    if (cfg.macdMode) {
-      STATE.macdMode = cfg.macdMode;
-      document.querySelectorAll('#macd-mode-group button').forEach(b => {
-        b.classList.toggle('active', b.dataset.mode === cfg.macdMode);
-      });
-    }
-    // 主题: themeAuto=true → 自动; 否则 → 锁定 (旧配置无themeAuto视为手动)
-    if (cfg.theme) {
+    // 主题: 优先共享键 visual-theme (与交易记录页同步), 回退到本页配置
+    let sharedTheme = null, sharedAuto = null;
+    try {
+      const shared = localStorage.getItem('visual-theme');
+      if (shared) {
+        const st = JSON.parse(shared);
+        if (st && st.theme) { sharedTheme = st.theme; sharedAuto = st.auto === true; }
+      }
+    } catch (e) {}
+    if (sharedTheme) {
+      STATE._themeAuto = sharedAuto === true;
+      if (!STATE._themeAuto) applyTheme(sharedTheme);
+    } else if (cfg.theme) {
+      // themeAuto=true → 自动; 否则 → 锁定 (旧配置无themeAuto视为手动)
       STATE._themeAuto = cfg.themeAuto === true;
       if (!STATE._themeAuto) {
         applyTheme(cfg.theme);
@@ -724,7 +701,7 @@ async function fetchIntraday() {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
   const fetchTs = Date.now(); STATE._intraFetchTs = fetchTs;
-  const _cacheKey = `vi_${symbol}_1m_${STATE.macdMode}`;
+  const _cacheKey = `vi_${symbol}_1m`;
 
   // ── 浏览器缓存 ──
   let cacheHit = false;
@@ -745,9 +722,8 @@ async function fetchIntraday() {
   const loading = !cacheHit && !STATE.intradayData;
   if (loading) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
-    const macd13 = STATE.macdMode === 'macd13' ? '&macd13=true' : '';
     const [idResp, qResp] = await Promise.all([
-      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240${macd13}`),
+      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
       fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`)
     ]);
     const id = await idResp.json();
@@ -1423,19 +1399,6 @@ function onIndicatorChange() {
   }
 }
 
-let _macdMode = 'default';
-function onMacdMode(mode) {
-  STATE.macdMode = mode;
-  document.querySelectorAll('#macd-mode-group button').forEach(b => {
-    b.classList.toggle('active', b.dataset.mode === mode);
-  });
-  saveConfig();
-  if (mode !== _macdMode) {
-    _macdMode = mode;
-    refresh();
-  }
-}
-
 function refresh() {
   const input = document.getElementById('symbol-input').value.trim();
   if (!input) { STATE.symbol = '000001.SH'; fetchData(); return; }
@@ -1467,7 +1430,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();
-  _macdMode = STATE.macdMode;
 
   // ── 自动主题: 系统偏好 > 时间 ──
   if (STATE._themeAuto) {
@@ -1584,6 +1546,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const last = hist[0];
     document.getElementById('symbol-input').value = last.symbol;
     STATE.symbol = last.symbol;
+  }
+
+  // 支持从交易记录等页面跳转 ?symbol=000001.SZ 自动加载 (URL 参数优先于历史恢复)
+  const jumpSymbol = new URLSearchParams(location.search).get('symbol');
+  if (jumpSymbol) {
+    document.getElementById('symbol-input').value = jumpSymbol;
+    STATE.symbol = jumpSymbol;
   }
 
   // First load: 等容器高度确定后再渲染 (解决F11前后高度不准)

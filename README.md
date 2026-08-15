@@ -23,11 +23,10 @@ python -u visual/server.py
 | 成交量面板 | 可开关，关闭时 K线自动拉高 |
 | 动力系统 | Elder Impulse System — EMA13方向 + MACD柱方向决定蜡烛颜色(红多/绿空/蓝中性)，仅日K |
 | ATR 通道 | EMA13 ± 1/2/3 ATR 共6条虚线，仅日K，默认关闭 |
-| MACD 模式 | 默认(12/26/9)、MACD(13/30/10)，随视图自动切换 |
 | 自适应提示框 | 鼠标在不同面板显示对应数据；MACD跟随面板开关，RSI/KDJ/ATR 独立提示框开关 |
 | 股票搜索 | 模糊匹配代码/名称，实时下拉 + 键盘↑↓导航 |
 | 搜索历史 | localStorage 持久化最近10条，刷新不丢失 |
-| 配置持久化 | 主题/面板开关/MACD模式/提示框选项自动保存 |
+| 配置持久化 | 主题/面板开关/提示框选项自动保存 |
 | 主题 | 默认亮色 / 可切换暗色 |
 | 实时刷新 | 交易时段每30秒自动拉取快照 |
 | 数据缩放 | 鼠标滚轮 + 滑块，底部可拖动 |
@@ -112,7 +111,7 @@ visual/
 - 前端交易时段30秒刷新间隔 → 安全范围
 
 ### 配置持久化
-- `localStorage` key: `visual_chart_config` — 主题/面板/模式
+- `localStorage` key: `visual_chart_config` — 主题/面板
 - `localStorage` key: `visual_search_history` — 最近10条搜索记录
 
 ## 依赖

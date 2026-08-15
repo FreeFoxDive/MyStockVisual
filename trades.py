@@ -16,6 +16,7 @@ SQLite 持久化的多账户交易日志：注册/登录、买卖记录增删改
 
 import hashlib
 import hmac
+import json
 import secrets
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -131,6 +132,30 @@ CREATE INDEX IF NOT EXISTS idx_trades_user_symbol ON trades(user_id, symbol);
 """
 
 
+# ── 交易费率默认值 ──
+# 比例均为小数 (如 0.0001 = 万分之一); reverse_repo_rates 为国债逆回购佣金率
+# (十万分之X → 小数, 键为期限天数)。
+DEFAULT_FEES = {
+    "commission_rate_stock": 0.0001,   # 沪深股票 佣金 万一
+    "commission_rate_etf":   0.0001,   # ETF     佣金 万一
+    "commission_rate_hk":    0.0001,   # 港股通  佣金 万一
+    "min_commission":        5.0,      # A股/ETF 每笔佣金起点 (元, 买卖各算)
+    "stamp_duty_rate":       0.0005,   # 印花税 0.05% 仅卖出 (ETF 免征)
+    "transfer_fee_rate":     0.00001,  # 过户费 0.001% 买卖双向
+    "reverse_repo_rates": {            # 国债逆回购 佣金率 (十万分之X → 小数)
+        "1": 0.00001, "2": 0.00002, "3": 0.00003, "4": 0.00004,
+        "7": 0.00005, "14": 0.00010, "28": 0.00020,
+        "91": 0.00030, "182": 0.00030,
+    },
+}
+
+# 逆回购代码 → 期限 (天)
+_REPO_SSE = {"001": "1", "002": "2", "003": "3", "004": "4", "007": "7",
+             "014": "14", "028": "28", "091": "91", "182": "182"}   # 204xxx.SH
+_REPO_SZSE = {"810": "1", "811": "2", "800": "3", "809": "4", "801": "7",
+              "802": "14", "803": "28", "805": "91", "806": "182"}  # 1318xx.SZ
+
+
 def _now_iso():
     return datetime.now().isoformat(timespec="seconds")
 
@@ -158,6 +183,9 @@ def init_db(db_path=None):
                 "ALTER TABLE trades ADD COLUMN model_id INTEGER "
                 "REFERENCES models(id) ON DELETE SET NULL"
             )
+        # 迁移: 旧库 users 表补 fee_config 列 (TEXT 存 JSON; NULL = 用默认值)
+        if "fee_config" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN fee_config TEXT")
         # 种子模型 A–E (仅当 models 表为空时插入, 含停用行也计入)
         n = conn.execute("SELECT COUNT(*) FROM models").fetchone()[0]
         if n == 0:
@@ -177,6 +205,169 @@ def get_conn():
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+# ── 交易费率: 类型识别与单笔费用计算 ──
+def classify_symbol(symbol):
+    """按代码识别交易类型。
+
+    返回 ("stock"|"etf"|"hk", None) 或 ("reverse_repo", 期限天数)。
+    兼容多种写法: 00700 / 00700.HK / 600031.SH / 513290.SH / 204001.SH / 131810.SZ。
+    """
+    s = (symbol or "").upper()
+    code = s.split(".")[0]
+    if code.startswith("204") and code[3:] in _REPO_SSE:
+        return ("reverse_repo", _REPO_SSE[code[3:]])
+    if code.startswith("1318") and code[3:] in _REPO_SZSE:
+        return ("reverse_repo", _REPO_SZSE[code[3:]])
+    if s.endswith(".HK"):
+        return ("hk", None)
+    if len(code) == 6 and code[:2] in ("51", "56", "58", "15", "16"):
+        return ("etf", None)   # 沪 51/56/58, 深 15/16 (含 LOF, 费率同 ETF)
+    if code.isdigit() and len(code) < 6:
+        return ("hk", None)    # 5 位及以下数字 → 港股通
+    return ("stock", None)
+
+
+def _calc_fee_detail(trade, fees, side="closed"):
+    """计算单笔交易费用明细, fees 为已合并默认值的费率 dict。
+
+    side="closed": 完整往返 (买入+卖出佣金 / 印花税 / 双向过户费);
+    side="open":   仅买入侧 (买入佣金+最低佣金 / 买入过户费), 无卖出佣金/印花税。
+    返回 dict: buy_comm/sell_comm/stamp/transfer/total (元)。
+    """
+    kind, tenor = classify_symbol(trade["symbol"])
+    buy_amt = trade["entry_price"] * trade["quantity"]
+
+    if kind == "reverse_repo":
+        # 逆回购佣金: 成交额 × 期限费率 (单边), 仅买入算一次
+        rate = fees.get("reverse_repo_rates", {}).get(tenor, 0.0)
+        total = round(buy_amt * rate, 4)
+        return {"buy_comm": 0.0, "sell_comm": 0.0, "stamp": 0.0,
+                "transfer": 0.0, "total": total}
+
+    rate = fees.get(
+        {
+            "stock": "commission_rate_stock",
+            "etf": "commission_rate_etf",
+            "hk": "commission_rate_hk",
+        }[kind],
+        0.0,
+    )
+    min_comm = fees.get("min_commission", 0.0) if kind in ("stock", "etf") else 0.0
+    buy_comm = buy_amt * rate
+    if min_comm:
+        buy_comm = max(buy_comm, min_comm)
+    buy_transfer = buy_amt * fees.get("transfer_fee_rate", 0.0)
+
+    sell_comm = 0.0
+    stamp = 0.0
+    sell_transfer = 0.0
+    if side == "closed":
+        sell_amt = (trade["exit_price"] or 0.0) * trade["quantity"]
+        sell_comm = sell_amt * rate
+        if min_comm:
+            sell_comm = max(sell_comm, min_comm)
+        # 印花税: 仅卖出, 且 ETF 免征
+        stamp = 0.0 if kind == "etf" else sell_amt * fees.get("stamp_duty_rate", 0.0)
+        sell_transfer = sell_amt * fees.get("transfer_fee_rate", 0.0)
+
+    return {
+        "buy_comm": round(buy_comm, 4),
+        "sell_comm": round(sell_comm, 4),
+        "stamp": round(stamp, 4),
+        "transfer": round(buy_transfer + sell_transfer, 4),
+        "total": round(buy_comm + sell_comm + stamp + buy_transfer + sell_transfer, 4),
+    }
+
+
+def _calc_fees(trade, fees, side="closed"):
+    """计算单笔交易费用合计 (元), 见 _calc_fee_detail。"""
+    return _calc_fee_detail(trade, fees, side)["total"]
+
+
+def _clean_fees(config):
+    """校验并规范化费率配置; 非法值抛 ValueError。仅保留 DEFAULT_FEES 中已知键。"""
+    if not isinstance(config, dict):
+        raise ValueError("配置必须是对象")
+
+    def _num(key, allow_zero=True):
+        v = config.get(key)
+        if v is None:
+            return None  # 未提供 → 由调用方保留默认
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} 必须是数字")
+        if allow_zero:
+            if f < 0:
+                raise ValueError(f"{key} 不能为负")
+        elif f <= 0:
+            raise ValueError(f"{key} 必须大于 0")
+        return f
+
+    clean = {}
+    for key in ("commission_rate_stock", "commission_rate_etf", "commission_rate_hk",
+                "stamp_duty_rate", "transfer_fee_rate"):
+        v = _num(key)
+        if v is not None:
+            clean[key] = v
+    v = _num("min_commission", allow_zero=False)
+    if v is not None:
+        clean["min_commission"] = v
+
+    rr = config.get("reverse_repo_rates")
+    if rr is not None:
+        if not isinstance(rr, dict):
+            raise ValueError("reverse_repo_rates 必须是对象")
+        clean_rr = {}
+        for tenor in DEFAULT_FEES["reverse_repo_rates"]:
+            tv = rr.get(tenor)
+            if tv is None:
+                continue
+            try:
+                f = float(tv)
+            except (TypeError, ValueError):
+                raise ValueError(f"reverse_repo_rates.{tenor} 必须是数字")
+            if f < 0:
+                raise ValueError(f"reverse_repo_rates.{tenor} 不能为负")
+            clean_rr[tenor] = f
+        clean["reverse_repo_rates"] = clean_rr
+    return clean
+
+
+def get_user_fees(user_id):
+    """读取用户费率 (未设置则返回默认值)。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT fee_config FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row and row["fee_config"]:
+        try:
+            merged = dict(DEFAULT_FEES)
+            merged.update(json.loads(row["fee_config"]))
+            return merged
+        except (ValueError, TypeError):
+            pass
+    return dict(DEFAULT_FEES)
+
+
+def update_user_fees(user_id, config):
+    """保存用户费率 (校验并规范化后写库)。"""
+    clean = _clean_fees(config)
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET fee_config=? WHERE id=?",
+            (json.dumps(clean), user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return clean
 
 
 # ── 口令哈希 ──
@@ -584,14 +775,26 @@ def _clean(data, existing=None):
     return clean, None
 
 
-def _row_to_dict(row):
+def _row_to_dict(row, fee_config=None):
     d = dict(row)
     d["pnl"] = None
     d["return_pct"] = None
+    d["fees"] = 0.0
+    d["fee_breakdown"] = None
     if d["status"] == "closed" and d["exit_price"] is not None:
-        d["pnl"] = round((d["exit_price"] - d["entry_price"]) * d["quantity"], 2)
-        if d["entry_price"]:
-            d["return_pct"] = round((d["exit_price"] / d["entry_price"] - 1) * 100, 2)
+        if fee_config:
+            detail = _calc_fee_detail(d, fee_config, "closed")
+            d["fees"] = detail["total"]
+            d["fee_breakdown"] = detail
+        d["pnl"] = round((d["exit_price"] - d["entry_price"]) * d["quantity"] - d["fees"], 2)
+        cost = d["entry_price"] * d["quantity"]
+        if cost:
+            d["return_pct"] = round(d["pnl"] / cost * 100, 2)
+    elif d["status"] == "open" and fee_config:
+        # 持仓: 仅买入侧费用, 浮盈亏由前端 (现价-买入价)*数量 - fees 计算
+        detail = _calc_fee_detail(d, fee_config, "open")
+        d["fees"] = detail["total"]
+        d["fee_breakdown"] = detail
     return d
 
 
@@ -606,8 +809,11 @@ def get_trade(user_id, tid):
     return _row_to_dict(row) if row else None
 
 
-def list_trades(user_id, filters=None):
-    """查询交易记录，返回 (records, total)。filters: status/symbol/q/from/to/limit/offset。"""
+def list_trades(user_id, filters=None, fee_config=None):
+    """查询交易记录，返回 (records, total)。filters: status/symbol/q/from/to/limit/offset。
+
+    fee_config 非空时按费率扣佣计算单笔盈亏 (平仓=完整往返, 持仓=仅买入侧)。
+    """
     filters = filters or {}
     sql = "SELECT * FROM trades WHERE user_id=?"
     args = [user_id]
@@ -646,7 +852,7 @@ def list_trades(user_id, filters=None):
         rows = conn.execute(sql, args).fetchall()
     finally:
         conn.close()
-    return [_row_to_dict(r) for r in rows], total
+    return [_row_to_dict(r, fee_config) for r in rows], total
 
 
 def _clamp_int(v, lo, hi, default):
@@ -741,8 +947,11 @@ def _win_rate(wins, losses):
     return round(wins / denom * 100, 2) if denom else None
 
 
-def compute_stats(user_id, start=None, end=None):
-    """统计 closed 交易 (按 exit_date 过滤 [start,end]) 的盈亏/胜率/分桶序列/按股票汇总。"""
+def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=None):
+    """统计 closed 交易 (按 exit_date 过滤 [start,end]) 的盈亏/胜率/分桶序列/按股票汇总。
+
+    deduct_fees=True 且传入 fee_config 时, 每笔 pnl 扣除交易费用 (佣金/印花税/过户费)。
+    """
     conn = get_conn()
     try:
         open_count = conn.execute(
@@ -778,10 +987,13 @@ def compute_stats(user_id, start=None, end=None):
             continue
         if end and t["exit_date"] > end:
             continue
-        t["pnl"] = (t["exit_price"] - t["entry_price"]) * t["quantity"]
-        t["return_pct"] = (
-            (t["exit_price"] / t["entry_price"] - 1) * 100 if t["entry_price"] else 0.0
-        )
+        raw_pnl = (t["exit_price"] - t["entry_price"]) * t["quantity"]
+        t["fees"] = 0.0
+        if deduct_fees and fee_config:
+            t["fees"] = _calc_fees(t, fee_config)
+        t["pnl"] = raw_pnl - t["fees"]
+        cost = t["entry_price"] * t["quantity"]
+        t["return_pct"] = (t["pnl"] / cost * 100) if cost else 0.0
         trades.append(t)
 
     wins = [t for t in trades if t["pnl"] > 0]
@@ -826,6 +1038,8 @@ def compute_stats(user_id, start=None, end=None):
         "avg_loss": round(avg_loss, 2) if avg_loss is not None else None,
         "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
         "avg_holding_days": avg_holding_days,
+        "total_fees": round(sum(t["fees"] for t in trades), 2),
+        "deduct_fees": deduct_fees,
         "max_win": (
             {
                 "symbol": max_win["symbol"], "name": max_win["name"],

@@ -424,11 +424,18 @@ def _quote_from_row(q, symbol):
     }
 
 
+AF_QUOTE_BATCH = 50        # AlphaFeed 快照单次最多 50 只
+AF_QUOTE_INTERVAL = 1.2    # 批次间 sleep, 保证 ≤60次/min (60/min ≈ 1s 间隔)
+
+
 def fetch_quotes(symbols, fresh=False):
     """批量获取实时快照（一次 AlphaFeed 调用查多只）。
 
     fresh=True 时跳过缓存强刷，失败/空数据回退到缓存（缓存超 30s 的 get() 返回 None）。
     返回 {symbol: quote}；未取到的 symbol 不出现在返回字典中。
+
+    快照接口单次最多 50 只、限频 60 次/min，故超过 50 只时按 AF_QUOTE_BATCH 分批、
+    批间 sleep AF_QUOTE_INTERVAL。
     """
     symbols = [normalize_symbol(s) for s in symbols if s]
     symbols = list(dict.fromkeys(symbols))  # 去重保序
@@ -444,20 +451,23 @@ def fetch_quotes(symbols, fresh=False):
                 result[s] = cached
     to_fetch = [s for s in symbols if s not in result]
 
-    if to_fetch:
+    for i in range(0, len(to_fetch), AF_QUOTE_BATCH):
+        batch = to_fetch[i:i + AF_QUOTE_BATCH]
+        if i > 0:
+            time.sleep(AF_QUOTE_INTERVAL)
         try:
             af = get_af()
-            quotes = af.quotes.get(symbols=to_fetch, to_dataframe=True)
+            quotes = af.quotes.get(symbols=batch, to_dataframe=True)
             if quotes is not None and len(quotes) > 0:
                 for _, q in quotes.iterrows():
                     s = normalize_symbol(str(q.get("symbol", "")))
-                    if s in to_fetch and s not in result:
+                    if s in batch and s not in result:
                         result[s] = _quote_from_row(q, s)
                         quote_cache.set(s, result[s])
         except Exception as e:
-            print(f"[Visual] 批量获取快照失败 {to_fetch}: {e}", flush=True)
+            print(f"[Visual] 批量获取快照失败 {batch}: {e}", flush=True)
             # 拉取失败：回退缓存（fresh 模式下缓存此前被跳过，此处补读）
-            for s in to_fetch:
+            for s in batch:
                 cached = quote_cache.get(s)
                 if cached:
                     result[s] = cached
@@ -791,6 +801,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._send_json({"entry": trades.ENTRY_REASONS, "exit": trades.EXIT_REASONS})
         elif path == "/api/models":
             return self._handle_models_list()
+        elif path == "/api/fees":
+            return self._handle_fees_get()
         elif path == "/" or path == "/index.html":
             return self._serve_static("index.html")
         elif path.endswith(".html") or path.endswith(".js") or path.endswith(".css"):
@@ -875,6 +887,8 @@ class VisualHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             if not _check_rate_limit():
                 return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+        if path == "/api/fees":
+            return self._handle_fees_put()
         # /api/models/{id}
         if path.startswith("/api/models/"):
             mid = path[len("/api/models/"):]
@@ -1084,7 +1098,9 @@ class VisualHandler(BaseHTTPRequestHandler):
             "limit": params.get("limit", [None])[0],
             "offset": params.get("offset", [None])[0],
         }
-        records, total = trades.list_trades(user["id"], filters)
+        deduct = params.get("deduct_fees", [""])[0].lower() in ("1", "true")
+        fee_config = trades.get_user_fees(user["id"]) if deduct else None
+        records, total = trades.list_trades(user["id"], filters, fee_config=fee_config)
         return self._send_json({"trades": records, "total": total})
 
     def _handle_trades_create(self):
@@ -1129,7 +1145,30 @@ class VisualHandler(BaseHTTPRequestHandler):
             return
         start = params.get("from", [None])[0]
         end = params.get("to", [None])[0]
-        return self._send_json(trades.compute_stats(user["id"], start, end))
+        deduct = params.get("deduct_fees", [""])[0].lower() in ("1", "true")
+        fee_config = trades.get_user_fees(user["id"]) if deduct else None
+        return self._send_json(trades.compute_stats(
+            user["id"], start, end, deduct_fees=deduct, fee_config=fee_config
+        ))
+
+    def _handle_fees_get(self):
+        user = self._require_user()
+        if not user:
+            return
+        return self._send_json({"fees": trades.get_user_fees(user["id"])})
+
+    def _handle_fees_put(self):
+        user = self._require_user()
+        if not user:
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体必须是 JSON 对象", 400)
+        try:
+            fees = trades.update_user_fees(user["id"], body)
+        except ValueError as e:
+            return self._send_error(f"费率配置无效: {_sanitize_error(e)}", 400)
+        return self._send_json({"fees": fees})
 
     # ── 静态文件 ──
     def _serve_static(self, filename):
@@ -1167,10 +1206,9 @@ class VisualHandler(BaseHTTPRequestHandler):
         symbol = normalize_symbol(symbol_raw)
         period = params.get("period", ["1d"])[0]
         count = min(int(params.get("count", ["200"])[0]), 1000)
-        use_macd13 = params.get("macd13", ["false"])[0].lower() == "true"
 
         # 检查缓存
-        cache_key = f"{symbol}:{period}:{count}:{use_macd13}"
+        cache_key = f"{symbol}:{period}:{count}"
         cache = kline_cache_long if period in ("1w", "1M") else kline_cache
         cached = cache.get(cache_key)
         if cached:
@@ -1188,7 +1226,7 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._send_error(f"无法获取 {symbol} 的K线数据", 404)
 
         # 计算指标
-        df, indicators = compute_all_indicators(df, period, use_macd13)
+        df, indicators = compute_all_indicators(df, period)
 
 
         # ETF 溢价率
@@ -1319,7 +1357,6 @@ class VisualHandler(BaseHTTPRequestHandler):
         symbol = normalize_symbol(symbol_raw)
         period = params.get("period", ["5m"])[0]
         count = min(int(params.get("count", ["120"])[0]), 250)
-        use_macd13 = params.get("macd13", ["false"])[0].lower() == "true"
         try:
             af = get_af()
             dfs = af.klines.batch([symbol], period=period, count=count, adjust="forward", to_dataframe=True)
@@ -1332,16 +1369,16 @@ class VisualHandler(BaseHTTPRequestHandler):
             df = _normalize(df, prefer_time=True)
             if df is None:
                 return self._send_error("数据不足", 404)
-            # 过滤非当天数据（分时图只显示当日）
-            today = pd.Timestamp.now().normalize()
-            mask = df.index.normalize() == today
+            # 分时图显示最近一个交易日: 非交易日(周末/节假日)回退到上一交易日
+            last_day = df.index.normalize().max()
+            mask = df.index.normalize() == last_day
             df = df[mask]
             if raw_times is not None:
                 raw_times = raw_times[mask]
             if len(df) == 0:
-                return self._send_error("无当日分时数据", 404)
+                return self._send_error("无分时数据", 404)
             # 基于过滤后的数据重新计算指标
-            df, indicators = compute_all_indicators(df, period="1d", use_macd13=use_macd13, with_atr_val=True)
+            df, indicators = compute_all_indicators(df, period="1d", with_atr_val=True)
             bars = []
             for i, (idx, row) in enumerate(df.iterrows()):
                 ts = raw_times.iloc[i] if raw_times is not None and i < len(raw_times) else str(idx)
