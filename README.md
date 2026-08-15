@@ -179,6 +179,8 @@ docker compose down
 | 管理员账号 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 首次启动自动创建管理员（仅一次） |
 | 用户 | `appuser` (非 root) | 降低容器逃逸风险 |
 
+> 注：部署主机 `visual/data`、`visual/.cache` 的属主需为 UID 1000（绝大多数 Linux 首个用户即 1000）；否则构建时用 `--build-arg UID=$(id -u)` 对齐。
+
 ## 配色
 
 对标东方财富按"系列"分组，同色系线条在不同面板含义一致：
