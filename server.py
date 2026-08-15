@@ -407,35 +407,67 @@ def fetch_kline(symbol, period, count):
     return df, name
 
 
-def fetch_quote(symbol):
-    """从 AlphaFeed 获取实时快照"""
-    cached = quote_cache.get(symbol)
-    if cached:
-        return cached
+def _quote_from_row(q, symbol):
+    """把 AlphaFeed quotes DataFrame 的一行转成标准 quote dict"""
+    return {
+        "last_price": _safe_float(q.get("last_price")),
+        "prev_close": _safe_float(q.get("prev_close")),
+        "open": _safe_float(q.get("open")),
+        "high": _safe_float(q.get("high")),
+        "low": _safe_float(q.get("low")),
+        "volume": _safe_int(q.get("volume")),
+        "amount": _safe_float(q.get("amount")),
+        "change_pct": _safe_float(q.get("ext.change_pct")),
+        "amplitude": _safe_float(q.get("ext.amplitude")),
+        "turnover_rate": _safe_float(q.get("ext.turnover_rate")),
+        "name": q.get("ext.name", symbol),
+    }
 
-    try:
-        af = get_af()
-        quotes = af.quotes.get(symbols=[symbol], to_dataframe=True)
-        if quotes is not None and len(quotes) > 0:
-            q = quotes.iloc[0]
-            result = {
-                "last_price": _safe_float(q.get("last_price")),
-                "prev_close": _safe_float(q.get("prev_close")),
-                "open": _safe_float(q.get("open")),
-                "high": _safe_float(q.get("high")),
-                "low": _safe_float(q.get("low")),
-                "volume": _safe_int(q.get("volume")),
-                "amount": _safe_float(q.get("amount")),
-                "change_pct": _safe_float(q.get("ext.change_pct")),
-                "amplitude": _safe_float(q.get("ext.amplitude")),
-                "turnover_rate": _safe_float(q.get("ext.turnover_rate")),
-                "name": q.get("ext.name", symbol),
-            }
-            quote_cache.set(symbol, result)
-            return result
-    except Exception as e:
-        print(f"[Visual] 获取快照失败 {symbol}: {e}", flush=True)
-    return None
+
+def fetch_quotes(symbols, fresh=False):
+    """批量获取实时快照（一次 AlphaFeed 调用查多只）。
+
+    fresh=True 时跳过缓存强刷，失败/空数据回退到缓存（缓存超 30s 的 get() 返回 None）。
+    返回 {symbol: quote}；未取到的 symbol 不出现在返回字典中。
+    """
+    symbols = [normalize_symbol(s) for s in symbols if s]
+    symbols = list(dict.fromkeys(symbols))  # 去重保序
+    if not symbols:
+        return {}
+
+    result = {}
+    if not fresh:
+        # 缓存优先：命中直接返回，只抓缺失的
+        for s in symbols:
+            cached = quote_cache.get(s)
+            if cached:
+                result[s] = cached
+    to_fetch = [s for s in symbols if s not in result]
+
+    if to_fetch:
+        try:
+            af = get_af()
+            quotes = af.quotes.get(symbols=to_fetch, to_dataframe=True)
+            if quotes is not None and len(quotes) > 0:
+                for _, q in quotes.iterrows():
+                    s = normalize_symbol(str(q.get("symbol", "")))
+                    if s in to_fetch and s not in result:
+                        result[s] = _quote_from_row(q, s)
+                        quote_cache.set(s, result[s])
+        except Exception as e:
+            print(f"[Visual] 批量获取快照失败 {to_fetch}: {e}", flush=True)
+            # 拉取失败：回退缓存（fresh 模式下缓存此前被跳过，此处补读）
+            for s in to_fetch:
+                cached = quote_cache.get(s)
+                if cached:
+                    result[s] = cached
+
+    return result
+
+
+def fetch_quote(symbol):
+    """从 AlphaFeed 获取实时快照（单只，缓存优先）"""
+    return fetch_quotes([symbol]).get(normalize_symbol(symbol))
 
 
 def _normalize(df, prefer_time=False):
@@ -737,6 +769,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_kline(params)
         elif path == "/api/quote":
             return self._handle_quote(params)
+        elif path == "/api/quotes":
+            return self._handle_quotes(params)
         elif path == "/api/intraday":
             return self._handle_intraday(params)
         elif path == "/api/pledge":
@@ -1261,6 +1295,19 @@ class VisualHandler(BaseHTTPRequestHandler):
             if quote is None:
                 return self._send_error(f"无法获取 {symbol} 的快照", 404)
             self._send_json(quote)
+        except Exception as e:
+            self._send_error(f"获取快照失败: {_sanitize_error(e)}", 500)
+
+    # ── API: 批量实时快照 ──
+    def _handle_quotes(self, params):
+        raw = params.get("symbols", [""])[0]
+        symbols = [s.strip() for s in raw.split(",") if s.strip()]
+        if not symbols:
+            return self._send_error("缺少 symbols 参数")
+        fresh = params.get("fresh", ["0"])[0].lower() in ("1", "true", "yes")
+        try:
+            quotes = fetch_quotes(symbols, fresh=fresh)
+            self._send_json(quotes)
         except Exception as e:
             self._send_error(f"获取快照失败: {_sanitize_error(e)}", 500)
 

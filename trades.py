@@ -749,12 +749,27 @@ def compute_stats(user_id, start=None, end=None):
             "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='open'",
             (user_id,),
         ).fetchone()[0]
+        open_rows = conn.execute(
+            "SELECT symbol, name, entry_price, quantity FROM trades "
+            "WHERE user_id=? AND status='open' ORDER BY entry_date",
+            (user_id,),
+        ).fetchall()
         rows = conn.execute(
             "SELECT * FROM trades WHERE user_id=? AND status='closed' ORDER BY exit_date",
             (user_id,),
         ).fetchall()
     finally:
         conn.close()
+
+    open_positions = [
+        {
+            "symbol": r["symbol"],
+            "name": r["name"],
+            "entry_price": r["entry_price"],
+            "quantity": r["quantity"],
+        }
+        for r in open_rows
+    ]
 
     trades = []
     for r in rows:
@@ -909,4 +924,10 @@ def compute_stats(user_id, start=None, end=None):
         for m in sorted(by_model.values(), key=lambda x: -x["pnl"])
     ]
 
-    return {"summary": summary, "series": series, "by_symbol": by_symbol, "by_model": by_model}
+    return {
+        "summary": summary,
+        "series": series,
+        "by_symbol": by_symbol,
+        "by_model": by_model,
+        "open_positions": open_positions,
+    }

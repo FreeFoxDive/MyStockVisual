@@ -126,16 +126,17 @@ input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
 .section-title .bar { width: 4px; height: 16px; background: var(--btn-active); border-radius: 2px; }
 
 /* 概览卡片 */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
 .card {
   background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow);
+  border-radius: 8px; padding: 10px 12px; box-shadow: var(--shadow);
 }
-.card .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.card .value { font-size: 22px; font-weight: 700; }
+.card .label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; white-space: nowrap; }
+.card .value { font-size: 18px; font-weight: 700; }
 .card .value.pos { color: var(--up-color); }
 .card .value.neg { color: var(--down-color); }
-.card .sub { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+.card .value.accent { color: var(--btn-active); }
+.card .sub { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
 
 /* 图表面板 */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -178,7 +179,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .modal-mask.show { display: flex; }
 .modal {
   background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 10px; width: 100%; max-width: 560px; padding: 20px 24px;
+  border-radius: 10px; width: 100%; max-width: 720px; padding: 20px 24px;
   box-shadow: 0 10px 40px rgba(0,0,0,0.25);
 }
 .modal h2 { font-size: 17px; margin-bottom: 16px; }
@@ -189,6 +190,10 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .modal textarea { resize: vertical; min-height: 50px; }
 .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
 .modal .err { color: var(--up-color); font-size: 13px; margin-top: 10px; }
+.modal .trade-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+.modal .trade-panels.single { grid-template-columns: 1fr; }
+.modal .panel { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 0; min-width: 0; }
+.modal .panel legend { font-size: 13px; font-weight: 600; padding: 0 6px; color: var(--text-secondary); }
 
 /* 搜索补全 */
 .autocomplete { position: relative; }
@@ -286,7 +291,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
     <table>
       <thead>
         <tr>
-          <th>代码 / 名称</th><th>状态</th><th>模型</th><th>买入价</th><th>退出价</th><th>数量</th>
+          <th>代码 / 名称</th><th>状态</th><th>模型</th><th>买入价</th><th>退出价</th><th>现价</th><th>数量</th>
           <th>买入日</th><th>卖出日</th><th>买入理由</th><th>卖出理由</th><th>盈亏</th><th>操作</th>
         </tr>
       </thead>
@@ -326,38 +331,50 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <label>数量 (股) <span style="color:var(--up-color)">*</span></label>
         <input type="number" id="t-quantity" min="1" step="1" placeholder="如 100">
       </div>
-      <div>
-        <label>买入价 <span style="color:var(--up-color)">*</span></label>
-        <input type="number" id="t-entry-price" min="0" step="0.01" placeholder="如 10.50">
-      </div>
-      <div>
-        <label>买入日期 <span style="color:var(--up-color)">*</span></label>
-        <input type="date" id="t-entry-date">
-      </div>
-      <div id="exit-price-wrap">
-        <label>退出价 <span style="color:var(--up-color)">*</span></label>
-        <input type="number" id="t-exit-price" min="0" step="0.01" placeholder="如 12.00">
-      </div>
-      <div id="exit-date-wrap">
-        <label>卖出日期 <span style="color:var(--up-color)">*</span></label>
-        <input type="date" id="t-exit-date">
-      </div>
-      <div>
-        <label>买入理由 <span style="color:var(--up-color)">*</span></label>
-        <select id="t-entry-reason"></select>
-      </div>
-      <div>
-        <label>卖出理由 <span style="color:var(--up-color)" id="exit-reason-star">*</span></label>
-        <select id="t-exit-reason"></select>
-      </div>
-      <div>
-        <label>买入理由补充</label>
-        <textarea id="t-entry-note" placeholder="可选，自由文本补充"></textarea>
-      </div>
-      <div>
-        <label>卖出理由补充</label>
-        <textarea id="t-exit-note" placeholder="可选，自由文本补充"></textarea>
-      </div>
+    </div>
+    <div class="trade-panels" id="trade-panels">
+      <fieldset class="panel" id="entry-panel">
+        <legend>买入</legend>
+        <div class="grid">
+          <div>
+            <label>买入价 <span style="color:var(--up-color)">*</span></label>
+            <input type="number" id="t-entry-price" min="0" step="0.01" placeholder="如 10.50">
+          </div>
+          <div>
+            <label>买入日期 <span style="color:var(--up-color)">*</span></label>
+            <input type="date" id="t-entry-date">
+          </div>
+          <div class="full">
+            <label>买入理由 <span style="color:var(--up-color)">*</span></label>
+            <select id="t-entry-reason"></select>
+          </div>
+          <div class="full">
+            <label>买入理由补充</label>
+            <textarea id="t-entry-note" placeholder="可选，自由文本补充"></textarea>
+          </div>
+        </div>
+      </fieldset>
+      <fieldset class="panel" id="sell-panel">
+        <legend>卖出</legend>
+        <div class="grid">
+          <div>
+            <label>退出价 <span style="color:var(--up-color)">*</span></label>
+            <input type="number" id="t-exit-price" min="0" step="0.01" placeholder="如 12.00">
+          </div>
+          <div>
+            <label>卖出日期 <span style="color:var(--up-color)">*</span></label>
+            <input type="date" id="t-exit-date">
+          </div>
+          <div class="full">
+            <label>卖出理由 <span style="color:var(--up-color)" id="exit-reason-star">*</span></label>
+            <select id="t-exit-reason"></select>
+          </div>
+          <div class="full">
+            <label>卖出理由补充</label>
+            <textarea id="t-exit-note" placeholder="可选，自由文本补充"></textarea>
+          </div>
+        </div>
+      </fieldset>
     </div>
     <div class="err" id="modal-err"></div>
     <div class="actions">
@@ -384,6 +401,7 @@ const state = {
   pageSize: 20,
   editingId: null,
   selectedSymbol: null,   // {symbol, name}
+  quotes: {},             // {symbol: quote|null} 持仓股票现价 (null=超时/失败, 显示 —)
   pnlChart: null,
   symbolChart: null,
   modelChart: null,
@@ -460,6 +478,7 @@ async function checkAuth() {
     state.user = { username: data.username, is_admin: data.is_admin };
     showMain();
     await Promise.all([loadReasons(), loadModels(), loadStats(), loadTrades()]);
+    await refreshQuotes(true);  // 进入页面强刷一次持仓现价
   } catch (e) {
     state.user = null;
     showLogin();
@@ -554,6 +573,48 @@ async function loadStats() {
   renderModelChart();
 }
 
+// 持仓股票现价：每次重新拉取全部持仓(及时更新现价/浮盈亏), 失败保留旧值, 仅首次就失败的记 null
+async function refreshQuotes(fresh) {
+  if (!state.stats) return;
+  const positions = state.stats.open_positions || [];
+  const symbols = [...new Set(positions.map(p => p.symbol))];
+  if (!symbols.length) return;
+  try {
+    const data = await api(`/api/quotes?symbols=${encodeURIComponent(symbols.join(','))}&fresh=${fresh ? 1 : 0}`);
+    for (const s of symbols) {
+      const q = data[s];
+      if (q && q.last_price != null) {
+        state.quotes[s] = q;                              // 成功 → 更新
+      } else if (state.quotes[s] === undefined) {
+        state.quotes[s] = null;                           // 从未取到过 → 记 null 显示 —
+      }
+      // 已有旧值但本次没取到 → 保留旧值, 不打断显示
+    }
+  } catch (e) {
+    for (const s of symbols) {
+      if (state.quotes[s] === undefined) state.quotes[s] = null;
+    }
+  }
+  renderStatCards(state.stats.summary);
+  renderTable();
+}
+
+// 持仓聚合 (仅未平仓): 市值 = Σ现价×数量, 浮盈亏 = Σ(现价-买入价)×数量
+function openPositionAggregates() {
+  const positions = (state.stats && state.stats.open_positions) || [];
+  let marketValue = 0, cost = 0, floatPnl = 0;
+  for (const p of positions) {
+    const q = state.quotes[p.symbol];
+    const price = (q && q.last_price != null) ? q.last_price : null;
+    if (price == null) continue;
+    marketValue += price * p.quantity;
+    cost += p.entry_price * p.quantity;
+    floatPnl += (price - p.entry_price) * p.quantity;
+  }
+  const floatPct = cost ? (floatPnl / cost * 100) : 0;
+  return { marketValue, cost, floatPnl, floatPct };
+}
+
 function fmtMoney(v, signed = false) {
   if (v === null || v === undefined) return '—';
   const sign = signed && v > 0 ? '+' : '';
@@ -567,21 +628,34 @@ function pnlClass(v) {
 }
 
 function renderStatCards(s) {
+  const agg = openPositionAggregates();
+  const floatPctStr = agg.floatPct > 0 ? '+' + agg.floatPct.toFixed(2) + '%' : agg.floatPct.toFixed(2) + '%';
   const cards = [
-    { label: '总盈亏', value: fmtMoney(s.total_pnl, true), cls: pnlClass(s.total_pnl), sub: '总收益率 ' + (s.total_return_pct === null ? '—' : (s.total_return_pct > 0 ? '+' : '') + s.total_return_pct + '%') },
+    { label: '总盈亏', value: fmtMoney(s.total_pnl, true), cls: pnlClass(s.total_pnl), sub: (s.total_return_pct === null ? '—' : (s.total_return_pct > 0 ? '+' : '') + s.total_return_pct + '%') },
+    { label: '持仓金额', value: fmtMoney(agg.marketValue), cls: '', sub: `成本 ${fmtMoney(agg.cost)}` },
+    { label: '持仓浮盈亏', value: fmtMoney(agg.floatPnl, true), cls: pnlClass(agg.floatPnl), sub: floatPctStr },
     { label: '胜率', value: s.win_rate === null ? '—' : s.win_rate + '%', cls: '', sub: `${s.win_count}胜 / ${s.loss_count}负 / ${s.break_even_count}平` },
     { label: '盈亏比', value: s.profit_factor === null ? '∞' : s.profit_factor, cls: '', sub: s.avg_win === null ? '' : `均盈 ${fmtMoney(s.avg_win)} / 均亏 ${fmtMoney(s.avg_loss)}` },
     { label: '最大单笔盈利', value: s.max_win ? fmtMoney(s.max_win.pnl, true) : '—', cls: 'pos', sub: s.max_win ? `${s.max_win.name} +${s.max_win.return_pct}%` : '' },
     { label: '最大单笔亏损', value: s.max_loss ? fmtMoney(s.max_loss.pnl, true) : '—', cls: 'neg', sub: s.max_loss ? `${s.max_loss.name} ${s.max_loss.return_pct}%` : '' },
-    { label: '已平仓笔数', value: s.closed_count, cls: '', sub: `持仓中 ${s.open_count} 笔` },
+    { duo: { top: { label: '持仓中', value: s.open_count, cls: 'accent' }, bottom: { label: '已平仓', value: s.closed_count, cls: '' } } },
     { label: '平均持仓天数', value: s.avg_holding_days === null ? '—' : s.avg_holding_days, cls: '', sub: '买入 → 卖出' },
   ];
-  document.getElementById('stat-cards').innerHTML = cards.map(c => `
-    <div class="card">
+  document.getElementById('stat-cards').innerHTML = cards.map(c => {
+    if (c.duo) {
+      return `<div class="card">
+        <div class="label">${c.duo.top.label}</div>
+        <div class="value ${c.duo.top.cls}">${c.duo.top.value}</div>
+        <div class="label" style="margin-top:6px">${c.duo.bottom.label}</div>
+        <div class="value ${c.duo.bottom.cls}">${c.duo.bottom.value}</div>
+      </div>`;
+    }
+    return `<div class="card">
       <div class="label">${c.label}</div>
       <div class="value ${c.cls}">${c.value}</div>
       <div class="sub">${c.sub}</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function chartTheme() {
@@ -690,13 +764,25 @@ async function loadTrades() {
 function renderTable() {
   const tbody = document.getElementById('trade-tbody');
   if (!state.trades.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
   } else {
     tbody.innerHTML = state.trades.map(t => {
+      const q = t.status === 'open' ? state.quotes[t.symbol] : null;
+      const curPrice = (q && q.last_price != null) ? q.last_price : null;
       const pnl = t.pnl;
-      const pnlHtml = t.status === 'closed'
-        ? `<span class="${pnlClass(pnl)}">${fmtMoney(pnl, true)}</span><br><span style="color:var(--text-secondary);font-size:12px">${t.return_pct > 0 ? '+' : ''}${t.return_pct}%</span>`
-        : '<span style="color:var(--text-secondary)">—</span>';
+      let pnlHtml, pnlCls;
+      if (t.status === 'closed') {
+        pnlHtml = `<span class="${pnlClass(pnl)}">${fmtMoney(pnl, true)}</span><br><span style="color:var(--text-secondary);font-size:12px">${t.return_pct > 0 ? '+' : ''}${t.return_pct}%</span>`;
+        pnlCls = pnlClass(pnl);
+      } else if (curPrice != null) {
+        const fp = (curPrice - t.entry_price) * t.quantity;
+        const fpct = t.entry_price ? (curPrice / t.entry_price - 1) * 100 : 0;
+        pnlHtml = `<span class="${pnlClass(fp)}">${fmtMoney(fp, true)}</span><br><span style="color:var(--text-secondary);font-size:12px">${fpct > 0 ? '+' : ''}${fpct.toFixed(2)}%</span>`;
+        pnlCls = pnlClass(fp);
+      } else {
+        pnlHtml = '<span style="color:var(--text-secondary)">—</span>';
+        pnlCls = '';
+      }
       const badge = t.status === 'closed'
         ? '<span class="badge closed">已平仓</span>'
         : '<span class="badge open">持仓中</span>';
@@ -708,12 +794,13 @@ function renderTable() {
         <td>${escHtml(modelLabel(t.model_id))}</td>
         <td>${t.entry_price}</td>
         <td>${t.exit_price === null ? '—' : t.exit_price}</td>
+        <td>${t.status === 'open' ? (curPrice != null ? curPrice : '—') : '—'}</td>
         <td>${t.quantity}</td>
         <td>${escHtml(t.entry_date)}</td>
         <td>${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
         <td class="reason-cell">${escHtml(entryReason)}</td>
         <td class="reason-cell">${escHtml(exitReason || '—')}</td>
-        <td class="${pnlClass(pnl)}">${pnlHtml}</td>
+        <td class="${pnlCls}">${pnlHtml}</td>
         <td>
           <button onclick="openModal(${t.id})">编辑</button>
           <button class="danger" onclick="removeTrade(${t.id})">删除</button>
@@ -742,6 +829,7 @@ async function removeTrade(id) {
   if (!confirm(`确认删除 ${name} 的交易记录？此操作不可撤销。`)) return;
   await api('/api/trades/' + id, { method: 'DELETE' });
   await Promise.all([loadTrades(), loadStats()]);
+  await refreshQuotes(false);
 }
 
 // ═══════════════ 录入/编辑弹窗 ═══════════════
@@ -778,15 +866,8 @@ function closeModal() {
 
 function onStatusChange() {
   const closed = document.getElementById('t-status').value === 'closed';
-  document.getElementById('exit-price-wrap').style.display = closed ? '' : 'none';
-  document.getElementById('exit-date-wrap').style.display = closed ? '' : 'none';
-  document.getElementById('t-exit-reason').style.display = closed ? '' : 'none';
-  document.getElementById('t-exit-note').style.display = closed ? '' : 'none';
-  // 卖出理由标签所在 grid cell 也需要隐藏
-  const exitReasonCell = document.getElementById('t-exit-reason').closest('div');
-  const exitNoteCell = document.getElementById('t-exit-note').closest('div');
-  exitReasonCell.style.display = closed ? '' : 'none';
-  exitNoteCell.style.display = closed ? '' : 'none';
+  document.getElementById('sell-panel').style.display = closed ? '' : 'none';
+  document.getElementById('trade-panels').classList.toggle('single', !closed);
 }
 
 // 搜索补全
@@ -864,6 +945,7 @@ async function saveTrade() {
     }
     closeModal();
     await Promise.all([loadTrades(), loadStats()]);
+    await refreshQuotes(false);
   } catch (e) {
     document.getElementById('modal-err').textContent = e.message;
   }
@@ -897,6 +979,17 @@ window.addEventListener('resize', () => {
 });
 
 checkAuth();
+
+// 持仓现价定时刷新：交易时段(周一~周五 9:30-15:00)每 30s 拉一次, 与首页保持一致
+setInterval(() => {
+  if (!state.user) return;
+  const now = new Date();
+  const d = now.getDay();
+  if (d === 0 || d === 6) return;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (mins < 9 * 60 + 30 || mins >= 15 * 60) return;
+  refreshQuotes(false);
+}, 30000);
 </script>
 </body>
 </html>
