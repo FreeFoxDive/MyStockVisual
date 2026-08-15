@@ -41,14 +41,15 @@ python -u visual/server.py
 ```
 visual/
 ├── server.py          # HTTP服务器 (ThreadingHTTPServer 多线程) + AlphaFeed API 代理
-├── index.html         # 前端单页面 (ECharts 5 CDN)
 ├── indicators.py      # 指标计算函数 (ema / atr / macd / kdj / rsi / force_index)
-│                      #   ema / atr / macd / kdj / rsi / force_index
+├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
+├── static/            # 前端静态文件 (URL 仍为干净路径, 如 /trades.html /admin.html)
+│   ├── index.html     # 前端单页面 (ECharts 5 CDN)
+│   ├── trades.html    # 交易记录前端 (登录注册 + 统计界面)
+│   └── admin.html     # 管理后台 (用户管理 + 量化模型管理, 仅 admin)
 ├── Dockerfile         # Docker 构建文件
 ├── docker-compose.yml # Docker Compose 配置
 ├── requirements.txt   # Python 依赖
-├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
-├── trades.html        # 交易记录前端 (登录注册 + 统计界面)
 ├── docs/
 │   └── trades.md      # 交易记录功能文档 (数据表 / API / 统计口径)
 └── README.md          # 本文件
@@ -138,7 +139,7 @@ visual/
 
 主页左上角「📒 交易记录」入口，未登录须先登录，数据按账户隔离。支持录入股票代码/名称、买入价、退出价、数量、买卖日期、买卖理由；`closed` 平仓记录须填全卖出字段才算一笔交易完整结束。
 
-**量化模型**：每条交易可关联一个量化模型（A–E，对齐回测管线），默认「无」。模型列表全局共享，由管理员增删改查（含 `name` 与 `description` 策略描述），普通用户只读；「删除」为软删除（停用，不物理删除、不动交易记录），历史统计永久可追溯。买卖理由新增「动力红转」（买入）「动力绿转」（卖出）「动力蓝转」（双向，买卖均可选）。
+**量化模型**：每条交易可关联一个量化模型（A–E，对齐回测管线），默认「无」。模型列表全局共享，由管理员增删改查（含 `name` 与 `description` 策略描述），普通用户只读；「删除」为软删除（停用，不物理删除、不动交易记录），历史统计永久可追溯。买卖理由新增「动力红转」（卖出）「动力绿转」（买入）「动力蓝转」（买入）。
 
 **账户管理**：已关闭公开自助注册，新用户只能由管理员添加。管理员在「用户管理」区可添加 / 列表 / 删除 / 重置密码用户；仅单一管理员，由环境变量在首次启动时引导创建。
 

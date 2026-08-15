@@ -1099,6 +1099,9 @@ class VisualHandler(BaseHTTPRequestHandler):
 
     # ── 静态文件 ──
     def _serve_static(self, filename):
+        # 前端静态文件统一放在 static/ 子目录 (URL 仍为干净路径, 如 /trades.html /admin.html)
+        if filename.endswith((".html", ".js", ".css")):
+            filename = "static/" + filename
         filepath = (SCRIPT_DIR / filename).resolve()
         # 防止路径穿越: 确保解析后仍在 visual/ 目录内 (加 os.sep 防 visual-xxx 绕过)
         if not str(filepath).startswith(str(SCRIPT_DIR.resolve()) + os.sep):
