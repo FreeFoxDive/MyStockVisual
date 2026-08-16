@@ -71,16 +71,41 @@
 | `exit_reason` | TEXT | 可空（open 时为空） | 卖出理由分类 |
 | `exit_note` | TEXT | 可空 | 卖出理由自由文本补充 |
 | `model_id` | INTEGER | 可空，FK→models(id) ON DELETE SET NULL | 关联量化模型（`NULL`=无；软删不触发置空） |
+| `type` | TEXT | NOT NULL DEFAULT `'simple'` | 交易类型：`simple`（单笔买卖，默认）/ `batch`（批次多次买卖） |
 | `created_at` | TEXT | NOT NULL | 创建时间 |
 | `updated_at` | TEXT | NOT NULL | 更新时间 |
 
 索引：`idx_trades_user_exit(user_id, exit_date)`、`idx_trades_user_symbol(user_id, symbol)`。
 
-### 完整结束规则
+### 表 `trade_legs` — 批次交易腿（多次买卖明细）
 
-- `status='closed'`：`exit_price` / `exit_date` / `exit_reason` **必填**（且 `exit_date >= entry_date`），填写完整才算一笔交易完整结束。
-- `status='open'`：只要求 `entry_*` 字段完整；卖出字段置空。
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | 腿 ID |
+| `trade_id` | INTEGER | NOT NULL，FK→trades(id) ON DELETE CASCADE | 所属批次交易 |
+| `side` | TEXT | NOT NULL | `buy`（买入）/ `sell`（卖出） |
+| `price` | REAL | NOT NULL | 该腿成交价 |
+| `quantity` | INTEGER | NOT NULL | 该腿成交数量（股） |
+| `date` | TEXT | NOT NULL | 成交日期 `YYYY-MM-DD` |
+| `time` | TEXT | 可空 | 成交时间 `HH:MM[:SS]`（用于同日内正T/反T排序） |
+| `reason` | TEXT | 可空 | 该腿理由（如 加仓/止盈/做T） |
+| `note` | TEXT | 可空 | 该腿自由文本备注 |
+| `created_at` | TEXT | NOT NULL | 创建时间 |
+| `updated_at` | TEXT | NOT NULL | 更新时间 |
+
+索引：`idx_trade_legs_trade(trade_id, date, id)`。
+
+### 两种交易类型与结束规则
+
+- **单笔 `simple`**（默认）：一行记录 = 一次完整往返。`status='closed'` 要求 `exit_price`/`exit_date`/`exit_reason` 必填（`exit_date >= entry_date`）；`status='open'` 只要求 `entry_*` 字段完整，卖出字段置空。
+- **批次 `batch`**：父行只存**冗余汇总**（净持仓/加权均价/首买日/末卖日/status），明细在 `trade_legs`。每次腿写入时按时间顺序滚动重算：
+  - 按 `(date, time, id)` 排序，维护净持仓 `held` 与累计买入成本 `cost_total`。
+  - **买入**：`held += qty`，`cost_total += price × qty`，加权均价 = `cost_total / held`。
+  - **卖出**：校验 `qty <= held`（否则「卖出数量超过当前持仓」拒绝），实现盈亏 `(price − avg) × qty`，`held -= qty`，`cost_total = held × avg`（**卖出不改变均价**）。
+  - 循环结束 `held == 0` → `status='closed'`，否则 `open`。
 - 后端在 `create_trade` / `update_trade` 中统一校验，不满足即拒绝（返回 400 + 具体错误信息）。
+
+> **兼容性**：老库 `trades` 表自动补 `type` 列（默认 `'simple'`），`trade_legs` 表用 `CREATE TABLE IF NOT EXISTS` 新建；存量记录零改动，行为与历史逐位一致。
 
 ---
 
@@ -128,6 +153,49 @@
 - `GET /api/trades` 的 `from`/`to` 作用于 `COALESCE(exit_date, entry_date)`（即平仓用卖出日、持仓用买入日作为归属日期）；`q` 对 `symbol`/`name` 模糊匹配。
 - 股票代码/名称补全复用现有 `GET /api/search?q=...`。
 
+### 请求体示例
+
+**单笔买卖（`simple`，默认）**：`POST /api/trades`
+
+```json
+{
+  "symbol": "000001.SZ",
+  "name": "平安银行",
+  "status": "closed",
+  "quantity": 1000,
+  "entry_price": 10.5,
+  "entry_date": "2026-08-01",
+  "entry_reason": "突破买入",
+  "entry_note": "",
+  "exit_price": 12.0,
+  "exit_date": "2026-08-10",
+  "exit_reason": "止盈(达到目标价)",
+  "exit_note": "",
+  "model_id": 2
+}
+```
+
+**批次多次买卖（`batch`）**：`POST /api/trades`
+
+```json
+{
+  "type": "batch",
+  "symbol": "000001.SZ",
+  "name": "平安银行",
+  "model_id": null,
+  "legs": [
+    { "side": "buy",  "price": 10.0,  "quantity": 1000, "date": "2026-08-01", "time": "09:30", "reason": "建仓",   "note": "" },
+    { "side": "buy",  "price": 12.0,  "quantity": 500,  "date": "2026-08-03", "time": "10:00", "reason": "加仓",   "note": "" },
+    { "side": "sell", "price": 15.0,  "quantity": 800,  "date": "2026-08-05", "time": "14:00", "reason": "减仓",   "note": "" },
+    { "side": "sell", "price": 16.0,  "quantity": 700,  "date": "2026-08-08", "time": "09:45", "reason": "清仓",   "note": "" }
+  ]
+}
+```
+
+- `legs` 非空且至少一条 `buy`；每条腿 `side∈{buy,sell}`、`price>0`、`quantity>0`、`date` 合法（`time`/`reason`/`note` 可选）。
+- `update_trade` 对批次交易**整体替换** `legs`（客户端传完整列表），删旧插新后重算汇总。
+- 列表 / 详情 / 持仓接口对批次交易额外返回 `legs`（腿明细）与 `t_stats`（做T统计）字段。
+
 ---
 
 ## 4. 统计口径（`compute_stats`）
@@ -165,6 +233,41 @@
 - `model_id=NULL` 归入「无」。
 - 停用（软删）模型的历史交易仍计入，`name` 带「（已删除）」后缀，`active=false`。
 - 与 `by_symbol` 相同的盈亏/胜率口径，仅分组维度不同。
+
+### 批次交易盈亏（移动加权平均）
+
+批次交易通过统一的「归一化单笔指标」并入上面的统计口径（`_trade_metrics`），父行字段含义如下：
+
+| 父行字段 | 批次含义 |
+|------|------|
+| `entry_price` | 当前加权均价（`cost_total / held`；已平仓时为 `0.0`） |
+| `quantity` | 净持仓股数（已平仓时为 `0`） |
+| `entry_date` | 首条买入腿日期 |
+| `exit_date` | 末条卖出腿日期（仅平仓时） |
+| `entry_reason` | 首条买入腿理由 |
+| `exit_reason` | 末条卖出腿理由（仅平仓时） |
+
+- **单笔盈亏**：滚动实现的毛盈亏之和（每笔卖出 `(卖价 − 当时加权均价) × 数量`）扣除合计费用。
+- **收益率分母**：`cost = Σ(买入价 × 数量)`（累计买入金额），`return_pct = pnl / cost × 100%`。完全平仓时累计卖出金额 == 累计买入金额，与现有 `pnl / (entry_price × quantity)` 口径一致。
+- **费用**：每条腿各自计一次单边费用（每次下单的佣金各算一次最低佣金 5 元），合计后计入 `pnl` 与 `fees`。
+- **持仓中的批次**：浮盈亏由前端用 `(现价 − 加权均价) × 净持仓` 计算（与单笔持仓一致）。
+
+> 举例（扣费前）：买 1000@10 → 买 500@12（加权均价 16000/1500=10.667）→ 卖 800@15（实现 `(15−10.667)×800=3466.67`）→ 卖 700@16（实现 `(16−10.667)×700=3733.33`）。毛盈亏 7200，累计买入金额 16000，收益率 45%。
+
+### 做T 统计（正T / 反T / 成功率）
+
+批次交易的腿按 `date` 分组，**同一天既有买入又有卖出**记一次做T：
+
+- 配对数量 `matched_qty = min(当日Σ买入量, 当日Σ卖出量)`；超出部分按加仓/减仓计，不计入做T。
+- 方向：当日按 `(time, id)` 排序的**首条腿**为买 → **正T**（先买后卖）；首条腿为卖 → **反T**（先卖后买）。
+- T 盈亏 = `(当日平均卖价 − 当日平均买价) × matched_qty`（毛差价）；`> 0` 记为成功。
+
+汇总返回 `t_stats = {count, positive, reverse, success, success_rate, pnl}`：
+- `count` 做T次数，`positive`/`reverse` 正T/反T次数，`success_rate` 成功率（成功次数 / 总次数 × 100%，无做T时为 `null`），`pnl` 做T盈亏合计。
+
+> 口径与同花顺/东方财富一致：只要同一天既有买又有卖即记一次做T，**不要求先有非零底仓**（建仓当日「先买后卖」的日内往返也计一次正T）。
+>
+> 例：09:30 买 500@10.00 → 14:00 卖 500@10.50 ⇒ 正T，T盈亏 = (10.50−10.00)×500 = +250（成功）。
 
 ---
 

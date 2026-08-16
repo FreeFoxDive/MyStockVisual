@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_reason  TEXT,                    -- open 时为空
     exit_note    TEXT,
     model_id     INTEGER,                 -- 量化模型 (可空, 软删不影响历史)
+    type         TEXT NOT NULL DEFAULT 'simple',  -- 'simple' 单笔 / 'batch' 批次
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -129,6 +130,22 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_user_exit   ON trades(user_id, exit_date);
 CREATE INDEX IF NOT EXISTS idx_trades_user_symbol ON trades(user_id, symbol);
+
+CREATE TABLE IF NOT EXISTS trade_legs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id   INTEGER NOT NULL,
+    side       TEXT NOT NULL,            -- 'buy' | 'sell'
+    price      REAL NOT NULL,
+    quantity   INTEGER NOT NULL,
+    date       TEXT NOT NULL,            -- YYYY-MM-DD
+    time       TEXT,                     -- HH:MM[:SS], 可选; 用于同日内正T/反T排序
+    reason     TEXT,                     -- 该腿理由 (自由文本)
+    note       TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_trade_legs_trade ON trade_legs(trade_id, date, id);
 """
 
 
@@ -182,6 +199,11 @@ def init_db(db_path=None):
             conn.execute(
                 "ALTER TABLE trades ADD COLUMN model_id INTEGER "
                 "REFERENCES models(id) ON DELETE SET NULL"
+            )
+        # 迁移: 旧库 trades 表补 type 列 (默认 'simple', 老数据零改动)
+        if "type" not in tcols:
+            conn.execute(
+                "ALTER TABLE trades ADD COLUMN type TEXT NOT NULL DEFAULT 'simple'"
             )
         # 迁移: 旧库 users 表补 fee_config 列 (TEXT 存 JSON; NULL = 用默认值)
         if "fee_config" not in cols:
@@ -284,6 +306,46 @@ def _calc_fee_detail(trade, fees, side="closed"):
 def _calc_fees(trade, fees, side="closed"):
     """计算单笔交易费用合计 (元), 见 _calc_fee_detail。"""
     return _calc_fee_detail(trade, fees, side)["total"]
+
+
+def _calc_side_fees(symbol, side, price, quantity, fees):
+    """单边费用明细 (供批次交易每条腿各算一次)。
+
+    side='buy'/'sell'。返回 dict: comm / stamp / transfer / total (元, 各 round(...,4))。
+    与 _calc_fee_detail 的费率口径一致, 仅把买入侧/卖出侧拆开, 便于按腿累加。
+    """
+    kind, tenor = classify_symbol(symbol)
+    amt = (price or 0.0) * quantity
+
+    if kind == "reverse_repo":
+        # 逆回购佣金: 成交额 × 期限费率 (单边), 仅买入算一次
+        rate = fees.get("reverse_repo_rates", {}).get(tenor, 0.0)
+        total = round(amt * rate, 4) if side == "buy" else 0.0
+        return {"comm": 0.0, "stamp": 0.0, "transfer": 0.0, "total": total}
+
+    rate = fees.get(
+        {
+            "stock": "commission_rate_stock",
+            "etf": "commission_rate_etf",
+            "hk": "commission_rate_hk",
+        }[kind],
+        0.0,
+    )
+    min_comm = fees.get("min_commission", 0.0) if kind in ("stock", "etf") else 0.0
+    comm = amt * rate
+    if min_comm:
+        comm = max(comm, min_comm)
+    transfer = amt * fees.get("transfer_fee_rate", 0.0)
+    stamp = 0.0
+    if side == "sell" and kind != "etf":
+        stamp = amt * fees.get("stamp_duty_rate", 0.0)
+
+    return {
+        "comm": round(comm, 4),
+        "stamp": round(stamp, 4),
+        "transfer": round(transfer, 4),
+        "total": round(comm + stamp + transfer, 4),
+    }
 
 
 def _clean_fees(config):
@@ -671,8 +733,133 @@ def _valid_date(s):
         return False
 
 
+def _clean_batch(data, existing=None):
+    """校验并规范化批次交易 (type='batch')。返回 (clean_dict, error_msg)。
+
+    腿按 (date, time) 排序后滚动校验超卖, 并回填父行汇总字段 (净持仓/加权均价/首买日/末卖日/status)。
+    """
+    merged = {}
+    if existing:
+        merged.update(existing)
+    for k, v in data.items():
+        if v is not None:
+            merged[k] = v
+
+    def s(v):
+        return v.strip() if isinstance(v, str) else v
+
+    symbol = s(merged.get("symbol", "")).upper()
+    name = s(merged.get("name", ""))
+    if not symbol:
+        return None, "缺少股票代码"
+    if not name:
+        return None, "缺少股票名称"
+
+    model_id = None
+    if merged.get("model_id") not in (None, ""):
+        try:
+            model_id = int(merged["model_id"])
+        except (TypeError, ValueError):
+            return None, "模型无效"
+        if not _model_exists(model_id):
+            return None, "模型不存在"
+
+    raw_legs = merged.get("legs")
+    if not isinstance(raw_legs, list) or not raw_legs:
+        return None, "批次交易至少需要一条腿"
+
+    legs = []
+    has_buy = False
+    for i, leg in enumerate(raw_legs):
+        if not isinstance(leg, dict):
+            return None, f"第{i + 1}条腿格式无效"
+        side = s(leg.get("side", ""))
+        if side not in ("buy", "sell"):
+            return None, f"第{i + 1}条腿 side 必须为 buy 或 sell"
+        try:
+            price = float(leg.get("price"))
+        except (TypeError, ValueError):
+            return None, f"第{i + 1}条腿价格无效"
+        if price <= 0:
+            return None, f"第{i + 1}条腿价格必须大于 0"
+        try:
+            qty = int(leg.get("quantity"))
+        except (TypeError, ValueError):
+            return None, f"第{i + 1}条腿数量无效"
+        if qty <= 0:
+            return None, f"第{i + 1}条腿数量必须大于 0"
+        date_str = s(leg.get("date", ""))
+        if not _valid_date(date_str):
+            return None, f"第{i + 1}条腿日期无效 (格式 YYYY-MM-DD)"
+        time_str = s(leg.get("time")) or None
+        if time_str is not None:
+            parts = time_str.split(":")
+            if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
+                return None, f"第{i + 1}条腿时间无效 (格式 HH:MM 或 HH:MM:SS)"
+        if side == "buy":
+            has_buy = True
+        legs.append({
+            "side": side,
+            "price": price,
+            "quantity": qty,
+            "date": date_str,
+            "time": time_str,
+            "reason": s(leg.get("reason")) or None,
+            "note": s(leg.get("note")) or None,
+        })
+
+    if not has_buy:
+        return None, "批次交易至少需要一条买入腿"
+
+    # 按 (date, time) 排序后滚动校验超卖 + 计算净持仓/加权均价
+    legs.sort(key=lambda l: (l["date"], l["time"] or "", 0))
+    held = 0
+    cost_total = 0.0
+    for leg in legs:
+        if leg["side"] == "buy":
+            held += leg["quantity"]
+            cost_total += leg["price"] * leg["quantity"]
+        else:
+            if leg["quantity"] > held:
+                return None, "卖出数量超过当前持仓"
+            avg = cost_total / held if held else 0.0
+            held -= leg["quantity"]
+            cost_total = held * avg
+
+    status = "closed" if held == 0 else "open"
+    avg_cost = cost_total / held if held else 0.0
+    first_buy = next(l for l in legs if l["side"] == "buy")
+    sells = [l for l in legs if l["side"] == "sell"]
+    last_sell = sells[-1] if sells else None
+
+    clean = {
+        "symbol": symbol,
+        "name": name,
+        "model_id": model_id,
+        "type": "batch",
+        "legs": legs,
+        "status": status,
+        "entry_price": round(avg_cost, 4),
+        "quantity": held,
+        "entry_date": first_buy["date"],
+        "exit_price": None,
+        "exit_date": last_sell["date"] if status == "closed" else None,
+        "entry_reason": first_buy.get("reason") or "",
+        "entry_note": first_buy.get("note"),
+        "exit_reason": last_sell.get("reason") if last_sell else None,
+        "exit_note": last_sell.get("note") if last_sell else None,
+    }
+    return clean, None
+
+
 def _clean(data, existing=None):
     """合并并规范化字段。返回 (clean_dict, error_msg)。"""
+    ttype = data.get("type") or (existing or {}).get("type") or "simple"
+    if ttype not in ("simple", "batch"):
+        return None, "type 必须为 simple 或 batch"
+    if ttype == "batch":
+        return _clean_batch(data, existing)
+
     merged = {}
     if existing:
         merged.update(existing)
@@ -732,6 +919,7 @@ def _clean(data, existing=None):
         "symbol": symbol,
         "name": name,
         "status": status,
+        "type": "simple",
         "entry_price": entry_price,
         "quantity": quantity,
         "entry_date": entry_date,
@@ -775,26 +963,218 @@ def _clean(data, existing=None):
     return clean, None
 
 
+def _get_legs(trade_id):
+    """读取批次交易的全部腿 (按 date, time, id 排序)。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, side, price, quantity, date, time, reason, note "
+            "FROM trade_legs WHERE trade_id=? ORDER BY date, time, id",
+            (trade_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _batch_metrics(symbol, legs, fee_config):
+    """批次交易滚动盈亏/费用 (移动加权平均, 卖出不改变均价)。
+
+    legs 为腿列表 (含 id 可选)。返回:
+      pnl / return_pct / fees / cost / total_buy_amt / total_sell_amt /
+      net_qty / avg_cost / cost_price / first_date / last_date / fee_breakdown
+
+    口径说明 (与 simple 路径的差异, 有意为之):
+      - pnl        = 已实现毛盈亏 - 费用。
+      - cost       = 累计买入金额 total_buy_amt (收益率分母)。
+      - return_pct = pnl / cost * 100。注意: 未平仓批次也会返回非空 return_pct
+        (已实现盈亏/累计买入), 而 simple open 恒为 None —— 字段语义不统一, 消费方需自辨。
+      - avg_cost   = 移动加权均价, 随买入更新、卖出不变, 平仓后归 0。
+      - cost_price = 买入均价 Σ(价×量)/Σ量, 不随卖出更新 —— 与 avg_cost 是两个概念,
+        仅作"平均买入价"展示用, 勿当作移动加权成本。
+    """
+    legs = sorted(legs, key=lambda l: (l["date"], l["time"] or "", l.get("id", 0)))
+    held = 0
+    cost_total = 0.0
+    realized = 0.0
+    total_buy_amt = 0.0
+    total_buy_qty = 0
+    total_sell_amt = 0.0
+    fees = 0.0
+    bd = {"buy_comm": 0.0, "sell_comm": 0.0, "stamp": 0.0, "transfer": 0.0}
+    first_date = None
+    last_date = None
+
+    for leg in legs:
+        p = leg["price"]
+        q = leg["quantity"]
+        d = leg["date"]
+        first_date = d if first_date is None else min(first_date, d)
+        last_date = d if last_date is None else max(last_date, d)
+        if leg["side"] == "buy":
+            cost_total += p * q
+            held += q
+            total_buy_amt += p * q
+            total_buy_qty += q
+        else:
+            if q > held:
+                raise ValueError("卖出数量超过当前持仓")
+            avg = cost_total / held if held else 0.0
+            realized += (p - avg) * q
+            held -= q
+            cost_total = held * avg
+            total_sell_amt += p * q
+        if fee_config:
+            f = _calc_side_fees(symbol, leg["side"], p, q, fee_config)
+            fees += f["total"]
+            if leg["side"] == "buy":
+                bd["buy_comm"] += f["comm"]
+            else:
+                bd["sell_comm"] += f["comm"]
+            bd["stamp"] += f["stamp"]
+            bd["transfer"] += f["transfer"]
+
+    fees = round(fees, 4)
+    pnl = round(realized - fees, 2)
+    return {
+        "pnl": pnl,
+        "return_pct": round(pnl / total_buy_amt * 100, 2) if total_buy_amt else None,
+        "fees": fees,
+        "cost": total_buy_amt,
+        "total_buy_amt": total_buy_amt,
+        "total_sell_amt": total_sell_amt,
+        "total_buy_qty": total_buy_qty,
+        "net_qty": held,
+        "avg_cost": round(cost_total / held, 4) if held else 0.0,
+        "cost_price": round(total_buy_amt / total_buy_qty, 4) if total_buy_qty else 0.0,  # 买入均价, 非移动加权
+        "first_date": first_date,
+        "last_date": last_date,
+        "fee_breakdown": {
+            "buy_comm": round(bd["buy_comm"], 4),
+            "sell_comm": round(bd["sell_comm"], 4),
+            "stamp": round(bd["stamp"], 4),
+            "transfer": round(bd["transfer"], 4),
+            "total": fees,
+        },
+    }
+
+
+def _t_stats(legs):
+    """做T统计: 同日既有买又有卖记一次做T (机械定义, 不要求先有底仓)。
+
+    正T = 当日首腿为买; 反T = 当日首腿为卖。
+    T盈亏 = (当日平均卖价 - 当日平均买价) × min(买量, 卖量); > 0 记为成功。
+    返回 {count, positive, reverse, success, success_rate, pnl}。
+    """
+    days = {}
+    for leg in legs:
+        days.setdefault(leg["date"], []).append(leg)
+    for ls in days.values():
+        ls.sort(key=lambda l: (l["time"] or "", l.get("id", 0)))
+
+    count = 0
+    positive = 0
+    reverse = 0
+    success = 0
+    pnl = 0.0
+    for ls in days.values():
+        buy_qty = sum(l["quantity"] for l in ls if l["side"] == "buy")
+        sell_qty = sum(l["quantity"] for l in ls if l["side"] == "sell")
+        if not buy_qty or not sell_qty:
+            continue
+        count += 1
+        if ls[0]["side"] == "buy":
+            positive += 1
+        else:
+            reverse += 1
+        matched = min(buy_qty, sell_qty)
+        buy_amt = sum(l["price"] * l["quantity"] for l in ls if l["side"] == "buy")
+        sell_amt = sum(l["price"] * l["quantity"] for l in ls if l["side"] == "sell")
+        avg_buy = buy_amt / buy_qty
+        avg_sell = sell_amt / sell_qty
+        t_pnl = (avg_sell - avg_buy) * matched
+        pnl += t_pnl
+        if t_pnl > 0:
+            success += 1
+
+    return {
+        "count": count,
+        "positive": positive,
+        "reverse": reverse,
+        "success": success,
+        "success_rate": round(success / count * 100, 2) if count else None,
+        "pnl": round(pnl, 2),
+    }
+
+
+def _trade_metrics(trade_row, fee_config=None, deduct_fees=True):
+    """归一化单笔交易指标 (simple 与 batch 的单一数据源)。
+
+    返回 {pnl, return_pct, fees, cost, fee_breakdown, t_stats, legs}。
+    legs 仅 batch 交易非 None; t_stats 仅 batch 交易非 None。
+    """
+    t = dict(trade_row)
+
+    if t.get("type") == "batch":
+        legs = _get_legs(t["id"])
+        cfg = fee_config if (deduct_fees and fee_config) else None
+        m = _batch_metrics(t["symbol"], legs, cfg)
+        return {
+            "pnl": m["pnl"],
+            "return_pct": m["return_pct"],
+            "fees": m["fees"],
+            "cost": m["cost"],
+            "cost_price": m["cost_price"],
+            "total_buy_qty": m["total_buy_qty"],
+            "fee_breakdown": m["fee_breakdown"],
+            "t_stats": _t_stats(legs),
+            "legs": legs,
+        }
+
+    # simple 路径: 与历史口径逐位一致
+    pnl = None
+    return_pct = None
+    fees = 0.0
+    detail = None
+    cost = t["entry_price"] * t["quantity"]
+    if t["status"] == "closed" and t["exit_price"] is not None:
+        if fee_config and deduct_fees:
+            detail = _calc_fee_detail(t, fee_config, "closed")
+            fees = detail["total"]
+        pnl = round((t["exit_price"] - t["entry_price"]) * t["quantity"] - fees, 2)
+        if cost:
+            return_pct = round(pnl / cost * 100, 2)
+    elif t["status"] == "open" and fee_config and deduct_fees:
+        # 持仓: 仅买入侧费用, 浮盈亏由前端 (现价-买入价)*数量 - fees 计算
+        detail = _calc_fee_detail(t, fee_config, "open")
+        fees = detail["total"]
+
+    return {
+        "pnl": pnl,
+        "return_pct": return_pct,
+        "fees": fees,
+        "cost": cost,
+        "cost_price": None,
+        "fee_breakdown": detail,
+        "t_stats": None,
+        "legs": None,
+    }
+
+
 def _row_to_dict(row, fee_config=None):
     d = dict(row)
-    d["pnl"] = None
-    d["return_pct"] = None
-    d["fees"] = 0.0
-    d["fee_breakdown"] = None
-    if d["status"] == "closed" and d["exit_price"] is not None:
-        if fee_config:
-            detail = _calc_fee_detail(d, fee_config, "closed")
-            d["fees"] = detail["total"]
-            d["fee_breakdown"] = detail
-        d["pnl"] = round((d["exit_price"] - d["entry_price"]) * d["quantity"] - d["fees"], 2)
-        cost = d["entry_price"] * d["quantity"]
-        if cost:
-            d["return_pct"] = round(d["pnl"] / cost * 100, 2)
-    elif d["status"] == "open" and fee_config:
-        # 持仓: 仅买入侧费用, 浮盈亏由前端 (现价-买入价)*数量 - fees 计算
-        detail = _calc_fee_detail(d, fee_config, "open")
-        d["fees"] = detail["total"]
-        d["fee_breakdown"] = detail
+    m = _trade_metrics(d, fee_config=fee_config, deduct_fees=True)
+    d["pnl"] = m["pnl"]
+    d["return_pct"] = m["return_pct"]
+    d["fees"] = m["fees"]
+    d["fee_breakdown"] = m["fee_breakdown"]
+    d["cost"] = m["cost"]
+    if m.get("cost_price") is not None:
+        d["cost_price"] = m["cost_price"]
+    if m["legs"] is not None:
+        d["legs"] = m["legs"]
+        d["t_stats"] = m["t_stats"]
+        d["total_buy_qty"] = m["total_buy_qty"]
     return d
 
 
@@ -863,6 +1243,21 @@ def _clamp_int(v, lo, hi, default):
     return lo if n < lo else (hi if n > hi else n)
 
 
+def _insert_legs(conn, trade_id, legs):
+    now = _now_iso()
+    conn.executemany(
+        "INSERT INTO trade_legs(trade_id, side, price, quantity, date, time, reason, note, "
+        "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                trade_id, leg["side"], leg["price"], leg["quantity"], leg["date"],
+                leg.get("time"), leg.get("reason"), leg.get("note"), now, now,
+            )
+            for leg in legs
+        ],
+    )
+
+
 def create_trade(user_id, data):
     clean, err = _clean(data)
     if err:
@@ -873,18 +1268,20 @@ def create_trade(user_id, data):
         cur = conn.execute(
             "INSERT INTO trades(user_id, symbol, name, status, entry_price, exit_price, "
             "quantity, entry_date, exit_date, entry_reason, entry_note, exit_reason, "
-            "exit_note, model_id, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "exit_note, model_id, type, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 user_id, clean["symbol"], clean["name"], clean["status"],
                 clean["entry_price"], clean["exit_price"], clean["quantity"],
                 clean["entry_date"], clean["exit_date"], clean["entry_reason"],
                 clean["entry_note"], clean["exit_reason"], clean["exit_note"],
-                clean["model_id"], now, now,
+                clean["model_id"], clean.get("type", "simple"), now, now,
             ),
         )
-        conn.commit()
         tid = cur.lastrowid
+        if clean.get("type") == "batch":
+            _insert_legs(conn, tid, clean["legs"])
+        conn.commit()
     finally:
         conn.close()
     return get_trade(user_id, tid)
@@ -902,15 +1299,19 @@ def update_trade(user_id, tid, data):
         conn.execute(
             "UPDATE trades SET symbol=?, name=?, status=?, entry_price=?, exit_price=?, "
             "quantity=?, entry_date=?, exit_date=?, entry_reason=?, entry_note=?, "
-            "exit_reason=?, exit_note=?, model_id=?, updated_at=? WHERE id=? AND user_id=?",
+            "exit_reason=?, exit_note=?, model_id=?, type=?, updated_at=? "
+            "WHERE id=? AND user_id=?",
             (
                 clean["symbol"], clean["name"], clean["status"], clean["entry_price"],
                 clean["exit_price"], clean["quantity"], clean["entry_date"],
                 clean["exit_date"], clean["entry_reason"], clean["entry_note"],
                 clean["exit_reason"], clean["exit_note"], clean["model_id"],
-                _now_iso(), tid, user_id,
+                clean.get("type", "simple"), _now_iso(), tid, user_id,
             ),
         )
+        conn.execute("DELETE FROM trade_legs WHERE trade_id=?", (tid,))
+        if clean.get("type") == "batch":
+            _insert_legs(conn, tid, clean["legs"])
         conn.commit()
     finally:
         conn.close()
@@ -987,13 +1388,12 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
             continue
         if end and t["exit_date"] > end:
             continue
-        raw_pnl = (t["exit_price"] - t["entry_price"]) * t["quantity"]
-        t["fees"] = 0.0
-        if deduct_fees and fee_config:
-            t["fees"] = _calc_fees(t, fee_config)
-        t["pnl"] = raw_pnl - t["fees"]
-        cost = t["entry_price"] * t["quantity"]
-        t["return_pct"] = (t["pnl"] / cost * 100) if cost else 0.0
+        m = _trade_metrics(t, fee_config=fee_config, deduct_fees=deduct_fees)
+        t["fees"] = m["fees"]
+        t["pnl"] = m["pnl"]
+        t["cost"] = m["cost"]
+        t["return_pct"] = m["return_pct"] if m["return_pct"] is not None else 0.0
+        t["t_stats"] = m["t_stats"]
         trades.append(t)
 
     wins = [t for t in trades if t["pnl"] > 0]
@@ -1001,7 +1401,7 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
     break_even = [t for t in trades if t["pnl"] == 0]
 
     total_pnl = sum(t["pnl"] for t in trades)
-    total_cost = sum(t["entry_price"] * t["quantity"] for t in trades)
+    total_cost = sum(t["cost"] for t in trades)
     total_return_pct = (total_pnl / total_cost * 100) if total_cost else 0.0
 
     gross_win = sum(t["pnl"] for t in wins)
@@ -1025,6 +1425,26 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
         round(sum(holding_days) / len(holding_days), 1) if holding_days else None
     )
 
+    t_count = t_positive = t_reverse = t_success = 0
+    t_pnl = 0.0
+    for t in trades:
+        ts = t.get("t_stats")
+        if not ts:
+            continue
+        t_count += ts["count"]
+        t_positive += ts["positive"]
+        t_reverse += ts["reverse"]
+        t_success += ts["success"]
+        t_pnl += ts["pnl"]
+    summary_t_stats = {
+        "count": t_count,
+        "positive": t_positive,
+        "reverse": t_reverse,
+        "success": t_success,
+        "success_rate": round(t_success / t_count * 100, 2) if t_count else None,
+        "pnl": round(t_pnl, 2),
+    }
+
     summary = {
         "closed_count": len(trades),
         "open_count": open_count,
@@ -1040,6 +1460,7 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
         "avg_holding_days": avg_holding_days,
         "total_fees": round(sum(t["fees"] for t in trades), 2),
         "deduct_fees": deduct_fees,
+        "t_stats": summary_t_stats,
         "max_win": (
             {
                 "symbol": max_win["symbol"], "name": max_win["name"],

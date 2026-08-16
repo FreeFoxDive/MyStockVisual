@@ -758,6 +758,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", len(body))
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Security-Policy", CSP_HEADER)
         self.end_headers()
         self.wfile.write(body)
@@ -813,13 +814,19 @@ class VisualHandler(BaseHTTPRequestHandler):
 
     # ── 鉴权与 body 解析助手 ──
     def _client_ip(self):
-        """识别真实客户端 IP：Cloudflare/反代头优先，回退到 socket 对端。"""
+        """识别真实客户端 IP：只信任 CF-Connecting-IP，缺失时回退 socket 对端。
+
+        部署栈为 Cloudflare CDN → Caddy 反代 → 本服务 (Docker)。Cloudflare 会覆盖
+        客户端自带的 CF-Connecting-IP 头并注入真实访客 IP，故该头在 CF 前置时可信。
+
+        不信任 X-Forwarded-For：Cloudflare 对它只追加不覆盖，客户端预塞的伪造段
+        会落在第一位，取 split(",")[0] 恰好取到伪造值，可被用于绕过 per-IP 限流。
+        缺失 CF 头时回退 client_address[0]（反代/容器网关 IP，所有用户共享），
+        仅作安全默认值，不放大（避免全员共享 IP 互相触发限流）。
+        """
         cf = self.headers.get("CF-Connecting-IP")
         if cf:
             return cf.strip().split(",")[0].strip()
-        xff = self.headers.get("X-Forwarded-For")
-        if xff:
-            return xff.split(",")[0].strip()
         return self.client_address[0]
 
     def _get_cookie(self, name):
@@ -836,9 +843,13 @@ class VisualHandler(BaseHTTPRequestHandler):
         return trades.get_session(token)
 
     def _set_session_cookie(self, token, clear=False):
+        # 仅当反代转发 X-Forwarded-Proto: https 时加 Secure，保证本地 127.0.0.1 纯 HTTP
+        # 仍可登录（浏览器会拒绝在 http 下回传带 Secure 的 cookie）。Caddy 未配置转发头
+        # 时优雅降级为不带 Secure，与历史行为一致。
+        secure = " Secure" if self.headers.get("X-Forwarded-Proto", "").strip().lower() == "https" else ""
         if clear:
             return f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-        return f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}"
+        return f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}{secure}"
 
     def _read_json_body(self):
         try:
@@ -1193,6 +1204,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", f"{ct}; charset=utf-8")
         self.send_header("Content-Length", len(body))
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Security-Policy", CSP_HEADER)
         self.end_headers()
         self.wfile.write(body)

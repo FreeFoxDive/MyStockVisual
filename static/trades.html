@@ -228,6 +228,33 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .modal .panel { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 0; min-width: 0; }
 .modal .panel legend { font-size: 13px; font-weight: 600; padding: 0 6px; color: var(--text-secondary); }
 
+/* 类型切换 (单笔/批次) */
+.type-toggle { display: flex; gap: 18px; flex-wrap: wrap; }
+.type-toggle .type-opt { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+.type-toggle .type-opt input { width: auto; margin: 0; }
+
+/* 批次腿编辑器 */
+.legs-editor { margin-top: 12px; }
+.legs-editor .legs-toolbar { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.leg-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--bg-panel); }
+.leg-row .leg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.leg-row .leg-head .leg-no { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.leg-row .leg-head .leg-del { padding: 2px 8px; font-size: 12px; color: var(--up-color); border: none; background: transparent; cursor: pointer; }
+.leg-row .leg-head .leg-del:hover { text-decoration: underline; }
+.leg-row .leg-fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.leg-row .leg-fields > div { min-width: 0; }
+.leg-row .leg-fields .col-2 { grid-column: span 2; }
+.leg-row .leg-fields .col-3 { grid-column: span 3; }
+.leg-row .leg-fields label { display: block; font-size: 11px; color: var(--text-secondary); margin-bottom: 3px; }
+.leg-row .leg-fields input, .leg-row .leg-fields select { width: 100%; padding: 5px 8px; }
+.leg-side-btns { display: inline-flex; border: 1px solid var(--input-border); border-radius: 4px; overflow: hidden; }
+.leg-side-btns button { border: none; border-radius: 0; padding: 5px 12px; }
+.leg-side-btns button.active.buy { background: var(--up-color); color: #fff; }
+.leg-side-btns button.active.sell { background: var(--down-color); color: #fff; }
+
+/* 批次标签 */
+.badge.batch { background: rgba(41,98,255,0.12); color: var(--btn-active); margin-left: 4px; }
+
 /* 搜索补全 */
 .autocomplete { position: relative; }
 .autocomplete .dropdown {
@@ -263,6 +290,9 @@ td.neg { color: var(--down-color); font-weight: 600; }
   .modal { padding: 16px; }
   .modal .grid { grid-template-columns: 1fr; }
   .modal .trade-panels { grid-template-columns: 1fr; }
+  .leg-row .leg-fields { grid-template-columns: 1fr 1fr; }
+  .leg-row .leg-fields .col-2 { grid-column: span 2; }
+  .leg-row .leg-fields .col-3 { grid-column: span 2; }
 
   /* 表格 → 卡片 */
   .table-wrap { border: none; background: transparent; overflow: visible; }
@@ -406,7 +436,14 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <input type="text" id="t-symbol-input" placeholder="输入代码或名称搜索..." autocomplete="off">
         <div class="dropdown" id="t-symbol-dropdown"></div>
       </div>
-      <div>
+      <div class="full">
+        <label>类型</label>
+        <div class="type-toggle">
+          <label class="type-opt"><input type="radio" name="t-type" value="simple" checked onchange="onTypeChange()"> 单笔买卖</label>
+          <label class="type-opt"><input type="radio" name="t-type" value="batch" onchange="onTypeChange()"> 批次 (多次买卖/做T)</label>
+        </div>
+      </div>
+      <div id="t-status-wrap">
         <label>状态</label>
         <select id="t-status" onchange="onStatusChange()">
           <option value="open">持仓中 (未结束)</option>
@@ -417,7 +454,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <label>模型推荐</label>
         <select id="t-model"><option value="">无</option></select>
       </div>
-      <div>
+      <div id="t-quantity-wrap">
         <label>数量 (股) <span style="color:var(--up-color)">*</span></label>
         <input type="number" id="t-quantity" min="1" step="1" placeholder="如 100">
       </div>
@@ -465,6 +502,15 @@ td.neg { color: var(--down-color); font-weight: 600; }
           </div>
         </div>
       </fieldset>
+    </div>
+    <div class="legs-editor" id="legs-editor" style="display:none">
+      <div class="legs-toolbar">
+        <button class="primary" onclick="addLeg('buy')">＋ 买入</button>
+        <button onclick="addLeg('sell')">＋ 卖出</button>
+        <span style="color:var(--text-secondary);font-size:12px;align-self:center">按时间顺序录入每笔买卖，系统自动加权平均并计算盈亏</span>
+        <span id="legs-net-qty" style="margin-left:auto;font-weight:600;font-size:13px;align-self:center">当前剩余 0 股</span>
+      </div>
+      <div id="legs-list"></div>
     </div>
     <div class="err" id="modal-err"></div>
     <div class="actions">
@@ -519,6 +565,7 @@ const state = {
   pageSize: 20,
   editingId: null,
   selectedSymbol: null,   // {symbol, name}
+  legs: [],               // 批次腿编辑器草稿
   quotes: {},             // {symbol: quote|null} 持仓股票现价 (null=超时/失败, 显示 —)
   deductFees: true,       // 统计是否扣除佣金 (localStorage: trades-deduct-fees)
   fees: null,             // 当前用户费率配置 (来自 /api/fees)
@@ -956,12 +1003,25 @@ function buildPnlTip(t, gross, fees, netPnl, pct) {
     feeRows = `<div class="tip-row"><span class="tip-k">费用</span><span class="tip-v">未扣除</span></div>`;
   }
   const pctStr = (pct == null) ? '—' : (pct > 0 ? '+' : '') + pct.toFixed(2) + '%';
+  let tRows = '';
+  if (t.type === 'batch') {
+    const legCount = (t.legs && t.legs.length) || 0;
+    const ts = t.t_stats;
+    if (legCount) tRows += `<div class="tip-row"><span class="tip-k">成交笔数</span><span class="tip-v">${legCount}</span></div>`;
+    if (ts && ts.count) {
+      tRows += `<div class="tip-row"><span class="tip-k">做T</span><span class="tip-v">${ts.count} 次 (正T ${ts.positive} / 反T ${ts.reverse})</span></div>`
+        + `<div class="tip-row"><span class="tip-k">做T成功率</span><span class="tip-v">${ts.success_rate}%</span></div>`
+        + `<div class="tip-row"><span class="tip-k">做T盈亏</span><span class="tip-v ${pnlClass(ts.pnl)}">${fmtMoney(ts.pnl, true)}</span></div>`;
+    }
+    if (tRows) tRows = `<div class="tip-sep"></div>` + tRows;
+  }
   return `<div class="tip-title">盈亏明细</div>`
     + `<div class="tip-row"><span class="tip-k">股价变动</span><span class="tip-v ${pnlClass(gross)}">${fmtMoney(gross, true)}</span></div>`
     + feeRows
     + `<div class="tip-sep"></div>`
     + `<div class="tip-row"><span class="tip-k">最终盈亏</span><span class="tip-v ${pnlClass(netPnl)}">${fmtMoney(netPnl, true)}</span></div>`
-    + `<div class="tip-row"><span class="tip-k">收益率</span><span class="tip-v ${pnlClass(netPnl)}">${pctStr}</span></div>`;
+    + `<div class="tip-row"><span class="tip-k">收益率</span><span class="tip-v ${pnlClass(netPnl)}">${pctStr}</span></div>`
+    + tRows;
 }
 
 function hidePnlTip() {
@@ -1008,6 +1068,9 @@ function renderStatCards(s) {
     { label: '最大单笔亏损', value: s.max_loss ? fmtMoney(s.max_loss.pnl, true) : '—', cls: 'neg', sub: s.max_loss ? `${s.max_loss.name} ${s.max_loss.return_pct}%` : '', subCls: 'neg' },
     { duo: { top: { label: '持仓中', value: s.open_count, cls: 'accent' }, bottom: { label: '已平仓', value: s.closed_count, cls: '' } } },
     { label: '平均持仓天数', value: s.avg_holding_days === null ? '—' : s.avg_holding_days, cls: '', sub: '买入 → 卖出' },
+    (s.t_stats && s.t_stats.count
+      ? { label: '做T', value: s.t_stats.count, cls: 'accent', sub: `正T ${s.t_stats.positive} / 反T ${s.t_stats.reverse} · 成功率 ${s.t_stats.success_rate}% · ${fmtMoney(s.t_stats.pnl, true)}` }
+      : { label: '做T', value: '—', cls: '', sub: '同日买+卖记一次' }),
   ];
   document.getElementById('stat-cards').innerHTML = cards.map(c => {
     if (c.duo) {
@@ -1160,9 +1223,28 @@ function renderTable() {
       const q = state.quotes[t.symbol];
       const curPrice = (q && q.last_price != null) ? q.last_price : null;
       const fees = t.fees || 0;
+      const isBatch = t.type === 'batch';
       let gross = null, netPnl = null, pct = null;
       let pnlHtml, pnlCls;
-      if (t.status === 'closed') {
+      if (isBatch) {
+        // 批次: pnl 为已实现盈亏(扣费后); 持仓中再叠加未实现浮盈亏
+        const realized = t.pnl || 0;
+        const floating = (t.status === 'open' && curPrice != null)
+          ? (curPrice - t.entry_price) * t.quantity : 0;
+        gross = realized + fees + floating;
+        netPnl = realized + floating;
+        if (t.status === 'closed') {
+          pct = t.return_pct;
+        } else if (curPrice != null) {
+          pct = t.cost ? (netPnl / t.cost * 100) : 0;
+        } else {
+          pct = t.return_pct;
+        }
+        const pctStr = pct == null ? '—' : (pct > 0 ? '+' : '')
+          + ((t.status === 'open' && curPrice != null) ? pct.toFixed(2) : pct) + '%';
+        pnlHtml = `<span class="${pnlClass(netPnl)}">${fmtMoney(netPnl, true)}</span><br><span class="${pnlClass(netPnl)}" style="font-size:12px">${pctStr}</span>`;
+        pnlCls = pnlClass(netPnl);
+      } else if (t.status === 'closed') {
         gross = (t.exit_price != null && t.entry_price != null)
           ? (t.exit_price - t.entry_price) * t.quantity : null;
         netPnl = t.pnl;
@@ -1194,23 +1276,24 @@ function renderTable() {
         }
       }
       if (gross != null) tips[t.id] = buildPnlTip(t, gross, fees, netPnl, pct);
-      const badge = t.status === 'closed'
+      const badge = (t.status === 'closed'
         ? '<span class="badge closed">已平仓</span>'
-        : '<span class="badge open">持仓中</span>';
+        : '<span class="badge open">持仓中</span>')
+        + (isBatch ? '<span class="badge batch">批次</span>' : '');
       const entryReason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
       const exitReason = [t.exit_reason, t.exit_note].filter(Boolean).join('；');
       return `<tr>
         <td class="sym" data-label="代码"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
         <td data-label="状态">${badge}</td>
         <td data-label="模型">${escHtml(modelLabel(t.model_id))}</td>
-        <td data-label="买入价">${t.entry_price}</td>
+        <td data-label="${isBatch ? '成本价' : '买入价'}">${isBatch ? (t.status === 'closed' ? (t.cost_price != null ? t.cost_price : '—') : t.entry_price) : t.entry_price}</td>
         <td class="${exitCls}" data-label="退出价">${t.exit_price === null ? '—' : t.exit_price}</td>
         <td class="${curCls}" data-label="现价">${curPrice != null ? curPrice : '—'}</td>
-        <td data-label="数量">${t.quantity}</td>
-        <td data-label="买入日">${escHtml(t.entry_date)}</td>
-        <td data-label="卖出日">${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
-        <td class="reason-cell" data-label="买入理由">${escHtml(entryReason)}</td>
-        <td class="reason-cell" data-label="卖出理由">${escHtml(exitReason || '—')}</td>
+        <td data-label="${isBatch ? (t.status === 'closed' ? '总股数' : '净持仓') : '数量'}">${isBatch ? (t.status === 'closed' ? (t.total_buy_qty != null ? t.total_buy_qty : t.quantity) : t.quantity) : t.quantity}</td>
+        <td data-label="${isBatch ? '首买日' : '买入日'}">${escHtml(t.entry_date)}</td>
+        <td data-label="${isBatch ? '末卖日' : '卖出日'}">${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
+        <td class="reason-cell" data-label="${isBatch ? '首买理由' : '买入理由'}">${escHtml(entryReason)}</td>
+        <td class="reason-cell" data-label="${isBatch ? '末卖理由' : '卖出理由'}">${escHtml(exitReason || '—')}</td>
         <td class="${pnlCls}" data-label="盈亏"><span class="pnl-cell" data-tip-id="${t.id}">${pnlHtml}</span></td>
         <td class="row-actions">
           <button onclick="openModal(${t.id})">编辑</button>
@@ -1252,6 +1335,7 @@ function openModal(id) {
   document.getElementById('modal-title').textContent = id ? '编辑交易记录' : '新增交易记录';
 
   const t = id ? state.trades.find(x => x.id === id) : null;
+  const isBatch = !!(t && t.type === 'batch');
   document.getElementById('t-symbol-input').value = t ? `${t.name} (${t.symbol})` : '';
   document.getElementById('t-status').value = t ? t.status : 'open';
   document.getElementById('t-quantity').value = t ? t.quantity : '';
@@ -1263,11 +1347,21 @@ function openModal(id) {
   document.getElementById('t-exit-reason').value = t ? (t.exit_reason || '') : '';
   document.getElementById('t-entry-note').value = t ? (t.entry_note || '') : '';
   document.getElementById('t-exit-note').value = t ? (t.exit_note || '') : '';
+  const typeRadio = document.querySelector(`input[name="t-type"][value="${isBatch ? 'batch' : 'simple'}"]`);
+  if (typeRadio) typeRadio.checked = true;
+  state.legs = isBatch && Array.isArray(t.legs)
+    ? t.legs.map(l => ({
+        side: l.side, price: l.price, quantity: l.quantity, date: l.date,
+        time: l.time || '', reason: l.reason || '', note: l.note || '',
+      })).sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.time || '').localeCompare(a.time || ''))
+    : [];
   renderModelSelect(t ? t.model_id : null);
   if (t) state.selectedSymbol = { symbol: t.symbol, name: t.name };
 
-  onStatusChange();
-  document.getElementById('modal-mask').classList.add('show');
+  onTypeChange();
+  const mask = document.getElementById('modal-mask');
+  mask.classList.add('show');
+  mask.scrollTop = 0;
   hideSymbolDropdown();
 }
 
@@ -1280,6 +1374,127 @@ function onStatusChange() {
   const closed = document.getElementById('t-status').value === 'closed';
   document.getElementById('sell-panel').style.display = closed ? '' : 'none';
   document.getElementById('trade-panels').classList.toggle('single', !closed);
+}
+
+function onTypeChange() {
+  const batch = document.querySelector('input[name="t-type"]:checked').value === 'batch';
+  document.getElementById('t-status-wrap').style.display = batch ? 'none' : '';
+  document.getElementById('t-quantity-wrap').style.display = batch ? 'none' : '';
+  document.getElementById('trade-panels').style.display = batch ? 'none' : '';
+  document.getElementById('legs-editor').style.display = batch ? '' : 'none';
+  if (batch) {
+    renderLegs();
+  } else {
+    onStatusChange();
+  }
+}
+
+// ═══════════════ 批次腿编辑器 ═══════════════
+function newLeg(side) {
+  return { side, price: '', quantity: '', date: '', time: '', reason: '', note: '' };
+}
+
+function setLegField(idx, field, value) {
+  state.legs[idx][field] = value;
+  updateLegsSummary();
+}
+
+function updateLegsSummary() {
+  const el = document.getElementById('legs-net-qty');
+  if (!el) return;
+  let net = 0;
+  for (const l of state.legs) {
+    const q = parseInt(l.quantity, 10) || 0;
+    net += l.side === 'buy' ? q : -q;
+  }
+  el.textContent = '当前剩余 ' + net + ' 股';
+  el.style.color = net < 0 ? 'var(--up-color)' : (net === 0 ? 'var(--text-secondary)' : 'inherit');
+}
+
+function addLeg(side) {
+  if (state.legs.some(l => !l.price || !l.quantity || !l.date)) {
+    document.getElementById('modal-err').textContent = '请先填完当前这一笔（价格、数量、日期为必填）';
+    return;
+  }
+  state.legs.unshift(newLeg(side));
+  renderLegs();
+}
+
+function removeLeg(idx) {
+  state.legs.splice(idx, 1);
+  renderLegs();
+}
+
+function setLegSide(idx, side) {
+  state.legs[idx].side = side;
+  renderLegs();
+}
+
+function legRowHtml(leg, idx) {
+  const side = leg.side;
+  return `<div class="leg-row" data-leg-index="${idx}">
+    <div class="leg-head">
+      <span class="leg-no">第 ${state.legs.length - idx} 笔</span>
+      <button type="button" class="leg-del" onclick="removeLeg(${idx})">✕ 删除</button>
+    </div>
+    <div class="leg-fields">
+      <div>
+        <label>方向</label>
+        <div class="leg-side-btns">
+          <button type="button" class="${side === 'buy' ? 'active buy' : ''}" onclick="setLegSide(${idx},'buy')">买</button>
+          <button type="button" class="${side === 'sell' ? 'active sell' : ''}" onclick="setLegSide(${idx},'sell')">卖</button>
+        </div>
+      </div>
+      <div>
+        <label>价格 <span style="color:var(--up-color)">*</span></label>
+        <input type="number" min="0" step="0.01" data-leg-field="price" value="${leg.price}" placeholder="如 10.50" oninput="setLegField(${idx},'price',this.value)">
+      </div>
+      <div>
+        <label>数量 <span style="color:var(--up-color)">*</span></label>
+        <input type="number" min="1" step="1" data-leg-field="quantity" value="${leg.quantity}" placeholder="如 100" oninput="setLegField(${idx},'quantity',this.value)">
+      </div>
+      <div class="col-2">
+        <label>日期 <span style="color:var(--up-color)">*</span></label>
+        <input type="date" data-leg-field="date" value="${leg.date}" oninput="setLegField(${idx},'date',this.value)">
+      </div>
+      <div>
+        <label>时间 (可选)</label>
+        <input type="time" step="1" data-leg-field="time" value="${leg.time || ''}" oninput="setLegField(${idx},'time',this.value)">
+      </div>
+      <div class="col-3">
+        <label>理由 (可选)</label>
+        <input type="text" data-leg-field="reason" value="${escHtml(leg.reason || '')}" placeholder="如 加仓 / 止盈 / 做T" oninput="setLegField(${idx},'reason',this.value)">
+      </div>
+      <div class="col-3">
+        <label>备注 (可选)</label>
+        <input type="text" data-leg-field="note" value="${escHtml(leg.note || '')}" oninput="setLegField(${idx},'note',this.value)">
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderLegs() {
+  document.getElementById('legs-list').innerHTML = state.legs.map(legRowHtml).join('');
+  updateLegsSummary();
+}
+
+function collectLegs() {
+  const rows = document.querySelectorAll('#legs-list .leg-row');
+  const legs = [];
+  rows.forEach(row => {
+    const idx = parseInt(row.getAttribute('data-leg-index'), 10);
+    const get = f => row.querySelector(`[data-leg-field="${f}"]`).value;
+    legs.push({
+      side: state.legs[idx].side,
+      price: parseFloat(get('price')),
+      quantity: parseInt(get('quantity'), 10),
+      date: get('date'),
+      time: get('time') || null,
+      reason: get('reason').trim() || null,
+      note: get('note').trim() || null,
+    });
+  });
+  return legs;
 }
 
 // 搜索补全
@@ -1320,33 +1535,44 @@ function selectSymbol(el) {
 
 async function saveTrade() {
   document.getElementById('modal-err').textContent = '';
-  const status = document.getElementById('t-status').value;
-  const quantity = document.getElementById('t-quantity').value;
-  const entryPrice = document.getElementById('t-entry-price').value;
-  const entryDate = document.getElementById('t-entry-date').value;
-  const entryReason = document.getElementById('t-entry-reason').value;
+  const isBatch = document.querySelector('input[name="t-type"]:checked').value === 'batch';
 
   if (!state.selectedSymbol) { document.getElementById('modal-err').textContent = '请先搜索并选择股票'; return; }
 
   const modelId = document.getElementById('t-model').value;
 
-  const body = {
-    symbol: state.selectedSymbol.symbol,
-    name: state.selectedSymbol.name,
-    status,
-    quantity: parseInt(quantity, 10),
-    entry_price: parseFloat(entryPrice),
-    entry_date: entryDate,
-    entry_reason: entryReason,
-    entry_note: document.getElementById('t-entry-note').value.trim(),
-    model_id: modelId ? parseInt(modelId, 10) : null,
-  };
-
-  if (status === 'closed') {
-    body.exit_price = parseFloat(document.getElementById('t-exit-price').value);
-    body.exit_date = document.getElementById('t-exit-date').value;
-    body.exit_reason = document.getElementById('t-exit-reason').value;
-    body.exit_note = document.getElementById('t-exit-note').value.trim();
+  let body;
+  if (isBatch) {
+    body = {
+      type: 'batch',
+      symbol: state.selectedSymbol.symbol,
+      name: state.selectedSymbol.name,
+      model_id: modelId ? parseInt(modelId, 10) : null,
+      legs: collectLegs(),
+    };
+  } else {
+    const status = document.getElementById('t-status').value;
+    const quantity = document.getElementById('t-quantity').value;
+    const entryPrice = document.getElementById('t-entry-price').value;
+    const entryDate = document.getElementById('t-entry-date').value;
+    const entryReason = document.getElementById('t-entry-reason').value;
+    body = {
+      symbol: state.selectedSymbol.symbol,
+      name: state.selectedSymbol.name,
+      status,
+      quantity: parseInt(quantity, 10),
+      entry_price: parseFloat(entryPrice),
+      entry_date: entryDate,
+      entry_reason: entryReason,
+      entry_note: document.getElementById('t-entry-note').value.trim(),
+      model_id: modelId ? parseInt(modelId, 10) : null,
+    };
+    if (status === 'closed') {
+      body.exit_price = parseFloat(document.getElementById('t-exit-price').value);
+      body.exit_date = document.getElementById('t-exit-date').value;
+      body.exit_reason = document.getElementById('t-exit-reason').value;
+      body.exit_note = document.getElementById('t-exit-note').value.trim();
+    }
   }
 
   try {

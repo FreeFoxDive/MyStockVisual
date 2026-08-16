@@ -615,5 +615,183 @@ class TestReasons(TradesTestCase):
         self.assertNotIn("动力蓝转", trades.EXIT_REASONS)
 
 
+# ---------------------------------------------------------------------------
+# 9. 批次交易 (多次买卖/加仓减仓/做T)
+# ---------------------------------------------------------------------------
+class TestBatchTrade(TradesTestCase):
+    @staticmethod
+    def _batch(symbol="000001.SZ", name="平安银行", legs=None, model_id=None):
+        return {"type": "batch", "symbol": symbol, "name": name,
+                "legs": legs or [], "model_id": model_id}
+
+    def test_batch_weighted_avg_pnl_and_return(self):
+        uid = self._make_user()
+        legs = [
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-01-05", "time": "09:30"},
+            {"side": "buy", "price": 12.0, "quantity": 500, "date": "2026-01-10", "time": "09:30"},
+            {"side": "sell", "price": 15.0, "quantity": 800, "date": "2026-02-01", "time": "14:00"},
+            {"side": "sell", "price": 16.0, "quantity": 700, "date": "2026-02-10", "time": "14:00"},
+        ]
+        t = trades.create_trade(uid, self._batch(legs=legs))
+        # 累计卖出==累计买入 → 自动平仓
+        self.assertEqual(t["type"], "batch")
+        self.assertEqual(t["status"], "closed")
+        self.assertEqual(t["quantity"], 0)
+        self.assertEqual(t["entry_price"], 0.0)   # 平仓后加权均价归零
+        self.assertEqual(t["entry_date"], "2026-01-05")
+        self.assertEqual(t["exit_date"], "2026-02-10")
+        # 移动加权平均毛盈亏: (15-10.667)*800 + (16-10.667)*700 = 7200
+        self.assertAlmostEqual(t["pnl"], 7200.0, places=2)
+        self.assertAlmostEqual(t["return_pct"], 45.0, places=2)  # 7200/16000
+        self.assertAlmostEqual(t["cost"], 16000.0, places=2)
+        self.assertEqual(len(t["legs"]), 4)
+
+        # 扣佣: 每腿各计一次最低佣金 5 元 + 印花税(卖) + 过户费(双向)
+        fee_config = trades.get_user_fees(uid)
+        rows, total = trades.list_trades(uid, fee_config=fee_config)
+        f = rows[0]
+        # 费用 = 5.1 + 5.06 + 11.12 + 10.712 = 31.992
+        self.assertAlmostEqual(f["fees"], 31.992, places=3)
+        self.assertAlmostEqual(f["pnl"], 7168.01, places=2)
+        self.assertAlmostEqual(f["return_pct"], 44.8, places=2)
+        self.assertEqual(f["fee_breakdown"]["buy_comm"], 10.0)    # 两次买入各 5 元
+        self.assertEqual(f["fee_breakdown"]["sell_comm"], 10.0)   # 两次卖出各 5 元
+        self.assertAlmostEqual(f["fee_breakdown"]["stamp"], 11.6, places=2)
+        self.assertAlmostEqual(f["fee_breakdown"]["transfer"], 0.392, places=3)
+
+    def test_batch_partial_sell_stays_open(self):
+        uid = self._make_user()
+        legs = [
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-03-02", "time": "09:30"},
+            {"side": "sell", "price": 15.0, "quantity": 300, "date": "2026-03-03", "time": "14:00"},
+        ]
+        t = trades.create_trade(uid, self._batch(legs=legs))
+        self.assertEqual(t["status"], "open")
+        self.assertEqual(t["quantity"], 700)
+        self.assertEqual(t["entry_price"], 10.0)   # 仅买入更新加权均价
+        self.assertIsNone(t["exit_date"])
+        # 已实现盈亏 = (15-10)*300 (卖出不改变均价)
+        self.assertAlmostEqual(t["pnl"], 1500.0, places=2)
+        self.assertAlmostEqual(t["return_pct"], 15.0, places=2)
+
+    def test_batch_oversell_rejected(self):
+        uid = self._make_user()
+        legs = [
+            {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
+            {"side": "sell", "price": 10.0, "quantity": 200, "date": "2026-03-03", "time": "14:00"},
+        ]
+        self._assert_value_error(
+            trades.create_trade, uid, self._batch(legs=legs), sub="卖出数量超过当前持仓")
+
+    def test_batch_requires_buy_leg(self):
+        uid = self._make_user()
+        legs = [
+            {"side": "sell", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
+        ]
+        self._assert_value_error(
+            trades.create_trade, uid, self._batch(legs=legs), sub="至少需要一条买入腿")
+
+    def test_batch_t_stats(self):
+        uid = self._make_user()
+        legs = [
+            # 03-02 正T: 首腿买, 买1000 卖500 → 配对500, (10.5-10.0)*500=+250
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-03-02", "time": "09:30"},
+            {"side": "sell", "price": 10.5, "quantity": 500, "date": "2026-03-02", "time": "14:00"},
+            # 03-03 反T: 首腿卖, 卖500 买300 → 配对300, (11.0-10.8)*300=+60
+            {"side": "sell", "price": 11.0, "quantity": 500, "date": "2026-03-03", "time": "09:30"},
+            {"side": "buy", "price": 10.8, "quantity": 300, "date": "2026-03-03", "time": "14:00"},
+            # 03-04 仅卖出 → 不计做T, 清仓
+            {"side": "sell", "price": 11.5, "quantity": 300, "date": "2026-03-04", "time": "10:00"},
+        ]
+        t = trades.create_trade(uid, self._batch(legs=legs))
+        self.assertEqual(t["status"], "closed")
+        ts = t["t_stats"]
+        self.assertEqual(ts["count"], 2)
+        self.assertEqual(ts["positive"], 1)
+        self.assertEqual(ts["reverse"], 1)
+        self.assertEqual(ts["success"], 2)
+        self.assertEqual(ts["success_rate"], 100.0)
+        self.assertAlmostEqual(ts["pnl"], 310.0, places=2)
+
+        # 汇总做T统计 (同一 closed 集合)
+        summary_ts = trades.compute_stats(uid)["summary"]["t_stats"]
+        self.assertEqual(summary_ts["count"], 2)
+        self.assertEqual(summary_ts["positive"], 1)
+        self.assertEqual(summary_ts["reverse"], 1)
+        self.assertEqual(summary_ts["success"], 2)
+        self.assertEqual(summary_ts["success_rate"], 100.0)
+        self.assertAlmostEqual(summary_ts["pnl"], 310.0, places=2)
+
+    def test_batch_list_get_returns_legs(self):
+        uid = self._make_user()
+        legs = [
+            {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
+            {"side": "sell", "price": 12.0, "quantity": 100, "date": "2026-03-03", "time": "14:00"},
+        ]
+        t = trades.create_trade(uid, self._batch(legs=legs))
+        got = trades.get_trade(uid, t["id"])
+        self.assertEqual(len(got["legs"]), 2)
+        self.assertIsNotNone(got["t_stats"])
+        rows, total = trades.list_trades(uid)
+        self.assertEqual(total, 1)
+        self.assertEqual(len(rows[0]["legs"]), 2)
+        self.assertIsNotNone(rows[0]["t_stats"])
+
+    def test_batch_update_replaces_legs(self):
+        uid = self._make_user()
+        legs = [
+            {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
+            {"side": "sell", "price": 12.0, "quantity": 100, "date": "2026-03-03", "time": "14:00"},
+        ]
+        t = trades.create_trade(uid, self._batch(legs=legs))
+        new_legs = [
+            {"side": "buy", "price": 20.0, "quantity": 100, "date": "2026-03-04", "time": "09:30"},
+        ]
+        upd = trades.update_trade(uid, t["id"], {"type": "batch", "legs": new_legs})
+        self.assertEqual(upd["status"], "open")
+        self.assertEqual(len(upd["legs"]), 1)
+        self.assertEqual(upd["entry_price"], 20.0)
+        self.assertEqual(upd["quantity"], 100)
+
+    def test_migration_old_trades_gain_type_simple(self):
+        # 模拟「旧库」: 仅建无 type 列的 trades 表, 其余表交给 init_db 的 executescript
+        import sqlite3
+        old_db = os.path.join(self._tmp.name, "old.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                quantity INTEGER NOT NULL,
+                entry_date TEXT NOT NULL,
+                exit_date TEXT,
+                entry_reason TEXT NOT NULL,
+                entry_note TEXT,
+                exit_reason TEXT,
+                exit_note TEXT,
+                model_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        trades.init_db(old_db)  # 迁移应补 type 列
+        with trades.get_conn() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+        self.assertIn("type", cols)
+
+        uid = trades.create_user("alice", "secret123")
+        t = trades.create_trade(uid, self._closed())
+        self.assertEqual(t["type"], "simple")
+        self.assertEqual(t["pnl"], 300.0)   # 老口径逐位不变
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
