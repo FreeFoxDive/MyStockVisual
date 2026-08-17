@@ -3,7 +3,7 @@
 Visual K线图 HTTP 服务器
 ========================
 基于 Python 标准库 http.server，零额外依赖。
-代理 AlphaFeed API + 服务端指标计算，为前端 ECharts 提供 JSON 数据。
+代理麦蕊(实时/K线) + AlphaFeed(分时) + 服务端指标计算，为前端 ECharts 提供 JSON 数据。
 
 用法:
   python -u visual/server.py                   # 默认 localhost:8888
@@ -16,6 +16,7 @@ import gzip
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -24,6 +25,7 @@ from datetime import datetime
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+import urllib.request
 
 import numpy as np
 import pandas as pd
@@ -73,6 +75,145 @@ def get_af():
                 from alphafeed import AlphaFeed
                 _af = AlphaFeed(api_key=AF_API_KEY)
     return _af
+
+
+# ── 麦蕊智数 (Mairui) ──
+MAIRUI_API_KEY = os.environ.get("MAIRUI_FREE_API_KEY", "")
+if not MAIRUI_API_KEY:
+    print("[Visual] ⚠️  未设置 MAIRUI_FREE_API_KEY 环境变量", flush=True)
+else:
+    print("[Visual] MAIRUI_FREE_API_KEY 已加载", flush=True)
+
+_mr = None
+_mr_lock = threading.Lock()
+
+
+def get_mr():
+    global _mr
+    if _mr is None:
+        with _mr_lock:
+            if _mr is None:
+                from mairui import Client
+                _mr = Client(licence=MAIRUI_API_KEY)
+    return _mr
+
+
+# ── 麦蕊额度查询 (抓官方证书查询页, 麦蕊无额度 API) ──
+_quota_cache = {"data": None, "ts": 0.0}
+_quota_cache_lock = threading.Lock()
+_QUOTA_CACHE_TTL = 120.0
+
+
+def _fetch_mairui_quota():
+    """抓取 mairui.club/licenceinfo 证书查询页并解析今日额度。
+
+    麦蕊无查询额度的 API/SDK 方法, 只能抓官网页面 (服务端渲染, 额度内联在 HTML)。
+    返回 {ok, version, today_used, today_remaining, total_used, total_remaining, expiry},
+    失败返回 {"ok": False, "error": ...}。成功结果带 120s 内存缓存, 避免每次页面刷新都打官网。
+    """
+    now = time.time()
+    with _quota_cache_lock:
+        if _quota_cache["data"] is not None and now - _quota_cache["ts"] < _QUOTA_CACHE_TTL:
+            return _quota_cache["data"]
+
+    if not MAIRUI_API_KEY:
+        return {"ok": False, "error": "未配置 MAIRUI_FREE_API_KEY"}
+
+    url = "https://mairui.club/licenceinfo?lid=" + MAIRUI_API_KEY
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    # 表格结构: <td>版本</td><td class="licence-code">KEY</td><td>今日已用|剩余</td><td>总已用|剩余</td><td>有效期</td>
+    m = re.search(
+        r'<td>([^<]*)</td>\s*<td class="licence-code">[^<]*</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>',
+        html,
+        re.S,
+    )
+    if not m:
+        return {"ok": False, "error": "额度页结构解析失败"}
+
+    version = m.group(1).strip()
+    expiry = m.group(4).strip()
+
+    def _split(s):
+        parts = [x.strip() for x in s.split("|")]
+        return parts[0] if len(parts) > 0 else "", parts[1] if len(parts) > 1 else ""
+
+    def _int_or_none(s):
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            return None
+
+    today_used, today_remaining = _split(m.group(2).strip())
+    total_used, total_remaining = _split(m.group(3).strip())
+
+    data = {
+        "ok": True,
+        "version": version,
+        "today_used": _int_or_none(today_used),
+        "today_remaining": _int_or_none(today_remaining),
+        "total_used": _int_or_none(total_used),
+        "total_remaining": total_remaining,   # 可能为 "无限"
+        "expiry": expiry,
+    }
+    with _quota_cache_lock:
+        _quota_cache["data"] = data
+        _quota_cache["ts"] = now
+    return data
+
+
+# ── 指数集合 + 名称映射 (懒加载内存缓存) ──
+_index_symbols = None
+_index_names = {}
+_index_lock = threading.Lock()
+_name_map = None
+_name_map_lock = threading.Lock()
+
+
+def _load_index_cache():
+    """懒加载沪深指数列表 (symbol 集合 + symbol→名称), 服务生命周期内缓存一次"""
+    global _index_symbols, _index_names
+    if _index_symbols is not None:
+        return _index_symbols
+    with _index_lock:
+        if _index_symbols is not None:
+            return _index_symbols
+        symbols, names = set(), {}
+        try:
+            rows = get_mr().index_list()
+            for r in rows or []:
+                sym = str(r.get("dm", "")).strip().upper()
+                name = str(r.get("mc", "")).strip()
+                if sym:
+                    symbols.add(sym)
+                    if name:
+                        names[sym] = name
+        except Exception as e:
+            print(f"[Visual] 加载指数列表失败: {e}", flush=True)
+        _index_symbols, _index_names = symbols, names
+        return symbols
+
+
+def _is_index_symbol(symbol):
+    """判断 symbol 是否为沪深指数 (如 000001.SH 上证指数)"""
+    return symbol in _load_index_cache()
+
+
+def _lookup_name(symbol):
+    """查标的名称: 指数 → 股票/ETF 列表。找不到返回 symbol 本身。"""
+    if _is_index_symbol(symbol):
+        return _index_names.get(symbol, symbol)
+    global _name_map
+    if _name_map is None:
+        with _name_map_lock:
+            if _name_map is None:
+                _name_map = {s["symbol"]: s["name"] for s in _load_stock_list()}
+    return _name_map.get(symbol, symbol)
 
 
 # ── 指标计算 ──
@@ -342,7 +483,7 @@ def _load_pledge():
 # ── ETF 溢价 ──
 
 def _is_etf(symbol):
-    """判断是否为境内ETF (代码前缀: 51, 58, 15, 16, 56, 11, 18等)"""
+    """判断是否为场内基金 (ETF/LOF/封闭式; 代码前缀: 51, 58, 15, 16, 56, 11, 18等)"""
     code = symbol.split(".")[0]
     return code[:2] in ("51", "58", "15", "16", "56", "11", "18") or code.startswith("5")
 
@@ -365,8 +506,52 @@ def _fetch_etf_nav(symbol):
 
 
 # ── 数据获取 ──
+def _fetch_fund_kline(symbol, period, count):
+    """从麦蕊基金历史K线接口拉取 ETF K线 (SDK v1.2.0 无此方法, 直接 HTTP)。
+
+    接口: GET /jj/lskx/{code}/{period}/{licence}  (jjhqdata#api-179)
+    code 为 6 位数字(无 sh/sz 前缀), period=d/w/m, 字段 {t,d,o,h,l,c,v,a}。
+    a 为成交额(基金接口固定 0)。接口不支持 lt 分页, 返回全量历史, 本地 tail 截取。
+    返回标准化 DataFrame 或 None。
+    """
+    code = symbol.split(".")[0]
+    mr_period = {"1d": "d", "1w": "w", "1M": "m"}.get(period, "d")
+    url = f"https://api.mairuiapi.com/jj/lskx/{code}/{mr_period}/{MAIRUI_API_KEY}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception as e:
+        print(f"[Visual] 麦蕊获取ETF K线失败 {symbol}: {e}", flush=True)
+        return None
+
+    # dict = 错误响应, 空列表 = 无数据
+    if not rows or isinstance(rows, dict):
+        return None
+
+    df = pd.DataFrame(rows)
+    df = df.drop(columns=["d"], errors="ignore")  # d 与 t 同为日期, 保留 t
+    df = df.rename(columns={
+        "o": "open", "h": "high", "l": "low", "c": "close",
+        "a": "amount", "v": "volume", "t": "trade_date",
+    })
+    df = _normalize(df)
+    if df is not None and count:
+        df = df.tail(count)
+    if df is not None:
+        # 基金接口不提供成交额 (a 恒为 0), 置 NaN → 前端显示 "—"
+        df["amount"] = float("nan")
+    return df
+
+
 def fetch_kline(symbol, period, count):
-    """从 AlphaFeed 获取 K 线数据（优先磁盘缓存），返回标准化 DataFrame"""
+    """获取 K 线数据（优先磁盘缓存），返回标准化 DataFrame。
+
+    数据源路由：
+    - 指数 → 麦蕊 index_history
+    - 股票 → 麦蕊 stock_history
+    - ETF  → 麦蕊基金历史K线 (jj/lskx)
+    """
     # 检查磁盘缓存 (日K 60s/非交易 300s, 周月K 600s)
     now = datetime.now()
     in_trading = 9 <= now.hour < 15 and now.weekday() < 5
@@ -384,58 +569,77 @@ def fetch_kline(symbol, period, count):
         df = df.sort_index()
         return df, cached.get("name", symbol)
 
-    # AlphaFeed 拉取
-    af = get_af()
-    raw = af.klines.get(symbol=symbol, period=period, count=count,
-                        adjust="none", to_dataframe=True)
-    if raw is None or len(raw) == 0:
-        return None, None
+    df, name = None, None
 
-    df = _normalize(raw)
+    if _is_etf(symbol):
+        # ETF → 麦蕊基金历史K线 (jj/lskx)
+        df = _fetch_fund_kline(symbol, period, count)
+        if df is not None:
+            name = _lookup_name(symbol)
+    else:
+        # 麦蕊 K 线 (指数/股票)
+        api = get_mr()
+        mr_period = {"1d": "d", "1w": "w", "1M": "m"}.get(period, "d")
+        try:
+            if _is_index_symbol(symbol):
+                rows = api.index_history(symbol, mr_period, lt=count)
+            else:
+                rows = api.stock_history(symbol, mr_period, "n", lt=count)
+        except Exception as e:
+            print(f"[Visual] 麦蕊获取K线失败 {symbol}: {e}", flush=True)
+            return None, None
+
+        # dict = 错误响应 (如 {"error": "数据不存在"}), 空列表 = 无数据
+        if not rows or isinstance(rows, dict):
+            return None, None
+
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={
+            "o": "open", "h": "high", "l": "low", "c": "close",
+            "a": "amount", "v": "volume", "t": "trade_date",
+        })
+        df = _normalize(df)
+        if df is not None:
+            name = _lookup_name(symbol)
+
     if df is None:
         return None, None
 
-    name = raw.iloc[0].get("name", symbol) if "name" in raw.columns else symbol
-
     # 存入磁盘缓存
-    cache_data = {"name": name, "data": json.loads(df.reset_index().to_json(orient="records", date_format="iso"))}
+    cache_data = {"name": name or symbol, "data": json.loads(df.reset_index().to_json(orient="records", date_format="iso"))}
     try:
         _disk_cache.set(symbol, period, count, cache_data)
     except Exception:
         pass
 
-    return df, name
+    return df, name or symbol
 
 
-def _quote_from_row(q, symbol):
-    """把 AlphaFeed quotes DataFrame 的一行转成标准 quote dict"""
+def _mr_quote_to_std(q, symbol):
+    """把麦蕊实时行情 dict 转成标准 quote dict"""
     return {
-        "last_price": _safe_float(q.get("last_price")),
-        "prev_close": _safe_float(q.get("prev_close")),
-        "open": _safe_float(q.get("open")),
-        "high": _safe_float(q.get("high")),
-        "low": _safe_float(q.get("low")),
-        "volume": _safe_int(q.get("volume")),
-        "amount": _safe_float(q.get("amount")),
-        "change_pct": _safe_float(q.get("ext.change_pct")),
-        "amplitude": _safe_float(q.get("ext.amplitude")),
-        "turnover_rate": _safe_float(q.get("ext.turnover_rate")),
-        "name": q.get("ext.name", symbol),
+        "last_price": _safe_float(q.get("p")),
+        "prev_close": _safe_float(q.get("yc")),
+        "open": _safe_float(q.get("o")),
+        "high": _safe_float(q.get("h")),
+        "low": _safe_float(q.get("l")),
+        "volume": _safe_int(q.get("v")),
+        "amount": _safe_float(q.get("cje")),
+        "change_pct": _safe_float(q.get("pc")),    # 麦蕊实时 pc = 涨跌幅%
+        "amplitude": _safe_float(q.get("zf")),     # zf = 振幅%
+        "turnover_rate": _safe_float(q.get("tr")),  # tr = 换手率% (ETF/指数无此字段)
+        "name": _lookup_name(symbol),
     }
 
 
-AF_QUOTE_BATCH = 50        # AlphaFeed 快照单次最多 50 只
-AF_QUOTE_INTERVAL = 1.2    # 批次间 sleep, 保证 ≤60次/min (60/min ≈ 1s 间隔)
+MR_QUOTE_BATCH = 20        # 麦蕊 stock_ssjy_more 单次最多 20 只
 
 
 def fetch_quotes(symbols, fresh=False):
-    """批量获取实时快照（一次 AlphaFeed 调用查多只）。
+    """批量获取实时快照（麦蕊：股票走 ssjy_more 批量，ETF 走 fund_real_time，指数走 index_real_time）。
 
     fresh=True 时跳过缓存强刷，失败/空数据回退到缓存（缓存超 30s 的 get() 返回 None）。
     返回 {symbol: quote}；未取到的 symbol 不出现在返回字典中。
-
-    快照接口单次最多 50 只、限频 60 次/min，故超过 50 只时按 AF_QUOTE_BATCH 分批、
-    批间 sleep AF_QUOTE_INTERVAL。
     """
     symbols = [normalize_symbol(s) for s in symbols if s]
     symbols = list(dict.fromkeys(symbols))  # 去重保序
@@ -450,33 +654,71 @@ def fetch_quotes(symbols, fresh=False):
             if cached:
                 result[s] = cached
     to_fetch = [s for s in symbols if s not in result]
+    if not to_fetch:
+        return result
 
-    for i in range(0, len(to_fetch), AF_QUOTE_BATCH):
-        batch = to_fetch[i:i + AF_QUOTE_BATCH]
-        if i > 0:
-            time.sleep(AF_QUOTE_INTERVAL)
+    # 按类型分组路由
+    index_codes, stock_codes, etf_codes = [], [], []
+    for s in to_fetch:
+        if _is_index_symbol(s):
+            index_codes.append(s)
+        elif _is_etf(s):
+            etf_codes.append(s)
+        else:
+            stock_codes.append(s)
+
+    api = get_mr()
+
+    def _emit(s, q):
+        result[s] = _mr_quote_to_std(q, s)
+        quote_cache.set(s, result[s])
+
+    # 1) 指数 (单只 index_real_time)
+    for s in index_codes:
         try:
-            af = get_af()
-            quotes = af.quotes.get(symbols=batch, to_dataframe=True)
-            if quotes is not None and len(quotes) > 0:
-                for _, q in quotes.iterrows():
-                    s = normalize_symbol(str(q.get("symbol", "")))
-                    if s in batch and s not in result:
-                        result[s] = _quote_from_row(q, s)
-                        quote_cache.set(s, result[s])
+            q = api.index_real_time(s)
+            if isinstance(q, dict) and not q.get("error"):
+                _emit(s, q)
         except Exception as e:
-            print(f"[Visual] 批量获取快照失败 {batch}: {e}", flush=True)
-            # 拉取失败：回退缓存（fresh 模式下缓存此前被跳过，此处补读）
-            for s in batch:
-                cached = quote_cache.get(s)
-                if cached:
-                    result[s] = cached
+            print(f"[Visual] 指数快照失败 {s}: {e}", flush=True)
+
+    # 2) ETF/基金 (单只 fund_real_time, code 6 位无后缀)
+    for s in etf_codes:
+        try:
+            q = api.fund_real_time(s.split(".")[0])
+            if isinstance(q, dict) and not q.get("error"):
+                _emit(s, q)
+        except Exception as e:
+            print(f"[Visual] ETF快照失败 {s}: {e}", flush=True)
+
+    # 3) 股票 (批量 ssjy_more, 最多 20/次)
+    for i in range(0, len(stock_codes), MR_QUOTE_BATCH):
+        batch = stock_codes[i:i + MR_QUOTE_BATCH]
+        try:
+            rows = api.stock_ssjy_more([c.split(".")[0] for c in batch])
+            if isinstance(rows, list):
+                for q in rows:
+                    if not isinstance(q, dict) or q.get("error"):
+                        continue
+                    code = str(q.get("dm", "")).strip()
+                    s = next((x for x in batch if x.split(".")[0] == code), None)
+                    if s is not None:
+                        _emit(s, q)
+        except Exception as e:
+            print(f"[Visual] 批量快照失败 {batch}: {e}", flush=True)
+
+    # 未取到的回退缓存 (fresh 模式此前跳过了缓存优先读取)
+    for s in to_fetch:
+        if s not in result:
+            cached = quote_cache.get(s)
+            if cached:
+                result[s] = cached
 
     return result
 
 
 def fetch_quote(symbol):
-    """从 AlphaFeed 获取实时快照（单只，缓存优先）"""
+    """从麦蕊获取实时快照（单只，缓存优先）"""
     return fetch_quotes([symbol]).get(normalize_symbol(symbol))
 
 
@@ -543,21 +785,29 @@ def _stock_list_to_disk(stocks, ts):
 
 
 def _fetch_stock_list():
-    """从 AlphaFeed 拉取 symbol+name 列表 (跳过 DataFrame, 直接读 dict)"""
-    af = get_af()
+    """从麦蕊拉取 symbol+name 列表 (沪深A股 + 北交所 + 场内基金)"""
+    api = get_mr()
     stocks = []
-    for universe in ("CN_Stock", "CN_ETF"):
+
+    def _append(rows):
+        for r in rows or []:
+            sym = str(r.get("dm", "")).strip()
+            # 麦蕊部分简称含空格(如 "五 粮 液"), 去掉全部空白以免搜索/显示异常
+            name = re.sub(r"\s+", "", str(r.get("mc", "")))
+            if not sym or not name:
+                continue
+            code = sym.split(".")[0] if "." in sym else sym
+            stocks.append({"symbol": sym, "name": name, "code": code})
+
+    # stock_list 已含科创(688), 故无需再拉 star_stock_list
+    # fund_list(沪深基金) 是 etf_list 的超集, 额外含 LOF/封闭式基金, 故用 fund_list
+    for fn, label in ((api.stock_list, "沪深A股"),
+                      (api.bj_stock_list, "北交所"),
+                      (api.fund_list, "场内基金")):
         try:
-            quotes = af.quotes.get(universes=universe, to_dataframe=False)
-            for q in quotes:
-                sym = q.get("symbol", "")
-                name = (q.get("ext") or {}).get("name", "")
-                if not sym or not name or pd.isna(name):
-                    continue
-                code = sym.split(".")[0] if "." in sym else sym
-                stocks.append({"symbol": sym, "name": str(name), "code": code})
+            _append(fn())
         except Exception as e:
-            print(f"[Visual] {universe} 加载失败: {e}", flush=True)
+            print(f"[Visual] {label} 列表加载失败: {e}", flush=True)
     return stocks
 
 
@@ -622,7 +872,7 @@ def _load_stock_list():
     with _stock_lock:
         if _stock_list is not None:
             return _stock_list
-        print("[Visual] 首次加载全量A股+ETF列表...", flush=True)
+        print("[Visual] 首次加载全量A股+场内基金列表...", flush=True)
         stocks = []
         for attempt in range(2):
             try:
@@ -637,32 +887,38 @@ def _load_stock_list():
             ts = time.time()
             _stock_list, _stock_list_time = stocks, ts
             _stock_list_to_disk(stocks, ts)
-            print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+ETF)", flush=True)
+            print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+场内基金)", flush=True)
         else:
             _stock_list = []
         return _stock_list
 
 
 def _search_stocks(query):
-    """模糊搜索: 代码前缀 || 名称包含"""
+    """模糊搜索: 名称/代码精确 > 名称前缀 > 代码前缀 > 名称包含 > 代码包含"""
     stocks = _load_stock_list()
     if not stocks:
         return []
     q = query.strip().lower()
     results = []
     for s in stocks:
+        name = s["name"].lower()
+        code = s["code"]
         score = 0
-        if s["code"].startswith(q):
-            score = 100  # 代码前缀匹配最高优先级
-        elif q in s["name"].lower():
-            score = 50   # 名称包含
-        elif q in s["code"]:
-            score = 30   # 代码包含
+        if name == q or code == q:
+            score = 200   # 名称/代码精确匹配
+        elif name.startswith(q):
+            score = 150   # 名称前缀 (如 "酒ETF"/"白酒基金" 直接命中)
+        elif code.startswith(q):
+            score = 100   # 代码前缀
+        elif q in name:
+            score = 50    # 名称包含
+        elif q in code:
+            score = 30    # 代码包含
         if score > 0:
             results.append({**s, "score": score})
     results.sort(key=lambda x: -x["score"])
     return [{"symbol": r["symbol"], "name": r["name"], "code": r["code"]}
-            for r in results[:15]]
+            for r in results[:30]]
 
 
 # ── JSON 编码 ──
@@ -701,7 +957,7 @@ def _safe_int(v):
 
 # ── 股票代码标准化 ──
 def normalize_symbol(raw):
-    """将用户输入标准化为 AlphaFeed symbol 格式"""
+    """将用户输入标准化为带交易所后缀的 symbol 格式 (如 000001.SZ)"""
     raw = raw.strip().upper()
     if raw.endswith(".SH") or raw.endswith(".SZ") or raw.endswith(".BJ"):
         return raw
@@ -713,6 +969,10 @@ def normalize_symbol(raw):
         return f"{raw}.SZ"
     if raw.startswith(("4", "8", "9")):
         return f"{raw}.BJ"
+    if raw.startswith("5"):                    # 上交所基金 (50/51/52/53/55/56/58/59...)
+        return f"{raw}.SH"
+    if raw.startswith(("15", "16", "18")):     # 深交所基金 (LOF/ETF/封闭式)
+        return f"{raw}.SZ"
     # 默认尝试 SH
     return f"{raw}.SH"
 
@@ -804,6 +1064,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_models_list()
         elif path == "/api/fees":
             return self._handle_fees_get()
+        elif path == "/api/quota":
+            return self._handle_quota()
         elif path == "/" or path == "/index.html":
             return self._serve_static("index.html")
         elif path.endswith(".html") or path.endswith(".js") or path.endswith(".css"):
@@ -1181,6 +1443,12 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._send_error(f"费率配置无效: {_sanitize_error(e)}", 400)
         return self._send_json({"fees": fees})
 
+    def _handle_quota(self):
+        # 麦蕊额度 (需登录, 未登录不暴露额度信息)
+        if not self._require_user():
+            return
+        return self._send_json(_fetch_mairui_quota())
+
     # ── 静态文件 ──
     def _serve_static(self, filename):
         # 前端静态文件统一放在 static/ 子目录 (URL 仍为干净路径, 如 /trades.html /admin.html)
@@ -1483,7 +1751,7 @@ def main():
     print(f"""
 ╔══════════════════════════════════════════╗
 ║   📈 Visual K线图 股票可视化              ║
-║   数据源: AlphaFeed 实时接口              ║
+║   数据源: 麦蕊(实时/K线) + AlphaFeed(分时) ║
 ║   地址: http://{args.host}:{args.port}             ║
 ║   速率限制: {RATE_LIMIT_PER_MIN} 次/分钟           ║
 ╚══════════════════════════════════════════╝

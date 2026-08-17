@@ -63,6 +63,11 @@ body {
   position: sticky; top: 0; z-index: 20;
 }
 #toolbar .title { font-weight: 700; font-size: 15px; }
+#toolbar .quota-badge {
+  font-size: 12px; color: var(--text-secondary);
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 10px; margin-left: 10px; vertical-align: middle; cursor: help;
+}
 #toolbar .spacer { flex: 1; }
 #toolbar .user-wrap { position: relative; }
 #toolbar .user { color: var(--text-secondary); font-size: 13px; }
@@ -315,6 +320,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
 <!-- ═══════════════ 顶栏 ═══════════════ -->
 <div id="toolbar">
   <span class="title">📒 交易记录统计</span>
+  <span class="quota-badge" id="quota-badge" style="display:none" title=""></span>
   <button onclick="location.href='/'" title="返回K线主页">← 主页</button>
   <span class="spacer"></span>
   <div class="user-wrap" id="user-wrap" style="display:none">
@@ -373,6 +379,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
     </div>
   </div>
   <div class="charts">
+    <div class="chart-box"><div class="chart-title">持仓金额分布</div><div class="chart" id="hold-pie-chart"></div></div>
     <div class="chart-box"><div class="chart-title">按期间盈亏</div><div class="chart" id="pnl-chart"></div></div>
     <div class="chart-box"><div class="chart-title">按股票盈亏</div><div class="chart" id="symbol-chart"></div></div>
     <div class="chart-box"><div class="chart-title">按模型盈亏</div><div class="chart" id="model-chart"></div></div>
@@ -572,6 +579,7 @@ const state = {
   pnlChart: null,
   symbolChart: null,
   modelChart: null,
+  holdChart: null,
 };
 
 function toYMD(d) {
@@ -686,6 +694,7 @@ function showLogin() {
   document.getElementById('toolbar-user').textContent = '';
   document.getElementById('user-wrap').style.display = 'none';
   document.getElementById('user-menu').style.display = 'none';
+  document.getElementById('quota-badge').style.display = 'none';
 }
 
 function showMain() {
@@ -698,6 +707,26 @@ function showMain() {
   userBtn.textContent = '👤 ' + state.user.username;
   userBtn.title = state.user.is_admin ? '管理后台' : '';
   userBtn.style.cursor = state.user.is_admin ? 'pointer' : 'default';
+  loadQuota();
+}
+
+// 麦蕊额度徽章: 显示「剩余 N」, hover 展示今日已用/总剩余/有效期
+async function loadQuota() {
+  const badge = document.getElementById('quota-badge');
+  if (!badge) return;
+  try {
+    const data = await api('/api/quota');
+    if (!data || !data.ok) { badge.style.display = 'none'; return; }
+    let text = '麦蕊剩余 ' + (data.today_remaining != null ? data.today_remaining : data.total_remaining);
+    badge.textContent = text;
+    badge.style.display = '';
+    const parts = ['今日已用 ' + (data.today_used != null ? data.today_used : '—')];
+    if (data.total_remaining) parts.push('总剩余 ' + data.total_remaining);
+    if (data.expiry) parts.push('有效期 ' + data.expiry);
+    badge.title = '数据源: 麦蕊 (' + (data.version || '免费版') + ') · ' + parts.join(' · ');
+  } catch (e) {
+    badge.style.display = 'none';
+  }
 }
 
 // 管理员点击用户名 → 弹出跳转菜单
@@ -930,6 +959,7 @@ async function loadStats() {
   renderPnlChart();
   renderSymbolChart();
   renderModelChart();
+  renderHoldChart();
 }
 
 // 现价：持仓优先全量 + 当前页平仓 (受筛选/分页影响), 失败保留旧值, 仅首次就失败的记 null
@@ -957,6 +987,7 @@ async function refreshQuotes(fresh) {
   }
   renderStatCards(state.stats.summary);
   renderTable();
+  renderHoldChart();
 }
 
 // 持仓聚合 (仅未平仓): 市值 = Σ现价×数量, 浮盈亏 = Σ(现价-买入价)×数量
@@ -1163,6 +1194,72 @@ function renderModelChart() {
     series: [{
       type: 'bar',
       data: sorted.map(s => ({ value: s.pnl, itemStyle: { color: s.pnl >= 0 ? upColor() : downColor() } })),
+    }],
+  });
+}
+
+// 持仓金额分布饼图：扇区大小 = 现价×数量(市值), 按市值降序
+function renderHoldChart() {
+  const el = document.getElementById('hold-pie-chart');
+  if (!state.holdChart) state.holdChart = echarts.init(el);
+  const positions = (state.stats && state.stats.open_positions) || [];
+  const rows = [];
+  for (const p of positions) {
+    const q = state.quotes[p.symbol];
+    const price = (q && q.last_price != null) ? q.last_price : null;
+    if (price == null || !(p.quantity > 0)) continue;
+    const mv = price * p.quantity;
+    if (mv <= 0) continue;
+    rows.push({
+      name: p.name || p.symbol,
+      symbol: p.symbol,
+      price,
+      qty: p.quantity,
+      mv,
+      cost: p.entry_price * p.quantity,
+      floatPnl: (price - p.entry_price) * p.quantity,
+    });
+  }
+  rows.sort((a, b) => b.mv - a.mv);
+  const total = rows.reduce((s, r) => s + r.mv, 0);
+
+  if (!rows.length) {
+    state.holdChart.clear();
+    state.holdChart.setOption({
+      title: { text: '暂无持仓', left: 'center', top: 'middle', textStyle: { color: chartTheme(), fontSize: 14, fontWeight: 'normal' } },
+    });
+    return;
+  }
+
+  state.holdChart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'item',
+      formatter: p => {
+        const r = rows[p.dataIndex];
+        const pct = total ? (r.mv / total * 100) : 0;
+        const pln = fmtMoney(r.floatPnl, true);
+        return `${r.name} ${r.symbol}<br/>持仓金额: ${fmtMoney(r.mv)} (${pct.toFixed(1)}%)<br/>持仓成本: ${fmtMoney(r.cost)}<br/>现价: ${r.price} × ${r.qty} 股<br/>浮盈亏: <span style="color:${r.floatPnl >= 0 ? upColor() : downColor()}">${pln}</span>`;
+      },
+    },
+    legend: {
+      type: 'scroll',
+      orient: 'horizontal',
+      bottom: 0,
+      textStyle: { color: chartTheme(), fontSize: 12 },
+    },
+    series: [{
+      type: 'pie',
+      radius: ['42%', '70%'],
+      center: ['50%', '46%'],
+      avoidLabelOverlap: true,
+      itemStyle: { borderColor: 'rgba(0,0,0,0.2)', borderWidth: 1 },
+      label: {
+        formatter: p => `${p.percent.toFixed(0)}%`,
+        color: chartTheme(),
+        fontSize: 12,
+      },
+      data: rows.map(r => ({ name: r.name, value: r.mv })),
     }],
   });
 }
@@ -1631,6 +1728,7 @@ window.addEventListener('resize', () => {
   if (state.pnlChart) state.pnlChart.resize();
   if (state.symbolChart) state.symbolChart.resize();
   if (state.modelChart) state.modelChart.resize();
+  if (state.holdChart) state.holdChart.resize();
 });
 
 // 盈亏明细 tooltip (事件委托; 固定定位避免被 .table-wrap 的 overflow 裁切)
