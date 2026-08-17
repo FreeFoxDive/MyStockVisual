@@ -387,7 +387,7 @@ def fetch_kline(symbol, period, count):
     # AlphaFeed 拉取
     af = get_af()
     raw = af.klines.get(symbol=symbol, period=period, count=count,
-                        adjust="forward", to_dataframe=True)
+                        adjust="none", to_dataframe=True)
     if raw is None or len(raw) == 0:
         return None, None
 
@@ -1371,7 +1371,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         count = min(int(params.get("count", ["120"])[0]), 250)
         try:
             af = get_af()
-            dfs = af.klines.batch([symbol], period=period, count=count, adjust="forward", to_dataframe=True)
+            dfs = af.klines.batch([symbol], period=period, count=count, adjust="none", to_dataframe=True)
             df = dfs.get(symbol)
             if df is None or len(df) == 0:
                 return self._send_error(f"无法获取 {symbol} 的分钟线", 404)
