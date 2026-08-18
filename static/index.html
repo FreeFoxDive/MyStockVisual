@@ -1445,9 +1445,18 @@ function onIndicatorChange() {
   }
 }
 
+function loadCurrent() {
+  if (STATE.period === 'intraday') {
+    STATE.intradayData = null; // 清缓存，强制重新加载分时
+    fetchIntraday();
+  } else {
+    fetchData();
+  }
+}
+
 function refresh() {
   const input = document.getElementById('symbol-input').value.trim();
-  if (!input) { STATE.symbol = '000001.SH'; fetchData(); return; }
+  if (!input) { STATE.symbol = '000001.SH'; loadCurrent(); return; }
   // 如果输入包含非数字/字母字符（如中文名），触发搜索而不是直接请求
   if (/[^\w.]/.test(input)) {
     fetch(`/api/search?q=${encodeURIComponent(input)}`)
@@ -1458,14 +1467,14 @@ function refresh() {
           const r = results[0];
           document.getElementById('symbol-input').value = r.symbol;
           STATE.symbol = r.symbol;
-          fetchData();
+          loadCurrent();
         }
       })
       .catch(() => {});
     return;
   }
   STATE.symbol = input;
-  fetchData();
+  loadCurrent();
 }
 
 // ═══════════════════════════════════════════════════════════════
