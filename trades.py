@@ -553,6 +553,42 @@ def count_admins():
         conn.close()
 
 
+def sync_admin_password(username, password):
+    """将管理员口令与 .env 对齐 (启动时调用)。
+
+    返回 'updated' | 'unchanged' | 'not_found' | 'not_admin'。
+    口令变化时更新哈希并吊销该管理员全部会话 (旧口令/旧 token 立即失效)。
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, password_hash, salt, is_admin FROM users WHERE username=?",
+            (username,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return "not_found"
+    if not row["is_admin"]:
+        return "not_admin"
+    if verify_password(password, row["salt"], row["password_hash"]):
+        return "unchanged"
+
+    password_hash, salt = hash_password(password)
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET password_hash=?, salt=? WHERE id=?",
+            (password_hash, salt, row["id"]),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    return "updated"
+
+
 def list_users():
     """返回所有用户 {id, username, is_admin, created_at}（不含口令哈希/盐）。"""
     conn = get_conn()

@@ -173,6 +173,16 @@ body {
 .info-group .up { color: var(--up-color); }
 .info-group .down { color: var(--down-color); }
 .info-group .oh { font-size: 13px; font-weight: 500; white-space: nowrap; }
+#info-guba {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 7px;
+  line-height: 1.4;
+}
+#info-guba:hover { color: var(--text); border-color: var(--text-secondary); }
 
 /* ═══════════════ History bar ═══════════ */
 #history-bar {
@@ -279,6 +289,7 @@ body {
   <div class="info-group">
     <span id="info-code" style="color:var(--text-secondary);font-size:12px;margin-right:4px"></span>
     <span class="name" id="info-name">—</span>
+    <a id="info-guba" href="#" target="_blank" rel="noopener noreferrer" style="display:none" title="东财股吧">股吧 ↗</a>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-pledge" style="font-size:12px;color:var(--text-secondary);display:none"></span>
     <span class="price" id="info-price">—</span>
@@ -323,6 +334,22 @@ body {
 </div>
 
 <script>
+// ═══════════════════════════════════════════════════════════════
+// 未登录访问 /api/* 返回 401 → 跳登录页 (带 next 回跳)
+// ═══════════════════════════════════════════════════════════════
+(function () {
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    return _fetch(input, init).then(res => {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (res.status === 401 && typeof url === 'string' && url.startsWith('/api/')) {
+        location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search);
+      }
+      return res;
+    });
+  };
+})();
+
 // ═══════════════════════════════════════════════════════════════
 // HTML ESCAPE (XSS 防护)
 // ═══════════════════════════════════════════════════════════════
@@ -483,11 +510,17 @@ async function fetchData() {
       localStorage.setItem(cacheKey, entry);
       _cleanLocalStorage();
     } catch(e) { /* quota exceeded */ }
+    // 质押比例: 切股先隐藏, 响应回来做竞态防护 + 无数据时隐藏
+    document.getElementById('info-pledge').style.display = 'none';
     fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
       .then(r => r.json()).then(d => {
+        if (STATE._fetchTs !== fetchTs) return; // 已切到新股票, 丢弃旧响应
+        const el = document.getElementById('info-pledge');
         if (d.pledge) {
-          document.getElementById('info-pledge').textContent = '质押 ' + d.pledge.ratio.toFixed(2) + '%';
-          document.getElementById('info-pledge').style.display = '';
+          el.textContent = '质押 ' + d.pledge.ratio.toFixed(2) + '%';
+          el.style.display = '';
+        } else {
+          el.style.display = 'none';
         }
       }).catch(() => {});
     addToHistory(data.symbol, data.name);
@@ -525,6 +558,19 @@ function showLoading(show) {
 function updateInfo(data) {
   document.getElementById('info-code').textContent = (data.symbol || '').replace(/\.(SH|SZ|BJ)$/, '');
   document.getElementById('info-name').textContent = data.name || data.symbol;
+  // 东财股吧跳转: 指数用 zs+market 前缀, 个股/ETF 用裸代码
+  const gubaEl = document.getElementById('info-guba');
+  if (gubaEl) {
+    const _m = (data.symbol || '').match(/\.(SH|SZ|BJ)$/);
+    const _code6 = (data.symbol || '').replace(/\.(SH|SZ|BJ)$/, '');
+    const _mkt = _m ? _m[1] : '';
+    if (data.is_index) {
+      gubaEl.href = 'https://guba.eastmoney.com/list,' + (_mkt === 'SZ' ? 'zssz' : 'zssh') + _code6 + '.html';
+    } else {
+      gubaEl.href = 'https://guba.eastmoney.com/list,' + _code6 + '.html';
+    }
+    gubaEl.style.display = _code6 ? '' : 'none';
+  }
   const q = data.quote;
 
   if (q && q.last_price) {

@@ -24,7 +24,7 @@ import threading
 from datetime import datetime
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 import urllib.request
 
 import numpy as np
@@ -78,11 +78,14 @@ def get_af():
 
 
 # ── 麦蕊智数 (Mairui) ──
-MAIRUI_API_KEY = os.environ.get("MAIRUI_FREE_API_KEY", "")
-if not MAIRUI_API_KEY:
-    print("[Visual] ⚠️  未设置 MAIRUI_FREE_API_KEY 环境变量", flush=True)
+# 优先付费版 token, 未配置才回退免费试用版
+MAIRUI_API_KEY = os.environ.get("MAIRUI_PAID_API_KEY", "") or os.environ.get("MAIRUI_FREE_API_KEY", "")
+if os.environ.get("MAIRUI_PAID_API_KEY"):
+    print("[Visual] MAIRUI_PAID_API_KEY 已加载 (付费版)", flush=True)
+elif MAIRUI_API_KEY:
+    print("[Visual] MAIRUI_FREE_API_KEY 已加载 (免费试用版)", flush=True)
 else:
-    print("[Visual] MAIRUI_FREE_API_KEY 已加载", flush=True)
+    print("[Visual] ⚠️  未设置 MAIRUI_PAID_API_KEY / MAIRUI_FREE_API_KEY 环境变量", flush=True)
 
 _mr = None
 _mr_lock = threading.Lock()
@@ -117,7 +120,7 @@ def _fetch_mairui_quota():
             return _quota_cache["data"]
 
     if not MAIRUI_API_KEY:
-        return {"ok": False, "error": "未配置 MAIRUI_FREE_API_KEY"}
+        return {"ok": False, "error": "未配置 MAIRUI_PAID_API_KEY / MAIRUI_FREE_API_KEY"}
 
     url = "https://mairui.club/licenceinfo?lid=" + MAIRUI_API_KEY
     try:
@@ -224,6 +227,11 @@ import trades
 
 SESSION_COOKIE = "session"
 SESSION_MAX_AGE = trades.SESSION_TTL_DAYS * 24 * 3600
+
+# ── 无需登录即可访问的 API 端点 (其余 /api/* 一律要求登录) ──
+# login/logout: 登录/登出本身必须公开; ping: 健康检查
+PUBLIC_API_GET = {"/api/ping"}
+PUBLIC_API_POST = {"/api/auth/login", "/api/auth/logout"}
 
 # ── 请求速率限制 (令牌桶) ──
 RATE_LIMIT_PER_MIN = 120
@@ -440,44 +448,207 @@ quote_cache = TTLCache(ttl_seconds=30)
 
 
 # ── 质押数据缓存 ──
-_pledge_cache = None
+# 全市场质押数据由 akshare.stock_gpzy_pledge_ratio_em 一次性批量返回, 无需逐股拉取。
+# 磁盘缓存命名: .cache/pledge_ratio_YYYYMMDD.json.gz (日期=数据对应交易日, 一眼可辨)。
+PLEDGE_FILE_PREFIX = "pledge_ratio_"
+PLEDGE_TTL = 24 * 3600      # 每日收盘后更新一次, 24h 作为保鲜兜底
+PLEDGE_KEEP_FILES = 7       # 磁盘只保留最近 7 个质押缓存文件
+
+_pledge_cache = None        # {code: {ratio, shares, market_value, count}}
+_pledge_ts = 0              # 内存缓存写入时间 (epoch)
+_pledge_date = None         # 内存缓存对应的数据交易日 YYYYMMDD
 _pledge_lock = threading.Lock()
+_refreshing_pledge = False  # 后台刷新是否进行中 (stale-while-revalidate)
+
+
+def _pledge_file_path(date_str):
+    return SCRIPT_DIR / ".cache" / f"{PLEDGE_FILE_PREFIX}{date_str}.json.gz"
+
+
+def _fetch_pledge():
+    """从 akshare 拉取全市场质押数据, 返回 (date_str, pledge); 失败返回 (None, None)"""
+    import akshare as ak
+    from datetime import date, timedelta
+    df = None
+    got_date = None
+    # 收盘后数据有延迟, 回溯最近 5 天找最新有数据的交易日
+    for offset in range(5):
+        d = (date.today() - timedelta(days=offset)).strftime("%Y%m%d")
+        try:
+            df = ak.stock_gpzy_pledge_ratio_em(date=d)
+            if df is not None and len(df) > 0:
+                got_date = d
+                break
+        except Exception:
+            continue
+    if df is None:
+        try:
+            df = ak.stock_gpzy_pledge_ratio_em()
+            got_date = date.today().strftime("%Y%m%d")
+        except Exception:
+            pass
+    if df is None or len(df) == 0:
+        return None, None
+    pledge = {}
+    for _, r in df.iterrows():
+        code = str(r["股票代码"]).strip()
+        if not code:
+            continue
+        pledge[code] = {
+            "ratio": float(r.get("质押比例", 0) or 0),
+            "shares": float(r.get("质押股数", 0) or 0),
+            "market_value": float(r.get("质押市值", 0) or 0),
+            "count": int(r.get("质押笔数", 0) or 0),
+        }
+    return got_date, pledge
+
+
+def _pledge_from_disk():
+    """读最新磁盘质押缓存, 返回 (date, pledge, ts); 无/失败返回 (None, None, 0)"""
+    try:
+        files = sorted(SCRIPT_DIR.joinpath(".cache").glob(f"{PLEDGE_FILE_PREFIX}*.json.gz"),
+                       reverse=True)
+        if not files:
+            return None, None, 0
+        fp = files[0]
+        with gzip.open(fp, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+        pledge = data.get("pledge")
+        if not pledge:
+            return None, None, 0
+        return data.get("date"), pledge, data.get("ts", fp.stat().st_mtime)
+    except Exception as e:
+        print(f"[Visual] 读取质押缓存失败: {e}", flush=True)
+    return None, None, 0
+
+
+def _pledge_to_disk(date_str, pledge):
+    """原子写入质押缓存 (gzip 临时文件 + replace), 并清理过期历史文件"""
+    try:
+        fp = _pledge_file_path(date_str)
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = fp.with_name(fp.name + ".tmp")
+        payload = {"date": date_str, "ts": time.time(), "count": len(pledge),
+                   "pledge": pledge}
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        tmp.replace(fp)
+        # 仅保留最近 N 个 (按文件名日期倒序), 更早的删除
+        all_files = sorted(fp.parent.glob(f"{PLEDGE_FILE_PREFIX}*.json.gz"), reverse=True)
+        for old in all_files[PLEDGE_KEEP_FILES:]:
+            try:
+                old.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[Visual] 写入质押缓存失败: {e}", flush=True)
+
+
+def _refresh_pledge_async():
+    """后台异步刷新质押数据 (stale-while-revalidate), 同一时刻只跑一个
+
+    拉取失败或日期未更新时保留旧缓存, 不覆盖、不清空, 仅记录日志等待下轮重试。
+    """
+    global _refreshing_pledge, _pledge_cache, _pledge_ts, _pledge_date
+    with _pledge_lock:
+        if _refreshing_pledge:
+            return
+        _refreshing_pledge = True
+
+    def _worker():
+        global _refreshing_pledge, _pledge_cache, _pledge_ts, _pledge_date
+        try:
+            date_str, pledge = _fetch_pledge()
+            if not pledge:
+                print("[Visual] 质押数据刷新失败: 未获取到数据, 保留旧缓存", flush=True)
+                return
+            # 非交易日或当天数据尚未更新: 拉到的仍是旧日期, 跳过重复写入
+            if _pledge_date and date_str == _pledge_date:
+                print(f"[Visual] 质押数据已是 {date_str} 最新, 跳过写入", flush=True)
+                return
+            _pledge_to_disk(date_str, pledge)
+            with _pledge_lock:
+                _pledge_cache = pledge
+                _pledge_ts = time.time()
+                _pledge_date = date_str
+            print(f"[Visual] 质押数据刷新完成: {date_str} 共 {len(pledge)} 条", flush=True)
+        except Exception as e:
+            print(f"[Visual] 质押数据刷新失败: {e}, 保留旧缓存", flush=True)
+        finally:
+            with _pledge_lock:
+                _refreshing_pledge = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _load_pledge():
-    global _pledge_cache
-    if _pledge_cache is not None:
+    """加载全市场质押数据 (内存+磁盘双层缓存, stale-while-revalidate)
+
+    有缓存绝不阻塞: 内存新鲜直接用, 过期返回旧值并后台刷新; 磁盘兜底。
+    仅在无任何缓存 (首次运行) 时才同步拉取。每日 15:30 定时刷新保证新鲜。
+    """
+    global _pledge_cache, _pledge_ts, _pledge_date
+    now = time.time()
+
+    # 1) 内存缓存新鲜 → 直接返回
+    if _pledge_cache is not None and now - _pledge_ts < PLEDGE_TTL:
         return _pledge_cache
+
+    # 2) 内存有但过期 → 返回旧数据 + 后台刷新 (不阻塞)
+    if _pledge_cache is not None:
+        _refresh_pledge_async()
+        return _pledge_cache
+
+    # 3) 磁盘缓存 → 加载返回; 过期则后台刷新 (不阻塞)
+    date_str, pledge, ts = _pledge_from_disk()
+    if pledge:
+        with _pledge_lock:
+            if _pledge_cache is None:
+                _pledge_cache = pledge
+                _pledge_ts = ts or now
+                _pledge_date = date_str
+        if now - (ts or 0) < PLEDGE_TTL:
+            return pledge
+        _refresh_pledge_async()
+        return pledge
+
+    # 4) 无任何缓存 (首次运行) → 同步拉取, 加锁避免并发重复拉取
     with _pledge_lock:
-        if _pledge_cache is not None:  # double-check within lock
+        if _pledge_cache is not None:
             return _pledge_cache
-        try:
-            import akshare as ak
-            from datetime import date, timedelta
-            df = None
-            for offset in range(5):
-                d = (date.today() - timedelta(days=offset)).strftime("%Y%m%d")
-                try:
-                    df = ak.stock_gpzy_pledge_ratio_em(date=d)
-                    if df is not None and len(df) > 0: break
-                except Exception: continue
-            if df is None:
-                df = ak.stock_gpzy_pledge_ratio_em()
-            pledge = {}
-            for _, r in df.iterrows():
-                code = str(r["股票代码"]).strip()
-                pledge[code] = {
-                    "ratio": float(r.get("质押比例", 0) or 0),
-                    "shares": float(r.get("质押股数", 0) or 0),
-                    "market_value": float(r.get("质押市值", 0) or 0),
-                    "count": int(r.get("质押笔数", 0) or 0),
-                }
+        print("[Visual] 首次加载全市场质押数据...", flush=True)
+        date_str, pledge = _fetch_pledge()
+        if pledge:
             _pledge_cache = pledge
-            print(f"[Visual] 已加载 {len(pledge)} 条质押数据", flush=True)
-        except Exception as e:
-            print(f"[Visual] 质押数据加载失败: {e}", flush=True)
+            _pledge_ts = time.time()
+            _pledge_date = date_str
+            _pledge_to_disk(date_str, pledge)
+            print(f"[Visual] 已加载 {date_str} {len(pledge)} 条质押数据", flush=True)
+        else:
             _pledge_cache = {}
-    return _pledge_cache
+            print("[Visual] 质押数据加载失败 (无缓存可用), 等待定时重试", flush=True)
+        return _pledge_cache
+
+
+def _next_schedule_delay(now=None):
+    """计算距离下一个 15:30 的秒数 (now 可注入便于测试, 默认当前时间)"""
+    from datetime import timedelta
+    now = now or datetime.now()
+    target = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return max(1.0, (target - now).total_seconds())
+
+
+def _pledge_scheduler():
+    """每日 15:30 定时刷新全市场质押数据 (A股收盘 15:00 后 30 分钟)"""
+    while True:
+        try:
+            time.sleep(_next_schedule_delay())
+            _refresh_pledge_async()
+        except Exception as e:
+            print(f"[Visual] 质押定时任务异常: {e}", flush=True)
+            time.sleep(60)
 
 
 # ── ETF 溢价 ──
@@ -1031,10 +1202,12 @@ class VisualHandler(BaseHTTPRequestHandler):
         path = parsed.path
         params = parse_qs(parsed.query)
 
-        # ── API 路由: 所有 /api/* 做速率限制 ──
+        # ── API 路由: 所有 /api/* 做速率限制 + 统一鉴权 ──
         if path.startswith("/api/"):
             if not _check_rate_limit():
                 return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+            if path not in PUBLIC_API_GET and not self._current_user():
+                return self._send_error("未登录", 401)
 
         if path == "/api/kline":
             return self._handle_kline(params)
@@ -1066,12 +1239,25 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_fees_get()
         elif path == "/api/quota":
             return self._handle_quota()
+        elif path == "/login.html":
+            # 登录页公开 (未登录跳转目标)
+            return self._serve_static("login.html")
         elif path == "/" or path == "/index.html":
+            if not self._current_user():
+                return self._redirect_to_login(path)
             return self._serve_static("index.html")
-        elif path.endswith(".html") or path.endswith(".js") or path.endswith(".css"):
+        elif path.endswith(".html"):
+            # trades.html / admin.html 等受保护页面
+            if not self._current_user():
+                return self._redirect_to_login(path)
+            return self._serve_static(path.lstrip("/"))
+        elif path.endswith((".js", ".css")):
+            # 静态资源公开 (登录页需加载样式/脚本)
             return self._serve_static(path.lstrip("/"))
         else:
-            # 默认返回 index.html (SPA fallback)
+            # 默认返回 index.html (SPA fallback); 未登录跳登录页
+            if not self._current_user():
+                return self._redirect_to_login(path)
             return self._serve_static("index.html")
 
     # ── 鉴权与 body 解析助手 ──
@@ -1132,6 +1318,8 @@ class VisualHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             if not _check_rate_limit():
                 return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
+            if path not in PUBLIC_API_POST and not self._current_user():
+                return self._send_error("未登录", 401)
         if path == "/api/auth/login":
             return self._handle_login()
         elif path == "/api/auth/logout":
@@ -1449,6 +1637,20 @@ class VisualHandler(BaseHTTPRequestHandler):
             return
         return self._send_json(_fetch_mairui_quota())
 
+    # ── 页面鉴权跳转 ──
+    def _redirect_to_login(self, target):
+        """未登录访问受保护页面 → 302 跳登录页, 带 next 回跳参数。
+
+        next 仅接受以 "/" 开头且非 "//" 的值, 防开放重定向。
+        """
+        next_url = ""
+        if target and target.startswith("/") and not target.startswith("//"):
+            next_url = "?next=" + quote(target)
+        self.send_response(302)
+        self.send_header("Location", "/login.html" + next_url)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
     # ── 静态文件 ──
     def _serve_static(self, filename):
         # 前端静态文件统一放在 static/ 子目录 (URL 仍为干净路径, 如 /trades.html /admin.html)
@@ -1472,7 +1674,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", f"{ct}; charset=utf-8")
         self.send_header("Content-Length", len(body))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", CSP_HEADER)
         self.end_headers()
         self.wfile.write(body)
@@ -1580,6 +1782,7 @@ class VisualHandler(BaseHTTPRequestHandler):
             "period": period,
             "count": len(klines),
             "is_etf": is_etf,
+            "is_index": _is_index_symbol(symbol),
             "macd_params": indicators["macd"]["params"],
             "klines": klines,
             "meta": {
@@ -1691,6 +1894,9 @@ class VisualHandler(BaseHTTPRequestHandler):
         if not symbol_raw:
             return self._send_error("缺少 symbol 参数")
         symbol = normalize_symbol(symbol_raw)
+        if _is_index_symbol(symbol):
+            # 指数无质押数据, 避免与同号个股撞码 (000001.SH 上证指数 vs 000001.SZ 平安银行)
+            return self._send_json({"symbol": symbol, "pledge": None})
         code = symbol.split(".")[0]
         pledge = _load_pledge()
         data = pledge.get(code)
@@ -1724,7 +1930,7 @@ def main():
     except Exception as e:
         print(f"[Visual] ⚠️  交易记录数据库初始化失败: {e}", flush=True)
 
-    # 引导首个管理员 (仅当库中无 admin 时创建，绝不覆盖已有口令)
+    # 管理员引导: .env 为口令权威来源。无管理员则创建, 已有则同步 (改 .env 密码后重启即生效)
     admin_user = os.environ.get("ADMIN_USERNAME", "").strip()
     admin_pass = os.environ.get("ADMIN_PASSWORD", "")
     if admin_user and admin_pass:
@@ -1733,9 +1939,17 @@ def main():
                 trades.create_user(admin_user, admin_pass, is_admin=True)
                 print(f"[Visual] 已创建管理员账号: {admin_user}", flush=True)
             else:
-                print("[Visual] 管理员已存在，跳过自动创建", flush=True)
+                status = trades.sync_admin_password(admin_user, admin_pass)
+                if status == "updated":
+                    print(f"[Visual] 管理员 {admin_user} 口令已与 .env 同步 (旧口令/会话已失效)", flush=True)
+                elif status == "unchanged":
+                    print("[Visual] 管理员口令与 .env 一致", flush=True)
+                elif status == "not_admin":
+                    print(f"[Visual] ⚠️  用户 {admin_user} 存在但非管理员, 忽略 .env 口令", flush=True)
+                else:  # not_found: 已有其他管理员, 忽略 .env 中的该用户名
+                    print(f"[Visual] ⚠️  已存在其他管理员, 忽略 .env 的 {admin_user}", flush=True)
         except Exception as e:
-            print(f"[Visual] ⚠️  管理员账号创建失败: {e}", flush=True)
+            print(f"[Visual] ⚠️  管理员账号同步失败: {e}", flush=True)
     elif admin_user or admin_pass:
         print("[Visual] ⚠️  ADMIN_USERNAME 与 ADMIN_PASSWORD 需同时设置", flush=True)
     else:
@@ -1764,6 +1978,9 @@ def main():
         t.start()
         return t
     _warmup()
+
+    # 每日 15:30 定时刷新全市场质押数据
+    threading.Thread(target=_pledge_scheduler, daemon=True).start()
 
     try:
         server.serve_forever()

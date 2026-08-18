@@ -107,23 +107,6 @@ input, select, textarea {
 }
 input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
 
-/* ═══════════════ 登录视图 ═══════════════ */
-#login-view {
-  max-width: 380px; margin: 60px auto; padding: 28px;
-  background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 8px; box-shadow: var(--shadow);
-}
-#login-view h1 { font-size: 20px; margin-bottom: 6px; }
-#login-view .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
-#login-view .field { margin-bottom: 14px; }
-#login-view label { display: block; font-size: 13px; margin-bottom: 4px; color: var(--text-secondary); }
-#login-view input { width: 100%; }
-#login-view .row { display: flex; gap: 10px; margin-top: 18px; }
-#login-view .err { color: var(--up-color); font-size: 13px; margin-top: 12px; min-height: 18px; }
-.tab-switch { display: flex; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
-.tab-switch button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 8px 14px; }
-.tab-switch button.active { border-bottom-color: var(--btn-active); color: var(--btn-active); background: transparent; }
-
 /* ═══════════════ 主视图 ═══════════════ */
 #main-view { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
 
@@ -333,18 +316,6 @@ td.neg { color: var(--down-color); font-weight: 600; }
   <button onclick="toggleTheme()" title="切换主题">🌙</button>
   <button id="btn-fees" onclick="openFeesModal()" style="display:none">⚙ 费率</button>
   <button id="btn-logout" class="danger" onclick="doLogout()" style="display:none">退出登录</button>
-</div>
-
-<!-- ═══════════════ 登录视图 ═══════════════ -->
-<div id="login-view" style="display:none">
-  <h1>📒 交易记录</h1>
-  <div class="sub">登录后可录入与统计你的交易记录，数据按账户独立存储。</div>
-  <div id="form-login">
-    <div class="field"><label>用户名</label><input id="login-username" autocomplete="username"></div>
-    <div class="field"><label>密码</label><input id="login-password" type="password" autocomplete="current-password"></div>
-    <div class="row"><button class="primary" style="flex:1" onclick="doLogin()">登 录</button></div>
-  </div>
-  <div class="err" id="auth-err"></div>
 </div>
 
 <!-- ═══════════════ 主视图 ═══════════════ -->
@@ -671,6 +642,7 @@ async function api(path, options = {}) {
   let data = null;
   try { data = await res.json(); } catch (e) { /* empty body */ }
   if (!res.ok) {
+    if (res.status === 401) redirectToLogin();
     throw new Error((data && data.error) || ('请求失败 (' + res.status + ')'));
   }
   return data;
@@ -686,19 +658,11 @@ function toggleTheme() {
   } catch (e) {}
 }
 
-function showLogin() {
-  document.getElementById('login-view').style.display = '';
-  document.getElementById('main-view').style.display = 'none';
-  document.getElementById('btn-logout').style.display = 'none';
-  document.getElementById('btn-fees').style.display = 'none';
-  document.getElementById('toolbar-user').textContent = '';
-  document.getElementById('user-wrap').style.display = 'none';
-  document.getElementById('user-menu').style.display = 'none';
-  document.getElementById('quota-badge').style.display = 'none';
+function redirectToLogin() {
+  location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search);
 }
 
 function showMain() {
-  document.getElementById('login-view').style.display = 'none';
   document.getElementById('main-view').style.display = '';
   document.getElementById('btn-logout').style.display = '';
   document.getElementById('btn-fees').style.display = '';
@@ -743,8 +707,6 @@ document.addEventListener('click', function (e) {
   }
 });
 
-function setAuthErr(msg) { document.getElementById('auth-err').textContent = msg || ''; }
-
 async function checkAuth() {
   try {
     const data = await api('/api/auth/me');
@@ -754,24 +716,14 @@ async function checkAuth() {
     await refreshQuotes(true);  // 进入页面强刷一次持仓现价
   } catch (e) {
     state.user = null;
-    showLogin();
+    redirectToLogin();
   }
-}
-
-async function doLogin() {
-  setAuthErr('');
-  const username = document.getElementById('login-username').value.trim();
-  const password = document.getElementById('login-password').value;
-  try {
-    await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
-    await checkAuth();
-  } catch (e) { setAuthErr(e.message); }
 }
 
 async function doLogout() {
   try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) {}
   state.user = null;
-  showLogin();
+  redirectToLogin();
 }
 
 // ═══════════════ 费率设置 ═══════════════
@@ -1012,6 +964,16 @@ function fmtMoney(v, signed = false) {
   return sign + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
 }
 
+// 金额缩写: 达到万位显示 n.xx万, 千位显示 n.xx千, 否则原值 (两位小数); signed 时正数带 +
+function fmtAmount(v, signed = false) {
+  if (v === null || v === undefined) return '—';
+  const sign = signed && v > 0 ? '+' : '';
+  const abs = Math.abs(v);
+  if (abs >= 10000) return sign + (v / 10000).toFixed(2) + '万';
+  if (abs >= 1000) return sign + (v / 1000).toFixed(2) + '千';
+  return sign + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+}
+
 function pnlClass(v) {
   if (v > 0) return 'pos';
   if (v < 0) return 'neg';
@@ -1091,7 +1053,7 @@ function renderStatCards(s) {
   const floatPctStr = agg.floatPct > 0 ? '+' + agg.floatPct.toFixed(2) + '%' : agg.floatPct.toFixed(2) + '%';
   const cards = [
     { label: '总盈亏', value: fmtMoney(s.total_pnl, true), cls: pnlClass(s.total_pnl), sub: (s.total_return_pct === null ? '—' : (s.total_return_pct > 0 ? '+' : '') + s.total_return_pct + '%'), subCls: pnlClass(s.total_pnl) },
-    { label: '持仓金额', value: fmtMoney(agg.marketValue), cls: '', sub: `成本 ${fmtMoney(agg.cost)}` },
+    { label: '持仓金额', value: fmtAmount(agg.marketValue), cls: '', sub: `成本 ${fmtAmount(agg.cost)}` },
     { label: '持仓浮盈亏', value: fmtMoney(agg.floatPnl, true), cls: pnlClass(agg.floatPnl), sub: floatPctStr, subCls: pnlClass(agg.floatPnl) },
     { label: '胜率', value: s.win_rate === null ? '—' : s.win_rate + '%', cls: s.win_rate === null ? '' : pnlClass(s.win_rate - 50), sub: `${s.win_count}胜 / ${s.loss_count}负 / ${s.break_even_count}平` },
     { label: '盈亏比', value: s.profit_factor === null ? '∞' : s.profit_factor, cls: '', sub: s.avg_win === null ? '' : `均盈 ${fmtMoney(s.avg_win)} / 均亏 ${fmtMoney(s.avg_loss)}` },
@@ -1131,6 +1093,10 @@ function upColor() {
 }
 function downColor() {
   return getComputedStyle(document.documentElement).getPropertyValue('--down-color').trim() || '#14b143';
+}
+// 不亏不盈/中性色: 用主题主文字色 (暗色近白, 亮色近黑), 区别于 chartTheme 的次要灰
+function neutralColor() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#2c3e50';
 }
 
 function renderPnlChart() {
@@ -1198,17 +1164,19 @@ function renderModelChart() {
   });
 }
 
-// 持仓金额分布饼图：扇区大小 = 现价×数量(市值), 按市值降序
+// 持仓金额分布饼图：扇区大小 = 现价×数量(市值, 现价缺失回退成本), 按市值降序；圆环中心显示持仓净盈亏
 function renderHoldChart() {
   const el = document.getElementById('hold-pie-chart');
   if (!state.holdChart) state.holdChart = echarts.init(el);
   const positions = (state.stats && state.stats.open_positions) || [];
   const rows = [];
   for (const p of positions) {
+    if (!(p.quantity > 0)) continue;
     const q = state.quotes[p.symbol];
     const price = (q && q.last_price != null) ? q.last_price : null;
-    if (price == null || !(p.quantity > 0)) continue;
-    const mv = price * p.quantity;
+    const cost = p.entry_price * p.quantity;
+    // 现价未取到(限流/盘后/超时)时回退成本价, 保证「有持仓就画饼图」, 不再误显示「暂无持仓」
+    const mv = price != null ? price * p.quantity : cost;
     if (mv <= 0) continue;
     rows.push({
       name: p.name || p.symbol,
@@ -1216,8 +1184,8 @@ function renderHoldChart() {
       price,
       qty: p.quantity,
       mv,
-      cost: p.entry_price * p.quantity,
-      floatPnl: (price - p.entry_price) * p.quantity,
+      cost,
+      floatPnl: price != null ? (price - p.entry_price) * p.quantity : null,
     });
   }
   rows.sort((a, b) => b.mv - a.mv);
@@ -1231,15 +1199,57 @@ function renderHoldChart() {
     return;
   }
 
+  // 中心净盈亏：全部持仓现价可得才汇总浮盈亏, 部分缺失则显示占位
+  const allQuoted = rows.every(r => r.floatPnl != null);
+  const costTotal = rows.reduce((s, r) => s + r.cost, 0);
+  const floatPnl = allQuoted ? rows.reduce((s, r) => s + r.floatPnl, 0) : null;
+  const floatPct = (allQuoted && costTotal) ? (floatPnl / costTotal * 100) : null;
+  const centerColor = floatPnl == null ? chartTheme() : (floatPnl > 0 ? upColor() : (floatPnl < 0 ? downColor() : neutralColor()));
+  const pctStr = floatPct == null ? '' : (floatPct > 0 ? '+' : '') + floatPct.toFixed(2) + '%';
+  const note = floatPnl == null ? '现价未取到' : pctStr;
+  // 富文本: {pct|...} 段单独着色(红涨/绿跌/白平), 「净盈亏」标签保持主题灰
+  const capText = '净盈亏' + (note ? ' · {pct|' + note + '}' : '');
+
   state.holdChart.setOption({
     backgroundColor: 'transparent',
+    graphic: [
+      {
+        // 数字用 graphic: 靠 left:'center'/top:'middle' 让文字 box 整体对齐圆心, 不再叠 textAlign (叠加会二次偏移)
+        type: 'text',
+        left: 'center',
+        top: 'middle',
+        silent: true,
+        style: {
+          text: floatPnl == null ? '—' : fmtAmount(floatPnl, true),
+          fill: centerColor,
+          fontSize: 15,
+          fontWeight: 'bold',
+        },
+      },
+      {
+        type: 'text',
+        left: 'center',
+        top: '58%',
+        silent: true,
+        style: {
+          text: capText,
+          fill: chartTheme(),
+          fontSize: 11,
+          textVerticalAlign: 'middle',
+          rich: { pct: { fill: centerColor } },
+        },
+      },
+    ],
     tooltip: {
       trigger: 'item',
       formatter: p => {
         const r = rows[p.dataIndex];
         const pct = total ? (r.mv / total * 100) : 0;
-        const pln = fmtMoney(r.floatPnl, true);
-        return `${r.name} ${r.symbol}<br/>持仓金额: ${fmtMoney(r.mv)} (${pct.toFixed(1)}%)<br/>持仓成本: ${fmtMoney(r.cost)}<br/>现价: ${r.price} × ${r.qty} 股<br/>浮盈亏: <span style="color:${r.floatPnl >= 0 ? upColor() : downColor()}">${pln}</span>`;
+        const quoted = r.floatPnl != null;
+        const pln = quoted ? fmtMoney(r.floatPnl, true) : '—';
+        const pnlColor = quoted ? (r.floatPnl >= 0 ? upColor() : downColor()) : chartTheme();
+        const priceStr = quoted ? `${r.price} × ${r.qty} 股` : '—（按成本估算）';
+        return `${r.name} ${r.symbol}<br/>持仓金额: ${fmtAmount(r.mv)} (${pct.toFixed(1)}%)<br/>持仓成本: ${fmtAmount(r.cost)}<br/>现价: ${priceStr}<br/>浮盈亏: <span style="color:${pnlColor}">${pln}</span>`;
       },
     },
     legend: {
@@ -1251,7 +1261,7 @@ function renderHoldChart() {
     series: [{
       type: 'pie',
       radius: ['42%', '70%'],
-      center: ['50%', '46%'],
+      center: ['50%', '50%'],
       avoidLabelOverlap: true,
       itemStyle: { borderColor: 'rgba(0,0,0,0.2)', borderWidth: 1 },
       label: {
@@ -1692,13 +1702,6 @@ document.getElementById('modal-mask').addEventListener('click', function (e) {
 });
 
 document.getElementById('t-symbol-input').addEventListener('input', onSymbolInput);
-
-// 回车登录
-function bindEnter(id, fn) {
-  document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
-}
-bindEnter('login-username', doLogin);
-bindEnter('login-password', doLogin);
 
 // 初始化主题 (与主页共享 visual-theme 键)
 try {

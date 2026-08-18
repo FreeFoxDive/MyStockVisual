@@ -147,7 +147,7 @@ visual/
 - 数据库：SQLite，文件 `data/trades.db`（运行时自动创建，`data/` 不入库）
 - 口令：PBKDF2-SHA256（20 万次迭代）+ 随机盐
 - 会话：`secrets.token_hex(32)`，30 天过期，`HttpOnly` + `SameSite=Lax` Cookie
-- 管理员：`.env` 中配置 `ADMIN_USERNAME` / `ADMIN_PASSWORD`，服务启动时若无管理员则自动创建（仅一次，不覆盖已改口令）
+- 管理员：`.env` 中配置 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 作为口令权威来源；服务启动时若无管理员则自动创建，已有管理员则同步口令（改 `.env` 后重启即生效）
 
 ## Docker 部署
 
@@ -176,7 +176,7 @@ docker compose down
 | 缓存卷 | `.cache` | Docker volume 持久化 |
 | 数据卷 | `data` | 交易记录数据库 `trades.db` 持久化 |
 | 环境变量 | `.env` | 通过 `env_file` 注入 |
-| 管理员账号 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 首次启动自动创建管理员（仅一次） |
+| 管理员账号 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 无管理员则自动创建；已有则启动时同步口令 |
 | 用户 | `appuser` (非 root) | 降低容器逃逸风险 |
 
 > 注：部署主机 `visual/data`、`visual/.cache` 的属主需为 UID 1000（绝大多数 Linux 首个用户即 1000）；否则构建时用 `--build-arg UID=$(id -u)` 对齐。

@@ -231,10 +231,15 @@ async function api(path, options = {}) {
   const res = await fetch(path, opts);
   let data = null;
   try { data = await res.json(); } catch (e) { /* empty body */ }
+  if (res.status === 401) redirectToLogin();
   if (!res.ok) {
     throw new Error((data && data.error) || ('请求失败 (' + res.status + ')'));
   }
   return data;
+}
+
+function redirectToLogin() {
+  location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search);
 }
 
 function toggleTheme() {
@@ -255,13 +260,13 @@ async function checkAuth() {
     await Promise.all([loadUsers(), loadModels()]);
     applyHash();
   } catch (e) {
-    location.href = '/trades.html';
+    redirectToLogin();
   }
 }
 
 async function doLogout() {
   try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) {}
-  location.href = '/trades.html';
+  redirectToLogin();
 }
 
 // ═══════════════ 用户管理 ═══════════════
