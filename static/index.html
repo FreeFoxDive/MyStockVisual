@@ -368,6 +368,7 @@ const STATE = {
   period: '1d',
   theme: 'light',
   klineData: null,       // raw JSON from server
+  trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
   chart: null,
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
   _gridRects: null,      // cached grid pixel rects
@@ -471,6 +472,7 @@ async function fetchData() {
   if (STATE.period === 'intraday') STATE.period = '1d';
   const period = STATE.period;
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
+  STATE.trades = null; // 切股/切周期先清空, 避免缓存命中快速渲染短暂显示上一只股票的买卖点
   const cacheKey = `vk_${symbol}_${period}`;
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
@@ -525,8 +527,8 @@ async function fetchData() {
       }).catch(() => {});
     addToHistory(data.symbol, data.name);
     updateInfo(data);
-    if (cacheHit) updateChart(false); // 后台刷新
-    else updateChart(false);
+    await loadTrades(data.symbol, fetchTs);
+    updateChart(false);
   } catch (e) {
     console.error('获取数据失败:', e);
     alert('❌ 获取数据失败: ' + e.message);
@@ -534,6 +536,79 @@ async function fetchData() {
     STATE.chart.hideLoading();
     showLoading(false);
   }
+}
+
+// ── 交易记录: 拉取当前 symbol 的买卖点 (仅登录用户, 未登录由服务端 401 拦截跳登录) ──
+async function loadTrades(symbol, fetchTs) {
+  try {
+    const resp = await fetch(`/api/trades?symbol=${encodeURIComponent(symbol)}&limit=500`);
+    if (!resp.ok) { STATE.trades = null; return; }
+    const data = await resp.json();
+    if (STATE._fetchTs !== fetchTs || STATE.symbol !== symbol) return; // 已切到新股票
+    STATE.trades = data.trades || [];
+  } catch (e) {
+    STATE.trades = null; // 静默降级: 无买卖点, 不影响 K 线
+  }
+}
+
+// 交易日期 → bar 索引 (升序 dates 里第一个 date >= d 的 bar; 日/周/月通用)
+function matchBarIndex(dates, d) {
+  for (let i = 0; i < dates.length; i++) {
+    if (String(dates[i]).slice(0, 10) >= d) return i;
+  }
+  return -1;
+}
+
+// 依据交易记录构建 ECharts markPoint (同花顺样式: 红底白B挂柱体下/绿底白S挂柱体上, 不遮实体)
+function buildTradeMarkers(klines, dates) {
+  const trades = STATE.trades;
+  if (!trades || !trades.length) return { symbol: 'none' };
+
+  const points = [];
+  const push = (side, date, price, qty) => {
+    if (!date || price == null || isNaN(price)) return;
+    const idx = matchBarIndex(dates, date);
+    if (idx < 0) return; // K 线窗口外不显示
+    const bar = klines[idx];
+    const isBuy = side === 'buy';
+    const qtyText = (qty != null && qty !== '') ? (qty + ' 股') : '';
+    points.push({
+      coord: [idx, isBuy ? bar.low : bar.high],
+      symbol: 'circle',
+      symbolSize: 14,
+      symbolOffset: [0, isBuy ? 8 : -8],
+      name: isBuy ? '买入' : '卖出',
+      value: price + ' 元' + (qtyText ? ' · ' + qtyText : '') + ' (' + date + ')',
+      itemStyle: { color: isBuy ? C().up : C().down },
+      label: {
+        show: true,
+        formatter: isBuy ? 'B' : 'S',
+        color: '#fff',
+        fontSize: 10,
+        fontWeight: 'bold',
+        position: 'inside',
+      },
+    });
+  };
+
+  for (const t of trades) {
+    if (t.type === 'batch') {
+      const legs = t.legs || [];
+      for (const l of legs) push(l.side, l.date, l.price, l.quantity);
+    } else {
+      push('buy', t.entry_date, t.entry_price, t.quantity);
+      if (t.status === 'closed') push('sell', t.exit_date, t.exit_price, t.quantity);
+    }
+  }
+
+  if (!points.length) return { symbol: 'none' };
+  return {
+    tooltip: {
+      trigger: 'item',
+      formatter: (p) => p.name + '<br/>' + p.value,
+    },
+    data: points,
+  };
 }
 
 async function fetchQuote() {
@@ -1115,7 +1190,7 @@ function updateChart(reTheme) {
   series.push(
     { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
       itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
-      markPoint: { symbol: 'none' } },
+      markPoint: buildTradeMarkers(klines, dates) },
     { name: 'MA5', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: ma5,
       symbol: 'none', smooth: true, lineStyle: { color: C().ma5, width: 1 },
       itemStyle: { color: C().ma5 } },
