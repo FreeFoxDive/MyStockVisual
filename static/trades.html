@@ -1490,10 +1490,45 @@ function onTypeChange() {
   document.getElementById('trade-panels').style.display = batch ? 'none' : '';
   document.getElementById('legs-editor').style.display = batch ? '' : 'none';
   if (batch) {
+    seedLegsFromSimple();
     renderLegs();
   } else {
     onStatusChange();
   }
+}
+
+// 单笔 → 批次切换时, 把旧的买入(及已平仓的卖出)内容带入批次腿编辑器
+function seedLegsFromSimple() {
+  if (state.legs.length) return;
+  const entryPrice = document.getElementById('t-entry-price').value;
+  const entryDate = document.getElementById('t-entry-date').value;
+  if (!entryPrice && !entryDate) return;   // 新增记录, 无旧内容可带
+  const qty = document.getElementById('t-quantity').value;
+  const legs = [{
+    side: 'buy',
+    price: entryPrice,
+    quantity: qty,
+    date: entryDate,
+    time: '',
+    reason: document.getElementById('t-entry-reason').value || '',
+    note: document.getElementById('t-entry-note').value.trim(),
+  }];
+  if (document.getElementById('t-status').value === 'closed') {
+    const exitPrice = document.getElementById('t-exit-price').value;
+    const exitDate = document.getElementById('t-exit-date').value;
+    if (exitPrice || exitDate) {
+      legs.push({
+        side: 'sell',
+        price: exitPrice,
+        quantity: qty,
+        date: exitDate,
+        time: '',
+        reason: document.getElementById('t-exit-reason').value || '',
+        note: document.getElementById('t-exit-note').value.trim(),
+      });
+    }
+  }
+  state.legs = legs.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
 
 // ═══════════════ 批次腿编辑器 ═══════════════
