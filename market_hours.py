@@ -123,3 +123,29 @@ def seconds_until_session(now: datetime | None = None) -> float:
         return 60.0
     nxt = min(candidates)
     return max(1.0, (nxt - now).total_seconds())
+
+
+def nth_trading_day(start_day: str, n: int):
+    """推荐持仓周期的第 n 个交易日 (含起算日)。
+
+    start_day 当天若是交易日则计为第 1 日, 否则从其后第一个交易日起算。
+    n < 1 或日期无效返回 None; 一年内找不到也返回 None。
+    """
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return None
+    if n < 1:
+        return None
+    try:
+        dt = datetime.strptime(str(start_day)[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    found = 0
+    for _ in range(max(n * 4, n + 60)):
+        if is_trading_day(dt):
+            found += 1
+            if found >= n:
+                return dt.strftime("%Y-%m-%d")
+        dt += timedelta(days=1)
+    return None

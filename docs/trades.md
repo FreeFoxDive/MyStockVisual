@@ -45,13 +45,15 @@
 | `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | 模型 ID |
 | `name` | TEXT | NOT NULL | 模型名称（启用中唯一，见下） |
 | `description` | TEXT | NOT NULL DEFAULT '' | 策略描述 |
+| `hold_days` | INTEGER | 可空 | 推荐持仓交易日（空=不发到期平仓提醒） |
 | `active` | INTEGER | NOT NULL DEFAULT 1 | 是否启用（0=已软删除） |
 | `created_at` | TEXT | NOT NULL | 创建时间 |
 | `deleted_at` | TEXT | 可空 | 软删除时间（恢复时置空） |
 
 - **名称唯一性**：部分唯一索引 `idx_models_name_active`（`UNIQUE(name) WHERE active=1`），仅启用中的模型名不可重复；停用后可复用同名。
 - **软删除**：管理员「删除」仅置 `active=0` 并记录 `deleted_at`，**不物理删除、不动交易记录**，历史交易与按模型统计永久可追溯；同名模型可「恢复」。
-- **种子数据**：首次建库自动播种 A–E 五个模型（对应回测管线）：`A 60分钟超短`、`B 日线波段`、`C 日线波段·阳包阴`、`D 动力管线`、`E K线反转管线`；策略描述默认留空，不暴露内部策略细节。
+- **种子数据**：首次建库自动播种 A–E 五个模型（对应回测管线）：`A 60分钟超短`（3 日）、`B 日线波段`（20 日）、`C 日线波段·阳包阴`（10 日）、`D 动力管线`（7 日）、`E K线反转管线`（不提醒）；策略描述默认留空，不暴露内部策略细节。旧库升级时仅在刚补 `hold_days` 列时回填 A–D 默认值，之后不覆盖人工修改。
+- **推荐持仓**：管理员可改 `hold_days`（1~250 或空）。关联该模型的 **open 持仓** 在到期日（买入日起算第 N 个交易日；批次用最晚一笔买入日）上午 10:00、下午 14:00 各发一次钉钉平仓提醒。无模型或未填天数的持仓不提醒。
 
 ### 表 `trades` — 交易记录
 
@@ -107,7 +109,7 @@
 | `user_id` | INTEGER | NOT NULL，FK→users ON DELETE CASCADE | |
 | `trade_id` | INTEGER | 可空，FK→trades ON DELETE SET NULL | |
 | `symbol` | TEXT | NOT NULL | |
-| `alert_type` | TEXT | NOT NULL | `accel_down` / `accel_up` / `sl_breached` / `tp_reached` / `breakeven_hit` / `limit_up_sealed` |
+| `alert_type` | TEXT | NOT NULL | `accel_down` / `accel_up` / `sl_breached` / `tp_reached` / `breakeven_hit` / `limit_up_sealed` / `hold_exit_am` / `hold_exit_pm` |
 | `trade_date` | TEXT | NOT NULL | 触发当日 `YYYY-MM-DD` |
 | `fired_at` | TEXT | NOT NULL | 触发时间 ISO8601 |
 | `price` | REAL | 可空 | 触发时现价 |
@@ -161,9 +163,9 @@
 | POST | `/api/admin/users/{id}/reset-password` | 管理员 | 重置密码 `{password}`（至少 6 位） |
 | POST | `/api/admin/users/{id}/monitor` | 管理员 | `{enabled: bool}` 授权/取消持仓监控 |
 | GET | `/api/monitor/status` | 是 | 监控线程状态 + 当前用户最近 20 条告警 |
-| GET | `/api/models` | 是 | 模型列表 `[{id,name,description,active,created_at,deleted_at}]`（含停用项，前端过滤） |
-| POST | `/api/models` | 管理员 | 新增模型 `{name,description}`，重名 409 |
-| PUT | `/api/models/{id}` | 管理员 | 更新模型 `{name,description}`（不存在 404） |
+| GET | `/api/models` | 是 | 模型列表 `[{id,name,description,hold_days,active,created_at,deleted_at}]`（含停用项，前端过滤） |
+| POST | `/api/models` | 管理员 | 新增模型 `{name,description,hold_days}`，重名 409 |
+| PUT | `/api/models/{id}` | 管理员 | 更新模型 `{name,description,hold_days}`（不存在 404） |
 | DELETE | `/api/models/{id}` | 管理员 | 软删除模型（置 `active=0`，交易记录不受影响） |
 | POST | `/api/models/{id}/restore` | 管理员 | 恢复停用模型（启用中重名 409） |
 | GET | `/api/trades` | 是 | 列表，参数 `status,symbol,q,from,to,model_id,limit,offset` |
@@ -305,9 +307,10 @@
 - **数据源**：AlphaFeed `quotes.get(symbols=...)` 按代码查询（60 次/分钟、50 只/次），监控进程令牌桶硬上限 **6 次/分钟**，给选股留额度。循环内禁用 `universes=` 池查询。涨跌停价用 `instruments.batch` 的 `ext.limit_up`（每日一次）；五档用 `depth.batch` **按需**（距涨跌停 ≤1.5% 或距止损 ≤1% 才拉）。K 线一律不复权。
 - **加速度**：进程为每只标的维护 30 分钟价格序列（交易所 `timestamp` 为轴，未前进则不采样）。窗口按秒定义（60s / 180s），用 z-score、加速度、量比、盘口压力判定「加速接近止损 / 加速接近止盈或涨停」。开盘 09:30–09:35 走绝对门槛（相对开盘跌/涨 ≥2% 且连续 3 个采样点同向）。
 - **告警类型与节流**：
-  - 每日一次：到达保本价（上穿）、止损击穿、止盈达成、涨停封板（卖1量为 0）
+  - 每日一次：到达保本价（上穿）、止损击穿、止盈达成、涨停封板（卖1量为 0）、推荐持仓到期上午（`hold_exit_am`）、到期下午（`hold_exit_pm`）
   - 同股同类型 30 分钟一次：加速下跌、加速上涨
-- **钉钉**：`visual/dingtalk.py` 自包含实现，读 `visual/.env` 的 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN`。同一轮多条合并成一条 markdown，按用户名分组（群消息会带账户名与代码，不含口令）。未配置则只打日志。
+- **到期平仓提醒**：授权用户的 open 持仓若关联了填了 `hold_days` 的模型，在推荐周期**最后一个交易日**的 10:00–11:30 与 14:00–15:00 各推一次钉钉（不拉行情、不要求风控价）。单笔从买入日起算第 N 个交易日（含买入日）；批次从**最晚一笔买入腿**起算。同用户同标的按 `trade_id` 分别去重。
+- **钉钉**：`visual/dingtalk.py` 自包含实现，读 `visual/.env` 的 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN`。同一轮多条合并成一条 markdown，按用户名分组（群消息会带账户名与代码，不含口令）。到期提醒标题为「持仓到期提醒」。未配置则只打日志。
 - **运行**：`server.py` 启动时起 daemon 线程；新增记录不会立刻盯盘，下一轮轮询（约 20s）才会纳入。也可 `python -u visual/monitor.py` 单跑，`--replay 603698.SH:2026-08-19` 做离线校准。探测脚本 `python -u visual/probe_feed.py`。
 - **测试**：`python -u visual/test/test_monitor.py`（离线 mock，不发真实钉钉）。可选 `DINGTALK_LIVE=1` 做一次真连通，会往群发测试消息。
 

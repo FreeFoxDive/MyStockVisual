@@ -1,4 +1,4 @@
-"""持仓价格监控: 自建价格序列 + 六类告警 + 钉钉推送。
+"""持仓价格监控: 自建价格序列 + 六类告警 + 到期平仓提醒 + 钉钉推送。
 
 双入口:
   start_background(get_af, fallback_quotes)  — visual/server.py 起 daemon 线程
@@ -48,8 +48,14 @@ BUFFER_SECONDS = 30 * 60
 COOLDOWN_ACCEL_SEC = 30 * 60
 DAILY_ONCE = frozenset({
     "breakeven_hit", "sl_breached", "tp_reached", "limit_up_sealed",
+    "hold_exit_am", "hold_exit_pm",
 })
 ACCEL_TYPES = frozenset({"accel_down", "accel_up"})
+HOLD_EXIT_TYPES = frozenset({"hold_exit_am", "hold_exit_pm"})
+HOLD_EXIT_AM = (10, 0)         # 到期日上午提醒
+HOLD_EXIT_AM_END = (11, 30)
+HOLD_EXIT_PM = (14, 0)         # 到期日下午提醒
+HOLD_EXIT_PM_END = (15, 0)
 
 _CST = timezone(timedelta(hours=8))
 
@@ -377,15 +383,64 @@ def evaluate_alerts(position, metrics, limits=None, depth=None, now_dt=None):
     return out
 
 
+def _clock_mins(dt):
+    return dt.hour * 60 + dt.minute
+
+
+def evaluate_hold_exit(pos, now_dt=None):
+    """到期日 10:00-11:30 发 hold_exit_am, 14:00-15:00 发 hold_exit_pm; 非到期日空列表。
+
+    pos 需 hold_days 与 hold_anchor_date (或已算好的 hold_end_date)。
+    """
+    now_dt = now_dt or datetime.now()
+    hold_days = pos.get("hold_days")
+    if not hold_days:
+        return []
+    end = pos.get("hold_end_date")
+    if not end:
+        anchor = pos.get("hold_anchor_date") or pos.get("entry_date")
+        if not anchor:
+            return []
+        end = market_hours.nth_trading_day(anchor, int(hold_days))
+    today = now_dt.strftime("%Y-%m-%d")
+    if not end or today != end:
+        return []
+    t = _clock_mins(now_dt)
+    am_lo = HOLD_EXIT_AM[0] * 60 + HOLD_EXIT_AM[1]
+    am_hi = HOLD_EXIT_AM_END[0] * 60 + HOLD_EXIT_AM_END[1]
+    pm_lo = HOLD_EXIT_PM[0] * 60 + HOLD_EXIT_PM[1]
+    pm_hi = HOLD_EXIT_PM_END[0] * 60 + HOLD_EXIT_PM_END[1]
+    if am_lo <= t <= am_hi:
+        slot, when = "hold_exit_am", "上午10:00"
+    elif pm_lo <= t <= pm_hi:
+        slot, when = "hold_exit_pm", "下午14:00"
+    else:
+        return []
+    model = (pos.get("model_name") or "").strip()
+    anchor = pos.get("hold_anchor_date") or pos.get("entry_date") or ""
+    model_bit = f"{model} " if model else ""
+    detail = (
+        f"{when}提醒平仓 {model_bit}推荐持仓{int(hold_days)}交易日已到期"
+        f"（起算 {anchor}）"
+    )
+    return [{"alert_type": slot, "price": None, "detail": detail}]
+
+
 _UNSET = object()
 
 
-def should_fire(user_id, symbol, alert_type, now_dt=None, last=_UNSET):
-    """节流: 每日一次 / 30 分钟冷却。last 可注入便于单测; 显式 None 表示无历史。"""
+def should_fire(user_id, symbol, alert_type, now_dt=None, last=_UNSET, trade_id=None):
+    """节流: 每日一次 / 30 分钟冷却。last 可注入便于单测; 显式 None 表示无历史。
+
+    hold_exit_* 按 (user, symbol, type, trade_id) 去重, 避免同股两笔持仓互相挡住。
+    """
     now_dt = now_dt or datetime.now()
     today = now_dt.strftime("%Y-%m-%d")
     if last is _UNSET:
-        last = trades.last_monitor_alert(user_id, symbol, alert_type)
+        last = trades.last_monitor_alert(
+            user_id, symbol, alert_type,
+            trade_id=trade_id if alert_type in HOLD_EXIT_TYPES else None,
+        )
     if last is None:
         return True
     if alert_type in DAILY_ONCE:
@@ -415,6 +470,59 @@ def _build_message(fired, now_dt):
     for u in sorted(groups):
         lines.extend(groups[u])
     return "\n".join(lines)
+
+
+def _build_hold_message(fired, now_dt):
+    """到期平仓提醒 markdown。"""
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M")
+    slot = "上午 10:00" if now_dt.hour < 12 else "下午 14:00"
+    groups = defaultdict(list)
+    for item in fired:
+        u = item["username"]
+        pos = item["position"]
+        a = item["alert"]
+        groups[u].append(
+            f"- **{u} · {pos['symbol']} {pos.get('name') or ''}**: {a['detail']}"
+        )
+    lines = [
+        f"## 持仓到期提醒 {now_str}",
+        "",
+        f"推荐持仓周期最后交易日，请平仓（{slot}）：",
+        "",
+    ]
+    for u in sorted(groups):
+        lines.extend(groups[u])
+    return "\n".join(lines)
+
+
+def _check_hold_expire(now_dt=None, persist=True, notify=True):
+    """到期日 10:00 / 14:00 窗口内推送平仓提醒。不拉行情。返回 fired 列表。"""
+    now_dt = now_dt or datetime.now()
+    positions = trades.list_hold_expire_positions()
+    if not positions:
+        return []
+    today = now_dt.strftime("%Y-%m-%d")
+    fired = []
+    for pos in positions:
+        for a in evaluate_hold_exit(pos, now_dt=now_dt):
+            if not should_fire(
+                pos["user_id"], pos["symbol"], a["alert_type"],
+                now_dt=now_dt, trade_id=pos["id"],
+            ):
+                continue
+            if persist:
+                trades.insert_monitor_alert(
+                    pos["user_id"], pos["id"], pos["symbol"], a["alert_type"],
+                    today, price=a.get("price"), detail=a["detail"],
+                )
+            fired.append({
+                "username": pos.get("username") or str(pos["user_id"]),
+                "position": pos,
+                "alert": a,
+            })
+    if fired and notify:
+        dingtalk.send_markdown("持仓到期提醒", _build_hold_message(fired, now_dt))
+    return fired
 
 
 def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
@@ -530,6 +638,7 @@ def _loop(get_af, fallback_quotes):
                 wait = min(market_hours.seconds_until_session(now), 300)
                 time.sleep(max(5.0, wait))
                 continue
+            _check_hold_expire(now_dt=now)
             positions = trades.list_monitored_positions()
             n = len({p["symbol"] for p in positions})
             interval = _feed.poll_interval(n)
@@ -716,8 +825,12 @@ def main():
 
     if args.once:
         f = feed_mod.RestFeed(_get_af)
+        hold_fired = _check_hold_expire()
         fired = _poll_once(f)
-        print(f"[Monitor] 本轮触发 {len(fired)} 条", flush=True)
+        print(
+            f"[Monitor] 本轮触发 {len(fired)} 条价格告警 / {len(hold_fired)} 条到期提醒",
+            flush=True,
+        )
         return
 
     start_background(_get_af)

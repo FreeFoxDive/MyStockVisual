@@ -169,7 +169,7 @@ tr:hover td { background: var(--btn-hover); }
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>名称</th><th>策略描述</th><th>状态</th><th style="width:180px">操作</th></tr>
+        <tr><th>名称</th><th>策略描述</th><th>推荐持仓</th><th>状态</th><th style="width:180px">操作</th></tr>
       </thead>
       <tbody id="model-tbody"></tbody>
     </table>
@@ -200,6 +200,10 @@ tr:hover td { background: var(--btn-hover); }
   <div class="modal">
     <h2 id="model-modal-title">添加模型</h2>
     <div class="field"><label>模型名称</label><input id="m-name" autocomplete="off" maxlength="64"></div>
+    <div class="field"><label>推荐持仓交易日</label>
+      <input id="m-hold-days" type="number" min="1" max="250" step="1" placeholder="留空则不提醒平仓" style="width:160px">
+      <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">到期日 10:00 / 14:00 钉钉提醒平仓。A/B/C/D 默认 3/20/10/7。</div>
+    </div>
     <div class="field"><label>策略描述</label><textarea id="m-description" placeholder="可选，说明该模型的选股/买卖策略"></textarea></div>
     <div class="err" id="model-modal-err"></div>
     <div class="actions">
@@ -393,13 +397,14 @@ async function loadModels() {
 function renderAdminModels() {
   const tbody = document.getElementById('model-tbody');
   if (!state.models.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无模型</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无模型</td></tr>';
     return;
   }
   tbody.innerHTML = state.models.map(m => `
     <tr>
       <td>${escHtml(m.name)}</td>
       <td class="reason-cell">${escHtml(m.description || '')}</td>
+      <td>${m.hold_days ? m.hold_days + ' 日' : '—'}</td>
       <td>${m.active ? '<span class="badge closed">启用</span>' : '<span class="badge open">已删除</span>'}</td>
       <td>${m.active ? `
         <button onclick="openModelModal(${m.id})">编辑</button>
@@ -415,6 +420,7 @@ function openModelModal(id) {
   const m = id ? state.models.find(x => x.id === id) : null;
   document.getElementById('model-modal-title').textContent = id ? '编辑模型' : '添加模型';
   document.getElementById('m-name').value = m ? m.name : '';
+  document.getElementById('m-hold-days').value = (m && m.hold_days) ? m.hold_days : '';
   document.getElementById('m-description').value = m ? (m.description || '') : '';
   document.getElementById('model-modal-err').textContent = '';
   document.getElementById('model-modal-mask').classList.add('show');
@@ -427,9 +433,11 @@ function closeModelModal() {
 
 async function saveModel() {
   document.getElementById('model-modal-err').textContent = '';
+  const holdRaw = document.getElementById('m-hold-days').value.trim();
   const body = {
     name: document.getElementById('m-name').value.trim(),
     description: document.getElementById('m-description').value.trim(),
+    hold_days: holdRaw === '' ? null : parseInt(holdRaw, 10),
   };
   try {
     if (modelModalMode === 'add') {

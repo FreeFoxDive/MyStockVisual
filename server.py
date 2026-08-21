@@ -1551,7 +1551,10 @@ class VisualHandler(BaseHTTPRequestHandler):
         if body is None:
             return self._send_error("请求体无效 JSON", 400)
         try:
-            mid = trades.create_model(body.get("name"), body.get("description", ""))
+            mid = trades.create_model(
+                body.get("name"), body.get("description", ""),
+                body.get("hold_days"),
+            )
         except ValueError as e:
             return self._send_error(str(e), 409)
         return self._send_json({"ok": True, "id": mid})
@@ -1563,7 +1566,10 @@ class VisualHandler(BaseHTTPRequestHandler):
         if body is None:
             return self._send_error("请求体无效 JSON", 400)
         try:
-            updated = trades.update_model(mid, body.get("name"), body.get("description", ""))
+            hold_days = body["hold_days"] if "hold_days" in body else trades._UNSET
+            updated = trades.update_model(
+                mid, body.get("name"), body.get("description", ""), hold_days,
+            )
         except ValueError as e:
             return self._send_error(str(e), 409)
         if not updated:

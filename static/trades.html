@@ -952,7 +952,8 @@ function modelLabel(modelId) {
   if (modelId === null || modelId === undefined) return '无';
   const m = state.models.find(x => x.id === modelId);
   if (!m) return '无';
-  return m.active ? m.name : `${m.name}（已删除）`;
+  const name = m.active ? m.name : `${m.name}（已删除）`;
+  return m.hold_days ? `${name}（${m.hold_days}日）` : name;
 }
 
 function statQuery() {

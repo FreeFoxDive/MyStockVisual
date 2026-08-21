@@ -68,13 +68,19 @@ EXIT_REASONS = [
 
 # ── 量化模型种子 (对齐回测管线 A–E) ──
 # 策略描述默认留空，不暴露内部策略细节
+# hold_days: 推荐持仓交易日; None = 不发到期平仓提醒
 SEED_MODELS = [
-    ("A 60分钟超短", ""),
-    ("B 日线波段", ""),
-    ("C 日线波段·阳包阴", ""),
-    ("D 动力管线", ""),
-    ("E K线反转管线", ""),
+    ("A 60分钟超短", "", 3),
+    ("B 日线波段", "", 20),
+    ("C 日线波段·阳包阴", "", 10),
+    ("D 动力管线", "", 7),
+    ("E K线反转管线", "", None),
 ]
+SEED_HOLD_DAYS = {name: days for name, _desc, days in SEED_MODELS if days is not None}
+
+_UNSET = object()
+HOLD_DAYS_MIN = 1
+HOLD_DAYS_MAX = 250
 
 # ── 数据库表结构 ──
 SCHEMA = """
@@ -101,6 +107,7 @@ CREATE TABLE IF NOT EXISTS models (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    hold_days   INTEGER,                  -- 推荐持仓交易日, 空=不提醒平仓
     active      INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL,
     deleted_at  TEXT
@@ -239,12 +246,21 @@ def init_db(db_path=None):
         for col in ("take_profit", "stop_loss", "breakeven"):
             if col not in tcols:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
+        # 迁移: 旧库 models 表补 hold_days; 仅在刚加列时回填 A–D 默认值, 之后不覆盖人工修改
+        mcols = {r[1] for r in conn.execute("PRAGMA table_info(models)")}
+        if "hold_days" not in mcols:
+            conn.execute("ALTER TABLE models ADD COLUMN hold_days INTEGER")
+            for name, days in SEED_HOLD_DAYS.items():
+                conn.execute(
+                    "UPDATE models SET hold_days=? WHERE name=?", (days, name)
+                )
         # 种子模型 A–E (仅当 models 表为空时插入, 含停用行也计入)
         n = conn.execute("SELECT COUNT(*) FROM models").fetchone()[0]
         if n == 0:
             conn.executemany(
-                "INSERT INTO models (name, description, created_at) VALUES (?,?,?)",
-                [(name, desc, _now_iso()) for name, desc in SEED_MODELS],
+                "INSERT INTO models (name, description, hold_days, created_at) "
+                "VALUES (?,?,?,?)",
+                [(name, desc, days, _now_iso()) for name, desc, days in SEED_MODELS],
             )
         conn.commit()
     finally:
@@ -703,12 +719,33 @@ def reset_password(user_id, new_password):
 
 
 # ── 量化模型管理 (全局共享, 软删除) ──
+def _parse_hold_days(value):
+    """空/None → None (不提醒); 1~250 的整数原样返回; 其余抛 ValueError。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("推荐持仓交易日无效")
+    if isinstance(value, float):
+        if value != int(value):
+            raise ValueError("推荐持仓交易日须为整数")
+        value = int(value)
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("推荐持仓交易日无效")
+    if isinstance(value, str) and value.strip() != str(n):
+        raise ValueError("推荐持仓交易日无效")
+    if n < HOLD_DAYS_MIN or n > HOLD_DAYS_MAX:
+        raise ValueError(f"推荐持仓交易日须为 {HOLD_DAYS_MIN}~{HOLD_DAYS_MAX}")
+    return n
+
+
 def list_models(active_only=True):
-    """返回模型列表 {id, name, description, active, created_at, deleted_at}。
+    """返回模型列表 {id, name, description, hold_days, active, created_at, deleted_at}。
 
     active_only=True 只返回启用中的 (供交易下拉); False 返回全部 (供管理员列表)。
     """
-    sql = "SELECT id, name, description, active, created_at, deleted_at FROM models"
+    sql = "SELECT id, name, description, hold_days, active, created_at, deleted_at FROM models"
     if active_only:
         sql += " WHERE active=1"
     sql += " ORDER BY id"
@@ -720,6 +757,7 @@ def list_models(active_only=True):
                 "id": r["id"],
                 "name": r["name"],
                 "description": r["description"],
+                "hold_days": r["hold_days"],
                 "active": bool(r["active"]),
                 "created_at": r["created_at"],
                 "deleted_at": r["deleted_at"],
@@ -730,7 +768,7 @@ def list_models(active_only=True):
         conn.close()
 
 
-def create_model(name, description):
+def create_model(name, description, hold_days=None):
     """新增模型并返回 model_id。名称非空/启用中重名抛 ValueError。"""
     name = (name or "").strip()
     if not name:
@@ -738,11 +776,13 @@ def create_model(name, description):
     if len(name) > 64:
         raise ValueError("模型名称过长")
     description = (description or "").strip()
+    days = _parse_hold_days(hold_days)
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO models(name, description, active, created_at) VALUES(?,?,1,?)",
-            (name, description, _now_iso()),
+            "INSERT INTO models(name, description, hold_days, active, created_at) "
+            "VALUES(?,?,?,1,?)",
+            (name, description, days, _now_iso()),
         )
         conn.commit()
         return cur.lastrowid
@@ -752,8 +792,11 @@ def create_model(name, description):
         conn.close()
 
 
-def update_model(model_id, name, description):
-    """更新模型名称/描述。模型不存在返回 False；启用中重名抛 ValueError。"""
+def update_model(model_id, name, description, hold_days=_UNSET):
+    """更新模型名称/描述/推荐持仓日。模型不存在返回 False；启用中重名抛 ValueError。
+
+    hold_days 默认不改; 传入 None/'' 清空 (不再提醒平仓)。
+    """
     name = (name or "").strip()
     if not name:
         raise ValueError("模型名称不能为空")
@@ -762,10 +805,17 @@ def update_model(model_id, name, description):
     description = (description or "").strip()
     conn = get_conn()
     try:
-        cur = conn.execute(
-            "UPDATE models SET name=?, description=? WHERE id=?",
-            (name, description, model_id),
-        )
+        if hold_days is _UNSET:
+            cur = conn.execute(
+                "UPDATE models SET name=?, description=? WHERE id=?",
+                (name, description, model_id),
+            )
+        else:
+            days = _parse_hold_days(hold_days)
+            cur = conn.execute(
+                "UPDATE models SET name=?, description=?, hold_days=? WHERE id=?",
+                (name, description, days, model_id),
+            )
         if cur.rowcount == 0:
             return False
         conn.commit()
@@ -1323,6 +1373,28 @@ def _row_to_dict(row, fee_config=None):
     return d
 
 
+def _attach_hold_days(records):
+    """给交易 dict 补 hold_days (来自关联模型, 无模型为 None)。"""
+    if not records:
+        return records
+    mids = {d.get("model_id") for d in records if d.get("model_id")}
+    hold_map = {}
+    if mids:
+        conn = get_conn()
+        try:
+            q = "SELECT id, hold_days FROM models WHERE id IN (%s)" % (
+                ",".join("?" * len(mids))
+            )
+            hold_map = {
+                r["id"]: r["hold_days"] for r in conn.execute(q, list(mids))
+            }
+        finally:
+            conn.close()
+    for d in records:
+        d["hold_days"] = hold_map.get(d["model_id"]) if d.get("model_id") else None
+    return records
+
+
 def get_trade(user_id, tid):
     conn = get_conn()
     try:
@@ -1331,7 +1403,9 @@ def get_trade(user_id, tid):
         ).fetchone()
     finally:
         conn.close()
-    return _row_to_dict(row) if row else None
+    if not row:
+        return None
+    return _attach_hold_days([_row_to_dict(row)])[0]
 
 
 def list_trades(user_id, filters=None, fee_config=None):
@@ -1387,7 +1461,8 @@ def list_trades(user_id, filters=None, fee_config=None):
         rows = conn.execute(sql, args).fetchall()
     finally:
         conn.close()
-    return [_row_to_dict(r, fee_config) for r in rows], total
+    recs = [_row_to_dict(r, fee_config) for r in rows]
+    return _attach_hold_days(recs), total
 
 
 def _clamp_int(v, lo, hi, default):
@@ -1753,6 +1828,34 @@ def list_monitored_positions():
         conn.close()
 
 
+def list_hold_expire_positions():
+    """授权用户的 open 持仓, 且关联模型填了 hold_days。不要求风控价。
+
+    hold_anchor_date: 单笔用买入日; 批次用最晚一笔买入腿日期。
+    """
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.user_id, t.symbol, t.name, t.status, t.entry_date, "
+            "t.type, t.entry_price, t.quantity, t.model_id, "
+            "m.name AS model_name, m.hold_days, u.username, "
+            "CASE WHEN t.type='batch' THEN ("
+            "  SELECT MAX(l.date) FROM trade_legs l "
+            "  WHERE l.trade_id=t.id AND l.side='buy'"
+            ") ELSE t.entry_date END AS hold_anchor_date "
+            "FROM trades t "
+            "JOIN users u ON u.id = t.user_id "
+            "JOIN models m ON m.id = t.model_id "
+            "WHERE t.status='open' "
+            "AND (u.is_admin=1 OR u.monitor_enabled=1) "
+            "AND m.hold_days IS NOT NULL AND m.hold_days > 0 "
+            "ORDER BY t.user_id, t.symbol"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def insert_monitor_alert(user_id, trade_id, symbol, alert_type, trade_date,
                          price=None, detail=None):
     """写入一条监控告警。返回 row id。"""
@@ -1770,17 +1873,21 @@ def insert_monitor_alert(user_id, trade_id, symbol, alert_type, trade_date,
         conn.close()
 
 
-def last_monitor_alert(user_id, symbol, alert_type):
-    """最近一条同用户同标的同类型告警, 无则 None。"""
+def last_monitor_alert(user_id, symbol, alert_type, trade_id=None):
+    """最近一条同用户同标的同类型告警, 无则 None。trade_id 非空时再按持仓行过滤。"""
     conn = get_conn()
     try:
-        row = conn.execute(
+        sql = (
             "SELECT id, trade_id, trade_date, fired_at, price, detail "
             "FROM monitor_alerts "
-            "WHERE user_id=? AND symbol=? AND alert_type=? "
-            "ORDER BY fired_at DESC, id DESC LIMIT 1",
-            (user_id, symbol, alert_type),
-        ).fetchone()
+            "WHERE user_id=? AND symbol=? AND alert_type=?"
+        )
+        args = [user_id, symbol, alert_type]
+        if trade_id is not None:
+            sql += " AND trade_id=?"
+            args.append(trade_id)
+        sql += " ORDER BY fired_at DESC, id DESC LIMIT 1"
+        row = conn.execute(sql, args).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()

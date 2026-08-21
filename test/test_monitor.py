@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""持仓监控纯离线单测: 指标 / 六类告警 / 节流 / 时段 / 令牌桶 / 钉钉 / 整轮覆盖。
+"""持仓监控纯离线单测: 指标 / 六类告警 / 到期平仓 / 节流 / 时段 / 令牌桶 / 钉钉 / 整轮覆盖。
 
 运行:
     python -u visual/test/test_monitor.py
@@ -66,6 +66,53 @@ class TestMarketHours(unittest.TestCase):
     def test_after_close(self):
         after = datetime(2026, 8, 21, 15, 1)
         self.assertFalse(market_hours.in_session(after))
+
+
+class TestNthTradingDay(unittest.TestCase):
+    def test_inclusive_count_skips_weekend(self):
+        # 2026-08-21 周五; 3 个交易日 = 21 / 24 / 25
+        self.assertEqual(market_hours.nth_trading_day("2026-08-21", 1), "2026-08-21")
+        self.assertEqual(market_hours.nth_trading_day("2026-08-21", 3), "2026-08-25")
+
+    def test_non_trading_start_moves_forward(self):
+        self.assertEqual(market_hours.nth_trading_day("2026-08-22", 1), "2026-08-24")
+
+    def test_invalid(self):
+        self.assertIsNone(market_hours.nth_trading_day("2026-08-21", 0))
+        self.assertIsNone(market_hours.nth_trading_day("not-a-date", 3))
+
+
+class TestHoldExit(unittest.TestCase):
+    def _pos(self, **kw):
+        p = {
+            "hold_days": 3,
+            "hold_anchor_date": "2026-08-21",
+            "hold_end_date": "2026-08-25",
+            "model_name": "A 60分钟超短",
+            "symbol": "000001.SZ",
+        }
+        p.update(kw)
+        return p
+
+    def test_am_and_pm_windows(self):
+        pos = self._pos()
+        am = monitor.evaluate_hold_exit(pos, datetime(2026, 8, 25, 10, 0))
+        self.assertEqual([a["alert_type"] for a in am], ["hold_exit_am"])
+        self.assertIn("上午10:00", am[0]["detail"])
+        pm = monitor.evaluate_hold_exit(pos, datetime(2026, 8, 25, 14, 0))
+        self.assertEqual([a["alert_type"] for a in pm], ["hold_exit_pm"])
+        self.assertIn("下午14:00", pm[0]["detail"])
+
+    def test_outside_window_or_wrong_day(self):
+        pos = self._pos()
+        self.assertEqual(monitor.evaluate_hold_exit(pos, datetime(2026, 8, 25, 9, 45)), [])
+        self.assertEqual(monitor.evaluate_hold_exit(pos, datetime(2026, 8, 25, 13, 0)), [])
+        self.assertEqual(monitor.evaluate_hold_exit(pos, datetime(2026, 8, 24, 10, 0)), [])
+
+    def test_computes_end_date_from_anchor(self):
+        pos = self._pos(hold_end_date=None)
+        alerts = monitor.evaluate_hold_exit(pos, datetime(2026, 8, 25, 10, 5))
+        self.assertEqual([a["alert_type"] for a in alerts], ["hold_exit_am"])
 
 
 class TestTokenBucket(unittest.TestCase):
@@ -224,6 +271,15 @@ class TestThrottle(unittest.TestCase):
         last["fired_at"] = (now - timedelta(minutes=31)).isoformat(timespec="seconds")
         self.assertTrue(monitor.should_fire(1, "600000.SH", "accel_down", now_dt=now, last=last))
         self.assertTrue(monitor.should_fire(1, "600000.SH", "accel_up", now_dt=now, last=None))
+
+    def test_hold_exit_daily_once(self):
+        now = datetime(2026, 8, 21, 10, 5)
+        last = {"trade_date": "2026-08-21", "fired_at": "2026-08-21T10:00:00"}
+        self.assertFalse(monitor.should_fire(
+            1, "000001.SZ", "hold_exit_am", now_dt=now, last=last))
+        last["trade_date"] = "2026-08-20"
+        self.assertTrue(monitor.should_fire(
+            1, "000001.SZ", "hold_exit_am", now_dt=now, last=last))
 
 
 class TestReplayFixtures(unittest.TestCase):
@@ -600,6 +656,41 @@ class TestPollPipeline(PollPipelineTestCase):
         self.assertTrue(fired)
         send.assert_called_once()
         self.assertIsNotNone(trades.last_monitor_alert(1, "600000.SH", "sl_breached"))
+
+    def test_hold_expire_am_notifies_without_quotes(self):
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        # A 模型 3 日: 8-19 / 8-20 / 8-21 → 到期日即 self.now
+        self._open(admin, "000001.SZ", "平安", model_id=1, entry_date="2026-08-19")
+        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
+            fired = monitor._check_hold_expire(now_dt=self.now)
+        self.assertEqual([x["alert"]["alert_type"] for x in fired], ["hold_exit_am"])
+        send.assert_called_once()
+        title, text = send.call_args[0]
+        self.assertEqual(title, "持仓到期提醒")
+        self.assertIn("000001.SZ", text)
+        with mock.patch.object(dingtalk, "send_markdown") as send2:
+            again = monitor._check_hold_expire(now_dt=self.now + timedelta(minutes=10))
+        self.assertEqual(again, [])
+        send2.assert_not_called()
+        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send3:
+            pm = monitor._check_hold_expire(now_dt=datetime(2026, 8, 21, 14, 0))
+        self.assertEqual([x["alert"]["alert_type"] for x in pm], ["hold_exit_pm"])
+        send3.assert_called_once()
+
+    def test_hold_expire_batch_uses_latest_buy(self):
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        trades.create_trade(admin, {
+            "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+            "model_id": 1,
+            "legs": [
+                {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-08-03"},
+                {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-08-19"},
+            ],
+        })
+        with mock.patch.object(dingtalk, "send_markdown", return_value=True):
+            fired = monitor._check_hold_expire(now_dt=self.now)
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["alert"]["alert_type"], "hold_exit_am")
 
 
 class TestRestFeedMock(unittest.TestCase):

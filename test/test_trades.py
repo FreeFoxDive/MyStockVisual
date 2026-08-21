@@ -103,6 +103,7 @@ class TestInitDb(TradesTestCase):
                           "D 动力管线", "E K线反转管线"])
         self.assertEqual([m["id"] for m in models], [1, 2, 3, 4, 5])
         self.assertTrue(all(m["active"] == 1 for m in models))
+        self.assertEqual([m["hold_days"] for m in models], [3, 20, 10, 7, None])
 
     def test_init_db_idempotent_no_reseed(self):
         trades.create_model("自定义模型", "")
@@ -116,6 +117,43 @@ class TestInitDb(TradesTestCase):
         with trades.get_conn() as conn:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
         self.assertIn("model_id", cols)
+
+    def test_migration_adds_hold_days_and_backfills_abcd(self):
+        import sqlite3
+        old_db = os.path.join(self._tmp.name, "old_models.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+            CREATE TABLE models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+        """)
+        now = "2026-01-01T00:00:00"
+        conn.executemany(
+            "INSERT INTO models(name, description, created_at) VALUES(?,?,?)",
+            [
+                ("A 60分钟超短", "", now),
+                ("B 日线波段", "", now),
+                ("C 日线波段·阳包阴", "", now),
+                ("D 动力管线", "", now),
+                ("E K线反转管线", "", now),
+                ("自定义模型", "", now),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        trades.init_db(old_db)
+        hold = {m["name"]: m["hold_days"] for m in trades.list_models(active_only=False)}
+        self.assertEqual(hold["A 60分钟超短"], 3)
+        self.assertEqual(hold["B 日线波段"], 20)
+        self.assertEqual(hold["C 日线波段·阳包阴"], 10)
+        self.assertEqual(hold["D 动力管线"], 7)
+        self.assertIsNone(hold["E K线反转管线"])
+        self.assertIsNone(hold["自定义模型"])
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +304,23 @@ class TestModelCRUD(TradesTestCase):
         models = {m["id"]: m for m in trades.list_models(active_only=False)}
         self.assertEqual(models[mid]["name"], "F 突破模型")
         self.assertEqual(models[mid]["description"], "描述")
+        self.assertIsNone(models[mid]["hold_days"])
+
+    def test_create_model_hold_days(self):
+        mid = trades.create_model("F 突破模型", "", 15)
+        m = next(x for x in trades.list_models(active_only=False) if x["id"] == mid)
+        self.assertEqual(m["hold_days"], 15)
+        mid2 = trades.create_model("G 空持仓", "", "")
+        m2 = next(x for x in trades.list_models(active_only=False) if x["id"] == mid2)
+        self.assertIsNone(m2["hold_days"])
+
+    def test_create_model_hold_days_validation(self):
+        self._assert_value_error(trades.create_model, "F", "", 0,
+                                 sub="推荐持仓交易日须为")
+        self._assert_value_error(trades.create_model, "F", "", 251,
+                                 sub="推荐持仓交易日须为")
+        self._assert_value_error(trades.create_model, "F", "", "x",
+                                 sub="推荐持仓交易日无效")
 
     def test_create_model_validation(self):
         self._assert_value_error(trades.create_model, "", "", sub="模型名称不能为空")
@@ -280,7 +335,16 @@ class TestModelCRUD(TradesTestCase):
         m = next(x for x in trades.list_models(active_only=False) if x["id"] == 1)
         self.assertEqual(m["name"], "A 改名")
         self.assertEqual(m["description"], "新描述")
+        self.assertEqual(m["hold_days"], 3)  # 未传 hold_days 不改
         self.assertFalse(trades.update_model(999, "不存在", ""))
+
+    def test_update_model_hold_days(self):
+        self.assertTrue(trades.update_model(1, "A 60分钟超短", "", 5))
+        m = next(x for x in trades.list_models(active_only=False) if x["id"] == 1)
+        self.assertEqual(m["hold_days"], 5)
+        self.assertTrue(trades.update_model(1, "A 60分钟超短", "", None))
+        m = next(x for x in trades.list_models(active_only=False) if x["id"] == 1)
+        self.assertIsNone(m["hold_days"])
 
     def test_update_model_duplicate(self):
         self._assert_value_error(trades.update_model, 2, "A 60分钟超短", "",
@@ -924,6 +988,52 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
         self.assertTrue(trades.set_user_monitor(bob, True))
         pos = trades.list_monitored_positions()
         self.assertEqual({p["symbol"] for p in pos}, {"600000.SH", "000001.SZ"})
+
+    def test_hold_expire_positions_anchor_and_auth(self):
+        admin = self._make_user("admin", "secret123", is_admin=True)
+        bob = self._make_user("bob", "secret123")
+        # 无风控价也进到期列表; 无模型 / E(空 hold_days) 不进
+        trades.create_trade(admin, self._open(
+            symbol="000001.SZ", name="平安", model_id=1, entry_date="2026-08-21"))
+        trades.create_trade(admin, self._open(
+            symbol="000002.SZ", name="万科", model_id=5, entry_date="2026-08-21"))
+        trades.create_trade(admin, self._open(
+            symbol="000003.SZ", name="无模型", model_id=None, entry_date="2026-08-21"))
+        trades.create_trade(bob, self._open(
+            symbol="600000.SH", name="浦发", model_id=2, entry_date="2026-08-10"))
+        pos = trades.list_hold_expire_positions()
+        self.assertEqual({p["symbol"] for p in pos}, {"000001.SZ"})
+        self.assertEqual(pos[0]["hold_days"], 3)
+        self.assertEqual(pos[0]["hold_anchor_date"], "2026-08-21")
+        trades.set_user_monitor(bob, True)
+        pos = {p["symbol"]: p for p in trades.list_hold_expire_positions()}
+        self.assertEqual(set(pos), {"000001.SZ", "600000.SH"})
+        self.assertEqual(pos["600000.SH"]["hold_days"], 20)
+
+    def test_hold_expire_batch_uses_latest_buy(self):
+        admin = self._make_user("admin", "secret123", is_admin=True)
+        trades.create_trade(admin, {
+            "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+            "model_id": 1,
+            "legs": [
+                {"side": "buy", "price": 10.0, "quantity": 1000,
+                 "date": "2026-08-03", "time": "09:30"},
+                {"side": "sell", "price": 10.5, "quantity": 400,
+                 "date": "2026-08-10", "time": "14:00"},
+                {"side": "buy", "price": 11.0, "quantity": 200,
+                 "date": "2026-08-19", "time": "10:00"},
+            ],
+        })
+        pos = trades.list_hold_expire_positions()
+        self.assertEqual(len(pos), 1)
+        self.assertEqual(pos[0]["hold_anchor_date"], "2026-08-19")
+
+    def test_trade_row_attaches_hold_days(self):
+        uid = self._make_user()
+        t = trades.create_trade(uid, self._open(model_id=4))
+        self.assertEqual(t["hold_days"], 7)
+        recs, _ = trades.list_trades(uid)
+        self.assertEqual(recs[0]["hold_days"], 7)
 
     def test_monitor_alerts_roundtrip(self):
         uid = self._make_user()
