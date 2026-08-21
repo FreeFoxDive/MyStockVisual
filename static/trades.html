@@ -370,10 +370,13 @@ td.neg { color: var(--down-color); font-weight: 600; }
     <button id="f-3y" onclick="setListRange('3y')">近三年</button>
   </div>
   <div class="filter-bar">
-    <select id="f-status" onchange="resetAndLoad()">
+    <select id="f-status" onchange="onListFilterChange()">
       <option value="">全部状态</option>
-      <option value="open">持仓中</option>
+      <option value="open" selected>持仓中</option>
       <option value="closed">已平仓</option>
+    </select>
+    <select id="f-model" onchange="onListFilterChange()">
+      <option value="">全部模型</option>
     </select>
     <input type="text" id="f-q" placeholder="代码 / 名称 搜索..." style="width:200px" onkeydown="if(event.key==='Enter')resetAndLoad()">
     <span class="date-range">
@@ -537,6 +540,8 @@ const state = {
   granularity: 'month',
   statRange: '3m',
   listRange: '3m',
+  listStatus: 'open',     // 列表状态筛选 (localStorage: trades-list-status)
+  listModelId: '',        // 列表模型筛选 ''=全部 / none=无 / id (localStorage: trades-list-model)
   trades: [],
   total: 0,
   page: 1,
@@ -584,6 +589,7 @@ function presetFromTo(key) {
 
 // ═══════════════ 时间范围偏好持久化 (localStorage) ═══════════════
 const RANGE_KEYS = RANGE_PRESETS.map(p => p.key).concat('custom');
+const GRANULARITY_KEYS = ['week', 'month', 'year'];
 
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -597,11 +603,25 @@ function saveRangePrefs() {
   lsSet('trades-list-to', document.getElementById('f-to').value);
 }
 
+function saveListFilterPrefs() {
+  lsSet('trades-list-status', state.listStatus);
+  lsSet('trades-list-model', state.listModelId);
+}
+
 // 由范围 key 得到 {from,to}; custom 恢复已保存的自定义日期
 function rangeToInputs(mode, customFrom, customTo) {
   if (mode === 'custom') return { from: customFrom || '', to: customTo || '' };
   if (mode === 'all') return { from: '', to: '' };
   return presetFromTo(mode);
+}
+
+function initListFilters() {
+  const st = lsGet('trades-list-status');
+  state.listStatus = (st === '' || st === 'open' || st === 'closed') ? st : 'open';
+  document.getElementById('f-status').value = state.listStatus;
+
+  const mid = lsGet('trades-list-model');
+  state.listModelId = (mid === null) ? '' : mid;
 }
 
 function initRanges() {
@@ -623,6 +643,14 @@ function initRanges() {
   document.getElementById('stat-to').value = s.to;
   document.getElementById('f-from').value = l.from;
   document.getElementById('f-to').value = l.to;
+
+  let g = lsGet('trades-granularity');
+  if (!GRANULARITY_KEYS.includes(g)) g = 'month';
+  state.granularity = g;
+  GRANULARITY_KEYS.forEach(x =>
+    document.getElementById('g-' + x).classList.toggle('active', x === g));
+
+  initListFilters();
 }
 
 function escHtml(s) {
@@ -842,6 +870,35 @@ async function loadReasons() {
 async function loadModels() {
   const models = await api('/api/models');
   state.models = models || [];
+  renderFilterModelSelect();
+}
+
+function renderFilterModelSelect() {
+  const sel = document.getElementById('f-model');
+  if (!sel) return;
+  const active = state.models.filter(m => m.active);
+  const inactive = state.models.filter(m => !m.active);
+  let html = '<option value="">全部模型</option><option value="none">无</option>';
+  html += active.map(m =>
+    `<option value="${m.id}" title="${escHtml(m.description)}">${escHtml(m.name)}</option>`).join('');
+  html += inactive.map(m =>
+    `<option value="${m.id}">${escHtml(m.name)}（已删除）</option>`).join('');
+  sel.innerHTML = html;
+  const saved = state.listModelId;
+  const valid = saved === '' || saved === 'none' || state.models.some(m => String(m.id) === saved);
+  if (!valid) {
+    state.listModelId = '';
+    saveListFilterPrefs();
+  }
+  sel.value = state.listModelId;
+}
+
+function onListFilterChange() {
+  state.listStatus = document.getElementById('f-status').value;
+  const modelSel = document.getElementById('f-model');
+  if (modelSel) state.listModelId = modelSel.value;
+  saveListFilterPrefs();
+  resetAndLoad();
 }
 
 // 模型下拉 (含「无」首项; 编辑停用模型时插入 disabled 项保持追溯)
@@ -898,9 +955,11 @@ function setStatRange(mode) {
 }
 
 function setGranularity(g) {
+  if (!GRANULARITY_KEYS.includes(g)) g = 'month';
   state.granularity = g;
-  ['week', 'month', 'year'].forEach(x =>
+  GRANULARITY_KEYS.forEach(x =>
     document.getElementById('g-' + x).classList.toggle('active', x === g));
+  lsSet('trades-granularity', g);
   renderPnlChart();
 }
 
@@ -1277,7 +1336,6 @@ function renderHoldChart() {
 // ═══════════════ 交易列表 ═══════════════
 function listQuery() {
   const q = new URLSearchParams();
-  const status = document.getElementById('f-status').value;
   const kw = document.getElementById('f-q').value.trim();
   let from = '', to = '';
   if (state.listRange === 'custom') {
@@ -1287,7 +1345,8 @@ function listQuery() {
     const r = presetFromTo(state.listRange);
     from = r.from; to = r.to;
   }
-  if (status) q.set('status', status);
+  if (state.listStatus) q.set('status', state.listStatus);
+  if (state.listModelId) q.set('model_id', state.listModelId);
   if (kw) q.set('q', kw);
   if (from) q.set('from', from);
   if (to) q.set('to', to);
@@ -1789,7 +1848,7 @@ window.addEventListener('resize', () => {
   window.addEventListener('scroll', hidePnlTip, true);
 })();
 
-// 时间范围选择从 localStorage 恢复 (概览统计 + 交易查询)
+// 时间范围 / 粒度 / 列表筛选从 localStorage 恢复
 initRanges();
 
 checkAuth();

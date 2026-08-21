@@ -143,14 +143,14 @@
 | PUT | `/api/models/{id}` | 管理员 | 更新模型 `{name,description}`（不存在 404） |
 | DELETE | `/api/models/{id}` | 管理员 | 软删除模型（置 `active=0`，交易记录不受影响） |
 | POST | `/api/models/{id}/restore` | 管理员 | 恢复停用模型（启用中重名 409） |
-| GET | `/api/trades` | 是 | 列表，参数 `status,symbol,q,from,to,limit,offset` |
+| GET | `/api/trades` | 是 | 列表，参数 `status,symbol,q,from,to,model_id,limit,offset` |
 | POST | `/api/trades` | 是 | 新建（body 见 `trades` 字段） |
 | PUT | `/api/trades/{id}` | 是 | 更新（部分字段合并） |
 | DELETE | `/api/trades/{id}` | 是 | 删除 |
 | GET | `/api/trades/stats?from=&to=` | 是 | 统计汇总 + 时序序列 + 按股票汇总 + 按模型汇总 |
 | GET | `/api/trade-reasons` | 否 | 返回 `{entry:[...], exit:[...]}` 预设分类 |
 
-- `GET /api/trades` 的 `from`/`to` 作用于 `COALESCE(exit_date, entry_date)`（即平仓用卖出日、持仓用买入日作为归属日期）；`q` 对 `symbol`/`name` 模糊匹配。
+- `GET /api/trades` 的 `from`/`to` 作用于 `COALESCE(exit_date, entry_date)`（即平仓用卖出日、持仓用买入日作为归属日期）；`q` 对 `symbol`/`name` 模糊匹配；`model_id` 为空不加条件，`none`/`null` 匹配未关联模型，正整数精确匹配。
 - 股票代码/名称补全复用现有 `GET /api/search?q=...`。
 
 ### 请求体示例

@@ -424,6 +424,29 @@ class TestTradeCRUD(TradesTestCase):
         self.assertEqual(total, 4)
         self.assertEqual(len(records), 2)
 
+    def test_list_trades_model_id_filter(self):
+        uid = self._make_user()
+        trades.create_trade(uid, self._closed(model_id=4))
+        trades.create_trade(uid, self._closed(
+            symbol="600519.SH", name="贵州茅台", entry=1500.0, exit_=1500.0, model_id=2))
+        trades.create_trade(uid, self._closed(
+            symbol="000002.SZ", name="万科A", entry=8.0, exit_=8.0, model_id=None))
+        trades.create_trade(uid, self._open(model_id=4))
+        _, total = trades.list_trades(uid, {"model_id": 4})
+        self.assertEqual(total, 2)
+        _, total = trades.list_trades(uid, {"model_id": "none"})
+        self.assertEqual(total, 1)
+        _, total = trades.list_trades(uid, {"model_id": "null"})
+        self.assertEqual(total, 1)
+        recs, total = trades.list_trades(uid, {"model_id": 4, "status": "open"})
+        self.assertEqual(total, 1)
+        self.assertEqual(recs[0]["status"], "open")
+        recs, total = trades.list_trades(uid, {"model_id": "2"})
+        self.assertEqual(total, 1)
+        self.assertEqual(recs[0]["model_id"], 2)
+        _, total = trades.list_trades(uid, {"model_id": ""})
+        self.assertEqual(total, 4)
+
     def test_update_trade(self):
         uid = self._make_user()
         t = trades.create_trade(uid, self._closed())

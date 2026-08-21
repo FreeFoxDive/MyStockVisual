@@ -70,7 +70,7 @@ visual/
 | `POST /api/admin/users` | 添加用户 `{username,password}`（仅管理员） |
 | `DELETE /api/admin/users/{id}` | 删除用户（仅管理员） |
 | `POST /api/admin/users/{id}/reset-password` | 重置密码 `{password}`（仅管理员） |
-| `GET /api/trades` | 交易记录列表（需登录，`status/symbol/q/from/to/limit/offset`） |
+| `GET /api/trades` | 交易记录列表（需登录，`status/symbol/q/from/to/model_id/limit/offset`） |
 | `POST /api/trades` | 新建交易记录 |
 | `PUT /api/trades/{id}` | 更新交易记录 |
 | `DELETE /api/trades/{id}` | 删除交易记录 |

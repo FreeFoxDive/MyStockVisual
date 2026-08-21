@@ -1226,8 +1226,9 @@ def get_trade(user_id, tid):
 
 
 def list_trades(user_id, filters=None, fee_config=None):
-    """查询交易记录，返回 (records, total)。filters: status/symbol/q/from/to/limit/offset。
+    """查询交易记录，返回 (records, total)。filters: status/symbol/q/from/to/model_id/limit/offset。
 
+    model_id: 空不加条件; 'none'/'null' 匹配未关联模型; 正整数精确匹配。
     fee_config 非空时按费率扣佣计算单笔盈亏 (平仓=完整往返, 持仓=仅买入侧)。
     """
     filters = filters or {}
@@ -1244,6 +1245,15 @@ def list_trades(user_id, filters=None, fee_config=None):
         like = f"%{filters['q']}%"
         sql += " AND (symbol LIKE ? OR name LIKE ?)"
         args.extend([like, like])
+    mid = filters.get("model_id")
+    if mid in ("none", "null"):
+        sql += " AND model_id IS NULL"
+    elif mid not in (None, ""):
+        try:
+            sql += " AND model_id=?"
+            args.append(int(mid))
+        except (TypeError, ValueError):
+            pass
     if filters.get("from") or filters.get("to"):
         # 用 COALESCE(exit_date, entry_date) 作为记录归属日期
         date_col = "COALESCE(exit_date, entry_date)"

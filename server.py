@@ -1556,6 +1556,7 @@ class VisualHandler(BaseHTTPRequestHandler):
             "q": params.get("q", [None])[0],
             "from": params.get("from", [None])[0],
             "to": params.get("to", [None])[0],
+            "model_id": params.get("model_id", [None])[0],
             "limit": params.get("limit", [None])[0],
             "offset": params.get("offset", [None])[0],
         }
