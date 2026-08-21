@@ -841,17 +841,53 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
         self.assertEqual(t["take_profit"], 220)
         self.assertEqual(t["stop_loss"], 180)
         self.assertEqual(t["breakeven"], 200)
-        # 空串清空
         t2 = trades.update_trade(uid, t["id"], {"take_profit": "", "stop_loss": "", "breakeven": ""})
         self.assertIsNone(t2["take_profit"])
         self.assertIsNone(t2["stop_loss"])
         self.assertIsNone(t2["breakeven"])
-        # 无效
         self._assert_value_error(
             trades.update_trade, uid, t["id"], {"take_profit": -1}, sub="止盈价必须大于 0"
         )
         self._assert_value_error(
             trades.update_trade, uid, t["id"], {"stop_loss": "x"}, sub="止损价无效"
+        )
+
+    def test_risk_prices_all_or_nothing_and_order(self):
+        uid = self._make_user()
+        self._assert_value_error(
+            trades.create_trade, uid, self._open(stop_loss=180),
+            sub="止盈/止损/保本须全部填写或全部留空",
+        )
+        self._assert_value_error(
+            trades.create_trade, uid,
+            self._open(take_profit=200, stop_loss=180, breakeven=210),
+            sub="须满足止盈价 > 保本价 > 止损价",
+        )
+        self._assert_value_error(
+            trades.create_trade, uid,
+            self._open(take_profit=200, stop_loss=200, breakeven=200),
+            sub="须满足止盈价 > 保本价 > 止损价",
+        )
+        t = trades.create_trade(uid, self._open())
+        self.assertIsNone(t["take_profit"])
+        t2 = trades.update_trade(uid, t["id"], {
+            "take_profit": 220, "stop_loss": 180, "breakeven": 200,
+        })
+        self.assertEqual((t2["take_profit"], t2["breakeven"], t2["stop_loss"]), (220, 200, 180))
+
+    def test_legacy_partial_risk_kept_on_other_update(self):
+        uid = self._make_user()
+        t = trades.create_trade(uid, self._open())
+        with trades.get_conn() as conn:
+            conn.execute("UPDATE trades SET stop_loss=180 WHERE id=?", (t["id"],))
+            conn.commit()
+        t2 = trades.update_trade(uid, t["id"], {"entry_note": "备注"})
+        self.assertEqual(t2["stop_loss"], 180)
+        self.assertIsNone(t2["take_profit"])
+        self.assertEqual(t2["entry_note"], "备注")
+        self._assert_value_error(
+            trades.update_trade, uid, t["id"], {"take_profit": 220},
+            sub="止盈/止损/保本须全部填写或全部留空",
         )
 
     def test_batch_keeps_risk_prices(self):
@@ -868,18 +904,20 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
 
     def test_open_positions_include_risk_fields(self):
         uid = self._make_user()
-        trades.create_trade(uid, self._open(take_profit=240, stop_loss=180))
+        trades.create_trade(uid, self._open(take_profit=240, stop_loss=180, breakeven=200))
         pos = trades.compute_stats(uid)["open_positions"]
         self.assertEqual(len(pos), 1)
         self.assertEqual(pos[0]["take_profit"], 240)
         self.assertEqual(pos[0]["stop_loss"], 180)
-        self.assertIsNone(pos[0]["breakeven"])
+        self.assertEqual(pos[0]["breakeven"], 200)
 
     def test_monitor_enabled_and_positions(self):
         admin = self._make_user("admin", "secret123", is_admin=True)
         bob = self._make_user("bob", "secret123")
-        trades.create_trade(admin, self._open(symbol="600000.SH", name="浦发", stop_loss=8.0))
-        trades.create_trade(bob, self._open(symbol="000001.SZ", name="平安", take_profit=13.0))
+        trades.create_trade(admin, self._open(
+            symbol="600000.SH", name="浦发", take_profit=10.0, breakeven=9.0, stop_loss=8.0))
+        trades.create_trade(bob, self._open(
+            symbol="000001.SZ", name="平安", take_profit=13.0, breakeven=11.0, stop_loss=9.0))
         # bob 未授权 → 只有管理员持仓
         pos = trades.list_monitored_positions()
         self.assertEqual({p["symbol"] for p in pos}, {"600000.SH"})
@@ -889,7 +927,7 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
 
     def test_monitor_alerts_roundtrip(self):
         uid = self._make_user()
-        t = trades.create_trade(uid, self._open(stop_loss=180))
+        t = trades.create_trade(uid, self._open(take_profit=240, stop_loss=180, breakeven=200))
         aid = trades.insert_monitor_alert(
             uid, t["id"], t["symbol"], "accel_down", "2026-08-19",
             price=18.8, detail="test",

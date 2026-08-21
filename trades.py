@@ -827,8 +827,14 @@ def _valid_date(s):
         return False
 
 
-def _parse_risk_prices(merged):
+_RISK_KEYS = ("take_profit", "stop_loss", "breakeven")
+
+
+def _parse_risk_prices(merged, enforce=True):
     """解析止盈/止损/保本。空串或 None → 清空为 None; 非空须 > 0。
+
+    enforce=True 时须全部留空或全部填写, 且 止盈 > 保本 > 止损。
+    旧记录未改风控字段时 enforce=False, 允许历史不完整数据继续读出。
 
     返回 ({take_profit, stop_loss, breakeven}, error_msg)。
     """
@@ -849,6 +855,15 @@ def _parse_risk_prices(merged):
         if val <= 0:
             return None, f"{label}必须大于 0"
         result[key] = val
+    if not enforce:
+        return result, None
+    filled = [k for k in _RISK_KEYS if result[k] is not None]
+    if not filled:
+        return result, None
+    if len(filled) != 3:
+        return None, "止盈/止损/保本须全部填写或全部留空"
+    if not (result["take_profit"] > result["breakeven"] > result["stop_loss"]):
+        return None, "须满足止盈价 > 保本价 > 止损价"
     return result, None
 
 
@@ -968,7 +983,8 @@ def _clean_batch(data, existing=None):
         "exit_reason": last_sell.get("reason") if last_sell else None,
         "exit_note": last_sell.get("note") if last_sell else None,
     }
-    prices, err = _parse_risk_prices(merged)
+    enforce_risk = existing is None or any(k in data for k in _RISK_KEYS)
+    prices, err = _parse_risk_prices(merged, enforce=enforce_risk)
     if err:
         return None, err
     clean.update(prices)
@@ -1051,7 +1067,8 @@ def _clean(data, existing=None):
         "model_id": model_id,
     }
 
-    prices, err = _parse_risk_prices(merged)
+    enforce_risk = existing is None or any(k in data for k in _RISK_KEYS)
+    prices, err = _parse_risk_prices(merged, enforce=enforce_risk)
     if err:
         return None, err
     clean.update(prices)

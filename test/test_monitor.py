@@ -473,15 +473,15 @@ class TestPollPipeline(PollPipelineTestCase):
         admin = trades.create_user("admin", "secret123", is_admin=True)
         bob = trades.create_user("bob", "secret123")
         closed_uid = trades.create_user("carol", "secret123", is_admin=True)
-        self._open(admin, "600000.SH", "浦发", stop_loss=8.0)
-        self._open(bob, "000001.SZ", "平安", take_profit=13.0)
+        self._open(admin, "600000.SH", "浦发", take_profit=12.0, breakeven=10.0, stop_loss=8.0)
+        self._open(bob, "000001.SZ", "平安", take_profit=13.0, breakeven=11.0, stop_loss=9.0)
         self._open(admin, "300750.SZ", "宁德")  # 无风控价
         trades.create_trade(closed_uid, {
             "symbol": "601398.SH", "name": "工行", "status": "closed",
             "entry_price": 5.0, "exit_price": 5.5, "quantity": 100,
             "entry_date": "2026-08-01", "exit_date": "2026-08-10",
             "entry_reason": "突破买入", "exit_reason": "止盈(达到目标价)",
-            "stop_loss": 4.5,
+            "take_profit": 6.0, "breakeven": 5.0, "stop_loss": 4.5,
         })
         pos = trades.list_monitored_positions()
         self.assertEqual({p["symbol"] for p in pos}, {"600000.SH"})
@@ -491,7 +491,7 @@ class TestPollPipeline(PollPipelineTestCase):
 
     def test_sl_breach_persists_and_notifies(self):
         uid = trades.create_user("admin", "secret123", is_admin=True)
-        t = self._open(uid, "600000.SH", "浦发", stop_loss=9.5)
+        t = self._open(uid, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes={"600000.SH": self._quote(9.0, 1_000_060)})
         with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
             fired = monitor._poll_once(feed, now_dt=self.now)
@@ -514,7 +514,7 @@ class TestPollPipeline(PollPipelineTestCase):
     def test_second_poll_same_day_throttled(self):
         trades.create_user("admin", "secret123", is_admin=True)
         uid = 1
-        self._open(uid, "600000.SH", "浦发", stop_loss=9.5)
+        self._open(uid, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes={"600000.SH": self._quote(9.0, 1_000_060)})
         with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
             first = monitor._poll_once(feed, now_dt=self.now)
@@ -528,8 +528,8 @@ class TestPollPipeline(PollPipelineTestCase):
         a = trades.create_user("alice", "secret123", is_admin=True)
         b = trades.create_user("bob", "secret123")
         trades.set_user_monitor(b, True)
-        self._open(a, "600000.SH", "浦发", stop_loss=9.5)
-        self._open(b, "000001.SZ", "平安", take_profit=11.0)
+        self._open(a, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
+        self._open(b, "000001.SZ", "平安", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes={
             "600000.SH": self._quote(9.0, 1_000_060),
             "000001.SZ": self._quote(12.0, 1_000_060),
@@ -550,7 +550,7 @@ class TestPollPipeline(PollPipelineTestCase):
         with mock.patch.object(dingtalk, "send_markdown") as send:
             self.assertEqual(monitor._poll_once(feed, now_dt=self.now), [])
             send.assert_not_called()
-            self._open(uid, "600000.SH", "浦发", stop_loss=9.5)
+            self._open(uid, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
             feed.quotes_map["600000.SH"] = self._quote(9.0, 1_000_060)
             fired = monitor._poll_once(feed, now_dt=self.now)
         self.assertIn("sl_breached", [x["alert"]["alert_type"] for x in fired])
@@ -558,7 +558,7 @@ class TestPollPipeline(PollPipelineTestCase):
 
     def test_quotes_rate_limited_no_crash_no_push(self):
         trades.create_user("admin", "secret123", is_admin=True)
-        self._open(1, "600000.SH", "浦发", stop_loss=9.5)
+        self._open(1, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes_exc=feed_mod.RateLimited("429", retry_after_ms=1500))
         with mock.patch.object(dingtalk, "send_markdown") as send:
             fired = monitor._poll_once(feed, now_dt=self.now)
@@ -568,7 +568,7 @@ class TestPollPipeline(PollPipelineTestCase):
 
     def test_seed_then_quote_and_near_limit_fetches_depth(self):
         trades.create_user("admin", "secret123", is_admin=True)
-        self._open(1, "603118.SH", "共进", entry=10.0, take_profit=10.90)
+        self._open(1, "603118.SH", "共进", entry=10.0, take_profit=10.90, breakeven=10.20, stop_loss=9.50)
         seed = [
             {"ts": 1_000_000, "price": 10.00, "volume": 100},
             {"ts": 1_000_060, "price": 10.50, "volume": 200},
@@ -593,7 +593,7 @@ class TestPollPipeline(PollPipelineTestCase):
 
     def test_dingtalk_false_still_persists_alert(self):
         trades.create_user("admin", "secret123", is_admin=True)
-        self._open(1, "600000.SH", "浦发", stop_loss=9.5)
+        self._open(1, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes={"600000.SH": self._quote(9.0, 1_000_060)})
         with mock.patch.object(dingtalk, "send_markdown", return_value=False) as send:
             fired = monitor._poll_once(feed, now_dt=self.now)
