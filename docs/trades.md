@@ -24,6 +24,7 @@
 | `password_hash` | TEXT | NOT NULL | PBKDF2-SHA256 哈希（hex） |
 | `salt` | TEXT | NOT NULL | 随机盐（hex，16 字节） |
 | `is_admin` | INTEGER | NOT NULL DEFAULT 0 | 是否管理员（仅单一管理员为 1） |
+| `monitor_enabled` | INTEGER | NOT NULL DEFAULT 0 | 是否授权持仓监控（管理员恒开，不看此字段） |
 | `created_at` | TEXT | NOT NULL | 创建时间 ISO8601 |
 
 ### 表 `sessions` — 会话令牌
@@ -72,6 +73,9 @@
 | `exit_note` | TEXT | 可空 | 卖出理由自由文本补充 |
 | `model_id` | INTEGER | 可空，FK→models(id) ON DELETE SET NULL | 关联量化模型（`NULL`=无；软删不触发置空） |
 | `type` | TEXT | NOT NULL DEFAULT `'simple'` | 交易类型：`simple`（单笔买卖，默认）/ `batch`（批次多次买卖） |
+| `take_profit` | REAL | 可空 | 建议止盈价（可选，之后可改；空串清空） |
+| `stop_loss` | REAL | 可空 | 建议止损价 |
+| `breakeven` | REAL | 可空 | 建议保本价 |
 | `created_at` | TEXT | NOT NULL | 创建时间 |
 | `updated_at` | TEXT | NOT NULL | 更新时间 |
 
@@ -94,6 +98,22 @@
 | `updated_at` | TEXT | NOT NULL | 更新时间 |
 
 索引：`idx_trade_legs_trade(trade_id, date, id)`。
+
+### 表 `monitor_alerts` — 持仓监控告警（去重持久化）
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | INTEGER | PRIMARY KEY | |
+| `user_id` | INTEGER | NOT NULL，FK→users ON DELETE CASCADE | |
+| `trade_id` | INTEGER | 可空，FK→trades ON DELETE SET NULL | |
+| `symbol` | TEXT | NOT NULL | |
+| `alert_type` | TEXT | NOT NULL | `accel_down` / `accel_up` / `sl_breached` / `tp_reached` / `breakeven_hit` / `limit_up_sealed` |
+| `trade_date` | TEXT | NOT NULL | 触发当日 `YYYY-MM-DD` |
+| `fired_at` | TEXT | NOT NULL | 触发时间 ISO8601 |
+| `price` | REAL | 可空 | 触发时现价 |
+| `detail` | TEXT | 可空 | 详情文案 |
+
+索引：`idx_monitor_alerts_lookup(user_id, symbol, alert_type, fired_at)`。
 
 ### 两种交易类型与结束规则
 
@@ -121,7 +141,8 @@
 - **关闭公开注册**：不存在自助注册接口，新用户只能由管理员添加。
 - **首个管理员引导**：服务启动时读取环境变量 `ADMIN_USERNAME` / `ADMIN_PASSWORD`，若库里没有任何管理员（`is_admin=1`）则自动创建；已有同名管理员则同步口令（`.env` 为权威来源，改 `.env` 后重启即生效，旧口令及会话立即失效）。
 - **仅单一管理员**：引导出的账号是唯一管理员；管理员通过 `POST /api/admin/users` 添加的用户一律为普通用户，无「设为管理员」入口。
-- 管理员可**添加 / 列表 / 删除 / 重置密码**；删除管理员本身会被拒绝（400）。
+- 管理员可**添加 / 列表 / 删除 / 重置密码 / 授权持仓监控**；删除管理员本身会被拒绝（400）。
+- **持仓监控授权**：管理员恒开。普通用户需在管理后台打开「监控」开关（`users.monitor_enabled=1`）后，其填了止盈/止损/保本的持仓才会进入盘中监控。
 
 ---
 
@@ -133,11 +154,13 @@
 |------|------|------|------|
 | POST | `/api/auth/login` | 否 | 校验 → 建会话，`Set-Cookie` |
 | POST | `/api/auth/logout` | 是 | 删除会话，清 Cookie |
-| GET | `/api/auth/me` | 是 | 返回 `{username,is_admin}`；未登录 401 |
-| GET | `/api/admin/users` | 管理员 | 用户列表 `[{id,username,is_admin,created_at}]` |
+| GET | `/api/auth/me` | 是 | 返回 `{username,is_admin,monitor_enabled}`；未登录 401 |
+| GET | `/api/admin/users` | 管理员 | 用户列表 `[{id,username,is_admin,monitor_enabled,created_at}]` |
 | POST | `/api/admin/users` | 管理员 | 添加用户 `{username,password}` → 普通用户，重名 409 |
 | DELETE | `/api/admin/users/{id}` | 管理员 | 删除用户（管理员拒绝 400，不存在 404） |
 | POST | `/api/admin/users/{id}/reset-password` | 管理员 | 重置密码 `{password}`（至少 6 位） |
+| POST | `/api/admin/users/{id}/monitor` | 管理员 | `{enabled: bool}` 授权/取消持仓监控 |
+| GET | `/api/monitor/status` | 是 | 监控线程状态 + 当前用户最近 20 条告警 |
 | GET | `/api/models` | 是 | 模型列表 `[{id,name,description,active,created_at,deleted_at}]`（含停用项，前端过滤） |
 | POST | `/api/models` | 管理员 | 新增模型 `{name,description}`，重名 409 |
 | PUT | `/api/models/{id}` | 管理员 | 更新模型 `{name,description}`（不存在 404） |
@@ -171,7 +194,10 @@
   "exit_date": "2026-08-10",
   "exit_reason": "止盈(达到目标价)",
   "exit_note": "",
-  "model_id": 2
+  "model_id": 2,
+  "take_profit": 13.0,
+  "stop_loss": 9.8,
+  "breakeven": 10.5
 }
 ```
 
@@ -271,7 +297,23 @@
 
 ---
 
-## 5. 预设理由分类
+## 5. 持仓监控
+
+交易记录可填可选的止盈 / 止损 / 保本价（弹窗「风控价格」，空串表示清空，之后仍可改）。填了其中任意一个的 **open 持仓**，在用户被授权监控后，由 `visual/monitor.py` 在交易时段后台跟踪。
+
+- **谁会被监控**：管理员恒开；普通用户需 `monitor_enabled=1`。未填风控价的持仓不进监控列表。
+- **数据源**：AlphaFeed `quotes.get(symbols=...)` 按代码查询（60 次/分钟、50 只/次），监控进程令牌桶硬上限 **6 次/分钟**，给选股留额度。循环内禁用 `universes=` 池查询。涨跌停价用 `instruments.batch` 的 `ext.limit_up`（每日一次）；五档用 `depth.batch` **按需**（距涨跌停 ≤1.5% 或距止损 ≤1% 才拉）。K 线一律不复权。
+- **加速度**：进程为每只标的维护 30 分钟价格序列（交易所 `timestamp` 为轴，未前进则不采样）。窗口按秒定义（60s / 180s），用 z-score、加速度、量比、盘口压力判定「加速接近止损 / 加速接近止盈或涨停」。开盘 09:30–09:35 走绝对门槛（相对开盘跌/涨 ≥2% 且连续 3 个采样点同向）。
+- **告警类型与节流**：
+  - 每日一次：到达保本价（上穿）、止损击穿、止盈达成、涨停封板（卖1量为 0）
+  - 同股同类型 30 分钟一次：加速下跌、加速上涨
+- **钉钉**：`visual/dingtalk.py` 自包含实现，读 `visual/.env` 的 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN`。同一轮多条合并成一条 markdown，按用户名分组（群消息会带账户名与代码，不含口令）。未配置则只打日志。
+- **运行**：`server.py` 启动时起 daemon 线程；新增记录不会立刻盯盘，下一轮轮询（约 20s）才会纳入。也可 `python -u visual/monitor.py` 单跑，`--replay 603698.SH:2026-08-19` 做离线校准。探测脚本 `python -u visual/probe_feed.py`。
+- **测试**：`python -u visual/test/test_monitor.py`（离线 mock，不发真实钉钉）。可选 `DINGTALK_LIVE=1` 做一次真连通，会往群发测试消息。
+
+---
+
+## 6. 预设理由分类
 
 ### 买入理由 `ENTRY_REASONS`
 
@@ -287,7 +329,7 @@
 
 ---
 
-## 6. Docker 持久化
+## 7. Docker 持久化
 
 - `docker-compose.yml` 挂载 `./data:/app/data`，SQLite 数据库持久化到宿主机 `visual/data/trades.db`。
 - `Dockerfile` 中 `RUN mkdir -p .cache data && chown -R appuser:appuser /app` 确保目录可写。
@@ -296,13 +338,20 @@
 
 ---
 
-## 7. 文件清单
+## 8. 文件清单
 
 | 文件 | 说明 |
 |------|------|
-| `visual/trades.py` | 后端模块：DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、统计 |
+| `visual/trades.py` | 后端模块：DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、统计、监控告警 |
+| `visual/monitor.py` | 持仓监控循环 / 告警判定 / `--replay` 回放 |
+| `visual/feed.py` | AlphaFeed REST 行情接入（令牌桶 + 429 退避） |
+| `visual/dingtalk.py` | 钉钉机器人（visual 自包含） |
+| `visual/market_hours.py` | A 股交易日历与时段 |
+| `visual/probe_feed.py` | 一次性探测快照刷新频率与接口权限 |
+| `visual/test/test_monitor.py` | 监控离线单测（判定 / mock 钉钉 / 整轮覆盖 / Feed 回退） |
+| `visual/test/fixtures/` | 合成 1m 回放（非真实成交） |
 | `visual/static/trades.html` | 前端 SPA：登录、概览卡片、盈亏图表（含按模型）、记录表格、录入编辑弹窗 |
-| `visual/static/admin.html` | 管理后台：用户管理 + 量化模型管理（仅 admin，软删/恢复） |
-| `visual/server.py` | 新增 `do_POST/PUT/DELETE`、Cookie/body 解析、鉴权助手、路由分发 |
+| `visual/static/admin.html` | 管理后台：用户管理（含监控授权）+ 量化模型管理（仅 admin） |
+| `visual/server.py` | 新增 `do_POST/PUT/DELETE`、Cookie/body 解析、鉴权助手、路由分发、监控线程 |
 | `visual/static/index.html` | 左上角新增「📒 交易记录」入口按钮 |
 | `visual/data/trades.db` | SQLite 数据库文件（运行时自动创建，不入库） |

@@ -4,3 +4,4 @@ akshare>=1.16.0
 numpy>=1.24.0
 pandas>=2.0.0
 mairui>=1.2.0
+pandas_market_calendars

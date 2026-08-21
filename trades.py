@@ -9,7 +9,9 @@ SQLite 持久化的多账户交易日志：注册/登录、买卖记录增删改
   - users    用户账户 (PBKDF2-SHA256 口令哈希)
   - sessions 会话令牌 (30 天过期)
   - models   量化模型 (全局共享, 软删除)
-  - trades   交易记录 (open 持仓 / closed 平仓, 可选关联 model_id)
+  - trades   交易记录 (open 持仓 / closed 平仓, 可选关联 model_id, 可选止盈/止损/保本)
+  - trade_legs 批次交易腿
+  - monitor_alerts 持仓监控告警 (去重)
 
 数据库文件默认位于 `visual/data/trades.db`。
 """
@@ -81,8 +83,9 @@ CREATE TABLE IF NOT EXISTS users (
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     salt          TEXT NOT NULL,
-    is_admin      INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL
+    is_admin         INTEGER NOT NULL DEFAULT 0,
+    monitor_enabled  INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -123,6 +126,9 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_note    TEXT,
     model_id     INTEGER,                 -- 量化模型 (可空, 软删不影响历史)
     type         TEXT NOT NULL DEFAULT 'simple',  -- 'simple' 单笔 / 'batch' 批次
+    take_profit  REAL,                    -- 建议止盈价, 可空
+    stop_loss    REAL,                    -- 建议止损价, 可空
+    breakeven    REAL,                    -- 建议保本价, 可空
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -146,6 +152,22 @@ CREATE TABLE IF NOT EXISTS trade_legs (
     FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_trade_legs_trade ON trade_legs(trade_id, date, id);
+
+CREATE TABLE IF NOT EXISTS monitor_alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    trade_id    INTEGER,
+    symbol      TEXT NOT NULL,
+    alert_type  TEXT NOT NULL,
+    trade_date  TEXT NOT NULL,
+    fired_at    TEXT NOT NULL,
+    price       REAL,
+    detail      TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_alerts_lookup
+    ON monitor_alerts(user_id, symbol, alert_type, fired_at);
 """
 
 
@@ -208,6 +230,15 @@ def init_db(db_path=None):
         # 迁移: 旧库 users 表补 fee_config 列 (TEXT 存 JSON; NULL = 用默认值)
         if "fee_config" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN fee_config TEXT")
+        # 迁移: 旧库 users 表补 monitor_enabled 列 (管理员恒开, 普通用户需授权)
+        if "monitor_enabled" not in cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN monitor_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        # 迁移: 旧库 trades 表补风控价格列 (可空, 老数据零改动)
+        for col in ("take_profit", "stop_loss", "breakeven"):
+            if col not in tcols:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
         # 种子模型 A–E (仅当 models 表为空时插入, 含停用行也计入)
         n = conn.execute("SELECT COUNT(*) FROM models").fetchone()[0]
         if n == 0:
@@ -507,13 +538,13 @@ def create_session(user_id):
 
 
 def get_session(token):
-    """根据令牌返回当前用户 dict {id, username, is_admin}，无效/过期返回 None。"""
+    """根据令牌返回当前用户 dict {id, username, is_admin, monitor_enabled}，无效/过期返回 None。"""
     if not token:
         return None
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT s.token, s.expires_at, u.id, u.username, u.is_admin "
+            "SELECT s.token, s.expires_at, u.id, u.username, u.is_admin, u.monitor_enabled "
             "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?",
             (token,),
         ).fetchone()
@@ -528,7 +559,12 @@ def get_session(token):
     if expires < datetime.now():
         delete_session(token)
         return None
-    return {"id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"])}
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "is_admin": bool(row["is_admin"]),
+        "monitor_enabled": bool(row["monitor_enabled"]),
+    }
 
 
 def delete_session(token):
@@ -590,23 +626,45 @@ def sync_admin_password(username, password):
 
 
 def list_users():
-    """返回所有用户 {id, username, is_admin, created_at}（不含口令哈希/盐）。"""
+    """返回所有用户 {id, username, is_admin, monitor_enabled, created_at}（不含口令哈希/盐）。"""
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, username, is_admin, created_at FROM users ORDER BY id"
+            "SELECT id, username, is_admin, monitor_enabled, created_at FROM users ORDER BY id"
         ).fetchall()
         return [
             {
                 "id": r["id"],
                 "username": r["username"],
                 "is_admin": bool(r["is_admin"]),
+                "monitor_enabled": bool(r["monitor_enabled"]),
                 "created_at": r["created_at"],
             }
             for r in rows
         ]
     finally:
         conn.close()
+
+
+def set_user_monitor(user_id, enabled):
+    """设置普通用户的持仓监控授权。管理员恒开, 改 flag 不影响实际行为。用户不存在返回 False。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE users SET monitor_enabled=? WHERE id=?",
+            (1 if enabled else 0, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def user_can_monitor(user):
+    """管理员恒开; 普通用户看 monitor_enabled。"""
+    if not user:
+        return False
+    return bool(user.get("is_admin") or user.get("monitor_enabled"))
 
 
 def delete_user(user_id):
@@ -769,6 +827,31 @@ def _valid_date(s):
         return False
 
 
+def _parse_risk_prices(merged):
+    """解析止盈/止损/保本。空串或 None → 清空为 None; 非空须 > 0。
+
+    返回 ({take_profit, stop_loss, breakeven}, error_msg)。
+    """
+    result = {}
+    for key, label in (
+        ("take_profit", "止盈价"),
+        ("stop_loss", "止损价"),
+        ("breakeven", "保本价"),
+    ):
+        raw = merged.get(key, None)
+        if raw in (None, ""):
+            result[key] = None
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None, f"{label}无效"
+        if val <= 0:
+            return None, f"{label}必须大于 0"
+        result[key] = val
+    return result, None
+
+
 def _clean_batch(data, existing=None):
     """校验并规范化批次交易 (type='batch')。返回 (clean_dict, error_msg)。
 
@@ -885,6 +968,10 @@ def _clean_batch(data, existing=None):
         "exit_reason": last_sell.get("reason") if last_sell else None,
         "exit_note": last_sell.get("note") if last_sell else None,
     }
+    prices, err = _parse_risk_prices(merged)
+    if err:
+        return None, err
+    clean.update(prices)
     return clean, None
 
 
@@ -963,6 +1050,11 @@ def _clean(data, existing=None):
         "entry_note": entry_note,
         "model_id": model_id,
     }
+
+    prices, err = _parse_risk_prices(merged)
+    if err:
+        return None, err
+    clean.update(prices)
 
     if status == "closed":
         try:
@@ -1314,14 +1406,17 @@ def create_trade(user_id, data):
         cur = conn.execute(
             "INSERT INTO trades(user_id, symbol, name, status, entry_price, exit_price, "
             "quantity, entry_date, exit_date, entry_reason, entry_note, exit_reason, "
-            "exit_note, model_id, type, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "exit_note, model_id, type, take_profit, stop_loss, breakeven, "
+            "created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 user_id, clean["symbol"], clean["name"], clean["status"],
                 clean["entry_price"], clean["exit_price"], clean["quantity"],
                 clean["entry_date"], clean["exit_date"], clean["entry_reason"],
                 clean["entry_note"], clean["exit_reason"], clean["exit_note"],
-                clean["model_id"], clean.get("type", "simple"), now, now,
+                clean["model_id"], clean.get("type", "simple"),
+                clean.get("take_profit"), clean.get("stop_loss"), clean.get("breakeven"),
+                now, now,
             ),
         )
         tid = cur.lastrowid
@@ -1345,14 +1440,17 @@ def update_trade(user_id, tid, data):
         conn.execute(
             "UPDATE trades SET symbol=?, name=?, status=?, entry_price=?, exit_price=?, "
             "quantity=?, entry_date=?, exit_date=?, entry_reason=?, entry_note=?, "
-            "exit_reason=?, exit_note=?, model_id=?, type=?, updated_at=? "
+            "exit_reason=?, exit_note=?, model_id=?, type=?, "
+            "take_profit=?, stop_loss=?, breakeven=?, updated_at=? "
             "WHERE id=? AND user_id=?",
             (
                 clean["symbol"], clean["name"], clean["status"], clean["entry_price"],
                 clean["exit_price"], clean["quantity"], clean["entry_date"],
                 clean["exit_date"], clean["entry_reason"], clean["entry_note"],
                 clean["exit_reason"], clean["exit_note"], clean["model_id"],
-                clean.get("type", "simple"), _now_iso(), tid, user_id,
+                clean.get("type", "simple"),
+                clean.get("take_profit"), clean.get("stop_loss"), clean.get("breakeven"),
+                _now_iso(), tid, user_id,
             ),
         )
         conn.execute("DELETE FROM trade_legs WHERE trade_id=?", (tid,))
@@ -1406,8 +1504,8 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
             (user_id,),
         ).fetchone()[0]
         open_rows = conn.execute(
-            "SELECT symbol, name, entry_price, quantity FROM trades "
-            "WHERE user_id=? AND status='open' ORDER BY entry_date",
+            "SELECT symbol, name, entry_price, quantity, take_profit, stop_loss, breakeven "
+            "FROM trades WHERE user_id=? AND status='open' ORDER BY entry_date",
             (user_id,),
         ).fetchall()
         rows = conn.execute(
@@ -1423,6 +1521,9 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
             "name": r["name"],
             "entry_price": r["entry_price"],
             "quantity": r["quantity"],
+            "take_profit": r["take_profit"],
+            "stop_loss": r["stop_loss"],
+            "breakeven": r["breakeven"],
         }
         for r in open_rows
     ]
@@ -1612,3 +1713,74 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
         "by_model": by_model,
         "open_positions": open_positions,
     }
+
+
+# ── 持仓监控 ──
+def list_monitored_positions():
+    """授权用户 (管理员恒开 / monitor_enabled=1) 的 open 持仓, 且至少填了一个风控价。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.user_id, t.symbol, t.name, t.status, t.entry_price, "
+            "t.quantity, t.take_profit, t.stop_loss, t.breakeven, "
+            "u.username, u.is_admin, u.monitor_enabled "
+            "FROM trades t JOIN users u ON u.id = t.user_id "
+            "WHERE t.status='open' "
+            "AND (u.is_admin=1 OR u.monitor_enabled=1) "
+            "AND (t.take_profit IS NOT NULL OR t.stop_loss IS NOT NULL "
+            "     OR t.breakeven IS NOT NULL) "
+            "ORDER BY t.user_id, t.symbol"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def insert_monitor_alert(user_id, trade_id, symbol, alert_type, trade_date,
+                         price=None, detail=None):
+    """写入一条监控告警。返回 row id。"""
+    now = _now_iso()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO monitor_alerts(user_id, trade_id, symbol, alert_type, "
+            "trade_date, fired_at, price, detail) VALUES(?,?,?,?,?,?,?,?)",
+            (user_id, trade_id, symbol, alert_type, trade_date, now, price, detail),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def last_monitor_alert(user_id, symbol, alert_type):
+    """最近一条同用户同标的同类型告警, 无则 None。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, trade_id, trade_date, fired_at, price, detail "
+            "FROM monitor_alerts "
+            "WHERE user_id=? AND symbol=? AND alert_type=? "
+            "ORDER BY fired_at DESC, id DESC LIMIT 1",
+            (user_id, symbol, alert_type),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_monitor_alerts(user_id, limit=20):
+    """当前用户最近 limit 条告警 (新→旧)。"""
+    limit = _clamp_int(limit, 1, 200, 20)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, trade_id, symbol, alert_type, trade_date, fired_at, price, detail "
+            "FROM monitor_alerts WHERE user_id=? "
+            "ORDER BY fired_at DESC, id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+

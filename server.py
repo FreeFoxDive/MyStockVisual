@@ -1227,6 +1227,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_auth_me()
         elif path == "/api/admin/users":
             return self._handle_admin_users_list()
+        elif path == "/api/monitor/status":
+            return self._handle_monitor_status()
         elif path == "/api/trades/stats":
             return self._handle_trades_stats(params)
         elif path == "/api/trades":
@@ -1326,6 +1328,11 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._handle_logout()
         elif path == "/api/admin/users":
             return self._handle_admin_users_create()
+        elif path.startswith("/api/admin/users/") and path.endswith("/monitor"):
+            uid = path[len("/api/admin/users/"):-len("/monitor")]
+            if uid.isdigit():
+                return self._handle_admin_users_monitor(int(uid))
+            return self._send_error("Not Found", 404)
         elif path.startswith("/api/admin/users/") and path.endswith("/reset-password"):
             uid = path[len("/api/admin/users/"):-len("/reset-password")]
             if uid.isdigit():
@@ -1427,7 +1434,11 @@ class VisualHandler(BaseHTTPRequestHandler):
         user = self._current_user()
         if not user:
             return self._send_error("未登录", 401)
-        return self._send_json({"username": user["username"], "is_admin": user["is_admin"]})
+        return self._send_json({
+            "username": user["username"],
+            "is_admin": user["is_admin"],
+            "monitor_enabled": bool(user.get("is_admin") or user.get("monitor_enabled")),
+        })
 
     # ── API: 交易记录 ──
     def _require_user(self):
@@ -1495,6 +1506,37 @@ class VisualHandler(BaseHTTPRequestHandler):
         if not updated:
             return self._send_error("用户不存在", 404)
         return self._send_json({"ok": True})
+
+    def _handle_admin_users_monitor(self, user_id):
+        if not self._require_admin():
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        enabled = body.get("enabled")
+        if enabled not in (True, False, 0, 1, "0", "1", "true", "false"):
+            return self._send_error("enabled 必须为布尔值")
+        if isinstance(enabled, str):
+            enabled = enabled.lower() in ("1", "true")
+        else:
+            enabled = bool(enabled)
+        if not trades.set_user_monitor(user_id, enabled):
+            return self._send_error("用户不存在", 404)
+        return self._send_json({"ok": True, "id": user_id, "monitor_enabled": enabled})
+
+    def _handle_monitor_status(self):
+        user = self._require_user()
+        if not user:
+            return
+        try:
+            import monitor as _mon
+            st = _mon.get_status()
+        except Exception:
+            st = {"running": False, "backend": None, "last_poll": None, "n_symbols": 0}
+        alerts = trades.list_monitor_alerts(user["id"], limit=20)
+        st["alerts"] = alerts
+        st["monitor_enabled"] = bool(user.get("is_admin") or user.get("monitor_enabled"))
+        return self._send_json(st)
 
     # ── API: 量化模型 (读: 登录用户; 写: 仅 admin) ──
     def _handle_models_list(self):
@@ -1982,6 +2024,14 @@ def main():
 
     # 每日 15:30 定时刷新全市场质押数据
     threading.Thread(target=_pledge_scheduler, daemon=True).start()
+
+    # 持仓监控: 交易时段按代码快照轮询, 仅管理员/授权用户
+    try:
+        import monitor as _mon
+        _mon.start_background(get_af, fallback_quotes=fetch_quotes)
+        print("[Visual] 持仓监控线程已启动", flush=True)
+    except Exception as e:
+        print(f"[Visual] ⚠️  持仓监控启动失败: {e}", flush=True)
 
     try:
         server.serve_forever()

@@ -156,7 +156,7 @@ tr:hover td { background: var(--btn-hover); }
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>用户名</th><th>角色</th><th>创建时间</th><th style="width:180px">操作</th></tr>
+        <tr><th>用户名</th><th>角色</th><th>监控</th><th>创建时间</th><th style="width:180px">操作</th></tr>
       </thead>
       <tbody id="admin-tbody"></tbody>
     </table>
@@ -278,18 +278,38 @@ async function loadUsers() {
   try {
     const users = await api('/api/admin/users');
     adminUsers = users;
-    document.getElementById('admin-tbody').innerHTML = users.map(u => `
+    document.getElementById('admin-tbody').innerHTML = users.map(u => {
+      const mon = u.is_admin
+        ? '<span class="badge">恒开</span>'
+        : `<label style="cursor:pointer;font-size:13px"><input type="checkbox" ${u.monitor_enabled ? 'checked' : ''} onchange="toggleMonitor(${u.id}, this.checked)"> 授权</label>`;
+      return `
       <tr>
         <td>${escHtml(u.username)}${u.is_admin ? ' <span class="badge">管理员</span>' : ''}</td>
         <td>${u.is_admin ? '管理员' : '普通用户'}</td>
+        <td>${mon}</td>
         <td>${escHtml(u.created_at)}</td>
         <td>${u.is_admin ? '' : `
           <button onclick="openResetModal(${u.id})">重置密码</button>
           <button class="danger" onclick="deleteUser(${u.id})">删除</button>`}
         </td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
   } catch (e) {
-    document.getElementById('admin-tbody').innerHTML = `<tr><td colspan="4">加载失败：${escHtml(e.message)}</td></tr>`;
+    document.getElementById('admin-tbody').innerHTML = `<tr><td colspan="5">加载失败：${escHtml(e.message)}</td></tr>`;
+  }
+}
+
+async function toggleMonitor(id, enabled) {
+  try {
+    await api('/api/admin/users/' + id + '/monitor', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    });
+    const u = adminUsers.find(x => x.id === id);
+    if (u) u.monitor_enabled = enabled;
+  } catch (e) {
+    alert('设置失败：' + e.message);
+    await loadUsers();
   }
 }
 

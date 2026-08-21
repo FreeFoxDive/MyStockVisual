@@ -60,24 +60,30 @@ class TradesTestCase(unittest.TestCase):
     @staticmethod
     def _closed(symbol="000001.SZ", name="平安银行", entry=10.0, exit_=13.0,
                 qty=100, entry_date="2026-01-05", exit_date="2026-01-12",
-                reason="突破买入", exit_reason="止盈(达到目标价)", model_id=None):
-        return {
+                reason="突破买入", exit_reason="止盈(达到目标价)", model_id=None,
+                **extra):
+        d = {
             "symbol": symbol, "name": name, "status": "closed",
             "entry_price": entry, "exit_price": exit_, "quantity": qty,
             "entry_date": entry_date, "exit_date": exit_date,
             "entry_reason": reason, "exit_reason": exit_reason,
             "model_id": model_id,
         }
+        d.update(extra)
+        return d
 
     @staticmethod
     def _open(symbol="300750.SZ", name="宁德时代", entry=200.0, qty=100,
-              entry_date="2026-08-01", reason="动力绿转", model_id=None):
-        return {
+              entry_date="2026-08-01", reason="动力绿转", model_id=None,
+              **extra):
+        d = {
             "symbol": symbol, "name": name, "status": "open",
             "entry_price": entry, "quantity": qty,
             "entry_date": entry_date, "entry_reason": reason,
             "model_id": model_id,
         }
+        d.update(extra)
+        return d
 
     def _assert_value_error(self, fn, *args, sub=None, **kwargs):
         with self.assertRaises(ValueError) as cm:
@@ -814,6 +820,85 @@ class TestBatchTrade(TradesTestCase):
         t = trades.create_trade(uid, self._closed())
         self.assertEqual(t["type"], "simple")
         self.assertEqual(t["pnl"], 300.0)   # 老口径逐位不变
+
+
+class TestRiskPricesAndMonitorAuth(TradesTestCase):
+    def test_migration_adds_risk_and_monitor_columns(self):
+        with trades.get_conn() as conn:
+            tcols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+            ucols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        for col in ("take_profit", "stop_loss", "breakeven"):
+            self.assertIn(col, tcols)
+        self.assertIn("monitor_enabled", ucols)
+        self.assertIn("monitor_alerts", tables)
+
+    def test_risk_prices_optional_and_clear(self):
+        uid = self._make_user()
+        t = trades.create_trade(uid, self._open(take_profit=220, stop_loss=180, breakeven=200))
+        self.assertEqual(t["take_profit"], 220)
+        self.assertEqual(t["stop_loss"], 180)
+        self.assertEqual(t["breakeven"], 200)
+        # 空串清空
+        t2 = trades.update_trade(uid, t["id"], {"take_profit": "", "stop_loss": "", "breakeven": ""})
+        self.assertIsNone(t2["take_profit"])
+        self.assertIsNone(t2["stop_loss"])
+        self.assertIsNone(t2["breakeven"])
+        # 无效
+        self._assert_value_error(
+            trades.update_trade, uid, t["id"], {"take_profit": -1}, sub="止盈价必须大于 0"
+        )
+        self._assert_value_error(
+            trades.update_trade, uid, t["id"], {"stop_loss": "x"}, sub="止损价无效"
+        )
+
+    def test_batch_keeps_risk_prices(self):
+        uid = self._make_user()
+        t = trades.create_trade(uid, {
+            "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+            "take_profit": 12.0, "stop_loss": 9.0, "breakeven": 10.5,
+            "legs": [
+                {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-03-02"},
+            ],
+        })
+        self.assertEqual(t["take_profit"], 12.0)
+        self.assertEqual(t["status"], "open")
+
+    def test_open_positions_include_risk_fields(self):
+        uid = self._make_user()
+        trades.create_trade(uid, self._open(take_profit=240, stop_loss=180))
+        pos = trades.compute_stats(uid)["open_positions"]
+        self.assertEqual(len(pos), 1)
+        self.assertEqual(pos[0]["take_profit"], 240)
+        self.assertEqual(pos[0]["stop_loss"], 180)
+        self.assertIsNone(pos[0]["breakeven"])
+
+    def test_monitor_enabled_and_positions(self):
+        admin = self._make_user("admin", "secret123", is_admin=True)
+        bob = self._make_user("bob", "secret123")
+        trades.create_trade(admin, self._open(symbol="600000.SH", name="浦发", stop_loss=8.0))
+        trades.create_trade(bob, self._open(symbol="000001.SZ", name="平安", take_profit=13.0))
+        # bob 未授权 → 只有管理员持仓
+        pos = trades.list_monitored_positions()
+        self.assertEqual({p["symbol"] for p in pos}, {"600000.SH"})
+        self.assertTrue(trades.set_user_monitor(bob, True))
+        pos = trades.list_monitored_positions()
+        self.assertEqual({p["symbol"] for p in pos}, {"600000.SH", "000001.SZ"})
+
+    def test_monitor_alerts_roundtrip(self):
+        uid = self._make_user()
+        t = trades.create_trade(uid, self._open(stop_loss=180))
+        aid = trades.insert_monitor_alert(
+            uid, t["id"], t["symbol"], "accel_down", "2026-08-19",
+            price=18.8, detail="test",
+        )
+        self.assertTrue(aid > 0)
+        last = trades.last_monitor_alert(uid, t["symbol"], "accel_down")
+        self.assertEqual(last["trade_date"], "2026-08-19")
+        rows = trades.list_monitor_alerts(uid)
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

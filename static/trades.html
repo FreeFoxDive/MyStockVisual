@@ -215,6 +215,10 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .modal .trade-panels.single { grid-template-columns: 1fr; }
 .modal .panel { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 0; min-width: 0; }
 .modal .panel legend { font-size: 13px; font-weight: 600; padding: 0 6px; color: var(--text-secondary); }
+.modal .risk-panel { margin-top: 12px; }
+.risk-mini { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
+.risk-mini .k { margin-right: 2px; }
+.monitor-bell { font-size: 13px; font-weight: 500; color: var(--text-secondary); }
 
 /* 类型切换 (单笔/批次) */
 .type-toggle { display: flex; gap: 18px; flex-wrap: wrap; }
@@ -357,6 +361,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
   </div>
 
   <div class="section-title"><span class="bar"></span>交易记录
+    <span id="monitor-bell" class="monitor-bell" style="display:none" title="持仓监控已开启">🔔 监控中</span>
     <span style="flex:1"></span>
     <button class="primary" onclick="openModal()">＋ 新增记录</button>
   </div>
@@ -393,6 +398,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
       <thead>
         <tr>
           <th>代码 / 名称</th><th>状态</th><th>模型</th><th>买入价</th><th>退出价</th><th>现价</th><th>数量</th>
+          <th>止盈/止损/保本</th>
           <th>买入日</th><th>卖出日</th><th>买入理由</th><th>卖出理由</th><th>盈亏</th><th>操作</th>
         </tr>
       </thead>
@@ -493,6 +499,23 @@ td.neg { color: var(--down-color); font-weight: 600; }
       </div>
       <div id="legs-list"></div>
     </div>
+    <fieldset class="panel risk-panel" id="risk-panel">
+      <legend>风控价格（可选）</legend>
+      <div class="grid">
+        <div>
+          <label>止盈价</label>
+          <input type="number" id="t-take-profit" min="0" step="0.01" placeholder="可空，之后可改">
+        </div>
+        <div>
+          <label>止损价</label>
+          <input type="number" id="t-stop-loss" min="0" step="0.01" placeholder="可空，之后可改">
+        </div>
+        <div>
+          <label>保本价</label>
+          <input type="number" id="t-breakeven" min="0" step="0.01" placeholder="可空，之后可改">
+        </div>
+      </div>
+    </fieldset>
     <div class="err" id="modal-err"></div>
     <div class="actions">
       <button onclick="closeModal()">取消</button>
@@ -699,6 +722,8 @@ function showMain() {
   userBtn.textContent = '👤 ' + state.user.username;
   userBtn.title = state.user.is_admin ? '管理后台' : '';
   userBtn.style.cursor = state.user.is_admin ? 'pointer' : 'default';
+  const bell = document.getElementById('monitor-bell');
+  if (bell) bell.style.display = state.user.monitor_enabled ? '' : 'none';
   loadQuota();
 }
 
@@ -738,7 +763,7 @@ document.addEventListener('click', function (e) {
 async function checkAuth() {
   try {
     const data = await api('/api/auth/me');
-    state.user = { username: data.username, is_admin: data.is_admin };
+    state.user = { username: data.username, is_admin: data.is_admin, monitor_enabled: !!data.monitor_enabled };
     showMain();
     await Promise.all([loadReasons(), loadModels(), loadStats(), loadTrades(), loadFees()]);
     await refreshQuotes(true);  // 进入页面强刷一次持仓现价
@@ -1039,6 +1064,26 @@ function pnlClass(v) {
   return '';
 }
 
+function formatRiskPrices(t) {
+  const bits = [];
+  if (t.take_profit != null) bits.push('<span class="k">止盈</span>' + t.take_profit);
+  if (t.stop_loss != null) bits.push('<span class="k">止损</span>' + t.stop_loss);
+  if (t.breakeven != null) bits.push('<span class="k">保本</span>' + t.breakeven);
+  return bits.length ? bits.join('<br>') : '—';
+}
+
+function collectRiskPrices() {
+  const val = id => {
+    const s = document.getElementById(id).value.trim();
+    return s;  // 空串 = 清空; 后端解析
+  };
+  return {
+    take_profit: val('t-take-profit'),
+    stop_loss: val('t-stop-loss'),
+    breakeven: val('t-breakeven'),
+  };
+}
+
 function buildPnlTip(t, gross, fees, netPnl, pct) {
   const fb = t.fee_breakdown;
   let feeRows = '';
@@ -1251,6 +1296,7 @@ function renderHoldChart() {
   const total = rows.reduce((s, r) => s + r.mv, 0);
 
   if (!rows.length) {
+    state.holdChart.off('click');
     state.holdChart.clear();
     state.holdChart.setOption({
       title: { text: '暂无持仓', left: 'center', top: 'middle', textStyle: { color: chartTheme(), fontSize: 14, fontWeight: 'normal' } },
@@ -1323,13 +1369,20 @@ function renderHoldChart() {
       center: ['50%', '50%'],
       avoidLabelOverlap: true,
       itemStyle: { borderColor: 'rgba(0,0,0,0.2)', borderWidth: 1 },
+      cursor: 'pointer',
       label: {
         formatter: p => `${p.percent.toFixed(0)}%`,
         color: chartTheme(),
         fontSize: 12,
       },
-      data: rows.map(r => ({ name: r.name, value: r.mv })),
+      data: rows.map(r => ({ name: r.name, value: r.mv, symbol: r.symbol })),
     }],
+  });
+  state.holdChart.off('click');
+  state.holdChart.on('click', p => {
+    const r = p && p.data && p.data.symbol ? p.data : (rows[p.dataIndex]);
+    const symbol = r && r.symbol;
+    if (symbol) location.href = '/?symbol=' + encodeURIComponent(symbol);
   });
 }
 
@@ -1382,7 +1435,7 @@ function renderTable() {
   const tbody = document.getElementById('trade-tbody');
   const tips = {};
   if (!state.trades.length) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="empty">暂无交易记录，点击右上角「＋ 新增记录」开始录入</td></tr>';
     state.tips = {};
   } else {
     tbody.innerHTML = state.trades.map(t => {
@@ -1448,6 +1501,7 @@ function renderTable() {
         + (isBatch ? '<span class="badge batch">批次</span>' : '');
       const entryReason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
       const exitReason = [t.exit_reason, t.exit_note].filter(Boolean).join('；');
+      const riskHtml = formatRiskPrices(t);
       return `<tr>
         <td class="sym" data-label="代码"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
         <td data-label="状态">${badge}</td>
@@ -1456,6 +1510,7 @@ function renderTable() {
         <td class="${exitCls}" data-label="退出价">${t.exit_price === null ? '—' : t.exit_price}</td>
         <td class="${curCls}" data-label="现价">${curPrice != null ? curPrice : '—'}</td>
         <td data-label="${isBatch ? (t.status === 'closed' ? '总股数' : '净持仓') : '数量'}">${isBatch ? (t.status === 'closed' ? (t.total_buy_qty != null ? t.total_buy_qty : t.quantity) : t.quantity) : t.quantity}</td>
+        <td class="risk-mini" data-label="止盈/止损/保本">${riskHtml}</td>
         <td data-label="${isBatch ? '首买日' : '买入日'}">${escHtml(t.entry_date)}</td>
         <td data-label="${isBatch ? '末卖日' : '卖出日'}">${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
         <td class="reason-cell" data-label="${isBatch ? '首买理由' : '买入理由'}">${escHtml(entryReason)}</td>
@@ -1513,6 +1568,9 @@ function openModal(id) {
   document.getElementById('t-exit-reason').value = t ? (t.exit_reason || '') : '';
   document.getElementById('t-entry-note').value = t ? (t.entry_note || '') : '';
   document.getElementById('t-exit-note').value = t ? (t.exit_note || '') : '';
+  document.getElementById('t-take-profit').value = t && t.take_profit != null ? t.take_profit : '';
+  document.getElementById('t-stop-loss').value = t && t.stop_loss != null ? t.stop_loss : '';
+  document.getElementById('t-breakeven').value = t && t.breakeven != null ? t.breakeven : '';
   const typeRadio = document.querySelector(`input[name="t-type"][value="${isBatch ? 'batch' : 'simple'}"]`);
   if (typeRadio) typeRadio.checked = true;
   state.legs = isBatch && Array.isArray(t.legs)
@@ -1741,6 +1799,7 @@ async function saveTrade() {
   if (!state.selectedSymbol) { document.getElementById('modal-err').textContent = '请先搜索并选择股票'; return; }
 
   const modelId = document.getElementById('t-model').value;
+  const risk = collectRiskPrices();
 
   let body;
   if (isBatch) {
@@ -1750,6 +1809,7 @@ async function saveTrade() {
       name: state.selectedSymbol.name,
       model_id: modelId ? parseInt(modelId, 10) : null,
       legs: collectLegs(),
+      ...risk,
     };
   } else {
     const status = document.getElementById('t-status').value;
@@ -1767,6 +1827,7 @@ async function saveTrade() {
       entry_reason: entryReason,
       entry_note: document.getElementById('t-entry-note').value.trim(),
       model_id: modelId ? parseInt(modelId, 10) : null,
+      ...risk,
     };
     if (status === 'closed') {
       body.exit_price = parseFloat(document.getElementById('t-exit-price').value);

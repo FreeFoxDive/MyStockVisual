@@ -6,11 +6,11 @@
 
 ```bash
 cd D:/projects/stock_pick
-python -u visual/server.py
+venv/Scripts/python.exe -u visual/server.py
 # 浏览器打开 http://localhost:8888
 ```
 
-自动加载项目根目录 `.env` 中的 `AF_API_KEY`。
+用项目 venv 启动（系统 Python 缺 `mairui` 等依赖）。自动加载 `visual/.env`，没有则回退项目根 `.env`（`AF_API_KEY` / 钉钉 / 管理员口令）。
 
 ## 功能
 
@@ -34,6 +34,7 @@ python -u visual/server.py
 | 安全头 | CSP 限制脚本来源 + CORS 同源限制 |
 | 速率限制 | 服务端令牌桶 120次/分钟，超限返回 429 |
 | 交易记录 | 多账户登录，买卖记录增删改查，按周/月/年统计盈亏与胜率（详见 [docs/trades.md](docs/trades.md)） |
+| 持仓监控 | 授权用户的止盈/止损/保本价盘中监控，钉钉推送（仅管理员及授权用户） |
 
 ## 文件结构
 
@@ -42,6 +43,15 @@ visual/
 ├── server.py          # HTTP服务器 (ThreadingHTTPServer 多线程) + AlphaFeed API 代理
 ├── indicators.py      # 指标计算函数 (ema / atr / macd / kdj / rsi / force_index)
 ├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
+├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 钉钉)
+├── feed.py            # AlphaFeed REST 行情接入 (令牌桶)
+├── dingtalk.py        # 钉钉机器人 (visual 自包含)
+├── market_hours.py    # A 股交易日历与时段
+├── probe_feed.py      # 探测快照刷新频率 / 接口权限
+├── test/
+│   ├── test_trades.py
+│   ├── test_monitor.py    # 告警判定 + mock 钉钉 + 整轮覆盖
+│   └── fixtures/          # 合成 1m 回放 (非真实成交)
 ├── static/            # 前端静态文件 (URL 仍为干净路径, 如 /trades.html /admin.html)
 │   ├── index.html     # 前端单页面 (ECharts 5 CDN)
 │   ├── trades.html    # 交易记录前端 (登录注册 + 统计界面)
@@ -65,11 +75,13 @@ visual/
 | `GET /api/ping` | 健康检查 |
 | `POST /api/auth/login` | 登录，返回 `Set-Cookie: session` |
 | `POST /api/auth/logout` | 登出（需登录） |
-| `GET /api/auth/me` | 当前用户，返回 `{username,is_admin}`（未登录 401） |
+| `GET /api/auth/me` | 当前用户，返回 `{username,is_admin,monitor_enabled}`（未登录 401） |
 | `GET /api/admin/users` | 用户列表（仅管理员） |
 | `POST /api/admin/users` | 添加用户 `{username,password}`（仅管理员） |
 | `DELETE /api/admin/users/{id}` | 删除用户（仅管理员） |
 | `POST /api/admin/users/{id}/reset-password` | 重置密码 `{password}`（仅管理员） |
+| `POST /api/admin/users/{id}/monitor` | `{enabled}` 授权持仓监控（仅管理员） |
+| `GET /api/monitor/status` | 监控线程状态 + 当前用户最近告警 |
 | `GET /api/trades` | 交易记录列表（需登录，`status/symbol/q/from/to/model_id/limit/offset`） |
 | `POST /api/trades` | 新建交易记录 |
 | `PUT /api/trades/{id}` | 更新交易记录 |
@@ -116,9 +128,36 @@ visual/
 
 ## 依赖
 
-- Python: `alphafeed`, `numpy`, `pandas` (已存在于项目 venv)
+- Python: `alphafeed`, `numpy`, `pandas`, `akshare`, `mairui`, `pandas_market_calendars`（见 `requirements.txt`）
 - 前端: ECharts 5.5.0 (通过 CDN `https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js` 加载)
-- 无额外 pip 依赖 (仅用 Python 标准库 `http.server`)
+
+### 持仓监控配置
+
+写在 `visual/.env`（独立部署时不必依赖项目根）：
+
+```
+AF_API_KEY=...
+DINGDING_WEB_HOOK_TOKEN=...
+DINGDING_BOT_SIGN=...
+```
+
+监控只用 `quotes.get(symbols=...)` 按代码查询，令牌桶 6 次/分钟（额度 60/min 的 10%），不走 `universes=` 池查询。管理员在 `/admin.html` 给普通用户打开「监控」开关。
+
+校准 / 探测 / 测试：
+
+```
+venv/Scripts/python.exe -u visual/probe_feed.py
+venv/Scripts/python.exe -u visual/monitor.py --replay 603698.SH:2026-08-19 603118.SH:2026-08-13
+venv/Scripts/python.exe -u visual/test/test_monitor.py
+venv/Scripts/python.exe -u visual/test/test_trades.py
+```
+
+钉钉真连通（会往群发一条测试消息，平时不要跑）：
+
+```
+set DINGTALK_LIVE=1
+venv/Scripts/python.exe -u visual/test/test_monitor.py TestDingTalk.test_live_robot_reachable
+```
 
 ## 安全性
 
