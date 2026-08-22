@@ -441,8 +441,13 @@ class TTLCache:
             self._cache.clear()
 
 
-# 缓存: 日K 120s, 周/月K 300s, 快照 30s, 上限 500 条目
+# 分钟 K 线 (AlphaFeed 原生周期; 不做 3m 合成)
+MINUTE_PERIODS = frozenset({"1m", "5m", "15m", "30m", "60m"})
+MINUTE_COUNTS = {"1m": 1200, "5m": 480, "15m": 320, "30m": 320, "60m": 320}
+
+# 缓存: 日K 120s, 分钟K 60s, 周/月K 300s, 快照 30s, 上限 500 条目
 kline_cache = TTLCache(ttl_seconds=120)
+kline_cache_minute = TTLCache(ttl_seconds=60)
 kline_cache_long = TTLCache(ttl_seconds=300)
 quote_cache = TTLCache(ttl_seconds=30)
 
@@ -715,18 +720,40 @@ def _fetch_fund_kline(symbol, period, count):
     return df
 
 
+def _fetch_minute_kline(symbol, period, count):
+    """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
+    try:
+        af = get_af()
+        dfs = af.klines.batch(
+            [symbol], period=period, count=count, adjust="none", to_dataframe=True
+        )
+        df = dfs.get(symbol) if dfs else None
+    except Exception as e:
+        print(f"[Visual] AlphaFeed 获取分钟K线失败 {symbol} {period}: {e}", flush=True)
+        return None
+    if df is None or len(df) == 0:
+        return None
+    return _normalize(df, prefer_time=True)
+
+
 def fetch_kline(symbol, period, count):
     """获取 K 线数据（优先磁盘缓存），返回标准化 DataFrame。
 
     数据源路由：
+    - 分钟 → AlphaFeed klines.batch
     - 指数 → 麦蕊 index_history
     - 股票 → 麦蕊 stock_history
     - ETF  → 麦蕊基金历史K线 (jj/lskx)
     """
-    # 检查磁盘缓存 (日K 60s/非交易 300s, 周月K 600s)
+    # 检查磁盘缓存 (日K/分钟 盘中 60s/盘后 300s, 周月K 600s)
     now = datetime.now()
     in_trading = 9 <= now.hour < 15 and now.weekday() < 5
-    ttl = 60 if (period == "1d" and in_trading) else (300 if period == "1d" else 600)
+    if period in MINUTE_PERIODS:
+        ttl = 60 if in_trading else 300
+    elif period == "1d":
+        ttl = 60 if in_trading else 300
+    else:
+        ttl = 600
     cached = _disk_cache.get(symbol, period, count, ttl)
     if cached:
         df = pd.DataFrame(cached["data"])
@@ -742,7 +769,11 @@ def fetch_kline(symbol, period, count):
 
     df, name = None, None
 
-    if _is_etf(symbol):
+    if period in MINUTE_PERIODS:
+        df = _fetch_minute_kline(symbol, period, count)
+        if df is not None:
+            name = _lookup_name(symbol)
+    elif _is_etf(symbol):
         # ETF → 麦蕊基金历史K线 (jj/lskx)
         df = _fetch_fund_kline(symbol, period, count)
         if df is not None:
@@ -1736,11 +1767,17 @@ class VisualHandler(BaseHTTPRequestHandler):
 
         symbol = normalize_symbol(symbol_raw)
         period = params.get("period", ["1d"])[0]
-        count = min(int(params.get("count", ["200"])[0]), 1000)
+        default_count = MINUTE_COUNTS.get(period, 200)
+        count = min(int(params.get("count", [str(default_count)])[0]), 1500)
 
         # 检查缓存
         cache_key = f"{symbol}:{period}:{count}"
-        cache = kline_cache_long if period in ("1w", "1M") else kline_cache
+        if period in MINUTE_PERIODS:
+            cache = kline_cache_minute
+        elif period in ("1w", "1M"):
+            cache = kline_cache_long
+        else:
+            cache = kline_cache
         cached = cache.get(cache_key)
         if cached:
             resp = cached.copy()
@@ -1760,10 +1797,10 @@ class VisualHandler(BaseHTTPRequestHandler):
         df, indicators = compute_all_indicators(df, period)
 
 
-        # ETF 溢价率
+        # ETF 溢价率 (日/周/月; 分钟净值无法对齐)
         premium_data = None
         is_etf = _is_etf(symbol)
-        if is_etf:
+        if is_etf and period not in MINUTE_PERIODS:
             nav_df = _fetch_etf_nav(symbol)
             if nav_df is not None and len(nav_df) > 0:
                 # 对齐日期: 取最近匹配的净值
@@ -1789,7 +1826,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         for idx, row in df.iterrows():
             date_str = str(idx)
             if hasattr(idx, "strftime"):
-                date_str = idx.strftime("%Y-%m-%d %H:%M" if ":" in period else "%Y-%m-%d")
+                date_str = idx.strftime("%Y-%m-%d %H:%M" if period in MINUTE_PERIODS else "%Y-%m-%d")
             entry = {
                 "date": date_str,
                 "open": _safe_float(row.get("open")),
@@ -2014,7 +2051,7 @@ def main():
     print(f"""
 ╔══════════════════════════════════════════╗
 ║   📈 Visual K线图 股票可视化              ║
-║   数据源: 麦蕊(实时/K线) + AlphaFeed(分时) ║
+║   数据源: 麦蕊(日K) + AlphaFeed(分时/分钟) ║
 ║   地址: http://{args.host}:{args.port}             ║
 ║   速率限制: {RATE_LIMIT_PER_MIN} 次/分钟           ║
 ╚══════════════════════════════════════════╝
