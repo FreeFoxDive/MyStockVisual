@@ -510,8 +510,12 @@ async function fetchData() {
   try {
     const resp = await fetch(url);
     if (!resp.ok) {
-      const err = await resp.json();
-      throw new Error(err.error || `HTTP ${resp.status}`);
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const err = await resp.json();
+        if (err && err.error) msg = err.error;
+      } catch (_) { /* 网关 502 等可能返回 HTML */ }
+      throw new Error(msg);
     }
     const data = await resp.json();
     if (STATE._fetchTs !== fetchTs) return; // 竞态: 已切到新股票, 丢弃旧响应

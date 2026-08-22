@@ -335,7 +335,7 @@ def _prune_login_state_locked(now):
 
 
 # CSP: 'unsafe-inline' 是必需的，因为 index.html 使用内联 <script> 标签
-CSP_HEADER = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+CSP_HEADER = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://static.cloudflareinsights.com https://cloudflareinsights.com"
 
 # ── 磁盘缓存 ──
 CACHE_DIR = SCRIPT_DIR / ".cache" / "klines"
@@ -757,13 +757,14 @@ def fetch_kline(symbol, period, count):
     cached = _disk_cache.get(symbol, period, count, ttl)
     if cached:
         df = pd.DataFrame(cached["data"])
-        # trade_date/trade_time 在 data 行内, 不在顶层
-        if "trade_date" in df.columns:
-            df["trade_date"] = pd.to_datetime(df["trade_date"])
-            df = df.set_index("trade_date")
-        elif "trade_time" in df.columns:
+        # 分钟线优先 trade_time: JSON 常同时带 trade_date(日) 与 trade_time,
+        # 若先按 date 建索引, 同日多根重复 → RSI get_loc 返回 slice
+        if "trade_time" in df.columns:
             df["trade_time"] = pd.to_datetime(df["trade_time"])
             df = df.set_index("trade_time")
+        elif "trade_date" in df.columns:
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            df = df.set_index("trade_date")
         df = df.sort_index()
         return df, cached.get("name", symbol)
 
@@ -1794,7 +1795,11 @@ class VisualHandler(BaseHTTPRequestHandler):
             return self._send_error(f"无法获取 {symbol} 的K线数据", 404)
 
         # 计算指标
-        df, indicators = compute_all_indicators(df, period)
+        try:
+            df, indicators = compute_all_indicators(df, period)
+        except Exception as e:
+            print(f"[Visual] 指标计算失败 {symbol} {period}: {e}", flush=True)
+            return self._send_error(f"指标计算失败: {_sanitize_error(e)}", 500)
 
 
         # ETF 溢价率 (日/周/月; 分钟净值无法对齐)
