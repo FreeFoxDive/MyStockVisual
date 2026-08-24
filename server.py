@@ -222,6 +222,8 @@ def _lookup_name(symbol):
 # ── 指标计算 ──
 from indicators import compute_all_indicators, _safe_list, force_index
 
+import market_hours
+
 # ── 交易记录 ──
 import trades
 
@@ -747,7 +749,7 @@ def fetch_kline(symbol, period, count):
     """
     # 检查磁盘缓存 (日K/分钟 盘中 60s/盘后 300s, 周月K 600s)
     now = datetime.now()
-    in_trading = 9 <= now.hour < 15 and now.weekday() < 5
+    in_trading = market_hours.in_session(now)
     if period in MINUTE_PERIODS:
         ttl = 60 if in_trading else 300
     elif period == "1d":
@@ -1254,7 +1256,13 @@ class VisualHandler(BaseHTTPRequestHandler):
         elif path == "/api/search":
             return self._handle_search(params)
         elif path == "/api/ping":
-            return self._send_json({"ok": True, "time": str(datetime.now())})
+            now = datetime.now()
+            return self._send_json({
+                "ok": True,
+                "time": str(now),
+                "in_session": market_hours.in_session(now),
+                "is_trading_day": market_hours.is_trading_day(now),
+            })
         elif path == "/api/auth/me":
             return self._handle_auth_me()
         elif path == "/api/admin/users":

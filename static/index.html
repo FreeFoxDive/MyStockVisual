@@ -385,6 +385,10 @@ const STATE = {
 const MINUTE_PERIODS = ['1m', '5m', '15m', '30m', '60m'];
 const MINUTE_COUNTS = { '1m': 1200, '5m': 480, '15m': 320, '30m': 320, '60m': 320 };
 const ALL_PERIODS = ['1d', '1w', '1M', 'intraday', ...MINUTE_PERIODS];
+// 分钟K按周期刷新 (不再套用分时 60s); 分时仍 60s; 快照 10s
+const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3, '60m': 3600e3 };
+const INTRADAY_REFRESH_MS = 60e3;
+const QUOTE_REFRESH_MS = 10e3;
 
 // ═══════════════════════════════════════════════════════════════
 // COLORS
@@ -398,6 +402,7 @@ const COLORS = {
     gridLine: '#eeeeee',
     crossLine: '#cccccc',
     up: '#ef232a', down: '#14b143',
+    halt: '#999999',  // 停牌/无量: 同花顺浅色灰K
     // ── 白/黑系: MA5 / DIF / K / RSI1 ──
     ma5: '#1a1a1a', macdDif: '#1a1a1a', kdjK: '#1a1a1a', rsi6: '#1a1a1a',
     // ── 黄色系: MA10 / DEA / D / RSI2 ──
@@ -416,6 +421,7 @@ const COLORS = {
     gridLine: '#1e2130',
     crossLine: '#363a45',
     up: '#ef5350', down: '#26a69a',
+    halt: '#7a7e88',  // 停牌/无量: 暗色中性灰
     // ── 白色系: MA5 / DIF / K / RSI1 ──
     ma5: '#eeeeee', macdDif: '#eeeeee', kdjK: '#eeeeee', rsi6: '#eeeeee',
     // ── 黄色系: MA10 / DEA / D / RSI2 ──
@@ -431,6 +437,25 @@ const COLORS = {
 };
 
 function C() { return COLORS[STATE.theme]; }
+
+function isHaltBar(bar) {
+  if (!bar) return false;
+  if (bar.halted === true) return true;
+  const v = bar.volume;
+  return v == null || v <= 0;
+}
+
+function haltCandleStyle() {
+  const g = C().halt;
+  return { color: g, color0: g, borderColor: g, borderColor0: g, borderColorDoji: g };
+}
+
+function haltLabel(bar) {
+  if (!isHaltBar(bar)) return '';
+  const daily = STATE.period === '1d' || STATE.period === '1w' || STATE.period === '1M';
+  const text = daily ? '停牌' : '无量';
+  return ` <span style="color:${C().halt};font-weight:700">${text}</span>`;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // THEME — 自动: 系统偏好 > 时间(6-18亮/18-6暗), 手动点切换后锁定
@@ -460,7 +485,8 @@ function toggleTheme() {
   STATE.theme = STATE.theme === 'light' ? 'dark' : 'light';
   applyTheme(STATE.theme);
   saveConfig();
-  if (STATE.klineData) { updateChart(true); }
+  if (STATE.period === 'intraday' && STATE.intradayData) renderIntraday(STATE.intradayData);
+  else if (STATE.klineData) updateChart(true);
 }
 
 function onSystemThemeChange() {
@@ -469,19 +495,22 @@ function onSystemThemeChange() {
   if (sys !== STATE.theme) {
     applyTheme(sys);
     saveConfig();
-    if (STATE.klineData) { updateChart(true); }
+    if (STATE.period === 'intraday' && STATE.intradayData) renderIntraday(STATE.intradayData);
+    else if (STATE.klineData) updateChart(true);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // DATA FETCHING
 // ═══════════════════════════════════════════════════════════════
-async function fetchData() {
+async function fetchData(opts) {
+  const silent = !!(opts && opts.silent);
   const symbol = STATE.symbol;
   if (STATE.period === 'intraday') STATE.period = '1d';
   const period = STATE.period;
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
-  STATE.trades = null; // 切股/切周期先清空, 避免缓存命中快速渲染短暂显示上一只股票的买卖点
+  STATE._lastBarAt = fetchTs;
+  if (!silent) STATE.trades = null; // 切股/切周期先清空, 避免缓存命中快速渲染短暂显示上一只股票的买卖点
   const cacheKey = `vk_${symbol}_${period}`;
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
@@ -503,7 +532,7 @@ async function fetchData() {
   const count = MINUTE_COUNTS[period] || 300;
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
-  if (!cacheHit && !sameView) {
+  if (!silent && !cacheHit && !sameView) {
     STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
     showLoading(true);
   }
@@ -527,29 +556,33 @@ async function fetchData() {
       localStorage.setItem(cacheKey, entry);
       _cleanLocalStorage();
     } catch(e) { /* quota exceeded */ }
-    // 质押比例: 切股先隐藏, 响应回来做竞态防护 + 无数据时隐藏
-    document.getElementById('info-pledge').style.display = 'none';
-    fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
-      .then(r => r.json()).then(d => {
-        if (STATE._fetchTs !== fetchTs) return; // 已切到新股票, 丢弃旧响应
-        const el = document.getElementById('info-pledge');
-        if (d.pledge) {
-          el.textContent = '质押 ' + d.pledge.ratio.toFixed(2) + '%';
-          el.style.display = '';
-        } else {
-          el.style.display = 'none';
-        }
-      }).catch(() => {});
-    addToHistory(data.symbol, data.name);
+    if (!silent) {
+      // 质押比例: 切股先隐藏, 响应回来做竞态防护 + 无数据时隐藏
+      document.getElementById('info-pledge').style.display = 'none';
+      fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
+        .then(r => r.json()).then(d => {
+          if (STATE._fetchTs !== fetchTs) return; // 已切到新股票, 丢弃旧响应
+          const el = document.getElementById('info-pledge');
+          if (d.pledge) {
+            el.textContent = '质押 ' + d.pledge.ratio.toFixed(2) + '%';
+            el.style.display = '';
+          } else {
+            el.style.display = 'none';
+          }
+        }).catch(() => {});
+      addToHistory(data.symbol, data.name);
+    }
     updateInfo(data);
-    await loadTrades(data.symbol, fetchTs);
+    if (!silent) await loadTrades(data.symbol, fetchTs);
     updateChart(false);
   } catch (e) {
     console.error('获取数据失败:', e);
-    alert('❌ 获取数据失败: ' + e.message);
+    if (!silent) alert('❌ 获取数据失败: ' + e.message);
   } finally {
-    STATE.chart.hideLoading();
-    showLoading(false);
+    if (!silent) {
+      STATE.chart.hideLoading();
+      showLoading(false);
+    }
   }
 }
 
@@ -628,6 +661,7 @@ function buildTradeMarkers(klines, dates) {
 
 async function fetchQuote() {
   try {
+    STATE._lastQuoteAt = Date.now();
     const resp = await fetch(`/api/quote?symbol=${encodeURIComponent(STATE.symbol)}`);
     if (resp.ok) {
       const q = await resp.json();
@@ -837,6 +871,7 @@ async function fetchIntraday() {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
   const fetchTs = Date.now(); STATE._intraFetchTs = fetchTs;
+  STATE._lastBarAt = fetchTs;
   const _cacheKey = `vi_${symbol}_1m`;
 
   // ── 浏览器缓存 ──
@@ -883,7 +918,11 @@ function renderIntraday(data) {
   const chart = STATE.chart;
   const bars = data.bars;
   const times = bars.map(b => b.time);
-  const ohlc = bars.map(b => [b.open, b.close, b.low, b.high]);
+  const ohlc = bars.map(b => {
+    const value = [b.open, b.close, b.low, b.high];
+    if (isHaltBar(b)) return { value, itemStyle: haltCandleStyle() };
+    return value;
+  });
 
   const showVolume = document.getElementById('chk-volume').checked;
   const showMacd = document.getElementById('chk-macd').checked;
@@ -911,6 +950,7 @@ function renderIntraday(data) {
   // 成交量（可关闭）
   if (showVolume) {
     const vols = bars.map(b => {
+      if (isHaltBar(b)) return { value: b.volume || 0, itemStyle: { color: C().halt } };
       const up = (b.close || 0) >= (b.open || 0);
       return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
     });
@@ -986,7 +1026,7 @@ function renderIntraday(data) {
         const prevBar = idx > 0 ? data.bars[idx - 1] : null;
         const pc = prevBar ? prevBar.close : b.open;
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
-        let h = `<div><b>${b.time}</b></div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
+        let h = `<div><b>${b.time}</b>${haltLabel(b)}</div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
         const cRsiV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr}">${v.toFixed(1)}</span>`;
@@ -1184,14 +1224,17 @@ function updateChart(reTheme) {
   // ── Readonly series data ──
   const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
   const ohlc = klines.map((k, i) => {
-    if (!impulseOn) return [k.open, k.close, k.low, k.high];
+    const value = [k.open, k.close, k.low, k.high];
+    if (isHaltBar(k)) return { value, itemStyle: haltCandleStyle() };
+    if (!impulseOn) return value;
     let c;
     if (k.impulse === 1) c = C().up;
     else if (k.impulse === -1) c = C().down;
     else c = C().impulse_neutral;
-    return { value: [k.open, k.close, k.low, k.high], itemStyle: { color: c, color0: c, borderColor: c, borderColor0: c } };
+    return { value, itemStyle: { color: c, color0: c, borderColor: c, borderColor0: c } };
   });
   const vols = klines.map((k, i) => {
+    if (isHaltBar(k)) return { value: k.volume || 0, itemStyle: { color: C().halt } };
     const up = (k.close || 0) >= (k.open || 0);
     return { value: k.volume || 0, itemStyle: { color: up ? C().up : C().down } };
   });
@@ -1348,7 +1391,7 @@ function updateChart(reTheme) {
 
       // ── Helper ──
       const pc = prev ? prev.close : k.close; // 前一根收盘价
-      const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${escHtml(k.date)}</div>`;
+      const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${escHtml(k.date)}${haltLabel(k)}</div>`;
       const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'};font-weight:700">${v.toFixed(2)}</span>`;
 
       // Grid 0: K-line — full detail
@@ -1717,21 +1760,49 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
   }, 1000);
 
-  // 行情 2s + 分时/分钟K 60s (仅交易时段 9:30-15:00)
-  let intraTick = 0;
+  // 盘中自动刷新: 快照 / 分时 / 分钟K 分开间隔; 午休、周末、节假日不拉
+  STATE._lastQuoteAt = 0;
+  STATE._lastBarAt = 0;
+  STATE._serverTradingDay = null; // false = 节假日 (交易日历)
+
+  function inAshareSession(now) {
+    now = now || new Date();
+    const d = now.getDay();
+    if (d === 0 || d === 6) return false;
+    const t = now.getHours() * 60 + now.getMinutes();
+    return (t >= 9 * 60 + 30 && t <= 11 * 60 + 30) || (t >= 13 * 60 && t <= 15 * 60);
+  }
+
+  function canAutoRefresh() {
+    if (!inAshareSession()) return false;
+    if (STATE._serverTradingDay === false) return false;
+    return true;
+  }
+
+  async function syncSessionFlag() {
+    try {
+      const r = await fetch('/api/ping');
+      const d = await r.json();
+      if (typeof d.is_trading_day === 'boolean') STATE._serverTradingDay = d.is_trading_day;
+    } catch (e) { /* 失败时仅用本地时段 */ }
+  }
+  syncSessionFlag();
+  setInterval(syncSessionFlag, 60e3);
+
   setInterval(() => {
-    const now = new Date();
-    const h = now.getHours(), m = now.getMinutes();
-    if (h < 9 || (h === 9 && m < 30) || h >= 15) return;
-    fetchQuote();
-    if (STATE.period === 'intraday') {
-      intraTick++;
-      if (intraTick >= 30) { intraTick = 0; fetchIntraday(); }
-    } else if (MINUTE_PERIODS.includes(STATE.period)) {
-      intraTick++;
-      if (intraTick >= 30) { intraTick = 0; fetchData(); }
+    if (!canAutoRefresh()) return;
+    const now = Date.now();
+    if (now - (STATE._lastQuoteAt || 0) >= QUOTE_REFRESH_MS) {
+      STATE._lastQuoteAt = now;
+      fetchQuote();
     }
-  }, 2000);
+    if (STATE.period === 'intraday') {
+      if (now - (STATE._lastBarAt || 0) >= INTRADAY_REFRESH_MS) fetchIntraday();
+    } else if (MINUTE_PERIODS.includes(STATE.period)) {
+      const iv = MINUTE_REFRESH_MS[STATE.period] || 60e3;
+      if (now - (STATE._lastBarAt || 0) >= iv) fetchData({ silent: true });
+    }
+  }, 1000);
 });
 </script>
 </body>
