@@ -21,7 +21,7 @@ import hmac
 import json
 import secrets
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # ── 路径与常量 ──
@@ -29,6 +29,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = SCRIPT_DIR / "data" / "trades.db"
 
 _db_path = DEFAULT_DB_PATH
+
+# 所有入库时间戳统一北京时间 (naive UTC+8), 与容器/系统时区无关,
+# 避免 UTC 容器下 fired_at 显示差 8 小时、加速告警冷却误判刷屏。
+_CST = timezone(timedelta(hours=8))
+
+
+def _now():
+    return datetime.now(_CST).replace(tzinfo=None)
 
 PBKDF2_ITERATIONS = 200_000      # PBKDF2-SHA256 迭代次数
 SESSION_TTL_DAYS = 30            # 会话有效期 (天)
@@ -203,7 +211,7 @@ _REPO_SZSE = {"810": "1", "811": "2", "800": "3", "809": "4", "801": "7",
 
 
 def _now_iso():
-    return datetime.now().isoformat(timespec="seconds")
+    return _now().isoformat(timespec="seconds")
 
 
 def init_db(db_path=None):
@@ -538,7 +546,7 @@ def login(username, password):
 
 def create_session(user_id):
     token = secrets.token_hex(32)
-    now = datetime.now()
+    now = _now()
     expires = now + timedelta(days=SESSION_TTL_DAYS)
     conn = get_conn()
     try:
@@ -572,7 +580,7 @@ def get_session(token):
         expires = datetime.fromisoformat(row["expires_at"])
     except ValueError:
         return None
-    if expires < datetime.now():
+    if expires < _now():
         delete_session(token)
         return None
     return {
