@@ -219,6 +219,40 @@ class TestMetricsAndAlerts(unittest.TestCase):
         alerts = monitor.evaluate_alerts(pos, m, now_dt=datetime(2026, 8, 21, 10, 0))
         self.assertIn("breakeven_hit", [a["alert_type"] for a in alerts])
 
+    def test_be_broken_on_downward_touch(self):
+        samples = [
+            {"ts": 1000, "price": 10.2, "volume": 100},
+            {"ts": 1060, "price": 9.8, "volume": 200},
+        ]
+        pos = {"entry_price": 10.0, "breakeven": 10.0}
+        m = monitor.compute_metrics(samples, now_ts=1060, session_elapsed_min=30)
+        alerts = monitor.evaluate_alerts(pos, m, now_dt=datetime(2026, 8, 21, 10, 0))
+        types = [a["alert_type"] for a in alerts]
+        self.assertIn("be_broken", types)
+        self.assertNotIn("breakeven_hit", types)
+
+    def test_be_broken_touch_exact_level(self):
+        # 价格从上方恰好触到保本价也触发
+        samples = [
+            {"ts": 1000, "price": 10.05, "volume": 100},
+            {"ts": 1060, "price": 10.00, "volume": 200},
+        ]
+        pos = {"entry_price": 10.0, "breakeven": 10.0}
+        m = monitor.compute_metrics(samples, now_ts=1060, session_elapsed_min=30)
+        alerts = monitor.evaluate_alerts(pos, m, now_dt=datetime(2026, 8, 21, 10, 0))
+        self.assertIn("be_broken", [a["alert_type"] for a in alerts])
+
+    def test_be_broken_no_fire_whole_day_below(self):
+        # 全天价格都在保本下方 (跳空低开): 无上方到达, 不触发
+        samples = [
+            {"ts": 1000, "price": 9.5, "volume": 100},
+            {"ts": 1060, "price": 9.4, "volume": 200},
+        ]
+        pos = {"entry_price": 10.0, "breakeven": 10.0}
+        m = monitor.compute_metrics(samples, now_ts=1060, session_elapsed_min=30)
+        alerts = monitor.evaluate_alerts(pos, m, now_dt=datetime(2026, 8, 21, 10, 0))
+        self.assertNotIn("be_broken", [a["alert_type"] for a in alerts])
+
     def test_limit_up_sealed_uses_depth(self):
         samples = [
             {"ts": 1000, "price": 10.9, "volume": 100},
@@ -303,6 +337,32 @@ class TestReplayFixtures(unittest.TestCase):
         up = [h["alert"]["alert_type"] for h in hits.get("603118.SH:2026-08-13", [])]
         self.assertIn("accel_down", down)
         self.assertIn("accel_up", up)
+
+    def test_zhejiang_bank_20260825_breakeven_touch(self):
+        """真实回放 2026-08-25 浙商银行: 开盘2.95 涨到2.97(全天最高)后回落。
+
+        对应真实持仓 止盈3.03/保本2.97/止损2.85, 应只在 09:31 上穿保本触发
+        breakeven_hit, 不触发 tp_reached / sl_breached。
+        """
+        monitor.clear_buffers()
+        hits = monitor.replay(
+            ["601916.SH:2026-08-25"],
+            persist_fixture=False,
+            position_overrides={
+                "601916.SH": {
+                    "name": "浙商银行", "entry_price": 2.97,
+                    "stop_loss": 2.85, "take_profit": 3.03, "breakeven": 2.97,
+                },
+            },
+        )
+        hit = hits.get("601916.SH:2026-08-25") or []
+        types = [h["alert"]["alert_type"] for h in hit]
+        self.assertIn("breakeven_hit", types)
+        first = next(h for h in hit if h["alert"]["alert_type"] == "breakeven_hit")
+        self.assertEqual(first["clock"], "09:31")
+        self.assertNotIn("tp_reached", types)
+        self.assertNotIn("sl_breached", types)
+        self.assertNotIn("be_broken", types)   # 全天最高恰好=保本价, 无「从上方跌破」
 
 
 class TestPriceBuffer(unittest.TestCase):

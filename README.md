@@ -141,6 +141,13 @@ DINGDING_WEB_HOOK_TOKEN=...
 DINGDING_BOT_SIGN=...
 ```
 
+### 日志
+
+标准库 `logging`（`visual/logger.py` 统一配置），每行 `时间戳 [级别] 模块名 消息`，时间戳固定为**北京时间**（与容器时区无关）。默认输出到 stdout（Docker 下由 `docker compose logs` 捕获）；可用环境变量覆盖：
+
+- `LOG_LEVEL`：DEBUG / INFO / WARNING / ERROR，默认 INFO
+- `LOG_FILE`：设了则额外写本地文件（RotatingFileHandler，5MB×3 轮转），便于非 Docker 持久化
+
 监控只用 `quotes.get(symbols=...)` 按代码查询，令牌桶 6 次/分钟（额度 60/min 的 10%），不走 `universes=` 池查询。管理员在 `/admin.html` 给普通用户打开「监控」开关。
 
 校准 / 探测 / 测试：

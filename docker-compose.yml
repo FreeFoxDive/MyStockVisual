@@ -6,6 +6,8 @@ services:
       - "127.0.0.1:8888:8888"
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       - ./.cache:/app/.cache
       - ./data:/app/data

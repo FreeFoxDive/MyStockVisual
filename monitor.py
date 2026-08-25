@@ -1,4 +1,4 @@
-"""持仓价格监控: 自建价格序列 + 六类告警 + 到期平仓提醒 + 钉钉推送。
+"""持仓价格监控: 自建价格序列 + 七类告警 + 到期平仓提醒 + 钉钉推送。
 
 双入口:
   start_background(get_af, fallback_quotes)  — visual/server.py 起 daemon 线程
@@ -26,6 +26,10 @@ import feed as feed_mod  # noqa: E402
 import market_hours  # noqa: E402
 import trades  # noqa: E402
 
+import logging  # noqa: E402
+
+log = logging.getLogger("monitor")
+
 # ── 判定阈值 (集中, 便于校准) ──
 W_FAST = 60.0                 # 秒
 W_SLOW = 180.0                # 秒
@@ -47,7 +51,7 @@ EPS_PRICE = 0.0051
 BUFFER_SECONDS = 30 * 60
 COOLDOWN_ACCEL_SEC = 30 * 60
 DAILY_ONCE = frozenset({
-    "breakeven_hit", "sl_breached", "tp_reached", "limit_up_sealed",
+    "breakeven_hit", "be_broken", "sl_breached", "tp_reached", "limit_up_sealed",
     "hold_exit_am", "hold_exit_pm",
 })
 ACCEL_TYPES = frozenset({"accel_down", "accel_up"})
@@ -271,7 +275,7 @@ def evaluate_alerts(position, metrics, limits=None, depth=None, now_dt=None):
     """纯函数: 返回 [{alert_type, price, detail}, ...]。"""
     if not metrics:
         return []
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or market_hours.now()
     p = metrics["price"]
     sl = position.get("stop_loss")
     tp = position.get("take_profit")
@@ -304,6 +308,12 @@ def evaluate_alerts(position, metrics, limits=None, depth=None, now_dt=None):
         prev = metrics.get("prev_price")
         if prev is not None and prev < be <= p:
             add("breakeven_hit", f"上穿保本{be:.2f}")
+
+    # 3b) 跌破/跌回保本 (价格从上方到达保本价; 全天在保本下方的跳空低开不触发)
+    if be is not None and be > 0:
+        prev = metrics.get("prev_price")
+        if prev is not None and p <= be < prev:
+            add("be_broken", f"跌破保本{be:.2f}")
 
     # 4) 涨停封板 (官方口径: 卖1量=0)
     if _sealed_limit_up(depth):
@@ -392,7 +402,7 @@ def evaluate_hold_exit(pos, now_dt=None):
 
     pos 需 hold_days 与 hold_anchor_date (或已算好的 hold_end_date)。
     """
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or market_hours.now()
     hold_days = pos.get("hold_days")
     if not hold_days:
         return []
@@ -434,7 +444,7 @@ def should_fire(user_id, symbol, alert_type, now_dt=None, last=_UNSET, trade_id=
 
     hold_exit_* 按 (user, symbol, type, trade_id) 去重, 避免同股两笔持仓互相挡住。
     """
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or market_hours.now()
     today = now_dt.strftime("%Y-%m-%d")
     if last is _UNSET:
         last = trades.last_monitor_alert(
@@ -497,7 +507,7 @@ def _build_hold_message(fired, now_dt):
 
 def _check_hold_expire(now_dt=None, persist=True, notify=True):
     """到期日 10:00 / 14:00 窗口内推送平仓提醒。不拉行情。返回 fired 列表。"""
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or market_hours.now()
     positions = trades.list_hold_expire_positions()
     if not positions:
         return []
@@ -527,7 +537,7 @@ def _check_hold_expire(now_dt=None, persist=True, notify=True):
 
 def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     """一轮: 取持仓 → 补种 → 快照 → 判定 → 节流 → 推送。返回 fired 列表。"""
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or market_hours.now()
     positions = trades.list_monitored_positions()
     symbols = list(dict.fromkeys(p["symbol"] for p in positions))
     _set_status(n_symbols=len(symbols), last_poll=now_dt.isoformat(timespec="seconds"))
@@ -539,7 +549,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     try:
         limits_map = feed_obj.instruments(symbols) or {}
     except Exception as e:
-        print(f"[Monitor] instruments 失败: {e}", flush=True)
+        log.warning(f"instruments 失败: {e}")
 
     # 补种空序列
     missing = [s for s in symbols if not _buffers.get(s)]
@@ -549,7 +559,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
             for s, samples in (seeded or {}).items():
                 seed_buffer(s, samples)
         except Exception as e:
-            print(f"[Monitor] 补种失败: {e}", flush=True)
+            log.warning(f"补种失败: {e}")
 
     try:
         quotes = feed_obj.quotes(symbols) or {}
@@ -558,7 +568,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
         return []
     except Exception as e:
         _set_status(last_error=str(e))
-        print(f"[Monitor] quotes 失败: {e}", flush=True)
+        log.warning(f"quotes 失败: {e}")
         return []
 
     for sym, q in quotes.items():
@@ -588,7 +598,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
         except feed_mod.RateLimited:
             depths = {}
         except Exception as e:
-            print(f"[Monitor] depth 失败: {e}", flush=True)
+            log.warning(f"depth 失败: {e}")
 
     fired = []
     today = now_dt.strftime("%Y-%m-%d")
@@ -630,10 +640,10 @@ def _loop(get_af, fallback_quotes):
     _load_env()
     _feed = feed_mod.RestFeed(get_af, fallback_quotes=fallback_quotes)
     _set_status(running=True, backend=_feed.backend, last_error=None)
-    print("[Monitor] 持仓监控线程已启动", flush=True)
+    log.info("持仓监控线程已启动")
     while True:
         try:
-            now = datetime.now()
+            now = market_hours.now()
             if not market_hours.in_session(now):
                 wait = min(market_hours.seconds_until_session(now), 300)
                 time.sleep(max(5.0, wait))
@@ -649,7 +659,7 @@ def _loop(get_af, fallback_quotes):
             time.sleep(interval)
         except Exception as e:
             _set_status(last_error=str(e))
-            print(f"[Monitor] 循环异常: {e}", flush=True)
+            log.warning(f"循环异常: {e}")
             time.sleep(30)
 
 
@@ -689,7 +699,7 @@ def _save_fixture(symbol, day, payload):
     path = d / f"{symbol.replace('.', '_')}_{day}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"[Replay] 已写入 {path}", flush=True)
+    log.info(f"已写入 {path}")
 
 
 def fetch_replay_bars(af, symbol, day):
@@ -726,25 +736,25 @@ def replay(spec_list, persist_fixture=True, position_overrides=None):
             from alphafeed import AlphaFeed
             af = AlphaFeed(api_key=key)
         except Exception as e:
-            print(f"[Replay] AlphaFeed 不可用: {e}", flush=True)
+            log.warning(f"AlphaFeed 不可用: {e}")
 
     overrides = position_overrides or {}
     all_hits = {}
     for spec in spec_list:
         if ":" not in spec:
-            print(f"[Replay] 跳过无效参数 {spec}, 需要 SYMBOL:YYYY-MM-DD", flush=True)
+            log.warning(f"跳过无效参数 {spec}, 需要 SYMBOL:YYYY-MM-DD")
             continue
         symbol, day = spec.split(":", 1)
         symbol, day = symbol.strip().upper(), day.strip()
         fixture = _load_fixture(symbol, day)
         bars = (fixture or {}).get("bars") if fixture else None
         if not bars and af is not None:
-            print(f"[Replay] 拉取 {symbol} {day} 1m ...", flush=True)
+            log.info(f"拉取 {symbol} {day} 1m ...")
             bars = fetch_replay_bars(af, symbol, day)
             if bars and persist_fixture:
                 _save_fixture(symbol, day, {"symbol": symbol, "day": day, "bars": bars})
         if not bars:
-            print(f"[Replay] {symbol} {day} 无数据 (无 fixture 且未拉到 K 线)", flush=True)
+            log.warning(f"{symbol} {day} 无数据 (无 fixture 且未拉到 K 线)")
             continue
 
         ov = overrides.get(symbol) or {}
@@ -810,6 +820,8 @@ def main():
     parser.add_argument("--once", action="store_true", help="只跑一轮 (需在交易时段)")
     args = parser.parse_args()
     _load_env()
+    from logger import configure as _log_configure
+    _log_configure()
     trades.init_db()
 
     if args.replay:
@@ -827,9 +839,8 @@ def main():
         f = feed_mod.RestFeed(_get_af)
         hold_fired = _check_hold_expire()
         fired = _poll_once(f)
-        print(
-            f"[Monitor] 本轮触发 {len(fired)} 条价格告警 / {len(hold_fired)} 条到期提醒",
-            flush=True,
+        log.info(
+            f"本轮触发 {len(fired)} 条价格告警 / {len(hold_fired)} 条到期提醒"
         )
         return
 
@@ -838,7 +849,7 @@ def main():
         while True:
             time.sleep(60)
     except KeyboardInterrupt:
-        print("[Monitor] 已停止", flush=True)
+        log.info("已停止")
 
 
 if __name__ == "__main__":

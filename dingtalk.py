@@ -10,11 +10,14 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+log = logging.getLogger("dingtalk")
 
 DINGDING_WEBHOOK = "https://oapi.dingtalk.com/robot/send"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -39,7 +42,7 @@ def _load_env():
                     if k and k not in os.environ:
                         os.environ[k] = v
         except OSError as e:
-            print(f"[DingTalk] 读取 {env_file} 失败: {e}", flush=True)
+            log.warning(f"读取 {env_file} 失败: {e}")
         break
 
 
@@ -49,7 +52,7 @@ def send_markdown(title, text):
     token = os.environ.get("DINGDING_WEB_HOOK_TOKEN", "").strip()
     secret = os.environ.get("DINGDING_BOT_SIGN", "").strip()
     if not token or not secret:
-        print("[DingTalk] 未配置 DINGDING_WEB_HOOK_TOKEN/DINGDING_BOT_SIGN, 跳过推送", flush=True)
+        log.warning("未配置 DINGDING_WEB_HOOK_TOKEN/DINGDING_BOT_SIGN, 跳过推送")
         return False
 
     ts = str(round(time.time() * 1000))
@@ -73,9 +76,9 @@ def send_markdown(title, text):
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8", "ignore"))
         if result.get("errcode") == 0:
-            print("[DingTalk] 推送成功", flush=True)
+            log.info("推送成功")
             return True
-        print(f"[DingTalk] 推送失败: {result}", flush=True)
+        log.warning(f"推送失败: {result}")
     except Exception as e:
-        print(f"[DingTalk] 推送失败: {e}", flush=True)
+        log.warning(f"推送失败: {e}")
     return False

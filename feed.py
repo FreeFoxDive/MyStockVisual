@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 from datetime import datetime
+
+
+log = logging.getLogger("feed")
 
 
 QUOTES_BATCH = 50
@@ -100,7 +104,7 @@ class RestFeed:
     def _set_backoff(self, retry_after_ms):
         sec = max(1.0, (retry_after_ms or 60_000) / 1000.0)
         self.backoff_until = time.monotonic() + sec
-        print(f"[Feed] 429 退避 {sec:.0f}s", flush=True)
+        log.warning(f"429 退避 {sec:.0f}s")
 
     def quotes(self, symbols):
         """按代码拉快照, 返回 {symbol: quote_dict}。
@@ -116,7 +120,7 @@ class RestFeed:
             return {}
         n_req = (len(symbols) + QUOTES_BATCH - 1) // QUOTES_BATCH
         if not self._quotes_bucket.try_acquire(n_req):
-            print("[Feed] quotes 令牌不足, 跳过本轮", flush=True)
+            log.warning("quotes 令牌不足, 跳过本轮")
             return {}
         try:
             af = self._get_af()
@@ -135,7 +139,7 @@ class RestFeed:
             if wait is not None:
                 self._set_backoff(wait)
                 raise RateLimited(str(e), retry_after_ms=wait) from e
-            print(f"[Feed] quotes 失败, 尝试回退: {e}", flush=True)
+            log.warning(f"quotes 失败, 尝试回退: {e}")
             return self._fallback(symbols)
 
     def _fallback(self, symbols):
@@ -147,10 +151,10 @@ class RestFeed:
             try:
                 raw = self._fallback_quotes(symbols)
             except Exception as e:
-                print(f"[Feed] 回退快照失败: {e}", flush=True)
+                log.warning(f"回退快照失败: {e}")
                 return {}
         except Exception as e:
-            print(f"[Feed] 回退快照失败: {e}", flush=True)
+            log.warning(f"回退快照失败: {e}")
             return {}
         now_ts = time.time()
         out = {}
@@ -175,7 +179,8 @@ class RestFeed:
     def instruments(self, symbols):
         """当日涨跌停价, 进程内按交易日缓存。返回 {symbol: {limit_up, limit_down, name}}。"""
         symbols = list(dict.fromkeys(s for s in symbols if s))
-        day = datetime.now().strftime("%Y-%m-%d")
+        import market_hours
+        day = market_hours.now().strftime("%Y-%m-%d")
         with self._limit_lock:
             cache = self._limit_cache.get(day, {})
             missing = [s for s in symbols if s not in cache]
@@ -185,7 +190,7 @@ class RestFeed:
             af = self._get_af()
             insts = af.instruments.batch(missing) or []
         except Exception as e:
-            print(f"[Feed] instruments.batch 失败: {e}", flush=True)
+            log.warning(f"instruments.batch 失败: {e}")
             insts = []
         fresh = {}
         for item in insts:
@@ -215,7 +220,7 @@ class RestFeed:
             return {}
         n_req = (len(symbols) + QUOTES_BATCH - 1) // QUOTES_BATCH
         if not self._depth_bucket.try_acquire(n_req):
-            print("[Feed] depth 令牌不足, 跳过", flush=True)
+            log.warning("depth 令牌不足, 跳过")
             return {}
         try:
             af = self._get_af()
@@ -230,7 +235,7 @@ class RestFeed:
             if wait is not None:
                 self._set_backoff(wait)
                 raise RateLimited(str(e), retry_after_ms=wait) from e
-            print(f"[Feed] depth.batch 失败: {e}", flush=True)
+            log.warning(f"depth.batch 失败: {e}")
             return {}
 
     def seed_intraday(self, symbols):
@@ -245,14 +250,14 @@ class RestFeed:
             af = self._get_af()
             dfs = af.klines.intraday_batch(symbols, to_dataframe=True) or {}
         except Exception as e:
-            print(f"[Feed] intraday_batch 失败, 回退 klines.batch 1m: {e}", flush=True)
+            log.warning(f"intraday_batch 失败, 回退 klines.batch 1m: {e}")
             try:
                 af = self._get_af()
                 dfs = af.klines.batch(
                     symbols, period="1m", count=240, adjust="none", to_dataframe=True
                 ) or {}
             except Exception as e2:
-                print(f"[Feed] klines.batch 1m 失败: {e2}", flush=True)
+                log.warning(f"klines.batch 1m 失败: {e2}")
                 return {}
         out = {}
         for sym, df in dfs.items():
@@ -350,9 +355,14 @@ def _parse_ts(raw):
         return v / 1000.0 if v > 1e12 else v
     try:
         import pandas as pd
+        from datetime import timezone, timedelta
         t = pd.to_datetime(raw, errors="coerce")
         if t is None or (hasattr(t, "value") and t.value != t.value):  # NaT
             return None
+        # 交易所时间字符串 (如 trade_time) 是北京时间; naive 的 Timestamp.timestamp()
+        # 按 UTC 解释会差 8 小时, 这里显式按 +8 定本地时区再取 epoch。
+        if t.tz is None:
+            t = t.tz_localize(timezone(timedelta(hours=8)))
         return float(t.timestamp())
     except Exception:
         return None

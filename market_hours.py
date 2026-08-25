@@ -5,8 +5,11 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+import logging
+
+log = logging.getLogger("market_hours")
 
 # A 股连续竞价: 09:30-11:30, 13:00-15:00; 午休按已过 120 分钟冻结
 _AM_START = (9, 30)
@@ -14,6 +17,22 @@ _AM_END = (11, 30)
 _PM_START = (13, 0)
 _PM_END = (15, 0)
 _SESSION_MINUTES = 240
+
+_CST = timezone(timedelta(hours=8))
+
+
+def now():
+    """当前北京时间 (naive UTC+8 墙钟), 不受部署容器时区影响。
+
+    Docker 基础镜像 (python:3.12-slim) 默认 UTC, 直接用 datetime.now() 判断
+    交易时段会整体错位 8 小时, 导致盘中永不轮询。所有时段判定统一走这里。
+    """
+    return datetime.now(_CST).replace(tzinfo=None)
+
+
+def _now():
+    """模块内部取当前北京时间 (避开与形参 now 的重名)。"""
+    return now()
 
 _warned_fallback = False
 
@@ -33,10 +52,7 @@ def _xshg_days(start_year: int, end_year: int):
 def _weekday_fallback(day: str) -> bool:
     global _warned_fallback
     if not _warned_fallback:
-        print(
-            "[MarketHours] 未安装 pandas_market_calendars, 交易日降级为周一~周五",
-            flush=True,
-        )
+        log.warning("未安装 pandas_market_calendars, 交易日降级为周一~周五")
         _warned_fallback = True
     try:
         dt = datetime.strptime(day, "%Y-%m-%d")
@@ -49,7 +65,7 @@ def is_trading_day(value=None) -> bool:
     """value 为 datetime 或 YYYY-MM-DD; 默认今天。"""
     now = value if isinstance(value, datetime) else None
     if now is None and value is None:
-        now = datetime.now()
+        now = _now()
     if now is not None:
         day = now.strftime("%Y-%m-%d")
         year = now.year
@@ -68,7 +84,7 @@ def _mins(h, m):
 
 def in_session(now: datetime | None = None) -> bool:
     """交易日且落在 09:30-11:30 或 13:00-15:00 (含开盘, 不含 15:00 整点之后)。"""
-    now = now or datetime.now()
+    now = now or _now()
     if not is_trading_day(now):
         return False
     t = _mins(now.hour, now.minute)
@@ -80,7 +96,7 @@ def in_session(now: datetime | None = None) -> bool:
 
 def session_elapsed_minutes(now: datetime | None = None) -> float:
     """当日已过交易分钟数 (0~240)。午休冻结在 120。非交易日/未开盘返回 0。"""
-    now = now or datetime.now()
+    now = now or _now()
     if not is_trading_day(now):
         return 0.0
     t = now.hour * 60 + now.minute + now.second / 60.0
@@ -99,7 +115,7 @@ def session_elapsed_minutes(now: datetime | None = None) -> float:
 
 def seconds_until_session(now: datetime | None = None) -> float:
     """距离下一个连续竞价窗口的秒数。已在窗口内返回 0。"""
-    now = now or datetime.now()
+    now = now or _now()
     if in_session(now):
         return 0.0
     t = _mins(now.hour, now.minute)

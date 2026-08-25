@@ -21,7 +21,6 @@ import shutil
 import sys
 import time
 import threading
-from datetime import datetime
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
@@ -56,12 +55,19 @@ for _env_dir in (SCRIPT_DIR, PROJECT_DIR):
                     if _k not in os.environ:
                         os.environ[_k] = _v
 
+# ── 日志: 标准库 logging, 北京时间时间戳, 级别/文件可经 env 覆盖 ──
+import logging
+from logger import configure as _log_configure
+
+_log_configure()
+log = logging.getLogger("server")
+
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
 if not AF_API_KEY:
-    print("[Visual] ⚠️  未设置 AF_API_KEY 环境变量", flush=True)
+    log.warning("未设置 AF_API_KEY 环境变量")
 else:
-    print("[Visual] AF_API_KEY 已加载", flush=True)
+    log.info("AF_API_KEY 已加载")
 
 _af = None
 _af_lock = threading.Lock()
@@ -81,11 +87,11 @@ def get_af():
 # 优先付费版 token, 未配置才回退免费试用版
 MAIRUI_API_KEY = os.environ.get("MAIRUI_PAID_API_KEY", "") or os.environ.get("MAIRUI_FREE_API_KEY", "")
 if os.environ.get("MAIRUI_PAID_API_KEY"):
-    print("[Visual] MAIRUI_PAID_API_KEY 已加载 (付费版)", flush=True)
+    log.info("MAIRUI_PAID_API_KEY 已加载 (付费版)")
 elif MAIRUI_API_KEY:
-    print("[Visual] MAIRUI_FREE_API_KEY 已加载 (免费试用版)", flush=True)
+    log.info("MAIRUI_FREE_API_KEY 已加载 (免费试用版)")
 else:
-    print("[Visual] ⚠️  未设置 MAIRUI_PAID_API_KEY / MAIRUI_FREE_API_KEY 环境变量", flush=True)
+    log.warning("未设置 MAIRUI_PAID_API_KEY / MAIRUI_FREE_API_KEY 环境变量")
 
 _mr = None
 _mr_lock = threading.Lock()
@@ -197,7 +203,7 @@ def _load_index_cache():
                     if name:
                         names[sym] = name
         except Exception as e:
-            print(f"[Visual] 加载指数列表失败: {e}", flush=True)
+            log.warning(f"加载指数列表失败: {e}")
         _index_symbols, _index_names = symbols, names
         return symbols
 
@@ -525,7 +531,7 @@ def _pledge_from_disk():
             return None, None, 0
         return data.get("date"), pledge, data.get("ts", fp.stat().st_mtime)
     except Exception as e:
-        print(f"[Visual] 读取质押缓存失败: {e}", flush=True)
+        log.warning(f"读取质押缓存失败: {e}")
     return None, None, 0
 
 
@@ -548,7 +554,7 @@ def _pledge_to_disk(date_str, pledge):
             except Exception:
                 pass
     except Exception as e:
-        print(f"[Visual] 写入质押缓存失败: {e}", flush=True)
+        log.warning(f"写入质押缓存失败: {e}")
 
 
 def _refresh_pledge_async():
@@ -567,20 +573,20 @@ def _refresh_pledge_async():
         try:
             date_str, pledge = _fetch_pledge()
             if not pledge:
-                print("[Visual] 质押数据刷新失败: 未获取到数据, 保留旧缓存", flush=True)
+                log.warning("质押数据刷新失败: 未获取到数据, 保留旧缓存")
                 return
             # 非交易日或当天数据尚未更新: 拉到的仍是旧日期, 跳过重复写入
             if _pledge_date and date_str == _pledge_date:
-                print(f"[Visual] 质押数据已是 {date_str} 最新, 跳过写入", flush=True)
+                log.info(f"质押数据已是 {date_str} 最新, 跳过写入")
                 return
             _pledge_to_disk(date_str, pledge)
             with _pledge_lock:
                 _pledge_cache = pledge
                 _pledge_ts = time.time()
                 _pledge_date = date_str
-            print(f"[Visual] 质押数据刷新完成: {date_str} 共 {len(pledge)} 条", flush=True)
+            log.info(f"质押数据刷新完成: {date_str} 共 {len(pledge)} 条")
         except Exception as e:
-            print(f"[Visual] 质押数据刷新失败: {e}, 保留旧缓存", flush=True)
+            log.warning(f"质押数据刷新失败: {e}, 保留旧缓存")
         finally:
             with _pledge_lock:
                 _refreshing_pledge = False
@@ -623,24 +629,24 @@ def _load_pledge():
     with _pledge_lock:
         if _pledge_cache is not None:
             return _pledge_cache
-        print("[Visual] 首次加载全市场质押数据...", flush=True)
+        log.info("首次加载全市场质押数据...")
         date_str, pledge = _fetch_pledge()
         if pledge:
             _pledge_cache = pledge
             _pledge_ts = time.time()
             _pledge_date = date_str
             _pledge_to_disk(date_str, pledge)
-            print(f"[Visual] 已加载 {date_str} {len(pledge)} 条质押数据", flush=True)
+            log.info(f"已加载 {date_str} {len(pledge)} 条质押数据")
         else:
             _pledge_cache = {}
-            print("[Visual] 质押数据加载失败 (无缓存可用), 等待定时重试", flush=True)
+            log.warning("质押数据加载失败 (无缓存可用), 等待定时重试")
         return _pledge_cache
 
 
 def _next_schedule_delay(now=None):
     """计算距离下一个 15:30 的秒数 (now 可注入便于测试, 默认当前时间)"""
     from datetime import timedelta
-    now = now or datetime.now()
+    now = now or market_hours.now()
     target = now.replace(hour=15, minute=30, second=0, microsecond=0)
     if now >= target:
         target += timedelta(days=1)
@@ -654,7 +660,7 @@ def _pledge_scheduler():
             time.sleep(_next_schedule_delay())
             _refresh_pledge_async()
         except Exception as e:
-            print(f"[Visual] 质押定时任务异常: {e}", flush=True)
+            log.warning(f"质押定时任务异常: {e}")
             time.sleep(60)
 
 
@@ -679,7 +685,7 @@ def _fetch_etf_nav(symbol):
         df = df.dropna(subset=["date"]).set_index("date").sort_index()
         return df[["nav"]]
     except Exception as e:
-        print(f"[Visual] 获取 {symbol} 净值失败: {e}", flush=True)
+        log.warning(f"获取 {symbol} 净值失败: {e}")
         return None
 
 
@@ -700,7 +706,7 @@ def _fetch_fund_kline(symbol, period, count):
         with urllib.request.urlopen(req, timeout=8) as resp:
             rows = json.loads(resp.read().decode("utf-8", "ignore"))
     except Exception as e:
-        print(f"[Visual] 麦蕊获取ETF K线失败 {symbol}: {e}", flush=True)
+        log.warning(f"麦蕊获取ETF K线失败 {symbol}: {e}")
         return None
 
     # dict = 错误响应, 空列表 = 无数据
@@ -731,7 +737,7 @@ def _fetch_minute_kline(symbol, period, count):
         )
         df = dfs.get(symbol) if dfs else None
     except Exception as e:
-        print(f"[Visual] AlphaFeed 获取分钟K线失败 {symbol} {period}: {e}", flush=True)
+        log.warning(f"AlphaFeed 获取分钟K线失败 {symbol} {period}: {e}")
         return None
     if df is None or len(df) == 0:
         return None
@@ -748,7 +754,7 @@ def fetch_kline(symbol, period, count):
     - ETF  → 麦蕊基金历史K线 (jj/lskx)
     """
     # 检查磁盘缓存 (日K/分钟 盘中 60s/盘后 300s, 周月K 600s)
-    now = datetime.now()
+    now = market_hours.now()
     in_trading = market_hours.in_session(now)
     if period in MINUTE_PERIODS:
         ttl = 60 if in_trading else 300
@@ -791,7 +797,7 @@ def fetch_kline(symbol, period, count):
             else:
                 rows = api.stock_history(symbol, mr_period, "n", lt=count)
         except Exception as e:
-            print(f"[Visual] 麦蕊获取K线失败 {symbol}: {e}", flush=True)
+            log.warning(f"麦蕊获取K线失败 {symbol}: {e}")
             return None, None
 
         # dict = 错误响应 (如 {"error": "数据不存在"}), 空列表 = 无数据
@@ -885,7 +891,7 @@ def fetch_quotes(symbols, fresh=False):
             if isinstance(q, dict) and not q.get("error"):
                 _emit(s, q)
         except Exception as e:
-            print(f"[Visual] 指数快照失败 {s}: {e}", flush=True)
+            log.warning(f"指数快照失败 {s}: {e}")
 
     # 2) ETF/基金 (单只 fund_real_time, code 6 位无后缀)
     for s in etf_codes:
@@ -894,7 +900,7 @@ def fetch_quotes(symbols, fresh=False):
             if isinstance(q, dict) and not q.get("error"):
                 _emit(s, q)
         except Exception as e:
-            print(f"[Visual] ETF快照失败 {s}: {e}", flush=True)
+            log.warning(f"ETF快照失败 {s}: {e}")
 
     # 3) 股票 (批量 ssjy_more, 最多 20/次)
     for i in range(0, len(stock_codes), MR_QUOTE_BATCH):
@@ -910,7 +916,7 @@ def fetch_quotes(symbols, fresh=False):
                     if s is not None:
                         _emit(s, q)
         except Exception as e:
-            print(f"[Visual] 批量快照失败 {batch}: {e}", flush=True)
+            log.warning(f"批量快照失败 {batch}: {e}")
 
     # 未取到的回退缓存 (fresh 模式此前跳过了缓存优先读取)
     for s in to_fetch:
@@ -973,7 +979,7 @@ def _stock_list_from_disk():
             if stocks:
                 return stocks, ts
     except Exception as e:
-        print(f"[Visual] 读取股票列表缓存失败: {e}", flush=True)
+        log.warning(f"读取股票列表缓存失败: {e}")
     return None, 0
 
 
@@ -986,7 +992,7 @@ def _stock_list_to_disk(stocks, ts):
                        encoding="utf-8")
         tmp.replace(STOCK_LIST_FILE)
     except Exception as e:
-        print(f"[Visual] 写入股票列表缓存失败: {e}", flush=True)
+        log.warning(f"写入股票列表缓存失败: {e}")
 
 
 def _fetch_stock_list():
@@ -1012,7 +1018,7 @@ def _fetch_stock_list():
         try:
             _append(fn())
         except Exception as e:
-            print(f"[Visual] {label} 列表加载失败: {e}", flush=True)
+            log.warning(f"{label} 列表加载失败: {e}")
     return stocks
 
 
@@ -1034,9 +1040,9 @@ def _refresh_stock_list_async():
                 with _stock_lock:
                     _stock_list = stocks
                     _stock_list_time = ts
-                print(f"[Visual] 后台刷新股票列表完成: {len(stocks)} 只标的", flush=True)
+                log.info(f"后台刷新股票列表完成: {len(stocks)} 只标的")
         except Exception as e:
-            print(f"[Visual] 后台刷新股票列表失败: {e}", flush=True)
+            log.warning(f"后台刷新股票列表失败: {e}")
         finally:
             with _stock_lock:
                 _refreshing = False
@@ -1077,7 +1083,7 @@ def _load_stock_list():
     with _stock_lock:
         if _stock_list is not None:
             return _stock_list
-        print("[Visual] 首次加载全量A股+场内基金列表...", flush=True)
+        log.info("首次加载全量A股+场内基金列表...")
         stocks = []
         for attempt in range(2):
             try:
@@ -1085,14 +1091,14 @@ def _load_stock_list():
                 if stocks:
                     break
             except Exception as e:
-                print(f"[Visual] 加载列表({attempt+1}/2)失败: {e}", flush=True)
+                log.warning(f"加载列表({attempt+1}/2)失败: {e}")
             if attempt == 0:
                 time.sleep(3)
         if stocks:
             ts = time.time()
             _stock_list, _stock_list_time = stocks, ts
             _stock_list_to_disk(stocks, ts)
-            print(f"[Visual] 已加载 {len(stocks)} 只标的 (A股+场内基金)", flush=True)
+            log.info(f"已加载 {len(stocks)} 只标的 (A股+场内基金)")
         else:
             _stock_list = []
         return _stock_list
@@ -1202,9 +1208,9 @@ class VisualHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # 简洁日志
         if args:
-            print(f"[Visual] {fmt % args[:3]}", flush=True)
+            log.info(fmt % args[:3])
         else:
-            print(f"[Visual] {fmt}", flush=True)
+            log.info(fmt)
 
     def _send_json(self, data, code=200, headers=None):
         body = json.dumps(data, ensure_ascii=False, cls=NumpyEncoder).encode("utf-8")
@@ -1256,7 +1262,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         elif path == "/api/search":
             return self._handle_search(params)
         elif path == "/api/ping":
-            now = datetime.now()
+            now = market_hours.now()
             return self._send_json({
                 "ok": True,
                 "time": str(now),
@@ -1806,7 +1812,7 @@ class VisualHandler(BaseHTTPRequestHandler):
         try:
             df, indicators = compute_all_indicators(df, period)
         except Exception as e:
-            print(f"[Visual] 指标计算失败 {symbol} {period}: {e}", flush=True)
+            log.warning(f"指标计算失败 {symbol} {period}: {e}")
             return self._send_error(f"指标计算失败: {_sanitize_error(e)}", 500)
 
 
@@ -1886,7 +1892,7 @@ class VisualHandler(BaseHTTPRequestHandler):
             "klines": klines,
             "meta": {
                 "cached": False,
-                "server_time": str(datetime.now()),
+                "server_time": str(market_hours.now()),
                 "last_trade_date": klines[-1]["date"] if klines else None,
             }
         }
@@ -2025,9 +2031,9 @@ def main():
     # 初始化交易记录数据库
     try:
         trades.init_db()
-        print(f"[Visual] 交易记录数据库已就绪: {trades._db_path}", flush=True)
+        log.info(f"交易记录数据库已就绪: {trades._db_path}")
     except Exception as e:
-        print(f"[Visual] ⚠️  交易记录数据库初始化失败: {e}", flush=True)
+        log.warning(f"交易记录数据库初始化失败: {e}")
 
     # 管理员引导: .env 为口令权威来源。无管理员则创建, 已有则同步 (改 .env 密码后重启即生效)
     admin_user = os.environ.get("ADMIN_USERNAME", "").strip()
@@ -2036,28 +2042,28 @@ def main():
         try:
             if trades.count_admins() == 0:
                 trades.create_user(admin_user, admin_pass, is_admin=True)
-                print(f"[Visual] 已创建管理员账号: {admin_user}", flush=True)
+                log.info(f"已创建管理员账号: {admin_user}")
             else:
                 status = trades.sync_admin_password(admin_user, admin_pass)
                 if status == "updated":
-                    print(f"[Visual] 管理员 {admin_user} 口令已与 .env 同步 (旧口令/会话已失效)", flush=True)
+                    log.info(f"管理员 {admin_user} 口令已与 .env 同步 (旧口令/会话已失效)")
                 elif status == "unchanged":
-                    print("[Visual] 管理员口令与 .env 一致", flush=True)
+                    log.info("管理员口令与 .env 一致")
                 elif status == "not_admin":
-                    print(f"[Visual] ⚠️  用户 {admin_user} 存在但非管理员, 忽略 .env 口令", flush=True)
+                    log.warning(f"用户 {admin_user} 存在但非管理员, 忽略 .env 口令")
                 else:  # not_found: 已有其他管理员, 忽略 .env 中的该用户名
-                    print(f"[Visual] ⚠️  已存在其他管理员, 忽略 .env 的 {admin_user}", flush=True)
+                    log.warning(f"已存在其他管理员, 忽略 .env 的 {admin_user}")
         except Exception as e:
-            print(f"[Visual] ⚠️  管理员账号同步失败: {e}", flush=True)
+            log.warning(f"管理员账号同步失败: {e}")
     elif admin_user or admin_pass:
-        print("[Visual] ⚠️  ADMIN_USERNAME 与 ADMIN_PASSWORD 需同时设置", flush=True)
+        log.warning("ADMIN_USERNAME 与 ADMIN_PASSWORD 需同时设置")
     else:
-        print("[Visual] ⚠️  未设置 ADMIN_USERNAME/ADMIN_PASSWORD，无管理员时无法创建用户", flush=True)
+        log.warning("未设置 ADMIN_USERNAME/ADMIN_PASSWORD，无管理员时无法创建用户")
 
     # 启动时清理磁盘缓存
     try:
         _disk_cache.cleanup()
-        print(f"[Visual] 磁盘缓存已清理 (上限 {CACHE_MAX_MB}MB)", flush=True)
+        log.info(f"磁盘缓存已清理 (上限 {CACHE_MAX_MB}MB)")
     except Exception:
         pass
 
@@ -2085,14 +2091,14 @@ def main():
     try:
         import monitor as _mon
         _mon.start_background(get_af, fallback_quotes=fetch_quotes)
-        print("[Visual] 持仓监控线程已启动", flush=True)
+        log.info("持仓监控线程已启动")
     except Exception as e:
-        print(f"[Visual] ⚠️  持仓监控启动失败: {e}", flush=True)
+        log.warning(f"持仓监控启动失败: {e}")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[Visual] 服务器已停止", flush=True)
+        log.info("服务器已停止")
         server.shutdown()
 
 
