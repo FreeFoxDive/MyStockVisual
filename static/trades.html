@@ -305,6 +305,9 @@ td.neg { color: var(--down-color); font-weight: 600; }
   .table-wrap td.sym::before, .table-wrap td.row-actions::before { content: none; }
   .table-wrap td.row-actions { justify-content: flex-end; border-bottom: none; }
   .table-wrap td.empty { display: block; text-align: center; }
+  /* 风控价三行: 移动端改回块级(避免 flex 把每个 span 拆成独立行), 每行 标签+价格+涨幅, 去掉冗余列标签 */
+  .table-wrap td.risk-mini { display: block; text-align: left; }
+  .table-wrap td.risk-mini::before { content: none; }
 }
 </style>
 </head>
@@ -434,6 +437,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <div class="type-toggle">
           <label class="type-opt"><input type="radio" name="t-type" value="simple" checked onchange="onTypeChange()"> 单笔买卖</label>
           <label class="type-opt"><input type="radio" name="t-type" value="batch" onchange="onTypeChange()"> 批次 (多次买卖/做T)</label>
+          <label class="type-opt"><input type="radio" name="t-type" value="reverse_repo" onchange="onTypeChange()"> 逆回购</label>
         </div>
       </div>
       <div id="t-status-wrap">
@@ -443,7 +447,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
           <option value="closed">已平仓 (已结束)</option>
         </select>
       </div>
-      <div>
+      <div id="t-model-wrap">
         <label>模型推荐</label>
         <select id="t-model"><option value="">无</option></select>
       </div>
@@ -520,6 +524,36 @@ td.neg { color: var(--down-color); font-weight: 600; }
           <label>止损价</label>
           <input type="number" id="t-stop-loss" min="0" step="0.01" placeholder="最低，须 &lt; 保本">
         </div>
+      </div>
+    </fieldset>
+    <fieldset class="panel" id="repo-panel" style="display:none">
+      <legend>国债逆回购（出借资金，到期自动结算收益）</legend>
+      <div class="grid">
+        <div class="full">
+          <label>代码 <span style="color:var(--up-color)">*</span></label>
+          <select id="t-repo-code" onchange="onRepoCodeChange()"></select>
+        </div>
+        <div>
+          <label>成交利率 (%) <span style="color:var(--up-color)">*</span></label>
+          <input type="number" id="t-repo-rate" min="0" step="0.001" placeholder="如 2.50" oninput="repoPreview()">
+        </div>
+        <div>
+          <label>本金 (元) <span style="color:var(--up-color)">*</span></label>
+          <input type="number" id="t-repo-principal" min="1000" step="1000" placeholder="如 100000" oninput="repoPreview()">
+        </div>
+        <div>
+          <label>买入日期 <span style="color:var(--up-color)">*</span></label>
+          <input type="date" id="t-repo-date" onchange="repoPreview()">
+        </div>
+        <div>
+          <label>计息天数 <span style="color:var(--up-color)">*</span></label>
+          <input type="number" id="t-repo-days" min="1" step="1" placeholder="默认=期限，可改" oninput="repoPreview()">
+        </div>
+        <div class="full">
+          <label>理由 (可选)</label>
+          <input type="text" id="t-repo-reason" placeholder="如 闲钱短期理财">
+        </div>
+        <div class="full repo-preview" id="repo-preview" style="font-size:13px;line-height:1.7">选择代码、填利率与本金后自动预览</div>
       </div>
     </fieldset>
     <div class="err" id="modal-err"></div>
@@ -771,6 +805,7 @@ async function checkAuth() {
     const data = await api('/api/auth/me');
     state.user = { username: data.username, is_admin: data.is_admin, monitor_enabled: !!data.monitor_enabled };
     showMain();
+    initRepoCodeSelect();
     await Promise.all([loadReasons(), loadModels(), loadStats(), loadTrades(), loadFees()]);
     await refreshQuotes(true);  // 进入页面强刷一次持仓现价
   } catch (e) {
@@ -1204,8 +1239,8 @@ function renderStatCards(s) {
     { label: '盈亏比', value: s.profit_factor === null ? '∞' : s.profit_factor, cls: '', sub: s.avg_win === null ? '' : `均盈 ${fmtMoney(s.avg_win)} / 均亏 ${fmtMoney(s.avg_loss)}` },
     { label: '最大单笔盈利', value: s.max_win ? fmtMoney(s.max_win.pnl, true) : '—', cls: 'pos', sub: s.max_win ? `${s.max_win.name} +${s.max_win.return_pct}%` : '', subCls: 'pos' },
     { label: '最大单笔亏损', value: s.max_loss ? fmtMoney(s.max_loss.pnl, true) : '—', cls: 'neg', sub: s.max_loss ? `${s.max_loss.name} ${s.max_loss.return_pct}%` : '', subCls: 'neg' },
-    { duo: { top: { label: '持仓中', value: s.open_count, cls: 'accent' }, bottom: { label: '已平仓', value: s.closed_count, cls: '' } } },
-    { label: '平均持仓天数', value: s.avg_holding_days === null ? '—' : s.avg_holding_days, cls: '', sub: '买入 → 卖出' },
+    { duo: { top: { label: '持仓中 / 已平仓', value: `${s.open_count} / ${s.closed_count}`, cls: 'accent' }, bottom: { label: '平均持仓天数', value: s.avg_holding_days === null ? '—' : s.avg_holding_days + ' 天', cls: '' } } },
+    { label: '逆回购累计收益', value: fmtMoney(s.repo_income, true), cls: pnlClass(s.repo_income), sub: s.repo_count ? `${s.repo_count} 笔 · 按到期日` : '国债逆回购 净收益(利息-佣金)' },
     (s.t_stats && s.t_stats.count
       ? { label: '做T', value: s.t_stats.count, cls: 'accent', sub: `正T ${s.t_stats.positive} / 反T ${s.t_stats.reverse} · 成功率 ${s.t_stats.success_rate}% · ${fmtMoney(s.t_stats.pnl, true)}` }
       : { label: '做T', value: '—', cls: '', sub: '同日买+卖记一次' }),
@@ -1480,6 +1515,7 @@ function renderTable() {
     state.tips = {};
   } else {
     tbody.innerHTML = state.trades.map(t => {
+      if (t.type === 'reverse_repo') return repoRowHtml(t);
       const q = state.quotes[t.symbol];
       const curPrice = (q && q.last_price != null) ? q.last_price : null;
       const fees = t.fees || 0;
@@ -1580,6 +1616,42 @@ function changePage(delta) {
   loadTrades();
 }
 
+// 逆回购列表行: 成交利率 / 期限 / 计息天数 / 本金 / 到期日 / 净收益
+function repoRowHtml(t) {
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const matured = t.exit_date && t.exit_date <= todayStr;
+  const net = (t.pnl != null) ? t.pnl : ((t.interest != null) ? t.interest - (t.fees || 0) : null);
+  const pnlCls = net == null ? '' : pnlClass(net);
+  const statusBadge = matured
+    ? '<span class="badge closed">已到期</span>'
+    : '<span class="badge open">未到期</span>';
+  const pnlHtml = net == null ? '—'
+    : `<span class="${pnlCls}">${fmtMoney(net, true)}</span>${matured ? '' : '<br><span style="font-size:11px;color:var(--text-secondary)">预期</span>'}`;
+  const interestStr = (t.interest != null)
+    ? `利息 +${t.interest.toFixed(2)} / 佣金 ${fmtMoney(t.fees)}` : '—';
+  const reason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
+  return `<tr>
+    <td class="sym" data-label="代码"><span title="国债逆回购">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></span></td>
+    <td data-label="状态">${statusBadge}</td>
+    <td data-label="模型">—</td>
+    <td data-label="成交利率">${t.entry_price}%</td>
+    <td data-label="期限">${t.tenor}天</td>
+    <td data-label="计息">${t.repo_days}天</td>
+    <td data-label="本金">${fmtAmount(t.quantity)}</td>
+    <td class="risk-mini" data-label="到期日">到期 ${escHtml(t.exit_date || '—')}</td>
+    <td data-label="买入日">${escHtml(t.entry_date)}</td>
+    <td data-label="到期日">${escHtml(t.exit_date || '—')}</td>
+    <td class="reason-cell" data-label="买入理由">${escHtml(reason || '—')}</td>
+    <td class="reason-cell" data-label="利息/佣金">${interestStr}</td>
+    <td class="${pnlCls}" data-label="净收益">${pnlHtml}</td>
+    <td class="row-actions">
+      <button onclick="openModal(${t.id})">编辑</button>
+      <button class="danger" onclick="removeTrade(${t.id})">删除</button>
+    </td>
+  </tr>`;
+}
+
 async function removeTrade(id) {
   const t = state.trades.find(x => x.id === id);
   const name = t ? `${t.name} ${t.symbol}` : '该记录';
@@ -1598,6 +1670,7 @@ function openModal(id) {
 
   const t = id ? state.trades.find(x => x.id === id) : null;
   const isBatch = !!(t && t.type === 'batch');
+  const isRepo = !!(t && t.type === 'reverse_repo');
   document.getElementById('t-symbol-input').value = t ? `${t.name} (${t.symbol})` : '';
   document.getElementById('t-status').value = t ? t.status : 'open';
   document.getElementById('t-quantity').value = t ? t.quantity : '';
@@ -1612,7 +1685,14 @@ function openModal(id) {
   document.getElementById('t-take-profit').value = t && t.take_profit != null ? t.take_profit : '';
   document.getElementById('t-stop-loss').value = t && t.stop_loss != null ? t.stop_loss : '';
   document.getElementById('t-breakeven').value = t && t.breakeven != null ? t.breakeven : '';
-  const typeRadio = document.querySelector(`input[name="t-type"][value="${isBatch ? 'batch' : 'simple'}"]`);
+  // 逆回购字段
+  document.getElementById('t-repo-code').value = isRepo ? t.symbol : '';
+  document.getElementById('t-repo-rate').value = isRepo ? t.entry_price : '';
+  document.getElementById('t-repo-principal').value = isRepo ? t.quantity : '';
+  document.getElementById('t-repo-date').value = isRepo ? t.entry_date : '';
+  document.getElementById('t-repo-days').value = isRepo ? (t.repo_days || t.tenor || '') : '';
+  document.getElementById('t-repo-reason').value = isRepo ? (t.entry_reason || '') : '';
+  const typeRadio = document.querySelector(`input[name="t-type"][value="${isRepo ? 'reverse_repo' : (isBatch ? 'batch' : 'simple')}"]`);
   if (typeRadio) typeRadio.checked = true;
   state.legs = isBatch && Array.isArray(t.legs)
     ? t.legs.map(l => ({
@@ -1642,17 +1722,94 @@ function onStatusChange() {
 }
 
 function onTypeChange() {
-  const batch = document.querySelector('input[name="t-type"]:checked').value === 'batch';
-  document.getElementById('t-status-wrap').style.display = batch ? 'none' : '';
-  document.getElementById('t-quantity-wrap').style.display = batch ? 'none' : '';
-  document.getElementById('trade-panels').style.display = batch ? 'none' : '';
+  const type = document.querySelector('input[name="t-type"]:checked').value;
+  const batch = type === 'batch';
+  const repo = type === 'reverse_repo';
+  document.getElementById('t-status-wrap').style.display = (batch || repo) ? 'none' : '';
+  document.getElementById('t-quantity-wrap').style.display = (batch || repo) ? 'none' : '';
+  document.getElementById('trade-panels').style.display = (batch || repo) ? 'none' : '';
   document.getElementById('legs-editor').style.display = batch ? '' : 'none';
+  document.getElementById('risk-panel').style.display = (batch || repo) ? 'none' : '';
+  document.getElementById('repo-panel').style.display = repo ? '' : 'none';
+  document.getElementById('t-model-wrap').style.display = repo ? 'none' : '';
+  document.querySelector('.autocomplete').style.display = repo ? 'none' : '';
   if (batch) {
     seedLegsFromSimple();
     renderLegs();
+  } else if (repo) {
+    onRepoCodeChange();
+    repoPreview();
   } else {
     onStatusChange();
   }
+}
+
+// ── 国债逆回购 ──
+const REPO_CODES = [
+  { code: '204001.SH', name: '沪市1天逆回购', days: 1 },
+  { code: '204002.SH', name: '沪市2天逆回购', days: 2 },
+  { code: '204003.SH', name: '沪市3天逆回购', days: 3 },
+  { code: '204004.SH', name: '沪市4天逆回购', days: 4 },
+  { code: '204007.SH', name: '沪市7天逆回购', days: 7 },
+  { code: '204014.SH', name: '沪市14天逆回购', days: 14 },
+  { code: '204028.SH', name: '沪市28天逆回购', days: 28 },
+  { code: '204091.SH', name: '沪市91天逆回购', days: 91 },
+  { code: '204182.SH', name: '沪市182天逆回购', days: 182 },
+  { code: '131810.SZ', name: '深市1天逆回购', days: 1 },
+  { code: '131811.SZ', name: '深市2天逆回购', days: 2 },
+  { code: '131800.SZ', name: '深市3天逆回购', days: 3 },
+  { code: '131809.SZ', name: '深市4天逆回购', days: 4 },
+  { code: '131801.SZ', name: '深市7天逆回购', days: 7 },
+  { code: '131802.SZ', name: '深市14天逆回购', days: 14 },
+  { code: '131803.SZ', name: '深市28天逆回购', days: 28 },
+  { code: '131805.SZ', name: '深市91天逆回购', days: 91 },
+  { code: '131806.SZ', name: '深市182天逆回购', days: 182 },
+];
+// 逆回购佣金率 (十万分之X → 小数), 与后端 DEFAULT_FEES.reverse_repo_rates 一致
+const REPO_FEE = { 1: 0.00001, 2: 0.00002, 3: 0.00003, 4: 0.00004, 7: 0.00005, 14: 0.00010, 28: 0.00020, 91: 0.00030, 182: 0.00030 };
+
+function initRepoCodeSelect() {
+  const sel = document.getElementById('t-repo-code');
+  sel.innerHTML = '<option value="">选择代码…</option>' + REPO_CODES.map(r =>
+    `<option value="${r.code}" data-days="${r.days}">${r.name} (${r.code})</option>`).join('');
+}
+
+function onRepoCodeChange() {
+  const sel = document.getElementById('t-repo-code');
+  const opt = sel.options[sel.selectedIndex];
+  const daysInput = document.getElementById('t-repo-days');
+  if (opt && opt.value && !daysInput.value) {
+    daysInput.value = opt.dataset.days;   // 默认=期限, 可改
+  }
+  repoPreview();
+}
+
+function repoMaturityPreview(dateStr, tenorDays) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + tenorDays);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function repoPreview() {
+  const el = document.getElementById('repo-preview');
+  const sel = document.getElementById('t-repo-code');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || !opt.value) { el.textContent = '请选择逆回购代码'; return; }
+  const tenor = parseInt(opt.dataset.days, 10);
+  const rate = parseFloat(document.getElementById('t-repo-rate').value);
+  const principal = parseFloat(document.getElementById('t-repo-principal').value);
+  const date = document.getElementById('t-repo-date').value;
+  let days = parseInt(document.getElementById('t-repo-days').value, 10);
+  if (!(days > 0)) days = tenor;
+  if (!(rate > 0) || !(principal > 0) || !date) { el.textContent = '填利率、本金与买入日期后自动预览'; return; }
+  const interest = principal * (rate / 100) * days / 365;
+  const comm = principal * (REPO_FEE[tenor] || 0);
+  const net = interest - comm;
+  el.innerHTML = `期限 <b>${tenor}</b> 天 · 计息 <b>${days}</b> 天 · 到期(约) <b>${repoMaturityPreview(date, tenor)}</b><br>` +
+    `利息 <b style="color:var(--up-color)">+${interest.toFixed(2)}</b> 元 · 佣金 <b>${comm.toFixed(2)}</b> 元 · 净收益 <b style="color:var(--up-color)">+${net.toFixed(2)}</b> 元`;
 }
 
 // 单笔 → 批次切换时, 把旧的买入(及已平仓的卖出)内容带入批次腿编辑器
@@ -1835,17 +1992,48 @@ function selectSymbol(el) {
 
 async function saveTrade() {
   document.getElementById('modal-err').textContent = '';
-  const isBatch = document.querySelector('input[name="t-type"]:checked').value === 'batch';
+  const err = m => { document.getElementById('modal-err').textContent = m; };
+  const type = document.querySelector('input[name="t-type"]:checked').value;
 
-  if (!state.selectedSymbol) { document.getElementById('modal-err').textContent = '请先搜索并选择股票'; return; }
+  if (type === 'reverse_repo') {
+    const body = {
+      type: 'reverse_repo',
+      symbol: document.getElementById('t-repo-code').value,
+      entry_price: parseFloat(document.getElementById('t-repo-rate').value),
+      quantity: parseFloat(document.getElementById('t-repo-principal').value),
+      entry_date: document.getElementById('t-repo-date').value,
+      repo_days: parseInt(document.getElementById('t-repo-days').value, 10),
+      entry_reason: document.getElementById('t-repo-reason').value.trim(),
+    };
+    if (!body.symbol) { err('请选择逆回购代码'); return; }
+    if (!(body.entry_price > 0)) { err('请填写成交利率'); return; }
+    if (!(body.quantity > 0)) { err('请填写本金金额'); return; }
+    if (!body.entry_date) { err('请选择买入日期'); return; }
+    if (!(body.repo_days > 0)) { err('请填写计息天数'); return; }
+    try {
+      if (state.editingId) {
+        await api('/api/trades/' + state.editingId, { method: 'PUT', body: JSON.stringify(body) });
+      } else {
+        await api('/api/trades', { method: 'POST', body: JSON.stringify(body) });
+      }
+      closeModal();
+      await Promise.all([loadTrades(), loadStats()]);
+      await refreshQuotes(false);
+    } catch (e) {
+      err(e.message);
+    }
+    return;
+  }
+
+  if (!state.selectedSymbol) { err('请先搜索并选择股票'); return; }
 
   const modelId = document.getElementById('t-model').value;
   const risk = collectRiskPrices();
   const riskErr = validateRiskPrices(risk);
-  if (riskErr) { document.getElementById('modal-err').textContent = riskErr; return; }
+  if (riskErr) { err(riskErr); return; }
 
   let body;
-  if (isBatch) {
+  if (type === 'batch') {
     body = {
       type: 'batch',
       symbol: state.selectedSymbol.symbol,

@@ -894,7 +894,7 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
-        for col in ("take_profit", "stop_loss", "breakeven"):
+        for col in ("take_profit", "stop_loss", "breakeven", "repo_days"):
             self.assertIn(col, tcols)
         self.assertIn("monitor_enabled", ucols)
         self.assertIn("monitor_alerts", tables)
@@ -1047,6 +1047,143 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
         self.assertEqual(last["trade_date"], "2026-08-19")
         rows = trades.list_monitor_alerts(uid)
         self.assertEqual(len(rows), 1)
+
+
+# ---------------------------------------------------------------------------
+# 逆回购 (国债逆回购 reverse_repo)
+# ---------------------------------------------------------------------------
+class TestReverseRepo(TradesTestCase):
+    def test_classify_symbol_repo_codes(self):
+        self.assertEqual(trades.classify_symbol("204001.SH"), ("reverse_repo", "1"))
+        self.assertEqual(trades.classify_symbol("204007.SH"), ("reverse_repo", "7"))
+        self.assertEqual(trades.classify_symbol("204182.SH"), ("reverse_repo", "182"))
+        self.assertEqual(trades.classify_symbol("131810.SZ"), ("reverse_repo", "1"))
+        self.assertEqual(trades.classify_symbol("131802.SZ"), ("reverse_repo", "14"))
+        self.assertEqual(trades.classify_symbol("131806.SZ"), ("reverse_repo", "182"))
+        self.assertEqual(trades.classify_symbol("600000.SH"), ("stock", None))
+        self.assertEqual(trades.classify_symbol("204001"), ("reverse_repo", "1"))
+
+    def test_clean_reverse_repo_defaults(self):
+        d, err = trades._clean_reverse_repo({
+            "symbol": "204001.SH", "entry_price": 2.5, "quantity": 100000,
+            "entry_date": "2026-08-25",
+        })
+        self.assertIsNone(err)
+        self.assertEqual(d["type"], "reverse_repo")
+        self.assertEqual(d["status"], "open")
+        self.assertEqual(d["name"], "国债逆回购1天")
+        self.assertEqual(d["entry_price"], 2.5)
+        self.assertEqual(d["quantity"], 100000)
+        self.assertEqual(d["repo_days"], 1)          # 默认=期限
+        self.assertEqual(d["exit_date"], "2026-08-26")  # 买入日+1天
+        self.assertIsNone(d["take_profit"])
+
+    def test_clean_reverse_repo_validation(self):
+        base = {"symbol": "204001.SH", "entry_price": 2.5,
+                "quantity": 100000, "entry_date": "2026-08-25"}
+
+        def _err(**over):
+            d, err = trades._clean_reverse_repo({**base, **over})
+            return err
+
+        self.assertIn("不是逆回购代码", _err(symbol="600000.SH"))
+        self.assertIn("必须大于 0", _err(entry_price=0))
+        self.assertIn("成交利率无效", _err(entry_price="x"))
+        self.assertIn("最低 1000", _err(quantity=500))
+        self.assertIn("必须大于 0", _err(quantity=0))
+        self.assertIn("买入日期无效", _err(entry_date="bad"))
+        self.assertIn("计息天数", _err(repo_days=0))
+        self.assertIn("计息天数无效", _err(repo_days="x"))
+
+    def test_repo_maturity_skips_weekend(self):
+        # 2026-08-28 是周五, 1天期到期 08-29(周六) → 顺延 08-31(周一)
+        self.assertEqual(trades._repo_maturity("2026-08-28", 1), "2026-08-31")
+
+    def test_repo_metrics_interest_and_commission(self):
+        # 10万 × 2.5% × 3天 /365 = 20.55; 1天期佣金 10万×十万分之1 = 1.0
+        d, _ = trades._clean_reverse_repo({
+            "symbol": "204001.SH", "entry_price": 2.5, "quantity": 100000,
+            "entry_date": "2026-08-25", "repo_days": 3,
+        })
+        m = trades._trade_metrics(d, fee_config=trades.DEFAULT_FEES, deduct_fees=True)
+        self.assertAlmostEqual(m["interest"], 20.55, places=2)
+        self.assertEqual(m["fees"], 1.0)
+        self.assertAlmostEqual(m["pnl"], 19.55, places=2)
+        self.assertEqual(m["tenor"], 1)
+        self.assertEqual(m["repo_days"], 3)
+        # 不扣佣金 → 毛利 = 利息
+        m2 = trades._trade_metrics(d, fee_config=trades.DEFAULT_FEES, deduct_fees=False)
+        self.assertAlmostEqual(m2["pnl"], 20.55, places=2)
+        self.assertEqual(m2["fees"], 0.0)
+
+    def test_create_repo_and_stats_separate(self):
+        uid = self._make_user("admin", "secret123", is_admin=True)
+        r1 = trades.create_trade(uid, {
+            "type": "reverse_repo", "symbol": "204001.SH", "entry_price": 2.5,
+            "quantity": 100000, "entry_date": "2026-08-25", "repo_days": 3,
+        })
+        self.assertEqual(r1["name"], "国债逆回购1天")
+        self.assertEqual(r1["interest"], 20.55)
+        self.assertEqual(r1["fees"], 1.0)
+        self.assertEqual(r1["pnl"], 19.55)
+        trades.create_trade(uid, {
+            "type": "reverse_repo", "symbol": "131802.SZ", "entry_price": 2.8,
+            "quantity": 50000, "entry_date": "2026-08-10",
+        })
+        st = trades.compute_stats(uid, start="2026-08-01", end="2026-08-31",
+                                  deduct_fees=True, fee_config=trades.DEFAULT_FEES)
+        s = st["summary"]
+        self.assertEqual(s["repo_count"], 2)
+        self.assertAlmostEqual(s["repo_income"], 19.55 + 48.70, places=2)
+        # 单独汇总, 不并总盈亏
+        self.assertEqual(s["total_pnl"], 0)
+        self.assertEqual(s["win_count"], 0)
+        # 不进持仓/不进监控
+        self.assertEqual(st["open_positions"], [])
+        self.assertEqual(trades.list_monitored_positions(), [])
+
+    def test_repo_excluded_from_monitor_and_open_positions(self):
+        uid = self._make_user("admin", "secret123", is_admin=True)
+        trades.create_trade(uid, {
+            "type": "reverse_repo", "symbol": "204001.SH", "entry_price": 2.5,
+            "quantity": 100000, "entry_date": "2026-08-25",
+        })
+        trades.create_trade(uid, self._open(take_profit=220, stop_loss=180, breakeven=200))
+        self.assertEqual(len(trades.list_monitored_positions()), 1)
+        st = trades.compute_stats(uid)
+        self.assertEqual(len(st["open_positions"]), 1)
+        self.assertEqual(st["open_positions"][0]["symbol"], "300750.SZ")
+
+    def test_update_repo_recomputes(self):
+        uid = self._make_user("admin", "secret123", is_admin=True)
+        r = trades.create_trade(uid, {
+            "type": "reverse_repo", "symbol": "204007.SH", "entry_price": 2.0,
+            "quantity": 50000, "entry_date": "2026-08-20",
+        })
+        self.assertEqual(r["tenor"], 7)
+        u = trades.update_trade(uid, r["id"], {"repo_days": 9, "entry_price": 2.2})
+        # 5万 × 2.2% × 9/365 = 27.12; 佣金 5万×十万分之5 = 2.5
+        self.assertAlmostEqual(u["interest"], 27.12, places=2)
+        self.assertEqual(u["fees"], 2.5)
+        self.assertAlmostEqual(u["pnl"], 24.62, places=2)
+
+    def test_repo_list_by_entry_date_not_maturity(self):
+        """列表按买入日归属: 到期日(次日)超出查询区间时仍应显示。"""
+        uid = self._make_user("admin", "secret123", is_admin=True)
+        trades.create_trade(uid, {
+            "type": "reverse_repo", "symbol": "204001.SH", "entry_price": 2.0,
+            "quantity": 100000, "entry_date": "2026-08-25",
+        })
+        recs, total = trades.list_trades(
+            uid, {"from": "2026-08-25", "to": "2026-08-25"}, fee_config=trades.DEFAULT_FEES,
+        )
+        self.assertEqual(total, 1)
+        self.assertEqual(recs[0]["type"], "reverse_repo")
+        # 到期日 08-26 在区间外, 若按 COALESCE(exit_date, entry_date) 会被过滤
+        recs2, total2 = trades.list_trades(
+            uid, {"from": "2026-08-20", "to": "2026-08-24"}, fee_config=trades.DEFAULT_FEES,
+        )
+        self.assertEqual(total2, 0)
 
 
 if __name__ == "__main__":

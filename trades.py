@@ -140,10 +140,11 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_reason  TEXT,                    -- open 时为空
     exit_note    TEXT,
     model_id     INTEGER,                 -- 量化模型 (可空, 软删不影响历史)
-    type         TEXT NOT NULL DEFAULT 'simple',  -- 'simple' 单笔 / 'batch' 批次
+    type         TEXT NOT NULL DEFAULT 'simple',  -- 'simple' 单笔 / 'batch' 批次 / 'reverse_repo' 逆回购
     take_profit  REAL,                    -- 建议止盈价, 可空
     stop_loss    REAL,                    -- 建议止损价, 可空
     breakeven    REAL,                    -- 建议保本价, 可空
+    repo_days    INTEGER,                 -- 逆回购实际计息天数 (默认=期限, 可覆盖节假日放大)
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -254,6 +255,9 @@ def init_db(db_path=None):
         for col in ("take_profit", "stop_loss", "breakeven"):
             if col not in tcols:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
+        # 迁移: 旧库 trades 表补逆回购计息天数列 (可空, 老数据零改动)
+        if "repo_days" not in tcols:
+            conn.execute("ALTER TABLE trades ADD COLUMN repo_days INTEGER")
         # 迁移: 旧库 models 表补 hold_days; 仅在刚加列时回填 A–D 默认值, 之后不覆盖人工修改
         mcols = {r[1] for r in conn.execute("PRAGMA table_info(models)")}
         if "hold_days" not in mcols:
@@ -885,6 +889,119 @@ def _valid_date(s):
         return False
 
 
+def _repo_maturity(entry_date, tenor_days):
+    """逆回购到期日 = 买入日 + 期限 (自然日); 落在非交易日则顺延到下一交易日。"""
+    try:
+        d = date.fromisoformat(str(entry_date)[:10]) + timedelta(days=int(tenor_days))
+    except (ValueError, TypeError):
+        return None
+    import market_hours
+    while not market_hours.is_trading_day(d.strftime("%Y-%m-%d")):
+        d += timedelta(days=1)
+    return d.isoformat()
+
+
+def _repo_net_income(principal, rate_pct, days, commission_rate):
+    """逆回购净收益: 利息 - 佣金。principal 本金(元), rate_pct 年化利率(%), days 计息天数。"""
+    interest = principal * (rate_pct / 100.0) * days / 365.0
+    commission = principal * (commission_rate or 0.0)
+    return interest, commission
+
+
+def _clean_reverse_repo(data, existing=None):
+    """校验并规范化逆回购交易 (type='reverse_repo')。
+
+    字段映射: entry_price=年化利率(%), quantity=本金(元), entry_date=买入日,
+    exit_date=到期日(自动), repo_days=实际计息天数(默认=期限)。status 恒 open,
+    到期由 exit_date 判定 (自动视为平仓)。
+    """
+    merged = {}
+    if existing:
+        merged.update(existing)
+    for k, v in data.items():
+        if v is not None:
+            merged[k] = v
+
+    def s(v):
+        return v.strip() if isinstance(v, str) else v
+
+    symbol = s(merged.get("symbol", "")).upper()
+    if not symbol:
+        return None, "缺少逆回购代码"
+    kind, tenor = classify_symbol(symbol)
+    if kind != "reverse_repo":
+        return None, f"{symbol} 不是逆回购代码 (应为 204xxx.SH 或 1318xx.SZ)"
+    tenor = int(tenor)
+
+    name = s(merged.get("name", ""))
+    if not name:
+        name = f"国债逆回购{tenor}天"
+
+    raw_rate = merged.get("entry_price")
+    if raw_rate in (None, ""):
+        return None, "缺少成交利率"
+    try:
+        rate = float(raw_rate)
+    except (TypeError, ValueError):
+        return None, "成交利率无效"
+    if rate <= 0:
+        return None, "成交利率必须大于 0"
+
+    raw_p = merged.get("quantity")
+    if raw_p in (None, ""):
+        return None, "缺少本金金额"
+    try:
+        principal = float(raw_p)
+    except (TypeError, ValueError):
+        return None, "本金无效"
+    if principal <= 0:
+        return None, "本金必须大于 0"
+    if principal < 1000:
+        return None, "逆回购最低 1000 元"
+
+    entry_date = s(merged.get("entry_date", ""))
+    if not _valid_date(entry_date):
+        return None, "买入日期无效 (格式 YYYY-MM-DD)"
+
+    days = tenor
+    raw_days = merged.get("repo_days")
+    if raw_days not in (None, ""):
+        try:
+            days = int(float(raw_days))
+        except (TypeError, ValueError):
+            return None, "计息天数无效"
+        if days < 1 or days > 400:
+            return None, "计息天数须为 1~400"
+
+    exit_date = _repo_maturity(entry_date, tenor)
+    if not exit_date:
+        return None, "到期日计算失败"
+
+    entry_reason = s(merged.get("entry_reason", ""))
+    entry_note = s(merged.get("entry_note")) or None
+
+    return {
+        "symbol": symbol,
+        "name": name,
+        "status": "open",
+        "type": "reverse_repo",
+        "entry_price": rate,
+        "exit_price": None,
+        "quantity": principal,
+        "entry_date": entry_date,
+        "exit_date": exit_date,
+        "entry_reason": entry_reason,
+        "entry_note": entry_note,
+        "exit_reason": None,
+        "exit_note": None,
+        "model_id": None,
+        "repo_days": days,
+        "take_profit": None,
+        "stop_loss": None,
+        "breakeven": None,
+    }, None
+
+
 _RISK_KEYS = ("take_profit", "stop_loss", "breakeven")
 
 
@@ -1052,8 +1169,10 @@ def _clean_batch(data, existing=None):
 def _clean(data, existing=None):
     """合并并规范化字段。返回 (clean_dict, error_msg)。"""
     ttype = data.get("type") or (existing or {}).get("type") or "simple"
+    if ttype == "reverse_repo":
+        return _clean_reverse_repo(data, existing)
     if ttype not in ("simple", "batch"):
-        return None, "type 必须为 simple 或 batch"
+        return None, "type 必须为 simple 或 batch 或 reverse_repo"
     if ttype == "batch":
         return _clean_batch(data, existing)
 
@@ -1311,12 +1430,36 @@ def _t_stats(legs):
 
 
 def _trade_metrics(trade_row, fee_config=None, deduct_fees=True):
-    """归一化单笔交易指标 (simple 与 batch 的单一数据源)。
+    """归一化单笔交易指标 (simple / batch / reverse_repo 的单一数据源)。
 
     返回 {pnl, return_pct, fees, cost, fee_breakdown, t_stats, legs}。
     legs 仅 batch 交易非 None; t_stats 仅 batch 交易非 None。
+    逆回购: pnl=净收益(利息-佣金), fees=佣金, cost=本金, 始终可算 (到期判定由调用方按 exit_date)。
     """
     t = dict(trade_row)
+
+    if t.get("type") == "reverse_repo":
+        rr = {}
+        if deduct_fees:
+            cfg = fee_config or DEFAULT_FEES
+            rr = cfg.get("reverse_repo_rates", {})
+        tenor = int(classify_symbol(t["symbol"])[1] or 0)
+        interest, commission = _repo_net_income(
+            t["quantity"], t["entry_price"], int(t.get("repo_days") or tenor), rr.get(str(tenor), 0.0),
+        )
+        return {
+            "pnl": round(interest - commission, 2),
+            "return_pct": round((interest - commission) / t["quantity"] * 100, 4) if t["quantity"] else None,
+            "fees": round(commission, 2),
+            "cost": t["quantity"],
+            "interest": round(interest, 2),
+            "repo_days": int(t.get("repo_days") or tenor),
+            "tenor": tenor,
+            "cost_price": None,
+            "fee_breakdown": None,
+            "t_stats": None,
+            "legs": None,
+        }
 
     if t.get("type") == "batch":
         legs = _get_legs(t["id"])
@@ -1374,6 +1517,10 @@ def _row_to_dict(row, fee_config=None):
     d["cost"] = m["cost"]
     if m.get("cost_price") is not None:
         d["cost_price"] = m["cost_price"]
+    if d.get("type") == "reverse_repo":
+        d["interest"] = m.get("interest")
+        d["repo_days"] = m.get("repo_days")
+        d["tenor"] = m.get("tenor")
     if m["legs"] is not None:
         d["legs"] = m["legs"]
         d["t_stats"] = m["t_stats"]
@@ -1445,9 +1592,11 @@ def list_trades(user_id, filters=None, fee_config=None):
             args.append(int(mid))
         except (TypeError, ValueError):
             pass
+    # 归属日期: 逆回购按买入日 (到期日可能超出查询区间导致看不到);
+    # 其余用 COALESCE(exit_date, entry_date)
+    date_col = "CASE WHEN type='reverse_repo' THEN entry_date "
+    date_col += "ELSE COALESCE(exit_date, entry_date) END"
     if filters.get("from") or filters.get("to"):
-        # 用 COALESCE(exit_date, entry_date) 作为记录归属日期
-        date_col = "COALESCE(exit_date, entry_date)"
         if filters.get("from"):
             sql += f" AND {date_col} >= ?"
             args.append(filters["from"])
@@ -1461,7 +1610,7 @@ def list_trades(user_id, filters=None, fee_config=None):
             f"SELECT COUNT(*) FROM ({sql})", args
         ).fetchone()[0]
 
-        sql += " ORDER BY COALESCE(exit_date, entry_date) DESC, id DESC"
+        sql += f" ORDER BY {date_col} DESC, id DESC"
         limit = _clamp_int(filters.get("limit"), 1, 500, 50)
         offset = max(0, _clamp_int(filters.get("offset"), 0, 10 ** 9, 0))
         sql += " LIMIT ? OFFSET ?"
@@ -1506,9 +1655,9 @@ def create_trade(user_id, data):
         cur = conn.execute(
             "INSERT INTO trades(user_id, symbol, name, status, entry_price, exit_price, "
             "quantity, entry_date, exit_date, entry_reason, entry_note, exit_reason, "
-            "exit_note, model_id, type, take_profit, stop_loss, breakeven, "
+            "exit_note, model_id, type, take_profit, stop_loss, breakeven, repo_days, "
             "created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 user_id, clean["symbol"], clean["name"], clean["status"],
                 clean["entry_price"], clean["exit_price"], clean["quantity"],
@@ -1516,6 +1665,7 @@ def create_trade(user_id, data):
                 clean["entry_note"], clean["exit_reason"], clean["exit_note"],
                 clean["model_id"], clean.get("type", "simple"),
                 clean.get("take_profit"), clean.get("stop_loss"), clean.get("breakeven"),
+                clean.get("repo_days"),
                 now, now,
             ),
         )
@@ -1541,7 +1691,7 @@ def update_trade(user_id, tid, data):
             "UPDATE trades SET symbol=?, name=?, status=?, entry_price=?, exit_price=?, "
             "quantity=?, entry_date=?, exit_date=?, entry_reason=?, entry_note=?, "
             "exit_reason=?, exit_note=?, model_id=?, type=?, "
-            "take_profit=?, stop_loss=?, breakeven=?, updated_at=? "
+            "take_profit=?, stop_loss=?, breakeven=?, repo_days=?, updated_at=? "
             "WHERE id=? AND user_id=?",
             (
                 clean["symbol"], clean["name"], clean["status"], clean["entry_price"],
@@ -1550,6 +1700,7 @@ def update_trade(user_id, tid, data):
                 clean["exit_reason"], clean["exit_note"], clean["model_id"],
                 clean.get("type", "simple"),
                 clean.get("take_profit"), clean.get("stop_loss"), clean.get("breakeven"),
+                clean.get("repo_days"),
                 _now_iso(), tid, user_id,
             ),
         )
@@ -1600,16 +1751,22 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
     conn = get_conn()
     try:
         open_count = conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='open'",
+            "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='open' "
+            "AND type != 'reverse_repo'",
             (user_id,),
         ).fetchone()[0]
         open_rows = conn.execute(
             "SELECT symbol, name, entry_price, quantity, take_profit, stop_loss, breakeven "
-            "FROM trades WHERE user_id=? AND status='open' ORDER BY entry_date",
+            "FROM trades WHERE user_id=? AND status='open' AND type != 'reverse_repo' "
+            "ORDER BY entry_date",
             (user_id,),
         ).fetchall()
         rows = conn.execute(
             "SELECT * FROM trades WHERE user_id=? AND status='closed' ORDER BY exit_date",
+            (user_id,),
+        ).fetchall()
+        repo_rows = conn.execute(
+            "SELECT * FROM trades WHERE user_id=? AND type='reverse_repo' ORDER BY entry_date",
             (user_id,),
         ).fetchall()
     finally:
@@ -1646,6 +1803,25 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
     wins = [t for t in trades if t["pnl"] > 0]
     losses = [t for t in trades if t["pnl"] < 0]
     break_even = [t for t in trades if t["pnl"] == 0]
+
+    # 逆回购: 按到期日 (exit_date) 落在 [start,end] 的净收益合计, 单独汇总不并总盈亏
+    repo_income = 0.0
+    repo_count = 0
+    repo_list = []
+    for r in repo_rows:
+        t = dict(r)
+        if start and t["exit_date"] < start:
+            continue
+        if end and t["exit_date"] > end:
+            continue
+        m = _trade_metrics(t, fee_config=fee_config, deduct_fees=deduct_fees)
+        repo_income += m["pnl"]
+        repo_count += 1
+        repo_list.append({
+            "symbol": t["symbol"], "name": t["name"], "entry_date": t["entry_date"],
+            "exit_date": t["exit_date"], "entry_price": t["entry_price"],
+            "quantity": t["quantity"], "net": m["pnl"],
+        })
 
     total_pnl = sum(t["pnl"] for t in trades)
     total_cost = sum(t["cost"] for t in trades)
@@ -1708,6 +1884,9 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
         "total_fees": round(sum(t["fees"] for t in trades), 2),
         "deduct_fees": deduct_fees,
         "t_stats": summary_t_stats,
+        "repo_income": round(repo_income, 2),
+        "repo_count": repo_count,
+        "repo_list": repo_list,
         "max_win": (
             {
                 "symbol": max_win["symbol"], "name": max_win["name"],
@@ -1826,6 +2005,7 @@ def list_monitored_positions():
             "u.username, u.is_admin, u.monitor_enabled "
             "FROM trades t JOIN users u ON u.id = t.user_id "
             "WHERE t.status='open' "
+            "AND t.type != 'reverse_repo' "
             "AND (u.is_admin=1 OR u.monitor_enabled=1) "
             "AND (t.take_profit IS NOT NULL OR t.stop_loss IS NOT NULL "
             "     OR t.breakeven IS NOT NULL) "

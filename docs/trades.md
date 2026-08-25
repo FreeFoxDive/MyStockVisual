@@ -63,21 +63,22 @@
 | `user_id` | INTEGER | NOT NULL，FK→users(id) ON DELETE CASCADE | 归属账户 |
 | `symbol` | TEXT | NOT NULL | 归一化代码（如 `000001.SZ`） |
 | `name` | TEXT | NOT NULL | 完整名称（如 `平安银行`） |
-| `status` | TEXT | NOT NULL | `open`（持仓中）/ `closed`（已平仓） |
-| `entry_price` | REAL | NOT NULL | 买入价 |
-| `exit_price` | REAL | 可空（open 时为空） | 退出价 |
-| `quantity` | INTEGER | NOT NULL | 数量 / 股数 |
+| `status` | TEXT | NOT NULL | `open`（持仓中）/ `closed`（已平仓）；逆回购恒 `open`，到期由 `exit_date` 判定 |
+| `entry_price` | REAL | NOT NULL | 买入价；**逆回购=成交年化利率（%）** |
+| `exit_price` | REAL | 可空（open 时为空） | 退出价；逆回购为空 |
+| `quantity` | INTEGER | NOT NULL | 数量 / 股数；**逆回购=本金金额（元）** |
 | `entry_date` | TEXT | NOT NULL | 买入日期 `YYYY-MM-DD` |
-| `exit_date` | TEXT | 可空 | 卖出日期 `YYYY-MM-DD` |
+| `exit_date` | TEXT | 可空 | 卖出日期；**逆回购=到期日（自动算）** |
 | `entry_reason` | TEXT | NOT NULL | 买入理由分类（预设值） |
 | `entry_note` | TEXT | 可空 | 买入理由自由文本补充 |
 | `exit_reason` | TEXT | 可空（open 时为空） | 卖出理由分类 |
 | `exit_note` | TEXT | 可空 | 卖出理由自由文本补充 |
 | `model_id` | INTEGER | 可空，FK→models(id) ON DELETE SET NULL | 关联量化模型（`NULL`=无；软删不触发置空） |
-| `type` | TEXT | NOT NULL DEFAULT `'simple'` | 交易类型：`simple`（单笔买卖，默认）/ `batch`（批次多次买卖） |
+| `type` | TEXT | NOT NULL DEFAULT `'simple'` | 交易类型：`simple`（单笔买卖，默认）/ `batch`（批次多次买卖）/ `reverse_repo`（国债逆回购） |
 | `take_profit` | REAL | 可空 | 建议止盈价（与保本/止损全空或全填，且 止盈 > 保本 > 止损） |
 | `stop_loss` | REAL | 可空 | 建议止损价 |
 | `breakeven` | REAL | 可空 | 建议保本价 |
+| `repo_days` | INTEGER | 可空 | 逆回购实际计息天数（默认=期限，可覆盖节假日放大） |
 | `created_at` | TEXT | NOT NULL | 创建时间 |
 | `updated_at` | TEXT | NOT NULL | 更新时间 |
 
@@ -313,6 +314,24 @@
 - **钉钉**：`visual/dingtalk.py` 自包含实现，读 `visual/.env` 的 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN`。同一轮多条合并成一条 markdown，按用户名分组（群消息会带账户名与代码，不含口令）。到期提醒标题为「持仓到期提醒」。未配置则只打日志。
 - **运行**：`server.py` 启动时起 daemon 线程；新增记录不会立刻盯盘，下一轮轮询（约 20s）才会纳入。也可 `python -u visual/monitor.py` 单跑，`--replay 603698.SH:2026-08-19` 做离线校准。探测脚本 `python -u visual/probe_feed.py`。
 - **测试**：`python -u visual/test/test_monitor.py`（离线 mock，不发真实钉钉）。可选 `DINGTALK_LIVE=1` 做一次真连通，会往群发测试消息。
+
+---
+
+## 5.5 国债逆回购
+
+「新增记录」类型选「逆回购」录入出借资金操作。只支持交易所标准逆回购（沪 `204xxx.SH` / 深 `1318xx.SZ`，共 18 个代码，期限 1/2/3/4/7/14/28/91/182 天）。
+
+**字段映射**：`entry_price`=成交年化利率（%），`quantity`=本金（元），`entry_date`=买入日，`repo_days`=实际计息天数（默认=期限，可手改覆盖节假日放大），`exit_date`=到期日（买入日+期限自然日，非交易日顺延到下一交易日）。`status` 恒为 `open`，到期由 `exit_date` 判定（自动视为平仓，无需手动改状态）。
+
+**收益口径**：
+
+```
+到期利息   = 本金 × 利率% × 计息天数 ÷ 365
+佣金       = 本金 × 期限佣金率 (reverse_repo_rates: 1天十万分之1 … 182天十万分之30)
+净收益     = 到期利息 − 佣金
+```
+
+**统计**：`summary.repo_income`（按到期日落在所选区间内的净收益合计，`repo_count` 笔数，`repo_list` 明细）**单独一行展示，不并入总盈亏/胜率/按股票归因**。逆回购不进持仓市值/浮盈亏聚合，也不进盘中持仓监控。
 
 ---
 
