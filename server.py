@@ -226,7 +226,7 @@ def _lookup_name(symbol):
 
 
 # ── 指标计算 ──
-from indicators import compute_all_indicators, _safe_list, force_index
+from indicators import compute_all_indicators, compute_impulse, _safe_list, force_index
 
 import market_hours
 
@@ -458,6 +458,7 @@ kline_cache = TTLCache(ttl_seconds=120)
 kline_cache_minute = TTLCache(ttl_seconds=60)
 kline_cache_long = TTLCache(ttl_seconds=300)
 quote_cache = TTLCache(ttl_seconds=30)
+_impulse_cache = TTLCache(ttl_seconds=120)
 
 
 # ── 质押数据缓存 ──
@@ -742,6 +743,40 @@ def _fetch_minute_kline(symbol, period, count):
     if df is None or len(df) == 0:
         return None
     return _normalize(df, prefer_time=True)
+
+
+def _fetch_impulse_qfq(symbol, count):
+    """用 AlphaFeed 前复权日K计算 Elder impulse 方向 (与 v7 动力管线口径一致)。
+
+    主图 K 线保持未复权, 但动力系统蜡烛颜色改用前复权, 避免分红除权造成
+    假的价格跳空污染 EMA13/MACD 方向。返回按 trade_date 索引的 int Series
+    (1=红 / -1=绿 / 0=蓝); 任何失败返回 None (调用方回退未复权 impulse)。
+    """
+    cache_key = f"{symbol}:{count}"
+    cached = _impulse_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        af = get_af()
+        dfs = af.klines.batch(
+            [symbol], period="1d", count=count, adjust="forward", to_dataframe=True
+        )
+        df = dfs.get(symbol) if dfs else None
+    except Exception as e:
+        log.warning(f"AlphaFeed 获取前复权日K失败 {symbol}: {e}")
+        return None
+    if df is None or len(df) == 0:
+        return None
+    df = _normalize(df)
+    if df is None:
+        return None
+    try:
+        impulse = compute_impulse(df["close"])
+    except Exception as e:
+        log.warning(f"前复权 impulse 计算失败 {symbol}: {e}")
+        return None
+    _impulse_cache.set(cache_key, impulse)
+    return impulse
 
 
 def fetch_kline(symbol, period, count):
@@ -1815,6 +1850,13 @@ class VisualHandler(BaseHTTPRequestHandler):
             log.warning(f"指标计算失败 {symbol} {period}: {e}")
             return self._send_error(f"指标计算失败: {_sanitize_error(e)}", 500)
 
+        # 动力系统(Elder impulse) 方向改用 AlphaFeed 前复权日K (与 v7 口径一致);
+        # 主图 OHLC / 其他指标仍用未复权真实价。缺前复权数据时回退现有未复权 impulse。
+        if period == "1d":
+            impulse_qfq = _fetch_impulse_qfq(symbol, count)
+            if impulse_qfq is not None:
+                aligned = impulse_qfq.reindex(df.index)
+                df["impulse"] = aligned.fillna(df["impulse"]).astype(int)
 
         # ETF 溢价率 (日/周/月; 分钟净值无法对齐)
         premium_data = None

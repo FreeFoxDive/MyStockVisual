@@ -5,8 +5,8 @@ Technical indicator calculation module - based on stock-indicators-cn package
 All indicators align with East Money/Tonghuashun/TDX standard algorithms.
 
 Thin wrapper around stock_indicators_cn — atr, macd, get_macd_params
-are imported directly from the library. Only compute_all_indicators and _safe_list
-are local (convenience aggregator + JSON-safe serialization).
+are imported directly from the library. Only compute_all_indicators, compute_impulse
+and _safe_list are local (convenience aggregator + JSON-safe serialization).
 """
 
 import numpy as np
@@ -15,6 +15,33 @@ from stock_indicators_cn import (
     ema, sma, kdj, rsi, force_index,
     atr, macd, get_macd_params,
 )
+
+
+def compute_impulse(close, macd_params=None):
+    """Elder Impulse System: 1=bullish(红), -1=bearish(绿), 0=neutral(蓝)。
+
+    用 EMA13 方向 + MACD 柱方向决定蜡烛颜色 (与 v7 动力管线口径一致)。
+    macd_params: {"fast": 12, "slow": 26, "signal": 9}, 缺省取日线标准参数。
+    """
+    if macd_params is None:
+        macd_params = {"fast": 12, "slow": 26, "signal": 9}
+    e13 = ema(close, 13)
+    dif, dea, hist = macd(close, macd_params["fast"], macd_params["slow"], macd_params["signal"])
+    impulse = pd.Series(0, index=close.index, dtype=int)
+    for i in range(1, len(close)):
+        e13_i = e13.iloc[i]
+        e13_prev = e13.iloc[i - 1]
+        hist_i = hist.iloc[i]
+        hist_prev = hist.iloc[i - 1]
+        if pd.isna(e13_i) or pd.isna(e13_prev) or pd.isna(hist_i) or pd.isna(hist_prev):
+            continue
+        ema_up = e13_i > e13_prev
+        hist_up = hist_i > hist_prev
+        if ema_up and hist_up:
+            impulse.iloc[i] = 1
+        elif not ema_up and not hist_up:
+            impulse.iloc[i] = -1
+    return impulse
 
 
 def compute_all_indicators(df, period="1d",
@@ -92,20 +119,7 @@ def compute_all_indicators(df, period="1d",
         }
 
     # Elder Impulse System: 1=bullish(红), -1=bearish(绿), 0=neutral(蓝)
-    impulse = pd.Series(0, index=c.index, dtype=int)
-    for i in range(1, len(c)):
-        e13_i = e13.iloc[i]
-        e13_prev = e13.iloc[i - 1]
-        hist_i = hist.iloc[i]
-        hist_prev = hist.iloc[i - 1]
-        if pd.isna(e13_i) or pd.isna(e13_prev) or pd.isna(hist_i) or pd.isna(hist_prev):
-            continue
-        ema_up = e13_i > e13_prev
-        hist_up = hist_i > hist_prev
-        if ema_up and hist_up:
-            impulse.iloc[i] = 1
-        elif not ema_up and not hist_up:
-            impulse.iloc[i] = -1
+    impulse = compute_impulse(c, mp)
     result_df["impulse"] = impulse
     indicators["impulse"] = {
         "params": {"ema_period": 13},
