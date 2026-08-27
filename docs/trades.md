@@ -324,9 +324,9 @@
   - 每日一次：到达保本价（上穿 `breakeven_hit` / 从上方跌破或跌回 `be_broken`）、止损击穿、止盈达成、涨停封板（卖1量为 0）、推荐持仓到期上午（`hold_exit_am`）、到期下午（`hold_exit_pm`）
   - 同股同类型 30 分钟一次：加速下跌、加速上涨
 - **到期平仓提醒**：授权用户的 open 持仓若关联了填了 `hold_days` 的模型，在推荐周期**最后一个交易日**的 10:00–11:30 与 14:00–15:00 各推一次钉钉（不拉行情、不要求风控价）。单笔从买入日起算第 N 个交易日（含买入日）；批次从**最晚一笔买入腿**起算。同用户同标的按 `trade_id` 分别去重。
-- **钉钉**：`visual/dingtalk.py` 自包含实现，读 `visual/.env` 的 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN`。同一轮多条合并成一条 markdown，按用户名分组（群消息会带账户名与代码，不含口令）。到期提醒标题为「持仓到期提醒」。未配置则只打日志。
+- **钉钉 / ntfy**：`visual/dingtalk.py` / `visual/ntfy.py` 为 `myappnotify` 薄包装；读 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN` 与 `NTFY_URL`（可加 `NTFY_TOPIC`）/ `NTFY_USER` / `NTFY_PASSWORD`。同一轮多条合并成一条 markdown 双发，按用户名分组（群消息会带账户名与代码，不含口令）。到期提醒标题为「持仓到期提醒」。未配置的通道跳过并打错误日志。
 - **运行**：`visual/server.py`（Waitress）启动时由 `app.start_background_jobs` 起 daemon 线程；新增记录不会立刻盯盘，下一轮轮询（约 20s）才会纳入。也可 `python -u visual/monitor.py` 单跑，`--replay 603698.SH:2026-08-19` 做离线校准。探测脚本 `python -u visual/probe_feed.py`。
-- **测试**：`python -m unittest discover -s visual/test`（含 monitor 离线 mock，不发真实钉钉）。可选 `DINGTALK_LIVE=1` 做一次真连通，会往群发测试消息。
+- **测试**：`python -m unittest discover -s visual/test`（含 monitor 离线 mock，不发真实通知）。可选 `DINGTALK_LIVE=1` / `NTFY_LIVE=1` 做真连通。
 
 ---
 
@@ -387,7 +387,8 @@
 | `visual/trades.py` | DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、统计、监控告警、录入校验 |
 | `visual/monitor.py` | 持仓监控循环 / 告警判定 / `--replay` 回放 |
 | `visual/feed.py` | AlphaFeed REST 行情接入（令牌桶 + 429 退避） |
-| `visual/dingtalk.py` | 钉钉机器人（visual 自包含） |
+| `visual/dingtalk.py` | 钉钉薄包装（myappnotify） |
+| `visual/ntfy.py` | ntfy 薄包装（myappnotify） |
 | `visual/market_hours.py` | A 股交易日历与时段 |
 | `visual/probe_feed.py` | 一次性探测快照刷新频率与接口权限 |
 | `visual/test/` | `test_trades` / `test_monitor` / `test_pledge` / `test_flask_auth` / `test_logger_redact` 等 |

@@ -11,7 +11,7 @@ venv/Scripts/python.exe -u visual/server.py
 # 浏览器打开 http://localhost:8888
 ```
 
-用项目 venv 启动（系统 Python 缺 `mairui` 等依赖）。自动加载 `visual/.env`，没有则回退项目根 `.env`（`AF_API_KEY` / 钉钉 / 管理员口令）。
+用项目 venv 启动（系统 Python 缺 `mairui` 等依赖）。自动加载 `visual/.env`，没有则回退项目根 `.env`（`AF_API_KEY` / 钉钉 / ntfy / 管理员口令）。
 
 ## 功能
 
@@ -34,7 +34,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 请求频率限制 | 服务端令牌桶 120次/分钟 |
 | 安全 | CSP、同源 Cookie 会话、CSRF 双提交、登录爆破锁定；SQL 参数化；日志密钥脱敏 |
 | 交易记录 | 多账户登录，买卖记录增删改查；录入校验日期/日K振幅/成交量；按周/月/年统计盈亏与胜率（默认周，详见 [docs/trades.md](docs/trades.md)） |
-| 持仓监控 | 授权用户填齐止盈/保本/止损（止盈>保本>止损）后盘中监控，钉钉推送；关联模型的持仓在推荐周期到期日 10:00/14:00 提醒平仓 |
+| 持仓监控 | 授权用户填齐止盈/保本/止损（止盈>保本>止损）后盘中监控，钉钉 + ntfy 推送；关联模型的持仓在推荐周期到期日 10:00/14:00 提醒平仓 |
 
 ## 文件结构
 
@@ -49,9 +49,10 @@ visual/
 ├── logger.py          # 日志配置 + 密钥脱敏
 ├── indicators.py      # 指标计算
 ├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
-├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 钉钉)
+├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 钉钉/ntfy)
 ├── feed.py            # AlphaFeed REST 行情接入 (令牌桶)
-├── dingtalk.py        # 钉钉机器人 (visual 自包含)
+├── dingtalk.py        # 钉钉薄包装 (myappnotify)
+├── ntfy.py            # ntfy 薄包装 (myappnotify)
 ├── market_hours.py    # A 股交易日历与时段
 ├── probe_feed.py      # 探测快照刷新频率 / 接口权限
 ├── test/
@@ -152,7 +153,13 @@ visual/
 AF_API_KEY=...
 DINGDING_WEB_HOOK_TOKEN=...
 DINGDING_BOT_SIGN=...
+NTFY_URL=https://ntfy.example.com
+NTFY_TOPIC=stock
+NTFY_USER=...
+NTFY_PASSWORD=...
 ```
+
+未配置的通道会跳过并打错误日志，不中断监控。
 
 ### 日志
 
@@ -171,11 +178,13 @@ venv/Scripts/python.exe -u visual/monitor.py --replay 603698.SH:2026-08-19 60311
 venv/Scripts/python.exe -m unittest discover -s visual/test
 ```
 
-钉钉真连通（会往群发一条测试消息，平时不要跑）：
+钉钉 / ntfy 真连通（会发一条测试消息，平时不要跑）：
 
 ```
 set DINGTALK_LIVE=1
 venv/Scripts/python.exe -u visual/test/test_monitor.py TestDingTalk.test_live_robot_reachable
+set NTFY_LIVE=1
+venv/Scripts/python.exe -u visual/test/test_monitor.py TestNtfy.test_live_reachable
 ```
 
 ## 安全性

@@ -1,4 +1,4 @@
-"""持仓价格监控: 自建价格序列 + 七类告警 + 到期平仓提醒 + 钉钉推送。
+"""持仓价格监控: 自建价格序列 + 七类告警 + 到期平仓提醒 + 钉钉/ntfy 推送。
 
 双入口:
   start_background(get_af, fallback_quotes)  — visual/server.py 起 daemon 线程
@@ -22,6 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import dingtalk  # noqa: E402
+import ntfy  # noqa: E402
 import feed as feed_mod  # noqa: E402
 import market_hours  # noqa: E402
 import trades  # noqa: E402
@@ -537,7 +538,9 @@ def _check_hold_expire(now_dt=None, persist=True, notify=True):
                 "alert": a,
             })
     if fired and notify:
-        dingtalk.send_markdown("持仓到期提醒", _build_hold_message(fired, now_dt))
+        md = _build_hold_message(fired, now_dt)
+        dingtalk.send_markdown("持仓到期提醒", md)
+        ntfy.send_markdown("持仓到期提醒", md)
     return fired
 
 
@@ -638,6 +641,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     if fired and notify:
         md = _build_message(fired, now_dt)
         dingtalk.send_markdown("持仓监控", md)
+        ntfy.send_markdown("持仓监控", md)
     return fired
 
 

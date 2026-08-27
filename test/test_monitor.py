@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""持仓监控纯离线单测: 指标 / 六类告警 / 到期平仓 / 节流 / 时段 / 令牌桶 / 钉钉 / 整轮覆盖。
+"""持仓监控纯离线单测: 指标 / 六类告警 / 到期平仓 / 节流 / 时段 / 令牌桶 / 钉钉 / ntfy / 整轮覆盖。
 
 运行:
     python -u visual/test/test_monitor.py
 钉钉真连通 (会往群里发一条测试消息):
     set DINGTALK_LIVE=1
     python -u visual/test/test_monitor.py TestDingTalk.test_live_robot_reachable
+ntfy 真连通:
+    set NTFY_LIVE=1
+    python -u visual/test/test_monitor.py TestNtfy.test_live_reachable
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
+from contextlib import contextmanager
 
 _VISUAL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _VISUAL_DIR not in sys.path:
@@ -30,9 +34,18 @@ import dingtalk  # noqa: E402
 import feed as feed_mod  # noqa: E402
 import market_hours  # noqa: E402
 import monitor  # noqa: E402
+import ntfy  # noqa: E402
 import trades  # noqa: E402
 
 FIXTURE_DIR = Path(_VISUAL_DIR) / "test" / "fixtures"
+
+
+@contextmanager
+def _notify_mocks(dingtalk_return=True, ntfy_return=True):
+    """Patch monitor's DingTalk + ntfy senders; yield (ding_send, ntfy_send)."""
+    with mock.patch.object(dingtalk, "send_markdown", return_value=dingtalk_return) as ding:
+        with mock.patch.object(ntfy, "send_markdown", return_value=ntfy_return) as nf:
+            yield ding, nf
 
 
 def _load_fixture(name):
@@ -388,13 +401,17 @@ class TestPriceBuffer(unittest.TestCase):
 
 
 class _FakeUrlResp:
-    def __init__(self, payload):
+    def __init__(self, payload, status=200):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         self._payload = payload
+        self.status = status
 
     def read(self):
         return self._payload
+
+    def getcode(self):
+        return self.status
 
     def __enter__(self):
         return self
@@ -418,7 +435,7 @@ class TestDingTalk(unittest.TestCase):
                 "DINGDING_WEB_HOOK_TOKEN": "",
                 "DINGDING_BOT_SIGN": "",
             }, clear=False):
-                with mock.patch("dingtalk.urllib.request.urlopen") as urlopen:
+                with mock.patch("myappnotify.dingtalk.urllib.request.urlopen") as urlopen:
                     self.assertFalse(dingtalk.send_markdown("t", "body"))
                     urlopen.assert_not_called()
 
@@ -431,9 +448,9 @@ class TestDingTalk(unittest.TestCase):
             "DINGDING_WEB_HOOK_TOKEN": token,
             "DINGDING_BOT_SIGN": secret,
         }, clear=False):
-            with mock.patch("dingtalk.time.time", return_value=frozen):
+            with mock.patch("myappnotify.dingtalk.time.time", return_value=frozen):
                 with mock.patch(
-                    "dingtalk.urllib.request.urlopen",
+                    "myappnotify.dingtalk.urllib.request.urlopen",
                     return_value=_FakeUrlResp('{"errcode":0,"errmsg":"ok"}'),
                 ) as urlopen:
                     ok = dingtalk.send_markdown("持仓监控", "## 正文\n- 一条")
@@ -454,7 +471,7 @@ class TestDingTalk(unittest.TestCase):
             "DINGDING_BOT_SIGN": "sec",
         }, clear=False):
             with mock.patch(
-                "dingtalk.urllib.request.urlopen",
+                "myappnotify.dingtalk.urllib.request.urlopen",
                 return_value=_FakeUrlResp('{"errcode":310000,"errmsg":"sign not match"}'),
             ):
                 self.assertFalse(dingtalk.send_markdown("t", "x"))
@@ -465,7 +482,7 @@ class TestDingTalk(unittest.TestCase):
             "DINGDING_BOT_SIGN": "sec",
         }, clear=False):
             with mock.patch(
-                "dingtalk.urllib.request.urlopen",
+                "myappnotify.dingtalk.urllib.request.urlopen",
                 side_effect=OSError("timed out"),
             ):
                 self.assertFalse(dingtalk.send_markdown("t", "x"))
@@ -483,6 +500,54 @@ class TestDingTalk(unittest.TestCase):
             "## visual 单测\n钉钉机器人连通性检查，可忽略。",
         )
         self.assertTrue(ok, "钉钉机器人返回失败，检查 token/sign 或网络")
+
+
+class TestNtfy(unittest.TestCase):
+    def test_skip_when_unconfigured(self):
+        with mock.patch.object(ntfy, "_load_env"):
+            with mock.patch.dict(os.environ, {
+                "NTFY_URL": "",
+                "NTFY_USER": "",
+                "NTFY_PASSWORD": "",
+            }, clear=False):
+                with mock.patch("myappnotify.ntfy.urllib.request.urlopen") as urlopen:
+                    self.assertFalse(ntfy.send_markdown("t", "body"))
+                    urlopen.assert_not_called()
+
+    def test_success_posts_markdown(self):
+        with mock.patch.dict(os.environ, {
+            "NTFY_URL": "https://ntfy.example.com/stock",
+            "NTFY_USER": "alice",
+            "NTFY_PASSWORD": "s3cret",
+        }, clear=False):
+            with mock.patch(
+                "myappnotify.ntfy.urllib.request.urlopen",
+                return_value=_FakeUrlResp('{"id":"1"}', status=200),
+            ) as urlopen:
+                ok = ntfy.send_markdown("持仓监控", "## 正文\n- 一条")
+        self.assertTrue(ok)
+        req = urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "https://ntfy.example.com/stock")
+        self.assertEqual(req.data.decode("utf-8"), "## 正文\n- 一条")
+        self.assertEqual(req.get_header("Markdown"), "yes")
+
+    @unittest.skipUnless(
+        os.environ.get("NTFY_LIVE") == "1",
+        "set NTFY_LIVE=1 to ping ntfy",
+    )
+    def test_live_reachable(self):
+        ntfy._load_env()
+        if not (
+            os.environ.get("NTFY_URL", "").strip()
+            and os.environ.get("NTFY_USER", "").strip()
+            and os.environ.get("NTFY_PASSWORD", "").strip()
+        ):
+            self.skipTest("visual/.env 未配置 NTFY_URL/NTFY_USER/NTFY_PASSWORD")
+        ok = ntfy.send_markdown(
+            "持仓监控连通性测试",
+            "## visual 单测\nntfy 连通性检查，可忽略。",
+        )
+        self.assertTrue(ok, "ntfy 返回失败，检查 URL/用户名密码或网络")
 
 
 class FakeFeed:
@@ -593,11 +658,12 @@ class PollPipelineTestCase(unittest.TestCase):
 class TestPollPipeline(PollPipelineTestCase):
     def test_empty_watchlist_skips_feed_and_dingtalk(self):
         feed = FakeFeed()
-        with mock.patch.object(dingtalk, "send_markdown") as send:
+        with _notify_mocks() as (send, got):
             fired = monitor._poll_once(feed, now_dt=self.now)
         self.assertEqual(fired, [])
         self.assertEqual(feed.quotes_calls, [])
         send.assert_not_called()
+        got.assert_not_called()
 
     def test_only_authorized_open_with_risk_prices(self):
         admin = trades.create_user("admin", "secret123", is_admin=True)
@@ -623,16 +689,18 @@ class TestPollPipeline(PollPipelineTestCase):
         uid = trades.create_user("admin", "secret123", is_admin=True)
         t = self._open(uid, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes={"600000.SH": self._quote(9.0, 1_000_060)})
-        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
+        with _notify_mocks() as (send, got):
             fired = monitor._poll_once(feed, now_dt=self.now)
         types = [x["alert"]["alert_type"] for x in fired]
         self.assertIn("sl_breached", types)
         send.assert_called_once()
+        got.assert_called_once()
         title, text = send.call_args[0]
         self.assertEqual(title, "持仓监控")
         self.assertIn("admin", text)
         self.assertIn("600000.SH", text)
         self.assertIn("sl_breached", text)
+        self.assertEqual(got.call_args[0], (title, text))
         last = trades.last_monitor_alert(uid, "600000.SH", "sl_breached")
         self.assertIsNotNone(last)
         self.assertEqual(last["trade_date"], "2026-08-21")
@@ -646,13 +714,14 @@ class TestPollPipeline(PollPipelineTestCase):
         uid = 1
         self._open(uid, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes={"600000.SH": self._quote(9.0, 1_000_060)})
-        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
+        with _notify_mocks() as (send, got):
             first = monitor._poll_once(feed, now_dt=self.now)
             feed.quotes_map["600000.SH"] = self._quote(8.8, 1_000_120)
             second = monitor._poll_once(feed, now_dt=self.now + timedelta(minutes=5))
         self.assertTrue(first)
         self.assertEqual(second, [])
         self.assertEqual(send.call_count, 1)
+        self.assertEqual(got.call_count, 1)
 
     def test_two_users_merged_one_push(self):
         a = trades.create_user("alice", "secret123", is_admin=True)
@@ -664,12 +733,13 @@ class TestPollPipeline(PollPipelineTestCase):
             "600000.SH": self._quote(9.0, 1_000_060),
             "000001.SZ": self._quote(12.0, 1_000_060),
         })
-        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
+        with _notify_mocks() as (send, got):
             fired = monitor._poll_once(feed, now_dt=self.now)
         kinds = {(x["username"], x["alert"]["alert_type"]) for x in fired}
         self.assertIn(("alice", "sl_breached"), kinds)
         self.assertIn(("bob", "tp_reached"), kinds)
         send.assert_called_once()
+        got.assert_called_once()
         text = send.call_args[0][1]
         self.assertIn("alice", text)
         self.assertIn("bob", text)
@@ -677,23 +747,26 @@ class TestPollPipeline(PollPipelineTestCase):
     def test_new_trade_picked_up_next_poll(self):
         uid = trades.create_user("admin", "secret123", is_admin=True)
         feed = FakeFeed()
-        with mock.patch.object(dingtalk, "send_markdown") as send:
+        with _notify_mocks() as (send, got):
             self.assertEqual(monitor._poll_once(feed, now_dt=self.now), [])
             send.assert_not_called()
+            got.assert_not_called()
             self._open(uid, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
             feed.quotes_map["600000.SH"] = self._quote(9.0, 1_000_060)
             fired = monitor._poll_once(feed, now_dt=self.now)
         self.assertIn("sl_breached", [x["alert"]["alert_type"] for x in fired])
         send.assert_called_once()
+        got.assert_called_once()
 
     def test_quotes_rate_limited_no_crash_no_push(self):
         trades.create_user("admin", "secret123", is_admin=True)
         self._open(1, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes_exc=feed_mod.RateLimited("429", retry_after_ms=1500))
-        with mock.patch.object(dingtalk, "send_markdown") as send:
+        with _notify_mocks() as (send, got):
             fired = monitor._poll_once(feed, now_dt=self.now)
         self.assertEqual(fired, [])
         send.assert_not_called()
+        got.assert_not_called()
         self.assertIn("429", monitor.get_status().get("last_error") or "")
 
     def test_seed_then_quote_and_near_limit_fetches_depth(self):
@@ -712,7 +785,7 @@ class TestPollPipeline(PollPipelineTestCase):
             }},
             seeds={"603118.SH": seed},
         )
-        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
+        with _notify_mocks() as (send, got):
             fired = monitor._poll_once(feed, now_dt=self.now)
         self.assertEqual(feed.seed_calls, [["603118.SH"]])
         self.assertTrue(feed.depth_calls, "逼近涨停应拉五档")
@@ -720,36 +793,41 @@ class TestPollPipeline(PollPipelineTestCase):
         self.assertIn("tp_reached", types)
         self.assertIn("limit_up_sealed", types)
         send.assert_called_once()
+        got.assert_called_once()
 
     def test_dingtalk_false_still_persists_alert(self):
         trades.create_user("admin", "secret123", is_admin=True)
         self._open(1, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
         feed = FakeFeed(quotes={"600000.SH": self._quote(9.0, 1_000_060)})
-        with mock.patch.object(dingtalk, "send_markdown", return_value=False) as send:
+        with _notify_mocks(dingtalk_return=False) as (send, got):
             fired = monitor._poll_once(feed, now_dt=self.now)
         self.assertTrue(fired)
         send.assert_called_once()
+        got.assert_called_once()
         self.assertIsNotNone(trades.last_monitor_alert(1, "600000.SH", "sl_breached"))
 
     def test_hold_expire_am_notifies_without_quotes(self):
         admin = trades.create_user("admin", "secret123", is_admin=True)
         # A 模型 3 日: 8-19 / 8-20 / 8-21 → 到期日即 self.now
         self._open(admin, "000001.SZ", "平安", model_id=1, entry_date="2026-08-19")
-        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send:
+        with _notify_mocks() as (send, got):
             fired = monitor._check_hold_expire(now_dt=self.now)
         self.assertEqual([x["alert"]["alert_type"] for x in fired], ["hold_exit_am"])
         send.assert_called_once()
+        got.assert_called_once()
         title, text = send.call_args[0]
         self.assertEqual(title, "持仓到期提醒")
         self.assertIn("000001.SZ", text)
-        with mock.patch.object(dingtalk, "send_markdown") as send2:
+        with _notify_mocks() as (send2, got2):
             again = monitor._check_hold_expire(now_dt=self.now + timedelta(minutes=10))
         self.assertEqual(again, [])
         send2.assert_not_called()
-        with mock.patch.object(dingtalk, "send_markdown", return_value=True) as send3:
+        got2.assert_not_called()
+        with _notify_mocks() as (send3, got3):
             pm = monitor._check_hold_expire(now_dt=datetime(2026, 8, 21, 14, 0))
         self.assertEqual([x["alert"]["alert_type"] for x in pm], ["hold_exit_pm"])
         send3.assert_called_once()
+        got3.assert_called_once()
 
     def test_hold_expire_batch_uses_latest_buy(self):
         admin = trades.create_user("admin", "secret123", is_admin=True)
@@ -761,7 +839,7 @@ class TestPollPipeline(PollPipelineTestCase):
                 {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-08-19"},
             ],
         })
-        with mock.patch.object(dingtalk, "send_markdown", return_value=True):
+        with _notify_mocks():
             fired = monitor._check_hold_expire(now_dt=self.now)
         self.assertEqual(len(fired), 1)
         self.assertEqual(fired[0]["alert"]["alert_type"], "hold_exit_am")
