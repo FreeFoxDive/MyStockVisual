@@ -984,6 +984,49 @@ def _valid_date(s):
         return False
 
 
+def _today_iso():
+    return _now().date().isoformat()
+
+
+def _reject_future_date(date_str, label="日期"):
+    """未来日返回错误文案，否则 None。"""
+    if date_str > _today_iso():
+        return f"{label}不能晚于今天"
+    return None
+
+
+def _validate_price_on_bar(symbol, date_str, price, side_label, leg_prefix=""):
+    """校验价在当日振幅内且成交量>0。返回错误文案或 None。
+
+    side_label: '买入' / '卖出'；leg_prefix: '第N条腿 '（可空）。
+    """
+    try:
+        from market import get_daily_bar
+        bar = get_daily_bar(symbol, date_str)
+    except Exception:
+        bar = None
+
+    pfx = leg_prefix or ""
+    if bar is None:
+        return f"{pfx}{date_str} 无日K数据（非交易日或未上市）"
+    vol = bar.get("volume") or 0
+    if vol <= 0:
+        return f"{pfx}{date_str} 成交量为0，疑似停牌，不能录入"
+
+    high = float(bar["high"])
+    low = float(bar["low"])
+    # 分位比较，避免浮点毛刺
+    price_c = round(float(price) * 100)
+    low_c = round(low * 100)
+    high_c = round(high * 100)
+    if price_c < low_c or price_c > high_c:
+        return (
+            f"{pfx}{side_label}价 {float(price):.2f} 不在当日振幅 "
+            f"[{low:.2f}, {high:.2f}] 内"
+        )
+    return None
+
+
 def _repo_maturity(entry_date, tenor_days):
     """逆回购到期日 = 买入日 + 期限 (自然日); 落在非交易日则顺延到下一交易日。"""
     try:
@@ -1057,6 +1100,9 @@ def _clean_reverse_repo(data, existing=None):
     entry_date = s(merged.get("entry_date", ""))
     if not _valid_date(entry_date):
         return None, "买入日期无效 (格式 YYYY-MM-DD)"
+    fut = _reject_future_date(entry_date, "买入日期")
+    if fut:
+        return None, fut
 
     days = tenor
     raw_days = merged.get("repo_days")
@@ -1195,6 +1241,15 @@ def _clean_batch(data, existing=None):
         date_str = s(leg.get("date", ""))
         if not _valid_date(date_str):
             return None, f"第{i + 1}条腿日期无效 (格式 YYYY-MM-DD)"
+        fut = _reject_future_date(date_str, f"第{i + 1}条腿日期")
+        if fut:
+            return None, fut
+        side_label = "买入" if side == "buy" else "卖出"
+        bar_err = _validate_price_on_bar(
+            symbol, date_str, price, side_label, leg_prefix=f"第{i + 1}条腿 ",
+        )
+        if bar_err:
+            return None, bar_err
         time_str = s(leg.get("time")) or None
         if time_str is not None:
             parts = time_str.split(":")
@@ -1309,6 +1364,12 @@ def _clean(data, existing=None):
     entry_date = s(merged.get("entry_date", ""))
     if not _valid_date(entry_date):
         return None, "买入日期无效 (格式 YYYY-MM-DD)"
+    fut = _reject_future_date(entry_date, "买入日期")
+    if fut:
+        return None, fut
+    bar_err = _validate_price_on_bar(symbol, entry_date, entry_price, "买入")
+    if bar_err:
+        return None, bar_err
     entry_reason = s(merged.get("entry_reason", ""))
     if not entry_reason:
         return None, "缺少买入理由"
@@ -1358,6 +1419,12 @@ def _clean(data, existing=None):
             return None, "卖出日期无效 (格式 YYYY-MM-DD)"
         if exit_date < entry_date:
             return None, "卖出日期不能早于买入日期"
+        fut = _reject_future_date(exit_date, "卖出日期")
+        if fut:
+            return None, fut
+        bar_err = _validate_price_on_bar(symbol, exit_date, exit_price, "卖出")
+        if bar_err:
+            return None, bar_err
 
         exit_reason = s(merged.get("exit_reason", ""))
         if not exit_reason:

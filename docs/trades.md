@@ -1,10 +1,10 @@
 # 交易记录统计功能文档
 
-> 面向 `visual` 项目的多账户交易日志：登录注册、买卖记录增删改查、量化模型关联、按周/月/年统计盈亏与胜率、按股票/模型归因。
-> 仅使用 Python 标准库（`sqlite3` / `hashlib` / `secrets`），不引入任何新依赖。
+> 面向 `visual` 项目的多账户交易日志：登录、买卖记录增删改查、量化模型关联、按周/月/年统计盈亏与胜率、按股票/模型归因。
+> HTTP 层为 **Flask + Waitress**（`app.py` / Blueprint）；业务库与口令仍用标准库 `sqlite3` / `hashlib` / `secrets`（`trades.py`）。
 
 - 入口：主页（`index.html`）左上角「📒 交易记录」按钮，点击跳转 `/trades.html`。
-- 未登录访问 `/trades.html` 会先展示登录页，登录成功后才能进入统计界面。
+- 未登录访问 `/trades.html` 会重定向到 `/login.html`，登录成功后进入统计界面。
 - 数据按账户隔离：每个账户只能看到自己的交易记录。
 
 ---
@@ -13,7 +13,7 @@
 
 数据库文件：`visual/data/trades.db`（SQLite，WAL 模式）。
 
-连接参数：`journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5000`。每次操作使用短连接（线程安全，适配 `ThreadingHTTPServer` 多线程）。
+连接参数：`journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5000`。每次操作使用短连接（线程安全，适配 Waitress 多线程）。用户输入一律走 **SQL 参数化**（`?` 占位），不把请求字符串拼进语句。
 
 ### 表 `users` — 用户账户
 
@@ -128,6 +128,18 @@
   - 循环结束 `held == 0` → `status='closed'`，否则 `open`。
 - 后端在 `create_trade` / `update_trade` 中统一校验，不满足即拒绝（返回 400 + 具体错误信息）。
 
+### 日期 / 价格与日 K 校验（`simple` / `batch`）
+
+服务端强制（前端日期 `max=今天` 仅为预检）：
+
+| 规则 | 说明 |
+|------|------|
+| 非未来日 | 买入日 / 卖出日 / 批次腿日期不得晚于今天 |
+| 有日 K | `market.get_daily_bar(symbol, date)` 取当日 OHLC；无该日 bar → 拒绝（非交易日或未上市） |
+| 成交量 > 0 | 当日 `volume≤0` → 拒绝（疑似停牌） |
+| 价在振幅内 | 买入/卖出价须落在当日 `[low, high]`（分位比较，避免浮点毛刺）；批次腿错误带「第 N 条腿」前缀 |
+| 逆回购 | 只拦未来买入日，不查 OHLC |
+
 > **兼容性**：老库 `trades` 表自动补 `type` 列（默认 `'simple'`），`trade_legs` 表用 `CREATE TABLE IF NOT EXISTS` 新建；存量记录零改动，行为与历史逐位一致。
 
 ---
@@ -135,9 +147,10 @@
 ## 2. 鉴权流程
 
 1. 口令用 **PBKDF2-SHA256**（`hashlib.pbkdf2_hmac`，200,000 次迭代）加随机盐（`secrets.token_hex(16)`）派生，密文与盐分开存储。
-2. 登录成功后生成会话令牌 `secrets.token_hex(32)`，写入 `sessions` 表，30 天过期。
-3. 令牌通过 `Set-Cookie` 下发：`session=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`。
-4. 受保护接口从 `Cookie` 读取令牌 → 查 `sessions` → 校验过期 → 得到当前用户（含 `is_admin`）；未登录返回 401。
+2. 登录成功后生成会话令牌 `secrets.token_hex(32)`，写入 `sessions` 表，30 天过期（**仍为 SQLite 会话，非 Flask 签名 session**）。
+3. 令牌经 Flask `Response.set_cookie` 下发：`session=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`（HTTPS 时加 `Secure`）。
+4. 受保护接口从 `request.cookies` 读令牌 → 查 `sessions` → 校验过期 → 得到当前用户（含 `is_admin`）；未登录返回 401。
+5. **CSRF**：变更方法（POST/PUT/DELETE）须 Cookie `csrf_token` + 请求头 `X-CSRF-Token` 双提交；前端 `static/js/api.js` 自动带上。
 
 ### 用户与管理员
 
@@ -151,7 +164,7 @@
 
 ## 3. API 端点
 
-所有 `/api/*` 均受令牌桶限流（120 次/分钟，超限 429）。
+所有 `/api/*` 均受令牌桶限流（120 次/分钟，超限 429）。路由在 `auth_routes.py` / `api_routes.py`（Flask Blueprint）。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
@@ -245,7 +258,7 @@
 
 ### 时序分桶序列（`series`）
 
-按 `exit_date` 归桶，返回 `week` / `month` / `year` 三种粒度，每桶 `{label, pnl, count, win_rate}`：
+按 `exit_date` 归桶，返回 `week` / `month` / `year` 三种粒度，每桶 `{label, pnl, count, win_rate}`。前端盈亏走势图默认粒度 **周**（`localStorage` 非法值回退为 week）：
 
 - `week`：`2026-W33`（ISO 年-周）
 - `month`：`2026-08`
@@ -312,8 +325,8 @@
   - 同股同类型 30 分钟一次：加速下跌、加速上涨
 - **到期平仓提醒**：授权用户的 open 持仓若关联了填了 `hold_days` 的模型，在推荐周期**最后一个交易日**的 10:00–11:30 与 14:00–15:00 各推一次钉钉（不拉行情、不要求风控价）。单笔从买入日起算第 N 个交易日（含买入日）；批次从**最晚一笔买入腿**起算。同用户同标的按 `trade_id` 分别去重。
 - **钉钉**：`visual/dingtalk.py` 自包含实现，读 `visual/.env` 的 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN`。同一轮多条合并成一条 markdown，按用户名分组（群消息会带账户名与代码，不含口令）。到期提醒标题为「持仓到期提醒」。未配置则只打日志。
-- **运行**：`server.py` 启动时起 daemon 线程；新增记录不会立刻盯盘，下一轮轮询（约 20s）才会纳入。也可 `python -u visual/monitor.py` 单跑，`--replay 603698.SH:2026-08-19` 做离线校准。探测脚本 `python -u visual/probe_feed.py`。
-- **测试**：`python -u visual/test/test_monitor.py`（离线 mock，不发真实钉钉）。可选 `DINGTALK_LIVE=1` 做一次真连通，会往群发测试消息。
+- **运行**：`visual/server.py`（Waitress）启动时由 `app.start_background_jobs` 起 daemon 线程；新增记录不会立刻盯盘，下一轮轮询（约 20s）才会纳入。也可 `python -u visual/monitor.py` 单跑，`--replay 603698.SH:2026-08-19` 做离线校准。探测脚本 `python -u visual/probe_feed.py`。
+- **测试**：`python -m unittest discover -s visual/test`（含 monitor 离线 mock，不发真实钉钉）。可选 `DINGTALK_LIVE=1` 做一次真连通，会往群发测试消息。
 
 ---
 
@@ -364,16 +377,23 @@
 
 | 文件 | 说明 |
 |------|------|
-| `visual/trades.py` | 后端模块：DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、统计、监控告警 |
+| `visual/server.py` | 入口：`create_app` + Waitress |
+| `visual/app.py` | Flask 工厂、静态页鉴权、后台任务（监控线程等） |
+| `visual/auth_routes.py` | `/api/auth/*` Blueprint |
+| `visual/api_routes.py` | 其余 `/api/*` Blueprint |
+| `visual/security.py` | CSP、限流、登录锁定、会话/CSRF Cookie |
+| `visual/market.py` | 行情代理、缓存、质押、`get_daily_bar` |
+| `visual/logger.py` | 日志配置 + 密钥脱敏 |
+| `visual/trades.py` | DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、统计、监控告警、录入校验 |
 | `visual/monitor.py` | 持仓监控循环 / 告警判定 / `--replay` 回放 |
 | `visual/feed.py` | AlphaFeed REST 行情接入（令牌桶 + 429 退避） |
 | `visual/dingtalk.py` | 钉钉机器人（visual 自包含） |
 | `visual/market_hours.py` | A 股交易日历与时段 |
 | `visual/probe_feed.py` | 一次性探测快照刷新频率与接口权限 |
-| `visual/test/test_monitor.py` | 监控离线单测（判定 / mock 钉钉 / 整轮覆盖 / Feed 回退） |
-| `visual/test/fixtures/` | 合成 1m 回放（非真实成交） |
-| `visual/static/trades.html` | 前端 SPA：登录、概览卡片、盈亏图表（含按模型）、记录表格、录入编辑弹窗 |
-| `visual/static/admin.html` | 管理后台：用户管理（含监控授权）+ 量化模型管理（仅 admin） |
-| `visual/server.py` | 新增 `do_POST/PUT/DELETE`、Cookie/body 解析、鉴权助手、路由分发、监控线程 |
-| `visual/static/index.html` | 左上角新增「📒 交易记录」入口按钮 |
+| `visual/test/` | `test_trades` / `test_monitor` / `test_pledge` / `test_flask_auth` / `test_logger_redact` 等 |
+| `visual/static/js/api.js` | 同源 fetch + CSRF 头 |
+| `visual/static/css/theme.css` / `js/theme.js` | 共享亮暗主题（`visual-theme`） |
+| `visual/static/trades.html` | 交易记录前端：概览、盈亏图表、记录表、录入弹窗 |
+| `visual/static/admin.html` | 管理后台：用户（含监控授权）+ 量化模型（仅 admin） |
+| `visual/static/login.html` / `index.html` | 登录页；主页含「📒 交易记录」入口 |
 | `visual/data/trades.db` | SQLite 数据库文件（运行时自动创建，不入库） |

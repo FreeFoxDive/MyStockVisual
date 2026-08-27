@@ -1,11 +1,12 @@
 # Visual — 本地股票K线可视化
 
-基于 Python HTTP Server + ECharts 5 的实时K线图表，AlphaFeed 数据源。
+基于 **Flask + Waitress** + ECharts 5 的实时K线图表，AlphaFeed / 麦蕊数据源。
 
 ## 快速启动
 
 ```bash
 cd D:/projects/stock_pick
+venv/Scripts/pip.exe install -r visual/requirements.txt
 venv/Scripts/python.exe -u visual/server.py
 # 浏览器打开 http://localhost:8888
 ```
@@ -25,23 +26,28 @@ venv/Scripts/python.exe -u visual/server.py
 | ATR 通道 | EMA13 ± 1/2/3 ATR 共6条虚线，仅日K，默认关闭 |
 | 自适应提示框 | 鼠标在不同面板显示对应数据；MACD跟随面板开关，RSI/KDJ/ATR 独立提示框开关 |
 | 股票搜索 | 模糊匹配代码/名称，实时下拉 + 键盘↑↓导航 |
-| 搜索历史 | localStorage 持久化最近10条，刷新不丢失 |
+| 搜索历史 | 跟账号持久化（兼浏览器本地），刷新不丢失 |
 | 配置持久化 | 主题/面板开关/提示框选项自动保存 |
-| 主题 | 默认亮色 / 可切换暗色 |
+| 主题 | 共享 `visual-theme`（`/css/theme.css` + `/js/theme.js`），亮/暗同步各页 |
 | 实时刷新 | 交易时段每30秒自动拉取快照 |
 | 数据缩放 | 鼠标滚轮 + 滑块，底部可拖动 |
 | 请求频率限制 | 服务端令牌桶 120次/分钟 |
-| 安全头 | CSP 限制脚本来源 + CORS 同源限制 |
-| 速率限制 | 服务端令牌桶 120次/分钟，超限返回 429 |
-| 交易记录 | 多账户登录，买卖记录增删改查，按周/月/年统计盈亏与胜率（详见 [docs/trades.md](docs/trades.md)） |
+| 安全 | CSP、同源 Cookie 会话、CSRF 双提交、登录爆破锁定；SQL 参数化；日志密钥脱敏 |
+| 交易记录 | 多账户登录，买卖记录增删改查；录入校验日期/日K振幅/成交量；按周/月/年统计盈亏与胜率（默认周，详见 [docs/trades.md](docs/trades.md)） |
 | 持仓监控 | 授权用户填齐止盈/保本/止损（止盈>保本>止损）后盘中监控，钉钉推送；关联模型的持仓在推荐周期到期日 10:00/14:00 提醒平仓 |
 
 ## 文件结构
 
 ```
 visual/
-├── server.py          # HTTP服务器 (ThreadingHTTPServer 多线程) + AlphaFeed API 代理
-├── indicators.py      # 指标计算函数 (ema / atr / macd / kdj / rsi / force_index)
+├── server.py          # 入口: Flask create_app + Waitress
+├── app.py             # Flask 工厂 / 静态页鉴权 / 后台任务启动
+├── auth_routes.py     # /api/auth/* Blueprint
+├── api_routes.py      # 其余 /api/* Blueprint
+├── security.py        # CSP / 限流 / 登录锁定 / 会话 Cookie / CSRF
+├── market.py          # 行情代理、缓存、质押等数据层
+├── logger.py          # 日志配置 + 密钥脱敏
+├── indicators.py      # 指标计算
 ├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
 ├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 钉钉)
 ├── feed.py            # AlphaFeed REST 行情接入 (令牌桶)
@@ -50,14 +56,21 @@ visual/
 ├── probe_feed.py      # 探测快照刷新频率 / 接口权限
 ├── test/
 │   ├── test_trades.py
-│   ├── test_monitor.py    # 告警判定 + mock 钉钉 + 整轮覆盖
-│   └── fixtures/          # 合成 1m 回放 (非真实成交)
-├── static/            # 前端静态文件 (URL 仍为干净路径, 如 /trades.html /admin.html)
-│   ├── index.html     # 前端单页面 (ECharts 5 CDN)
-│   ├── trades.html    # 交易记录前端 (登录注册 + 统计界面)
-│   └── admin.html     # 管理后台 (用户管理 + 量化模型管理, 仅 admin)
-├── Dockerfile         # Docker 构建文件
-├── docker-compose.yml # Docker Compose 配置
+│   ├── test_monitor.py
+│   ├── test_pledge.py
+│   ├── test_logger_redact.py
+│   ├── test_flask_auth.py
+│   └── fixtures/
+├── static/
+│   ├── css/theme.css  # 共享亮暗主题变量
+│   ├── js/theme.js    # 主题读写 (visual-theme)
+│   ├── js/api.js      # fetch + CSRF 头
+│   ├── index.html
+│   ├── trades.html
+│   ├── admin.html
+│   └── login.html
+├── Dockerfile
+├── docker-compose.yml
 ├── requirements.txt   # Python 依赖
 ├── docs/
 │   └── trades.md      # 交易记录功能文档 (数据表 / API / 统计口径)
@@ -115,7 +128,7 @@ visual/
 - 全量股票搜索列表: 24h TTL，内存 + 磁盘双层缓存；过期后 stale-while-revalidate（立即返回旧数据 + 后台刷新，不阻塞请求）
 
 ### 并发
-- 服务端 `ThreadingHTTPServer` 多线程处理请求，多个 K线/搜索/快照请求并行互不阻塞
+- Waitress 多线程处理请求；行情与交易 API 并行互不阻塞
 
 ### 限流
 - AlphaFeed 30次/分钟硬限制
@@ -124,11 +137,11 @@ visual/
 
 ### 配置持久化
 - `localStorage` key: `visual_chart_config` — 主题/面板
-- `localStorage` key: `visual_search_history` — 最近10条搜索记录
+- 搜索历史：服务端跟账号存（`users.search_history`），前端可与本地合并同步
 
 ## 依赖
 
-- Python: `alphafeed`, `numpy`, `pandas`, `akshare`, `mairui`, `pandas_market_calendars`（见 `requirements.txt`）
+- Python: `flask`, `waitress`, `alphafeed`, `numpy`, `pandas`, `akshare`, `mairui`, `pandas_market_calendars`（见 `requirements.txt`）
 - 前端: ECharts 5.5.0 (通过 CDN `https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js` 加载)
 
 ### 持仓监控配置
@@ -155,8 +168,7 @@ DINGDING_BOT_SIGN=...
 ```
 venv/Scripts/python.exe -u visual/probe_feed.py
 venv/Scripts/python.exe -u visual/monitor.py --replay 603698.SH:2026-08-19 603118.SH:2026-08-13
-venv/Scripts/python.exe -u visual/test/test_monitor.py
-venv/Scripts/python.exe -u visual/test/test_trades.py
+venv/Scripts/python.exe -m unittest discover -s visual/test
 ```
 
 钉钉真连通（会往群发一条测试消息，平时不要跑）：
@@ -169,7 +181,10 @@ venv/Scripts/python.exe -u visual/test/test_monitor.py TestDingTalk.test_live_ro
 ## 安全性
 
 ### 速率限制
-服务端实现令牌桶算法，默认 120 次/分钟。超限返回 HTTP 429。
+服务端实现令牌桶算法，默认 120 次/分钟。超限返回 HTTP 429。登录失败另有 IP 锁定。
+
+### 会话与 CSRF
+会话令牌存 SQLite，经 Flask `set_cookie` 下发（HttpOnly / SameSite=Lax）。变更 API 须 CSRF Cookie + `X-CSRF-Token` 头双提交。
 
 ### CORS
 限制为同源请求，避免跨域滥用。默认监听 localhost。
@@ -177,22 +192,27 @@ venv/Scripts/python.exe -u visual/test/test_monitor.py TestDingTalk.test_live_ro
 ### Content-Security-Policy
 所有响应包含 `Content-Security-Policy` 头，限制脚本来源仅为 `self` 和 `cdn.jsdelivr.net`。
 
-### 错误信息过滤
-敏感关键词（api key, token, auth 等）在错误响应中被过滤。
+### SQL
+`trades.py` 对用户输入使用参数化查询（`?` 占位），不拼接请求字符串进 SQL。
+
+### 日志与错误脱敏
+`logger.py` 对 password/token/api_key 等脱敏；接口错误经 `sanitize_error` 过滤敏感片段。
 
 ## 交易记录
 
 主页左上角「📒 交易记录」入口，未登录须先登录，数据按账户隔离。支持录入股票代码/名称、买入价、退出价、数量、买卖日期、买卖理由；`closed` 平仓记录须填全卖出字段才算一笔交易完整结束。
 
+**录入校验**：日期不得晚于今天；买卖价须在当日日 K 振幅 `[low, high]` 内且成交量 > 0（无 K / 停牌拒绝）；逆回购只拦未来日。前端日期控件 `max=今天`，具体错误展示在弹窗。
+
 **量化模型**：每条交易可关联一个量化模型（A–E，对齐回测管线），默认「无」。模型带推荐持仓交易日（A/B/C/D 默认 3/20/10/7，E 不提醒），到期日 10:00 / 14:00 钉钉提醒平仓；批次按最晚买入日起算。模型列表全局共享，由管理员增删改查（含 `name`、`description`、`hold_days`），普通用户只读；「删除」为软删除（停用，不物理删除、不动交易记录），历史统计永久可追溯。买卖理由新增「动力红转」（卖出）「动力绿转」（买入）「动力蓝转」（买入）。
 
 **账户管理**：已关闭公开自助注册，新用户只能由管理员添加。管理员在「用户管理」区可添加 / 列表 / 删除 / 重置密码用户；仅单一管理员，由环境变量在首次启动时引导创建。
 
-统计维度：按周/月/年查看总盈亏、胜率、盈亏比、最大单笔盈利/亏损、平均持仓天数，及按股票、按量化模型汇总。完整的数据表结构、API 端点、统计公式见 [docs/trades.md](docs/trades.md)。
+统计维度：按周/月/年查看总盈亏、胜率、盈亏比、最大单笔盈利/亏损、平均持仓天数，及按股票、按量化模型汇总（图表默认 **周**）。完整的数据表结构、API 端点、统计公式见 [docs/trades.md](docs/trades.md)。
 
 - 数据库：SQLite，文件 `data/trades.db`（运行时自动创建，`data/` 不入库）
 - 口令：PBKDF2-SHA256（20 万次迭代）+ 随机盐
-- 会话：`secrets.token_hex(32)`，30 天过期，`HttpOnly` + `SameSite=Lax` Cookie
+- 会话：`secrets.token_hex(32)`，30 天过期，`HttpOnly` + `SameSite=Lax` Cookie（SQLite token，非 Flask 签名 session）
 - 管理员：`.env` 中配置 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 作为口令权威来源；服务启动时若无管理员则自动创建，已有管理员则同步口令（改 `.env` 后重启即生效）
 
 ## Docker 部署

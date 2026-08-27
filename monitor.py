@@ -106,6 +106,12 @@ def get_status():
 
 def _set_status(**kwargs):
     with _lock:
+        if "last_error" in kwargs and kwargs["last_error"] is not None:
+            try:
+                from logger import redact_message
+                kwargs["last_error"] = redact_message(kwargs["last_error"])
+            except Exception:
+                pass
         _status.update(kwargs)
 
 

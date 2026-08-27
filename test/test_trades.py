@@ -19,7 +19,8 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date as _date
+from datetime import date as _date, timedelta
+from unittest import mock
 
 # visual/ 不是包（无 __init__.py），把其目录加入 sys.path 后直接 import trades
 _VISUAL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -38,6 +39,13 @@ def _week_label(d):
 # 测试期间把 PBKDF2 迭代次数调低, 口令哈希测试从 ~0.1s/次 降到毫秒级
 trades.PBKDF2_ITERATIONS = 1000
 
+# 默认宽松日K: 覆盖既有用例价格区间, 跳过真实行情拉取
+_PERMISSIVE_BAR = {"high": 99999.0, "low": 0.01, "volume": 1_000_000, "open": 10.0, "close": 10.0}
+
+
+def _permissive_bar(symbol, date_str):
+    return dict(_PERMISSIVE_BAR, date=str(date_str)[:10])
+
 
 class TradesTestCase(unittest.TestCase):
     """每个测试用独立的临时 DB 文件, 保证互相隔离。
@@ -50,6 +58,9 @@ class TradesTestCase(unittest.TestCase):
         self.db_path = os.path.join(self._tmp.name, "test_trades.db")
         trades.init_db(self.db_path)
         trades.PBKDF2_ITERATIONS = 1000
+        self._bar_patch = mock.patch("market.get_daily_bar", side_effect=_permissive_bar)
+        self._bar_patch.start()
+        self.addCleanup(self._bar_patch.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -1425,6 +1436,96 @@ class TestSearchHistory(TradesTestCase):
 
     def test_unknown_user_get_empty(self):
         self.assertEqual(trades.get_search_history(999999), [])
+
+
+class TestMarketBarValidation(TradesTestCase):
+    """未来日 / 振幅 / 零成交量校验 (mock get_daily_bar)。"""
+
+    def test_reject_future_entry_date(self):
+        uid = self._make_user()
+        future = (_date.today() + timedelta(days=3)).isoformat()
+        with self.assertRaises(ValueError) as cm:
+            trades.create_trade(uid, self._open(entry_date=future))
+        self.assertIn("不能晚于今天", str(cm.exception))
+
+    def test_reject_price_out_of_range(self):
+        uid = self._make_user()
+        self._bar_patch.stop()
+
+        def bar(symbol, date_str):
+            return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 1000}
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            with self.assertRaises(ValueError) as cm:
+                trades.create_trade(uid, self._open(entry=12.0, entry_date="2026-08-01"))
+            self.assertIn("不在当日振幅", str(cm.exception))
+
+    def test_reject_zero_volume(self):
+        uid = self._make_user()
+        self._bar_patch.stop()
+
+        def bar(symbol, date_str):
+            return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 0}
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            with self.assertRaises(ValueError) as cm:
+                trades.create_trade(uid, self._open(entry=10.5, entry_date="2026-08-01"))
+            self.assertIn("成交量为0", str(cm.exception))
+
+    def test_reject_missing_bar(self):
+        uid = self._make_user()
+        self._bar_patch.stop()
+        with mock.patch("market.get_daily_bar", return_value=None):
+            with self.assertRaises(ValueError) as cm:
+                trades.create_trade(uid, self._open(entry_date="2026-08-01"))
+            self.assertIn("无日K数据", str(cm.exception))
+
+    def test_ok_within_range(self):
+        uid = self._make_user()
+        self._bar_patch.stop()
+
+        def bar(symbol, date_str):
+            return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 1000}
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            t = trades.create_trade(uid, self._open(entry=10.5, entry_date="2026-08-01"))
+            self.assertEqual(t["entry_price"], 10.5)
+
+    def test_batch_leg_error_prefix(self):
+        uid = self._make_user()
+        self._bar_patch.stop()
+        calls = {"n": 0}
+
+        def bar(symbol, date_str):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 1000}
+            return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 0}
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            with self.assertRaises(ValueError) as cm:
+                trades.create_trade(uid, {
+                    "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+                    "take_profit": 12, "stop_loss": 8, "breakeven": 10,
+                    "legs": [
+                        {"side": "buy", "price": 10.5, "quantity": 100, "date": "2026-08-01"},
+                        {"side": "sell", "price": 10.8, "quantity": 100, "date": "2026-08-05"},
+                    ],
+                })
+            self.assertIn("第2条腿", str(cm.exception))
+            self.assertIn("成交量为0", str(cm.exception))
+
+    def test_repo_future_only(self):
+        """逆回购只拦未来日，不查 OHLC。"""
+        uid = self._make_user()
+        future = (_date.today() + timedelta(days=2)).isoformat()
+        with self.assertRaises(ValueError) as cm:
+            trades.create_trade(uid, {
+                "type": "reverse_repo", "symbol": "204001.SH",
+                "entry_price": 1.5, "quantity": 10000,
+                "entry_date": future, "repo_days": 1,
+            })
+        self.assertIn("不能晚于今天", str(cm.exception))
 
 
 if __name__ == "__main__":

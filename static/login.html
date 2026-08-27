@@ -4,44 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>登录 — Visual</title>
+<link rel="stylesheet" href="/css/theme.css">
 <style>
-/* ═══════════════ CSS Variables (与 index.html 对齐) ═══════════════ */
-:root {
-  --bg: #ffffff;
-  --bg-card: #ffffff;
-  --text: #2c3e50;
-  --text-secondary: #6c757d;
-  --border: #e9ecef;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --input-bg: #ffffff;
-  --input-border: #dee2e6;
-  --btn-active: #007bff;
-  --btn-active-text: #ffffff;
-  --up-color: #ef232a;
-}
-
-[data-theme="dark"] {
-  --bg: #0f1117;
-  --bg-card: #1a1d26;
-  --text: #d1d4dc;
-  --text-secondary: #787b86;
-  --border: #2a2e39;
-  --shadow: 0 1px 3px rgba(0,0,0,0.3);
-  --input-bg: #2a2e39;
-  --input-border: #363a45;
-  --btn-active: #2962ff;
-  --btn-active-text: #ffffff;
-}
-
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-  transition: background 0.3s, color 0.3s;
-}
-
 .wrap {
   min-height: 100vh;
   display: flex; align-items: center; justify-content: center;
@@ -63,27 +27,16 @@ body {
 #login-view .row { display: flex; gap: 10px; margin-top: 18px; }
 #login-view .err { color: var(--up-color); font-size: 13px; margin-top: 12px; min-height: 18px; }
 
-input, button {
-  padding: 6px 10px;
-  border: 1px solid var(--input-border);
-  border-radius: 4px;
-  background: var(--input-bg);
-  color: var(--text);
-  font-size: 13px;
-  outline: none;
-  transition: border-color 0.2s;
-}
 #login-view input { width: 100%; }
-input:focus { border-color: var(--btn-active); }
-button { cursor: pointer; padding: 8px 14px; transition: all 0.15s; }
-button.primary { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); flex: 1; }
-button.ghost { background: transparent; border-color: transparent; }
+button.primary { flex: 1; }
 
 .theme-toggle {
   position: fixed; top: 12px; right: 12px;
   font-size: 16px;
 }
 </style>
+<script src="/js/theme.js"></script>
+<script src="/js/api.js"></script>
 </head>
 <body>
 
@@ -103,19 +56,8 @@ button.ghost { background: transparent; border-color: transparent; }
 </div>
 
 <script>
-async function api(path, options = {}) {
-  const opts = {
-    credentials: 'same-origin',
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-  };
-  const res = await fetch(path, opts);
-  let data = null;
-  try { data = await res.json(); } catch (e) { /* empty body */ }
-  if (!res.ok) {
-    throw new Error((data && data.error) || ('请求失败 (' + res.status + ')'));
-  }
-  return data;
+async function api(path, options) {
+  return VisualApi.api(path, options);
 }
 
 function setAuthErr(msg) { document.getElementById('auth-err').textContent = msg || ''; }
@@ -137,33 +79,12 @@ async function doLogin() {
   } catch (e) { setAuthErr(e.message); }
 }
 
-// 回车登录
 ['login-username', 'login-password'].forEach(id => {
   document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 });
 
-// 主题切换 (与主页共享 visual-theme 键)
-function toggleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme');
-  const next = cur === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  try { localStorage.setItem('visual-theme', JSON.stringify({ theme: next, auto: false })); } catch (e) {}
-  syncThemeBtn();
-}
-function syncThemeBtn() {
-  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-  document.getElementById('theme-btn').textContent = dark ? '☀️' : '🌙';
-}
-try {
-  let theme = null;
-  const shared = localStorage.getItem('visual-theme');
-  if (shared) { try { theme = JSON.parse(shared).theme; } catch (e) { theme = null; } }
-  if (!theme) theme = localStorage.getItem('trades-theme');  // 兼容旧键
-  if (theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
-  syncThemeBtn();
-} catch (e) {}
+VisualTheme.init({ buttonId: 'theme-btn' });
 
-// 已登录则直接跳回 next; 否则聚焦用户名输入框
 (async function init() {
   try {
     await api('/api/auth/me');

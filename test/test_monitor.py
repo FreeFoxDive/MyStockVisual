@@ -557,6 +557,20 @@ class PollPipelineTestCase(unittest.TestCase):
         trades.init_db(os.path.join(self._tmp.name, "test_monitor.db"))
         monitor.clear_buffers()
         self.now = datetime(2026, 8, 21, 10, 0)
+        # create_trade 会校验日K; 离线单测用宽松 mock
+        self._bar_patch = mock.patch(
+            "market.get_daily_bar",
+            side_effect=lambda symbol, date_str: {
+                "date": str(date_str)[:10],
+                "high": 99999.0,
+                "low": 0.01,
+                "volume": 1_000_000,
+                "open": 10.0,
+                "close": 10.0,
+            },
+        )
+        self._bar_patch.start()
+        self.addCleanup(self._bar_patch.stop)
 
     def tearDown(self):
         monitor.clear_buffers()

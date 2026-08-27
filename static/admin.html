@@ -4,100 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>⚙️ 管理后台 — Visual</title>
+<link rel="stylesheet" href="/css/theme.css">
 <style>
-/* ═══════════════ CSS Variables (与 trades.html 对齐) ═══════════════ */
-:root {
-  --bg: #ffffff;
-  --bg-panel: #f8f9fa;
-  --bg-card: #ffffff;
-  --text: #2c3e50;
-  --text-secondary: #6c757d;
-  --border: #e9ecef;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --toolbar-bg: #f1f3f5;
-  --input-bg: #ffffff;
-  --input-border: #dee2e6;
-  --btn-bg: #ffffff;
-  --btn-hover: #e9ecef;
-  --btn-active: #007bff;
-  --btn-active-text: #ffffff;
-  --up-color: #ef232a;
-  --down-color: #14b143;
-  --scrollbar-thumb: #c1c1c1;
-}
-
-[data-theme="dark"] {
-  --bg: #0f1117;
-  --bg-panel: #14171f;
-  --bg-card: #1a1d26;
-  --text: #d1d4dc;
-  --text-secondary: #787b86;
-  --border: #2a2e39;
-  --shadow: 0 1px 3px rgba(0,0,0,0.3);
-  --toolbar-bg: #1a1d26;
-  --input-bg: #2a2e39;
-  --input-border: #363a45;
-  --btn-bg: #2a2e39;
-  --btn-hover: #363a45;
-  --btn-active: #2962ff;
-  --btn-active-text: #ffffff;
-  --scrollbar-thumb: #363a45;
-}
-
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-  transition: background 0.3s, color 0.3s;
-}
-
-/* ═══════════════ Toolbar ═══════════════ */
-#toolbar {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 16px;
-  background: var(--toolbar-bg);
-  border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 20;
-}
-#toolbar .title { font-weight: 700; font-size: 15px; }
-#toolbar .spacer { flex: 1; }
-#toolbar .user { color: var(--text-secondary); font-size: 13px; }
-
-button {
-  padding: 6px 12px;
-  border: 1px solid var(--input-border);
-  border-radius: 4px;
-  background: var(--btn-bg);
-  color: var(--text);
-  font-size: 13px; cursor: pointer;
-  transition: all 0.15s; white-space: nowrap;
-}
-button:hover { background: var(--btn-hover); }
-button.primary { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
-button.danger { color: var(--up-color); }
-button.active { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-
-input, select, textarea {
-  padding: 6px 10px;
-  border: 1px solid var(--input-border);
-  border-radius: 4px;
-  background: var(--input-bg);
-  color: var(--text);
-  font-size: 13px; outline: none;
-  transition: border-color 0.2s;
-}
-input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
-
-/* ═══════════════ 主视图 ═══════════════ */
+/* ═══════════════ 主视图 (页面专属) ═══════════════ */
 #main-view { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
 
 .section-title { font-size: 15px; font-weight: 700; margin: 26px 0 12px; display: flex; align-items: center; gap: 8px; scroll-margin-top: 70px; }
 .section-title .bar { width: 4px; height: 16px; background: var(--btn-active); border-radius: 2px; }
 
-/* 表格 */
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 600px; }
 th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -109,31 +23,9 @@ tr:hover td { background: var(--btn-hover); }
 .badge.closed { background: rgba(20,177,67,0.12); color: var(--down-color); }
 .reason-cell { max-width: 260px; white-space: normal; font-size: 12px; color: var(--text-secondary); }
 .empty { text-align: center; color: var(--text-secondary); padding: 30px 0; }
-
-/* 弹窗 */
-.modal-mask {
-  display: none; position: fixed; inset: 0;
-  background: rgba(0,0,0,0.45); z-index: 100;
-  align-items: flex-start; justify-content: center;
-  padding: 40px 16px; overflow-y: auto;
-}
-.modal-mask.show { display: flex; }
-.modal {
-  background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 10px; width: 100%; max-width: 560px; padding: 20px 24px;
-  box-shadow: 0 10px 40px rgba(0,0,0,0.25);
-}
-.modal h2 { font-size: 17px; margin-bottom: 16px; }
-.modal label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
-.modal input, .modal select, .modal textarea { width: 100%; }
-.modal textarea { resize: vertical; min-height: 50px; }
-.modal .field { margin-bottom: 14px; }
-.modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
-.modal .err { color: var(--up-color); font-size: 13px; margin-top: 10px; }
-
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
 </style>
+<script src="/js/theme.js"></script>
+<script src="/js/api.js"></script>
 </head>
 <body>
 
@@ -143,7 +35,7 @@ tr:hover td { background: var(--btn-hover); }
   <button onclick="location.href='/trades.html'" title="返回交易记录">← 交易记录</button>
   <span class="spacer"></span>
   <span class="user" id="toolbar-user"></span>
-  <button onclick="toggleTheme()" title="切换主题">🌙</button>
+  <button id="btn-theme" onclick="toggleTheme()" title="切换主题">🌙</button>
   <button id="btn-logout" class="danger" onclick="doLogout()" style="display:none">退出登录</button>
 </div>
 
@@ -227,30 +119,11 @@ function escHtml(s) {
 }
 
 async function api(path, options = {}) {
-  const opts = {
-    credentials: 'same-origin',
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-  };
-  const res = await fetch(path, opts);
-  let data = null;
-  try { data = await res.json(); } catch (e) { /* empty body */ }
-  if (res.status === 401) redirectToLogin();
-  if (!res.ok) {
-    throw new Error((data && data.error) || ('请求失败 (' + res.status + ')'));
-  }
-  return data;
+  return VisualApi.api(path, options, { onUnauthorized: redirectToLogin });
 }
 
 function redirectToLogin() {
   location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search);
-}
-
-function toggleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme');
-  const next = cur === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  try { localStorage.setItem('trades-theme', next); } catch (e) {}
 }
 
 async function checkAuth() {
@@ -482,11 +355,8 @@ function bindEnter(id, fn) {
   document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
 }
 
-// 初始化主题
-try {
-  const saved = localStorage.getItem('trades-theme');
-  if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
-} catch (e) {}
+// 初始化主题 (与其它页共享 visual-theme)
+VisualTheme.init({ buttonId: 'btn-theme' });
 
 // 锚点定位 (#users / #models)
 function applyHash() {

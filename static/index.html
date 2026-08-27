@@ -5,58 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>📈 股票K线图 — Visual</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<link rel="stylesheet" href="/css/theme.css">
+<script src="/js/theme.js"></script>
+<script src="/js/api.js"></script>
 <style>
-/* ═══════════════ CSS Variables ═══════════ */
-:root {
-  --bg: #ffffff;
-  --bg-panel: #f8f9fa;
-  --bg-card: #ffffff;
-  --text: #2c3e50;
-  --text-secondary: #6c757d;
-  --border: #e9ecef;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --toolbar-bg: #f1f3f5;
-  --input-bg: #ffffff;
-  --input-border: #dee2e6;
-  --btn-bg: #ffffff;
-  --btn-hover: #e9ecef;
-  --btn-active: #007bff;
-  --btn-active-text: #ffffff;
-  --up-color: #ef232a;
-  --down-color: #14b143;
-  --scrollbar-thumb: #c1c1c1;
-}
-
-[data-theme="dark"] {
-  --bg: #0f1117;
-  --bg-panel: #14171f;
-  --bg-card: #1a1d26;
-  --text: #d1d4dc;
-  --text-secondary: #787b86;
-  --border: #2a2e39;
-  --shadow: 0 1px 3px rgba(0,0,0,0.3);
-  --toolbar-bg: #1a1d26;
-  --input-bg: #2a2e39;
-  --input-border: #363a45;
-  --btn-bg: #2a2e39;
-  --btn-hover: #363a45;
-  --btn-active: #2962ff;
-  --btn-active-text: #ffffff;
-  --scrollbar-thumb: #363a45;
-}
-
-/* ═══════════════ Base ═══════════ */
-* { margin:0; padding:0; box-sizing:border-box; }
+/* ═══════════════ 页面专属 (主题变量见 theme.css) ═══════════════ */
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: var(--bg);
-  color: var(--text);
   height: 100vh;
   height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: background 0.3s, color 0.3s;
+  min-height: 0;
 }
 
 /* ═══════════════ Toolbar ═══════════ */
@@ -70,6 +30,7 @@ body {
   flex-shrink: 0;
   z-index: 10;
   flex-wrap: wrap;
+  position: static;
 }
 
 #toolbar .search-wrap {
@@ -345,8 +306,18 @@ body {
 (function () {
   const _fetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
+    init = init ? Object.assign({}, init) : {};
+    const method = ((init.method || 'GET') + '').toUpperCase();
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    if (method !== 'GET' && method !== 'HEAD' && typeof url === 'string' && url.startsWith('/api/')) {
+      const headers = new Headers(init.headers || {});
+      const csrf = (typeof VisualApi !== 'undefined' && VisualApi.getCookie)
+        ? VisualApi.getCookie('csrf_token') : '';
+      if (csrf && !headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', csrf);
+      init.headers = headers;
+      if (!init.credentials) init.credentials = 'same-origin';
+    }
     return _fetch(input, init).then(res => {
-      const url = typeof input === 'string' ? input : (input && input.url) || '';
       if (res.status === 401 && typeof url === 'string' && url.startsWith('/api/')) {
         location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search);
       }
@@ -471,13 +442,8 @@ function detectSystemTheme() {
 
 function applyTheme(theme) {
   STATE.theme = theme;
-  document.documentElement.setAttribute('data-theme', theme);
-  const btn = document.getElementById('btn-theme');
-  btn.textContent = STATE._themeAuto ? (theme === 'dark' ? '🌙 auto' : '☀️ auto') : (theme === 'dark' ? '☀️' : '🌙');
-  btn.title = STATE._themeAuto ? '自动模式(点击锁定)' : '手动模式(点击切换)';
-  try {
-    localStorage.setItem('visual-theme', JSON.stringify({ theme: theme, auto: STATE._themeAuto }));
-  } catch (e) {}
+  VisualTheme.apply(theme, { buttonId: 'btn-theme', auto: STATE._themeAuto });
+  VisualTheme.save(theme, STATE._themeAuto);
 }
 
 function toggleTheme() {
@@ -938,17 +904,10 @@ function loadConfig() {
     chkChannel.checked = !!cfg.channel;
     STATE.channelEnabled = !!cfg.channel;
     // 主题: 优先共享键 visual-theme (与交易记录页同步), 回退到本页配置
-    let sharedTheme = null, sharedAuto = null;
-    try {
-      const shared = localStorage.getItem('visual-theme');
-      if (shared) {
-        const st = JSON.parse(shared);
-        if (st && st.theme) { sharedTheme = st.theme; sharedAuto = st.auto === true; }
-      }
-    } catch (e) {}
-    if (sharedTheme) {
-      STATE._themeAuto = sharedAuto === true;
-      if (!STATE._themeAuto) applyTheme(sharedTheme);
+    const shared = VisualTheme.load();
+    if (shared.theme && (localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY))) {
+      STATE._themeAuto = shared.auto === true;
+      if (!STATE._themeAuto) applyTheme(shared.theme);
     } else if (cfg.theme) {
       // themeAuto=true → 自动; 否则 → 锁定 (旧配置无themeAuto视为手动)
       STATE._themeAuto = cfg.themeAuto === true;
