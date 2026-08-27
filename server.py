@@ -1306,6 +1306,8 @@ class VisualHandler(BaseHTTPRequestHandler):
             })
         elif path == "/api/auth/me":
             return self._handle_auth_me()
+        elif path == "/api/me/search-history":
+            return self._handle_search_history_get()
         elif path == "/api/admin/users":
             return self._handle_admin_users_list()
         elif path == "/api/monitor/status":
@@ -1373,14 +1375,26 @@ class VisualHandler(BaseHTTPRequestHandler):
             return None
         return trades.get_session(token)
 
+    def _request_is_https(self):
+        xfp = self.headers.get("X-Forwarded-Proto", "").strip().lower()
+        if xfp == "https":
+            return True
+        # Cloudflare 常见头: CF-Visitor: {"scheme":"https"}
+        cf = self.headers.get("CF-Visitor", "")
+        return "https" in cf.lower()
+
     def _set_session_cookie(self, token, clear=False):
-        # 仅当反代转发 X-Forwarded-Proto: https 时加 Secure，保证本地 127.0.0.1 纯 HTTP
-        # 仍可登录（浏览器会拒绝在 http 下回传带 Secure 的 cookie）。Caddy 未配置转发头
-        # 时优雅降级为不带 Secure，与历史行为一致。
-        secure = " Secure" if self.headers.get("X-Forwarded-Proto", "").strip().lower() == "https" else ""
+        # 仅当反代/CDN 标明 https 时加 Secure，保证本地 127.0.0.1 纯 HTTP
+        # 仍可登录（浏览器会拒绝在 http 下回传带 Secure 的 cookie）。
+        from email.utils import formatdate
+        secure = " Secure" if self._request_is_https() else ""
         if clear:
             return f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-        return f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}{secure}"
+        expires = formatdate(timeval=time.time() + SESSION_MAX_AGE, usegmt=True)
+        return (
+            f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; "
+            f"Max-Age={SESSION_MAX_AGE}; Expires={expires}{secure}"
+        )
 
     def _read_json_body(self):
         try:
@@ -1438,6 +1452,8 @@ class VisualHandler(BaseHTTPRequestHandler):
                 return self._send_json({"error": "请求过于频繁，请稍后重试"}, 429)
         if path == "/api/fees":
             return self._handle_fees_put()
+        if path == "/api/me/search-history":
+            return self._handle_search_history_put()
         # /api/models/{id}
         if path.startswith("/api/models/"):
             mid = path[len("/api/models/"):]
@@ -1521,11 +1537,30 @@ class VisualHandler(BaseHTTPRequestHandler):
             "monitor_enabled": bool(user.get("is_admin") or user.get("monitor_enabled")),
         })
 
+    def _handle_search_history_get(self):
+        user = self._require_user()
+        if not user:
+            return
+        return self._send_json({"history": trades.get_search_history(user["id"])})
+
+    def _handle_search_history_put(self):
+        user = self._require_user()
+        if not user:
+            return
+        body = self._read_json_body()
+        if body is None:
+            return self._send_error("请求体无效 JSON", 400)
+        history = trades.set_search_history(
+            user["id"], body.get("history") or [], allow_clear=False,
+        )
+        return self._send_json({"ok": True, "history": history})
+
     # ── API: 交易记录 ──
     def _require_user(self):
         user = self._current_user()
         if not user:
             self._send_error("未登录", 401)
+            return None
         return user
 
     def _require_admin(self):

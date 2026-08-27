@@ -741,30 +741,128 @@ function updateInfo(data) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SEARCH HISTORY (localStorage)
+// SEARCH HISTORY (localStorage + 服务端跟账号同步)
 // ═══════════════════════════════════════════════════════════════
 const HIST_KEY = 'visual_search_history';
 const HIST_MAX = 10;
+const LS_CACHE_BUDGET = 2 * 1024 * 1024; // vk_/vi_ 缓存上限 2MB，保留历史/配置键
+const LS_KEEP_KEYS = new Set([HIST_KEY, 'visual_chart_config', 'visual-theme', 'trades-theme']);
+
+function _cleanLocalStorage() {
+  try {
+    let total = 0;
+    const cacheEntries = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      const v = localStorage.getItem(k) || '';
+      total += k.length + v.length;
+      if ((k.startsWith('vk_') || k.startsWith('vi_')) && !LS_KEEP_KEYS.has(k)) {
+        let ts = 0;
+        try { ts = (JSON.parse(v) || {}).ts || 0; } catch (_) {}
+        cacheEntries.push({ k, ts, size: k.length + v.length });
+      }
+    }
+    if (total <= LS_CACHE_BUDGET) return;
+    cacheEntries.sort((a, b) => a.ts - b.ts); // 先删最旧
+    for (const e of cacheEntries) {
+      if (total <= LS_CACHE_BUDGET) break;
+      localStorage.removeItem(e.k);
+      total -= e.size;
+    }
+  } catch (_) { /* ignore */ }
+}
 
 function loadHistory() {
   try {
-    return JSON.parse(localStorage.getItem(HIST_KEY) || '[]');
+    return sortHistory(JSON.parse(localStorage.getItem(HIST_KEY) || '[]'));
   } catch (e) { return []; }
 }
 
 function saveHistory(list) {
+  const sorted = sortHistory(list).slice(0, HIST_MAX);
   try {
-    localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX)));
-  } catch (e) { /* quota exceeded, ignore */ }
+    localStorage.setItem(HIST_KEY, JSON.stringify(sorted));
+  } catch (e) {
+    _cleanLocalStorage();
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(sorted)); } catch (_) {}
+  }
+}
+
+function sortHistory(list) {
+  // 有 ts：按 ts 降序在前；无 ts 旧数据一律排后面（保持原相对顺序）
+  // 同 symbol：优先带 ts；都有 ts 取较大；都无 ts 保留先出现的
+  if (!Array.isArray(list) || !list.length) return [];
+  const best = new Map();
+  list.forEach((item, i) => {
+    if (!item || item.symbol == null) return;
+    const symbol = String(item.symbol).trim();
+    if (!symbol) return;
+    const name = String(item.name || symbol).trim() || symbol;
+    let ts = null;
+    if (item.ts != null && item.ts !== '') {
+      const n = Number(item.ts);
+      if (Number.isFinite(n) && n >= 0) ts = n;
+    }
+    const entry = { symbol, name, _i: i };
+    if (ts != null) entry.ts = ts;
+    const prev = best.get(symbol);
+    if (!prev) {
+      best.set(symbol, entry);
+      return;
+    }
+    const prevTs = prev.ts;
+    if (ts != null && (prevTs == null || ts >= prevTs)) best.set(symbol, entry);
+  });
+  const withTs = [];
+  const withoutTs = [];
+  for (const e of best.values()) {
+    if (e.ts != null) withTs.push(e);
+    else withoutTs.push(e);
+  }
+  withTs.sort((a, b) => b.ts - a.ts);
+  withoutTs.sort((a, b) => a._i - b._i);
+  return withTs.concat(withoutTs).slice(0, HIST_MAX).map(e => {
+    const row = { symbol: e.symbol, name: e.name };
+    if (e.ts != null) row.ts = e.ts;
+    return row;
+  });
+}
+
+function mergeHistory(local, server) {
+  return sortHistory([...(Array.isArray(server) ? server : []), ...(Array.isArray(local) ? local : [])]);
+}
+
+function pushHistoryToServer(list) {
+  const payload = sortHistory(list).slice(0, HIST_MAX);
+  // 本地被清缓存后可能是 []，禁止上传空列表抹掉服务端已有历史
+  if (!payload.length) return;
+  fetch('/api/me/search-history', {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ history: payload }),
+  }).catch(() => {});
+}
+
+async function syncHistoryWithServer() {
+  try {
+    const resp = await fetch('/api/me/search-history', { credentials: 'same-origin' });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const merged = mergeHistory(loadHistory(), data.history || []);
+    saveHistory(merged);
+    // 仅在有内容时回写；空 merged 表示两边都没有，无需 PUT
+    if (merged.length) pushHistoryToServer(merged);
+    renderHistoryTags();
+  } catch (_) { /* 未登录或网络失败: 仅用本地 */ }
 }
 
 function addToHistory(symbol, name) {
-  const list = loadHistory();
-  // 去重：删除旧条目
-  const filtered = list.filter(h => h.symbol !== symbol);
-  // 插到最前面
-  filtered.unshift({ symbol, name });
-  saveHistory(filtered);
+  const list = loadHistory().filter(h => h.symbol !== symbol);
+  list.unshift({ symbol, name, ts: Date.now() });
+  saveHistory(list);
+  pushHistoryToServer(list);
   renderHistoryTags();
 }
 
@@ -1728,7 +1826,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Restore last search from history
+  // Restore last search from history (本地) + 与账号同步
   renderHistoryTags();
   const hist = loadHistory();
   if (hist.length > 0) {
@@ -1744,15 +1842,30 @@ document.addEventListener('DOMContentLoaded', () => {
     STATE.symbol = jumpSymbol;
   }
 
-  // First load: 等容器高度确定后再渲染 (解决F11前后高度不准)
+  // First load: 本地无历史时先等服务端同步，再拉 K 线（解决清站点数据后记录丢失）
   const container = document.getElementById('chart-container');
   let initDone = false;
   const initRender = () => { if (!initDone) { initDone = true; refresh(); } };
-  if (container.clientHeight > 0) {
-    requestAnimationFrame(() => requestAnimationFrame(initRender));
+  const scheduleInit = () => {
+    if (container.clientHeight > 0) {
+      requestAnimationFrame(() => requestAnimationFrame(initRender));
+    } else {
+      const ro = new ResizeObserver(() => { if (container.clientHeight > 0) { ro.disconnect(); initRender(); } });
+      ro.observe(container);
+    }
+  };
+  if (!hist.length && !jumpSymbol) {
+    syncHistoryWithServer().then(() => {
+      const synced = loadHistory();
+      if (synced.length > 0) {
+        document.getElementById('symbol-input').value = synced[0].symbol;
+        STATE.symbol = synced[0].symbol;
+      }
+      scheduleInit();
+    }).catch(scheduleInit);
   } else {
-    const ro = new ResizeObserver(() => { if (container.clientHeight > 0) { ro.disconnect(); initRender(); } });
-    ro.observe(container);
+    syncHistoryWithServer();
+    scheduleInit();
   }
 
   // 时间 1s 刷新

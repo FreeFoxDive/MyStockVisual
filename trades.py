@@ -251,6 +251,9 @@ def init_db(db_path=None):
             conn.execute(
                 "ALTER TABLE users ADD COLUMN monitor_enabled INTEGER NOT NULL DEFAULT 0"
             )
+        # 迁移: 搜索/浏览历史 (JSON 数组, 跟账号走, 不依赖浏览器 localStorage)
+        if "search_history" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN search_history TEXT")
         # 迁移: 旧库 trades 表补风控价格列 (可空, 老数据零改动)
         for col in ("take_profit", "stop_loss", "breakeven"):
             if col not in tcols:
@@ -604,6 +607,98 @@ def delete_session(token):
         conn.commit()
     finally:
         conn.close()
+
+
+# ── 搜索/浏览历史 (跟账号持久化) ──
+SEARCH_HISTORY_MAX = 10
+
+
+def _normalize_search_history(raw):
+    """校验为 [{symbol, name, ts?}, ...]，最多 SEARCH_HISTORY_MAX 条。
+
+    排序：有 ts 的按 ts 降序在前；无 ts 的旧数据一律排在后面（保持原相对顺序）。
+    同 symbol：优先保留带 ts 的；都有 ts 取较大者；都无 ts 保留先出现的。
+    """
+    if not isinstance(raw, list):
+        return []
+    best = {}
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip()[:32]
+        name = str(item.get("name") or symbol).strip()[:64]
+        if not symbol:
+            continue
+        name = name or symbol
+        ts = None
+        if "ts" in item and item.get("ts") is not None:
+            try:
+                ts_val = int(item["ts"])
+                if ts_val >= 0:
+                    ts = ts_val
+            except (TypeError, ValueError):
+                ts = None
+        entry = {"symbol": symbol, "name": name, "_i": i}
+        if ts is not None:
+            entry["ts"] = ts
+        prev = best.get(symbol)
+        if prev is None:
+            best[symbol] = entry
+            continue
+        prev_ts = prev.get("ts")
+        if ts is not None and (prev_ts is None or ts >= prev_ts):
+            best[symbol] = entry
+        # else: 当前无 ts 而 prev 有 ts → 保留 prev；都无 ts → 保留先出现的 prev
+
+    with_ts = [e for e in best.values() if "ts" in e]
+    without_ts = [e for e in best.values() if "ts" not in e]
+    with_ts.sort(key=lambda e: e["ts"], reverse=True)
+    without_ts.sort(key=lambda e: e["_i"])
+    out = []
+    for e in with_ts + without_ts:
+        row = {"symbol": e["symbol"], "name": e["name"]}
+        if "ts" in e:
+            row["ts"] = e["ts"]
+        out.append(row)
+        if len(out) >= SEARCH_HISTORY_MAX:
+            break
+    return out
+
+
+def get_search_history(user_id):
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT search_history FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["search_history"]:
+        return []
+    try:
+        raw = json.loads(row["search_history"])
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return _normalize_search_history(raw)
+
+
+def set_search_history(user_id, history, *, allow_clear=True):
+    """写入搜索历史。allow_clear=False 时，禁止用空列表抹掉已有记录（防客户端清缓存误上传）。"""
+    cleaned = _normalize_search_history(history)
+    if not cleaned and not allow_clear:
+        existing = get_search_history(user_id)
+        if existing:
+            return existing
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET search_history=? WHERE id=?",
+            (json.dumps(cleaned, ensure_ascii=False), user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cleaned
 
 
 # ── 用户管理 (仅 admin) ──

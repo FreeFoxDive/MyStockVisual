@@ -6,6 +6,7 @@
 - 口令哈希与校验（PBKDF2-SHA256）
 - 鉴权：create_user / login / 会话过期与撤销
 - 用户管理：list / count / delete / reset_password
+- 搜索/浏览历史：迁移 / 归一化 / 去重截断 / 账号隔离
 - 模型 CRUD：软删除 / 恢复 / 名称唯一性 / 停用后同名复用
 - 交易 CRUD：字段校验 / 归一化 / 账户隔离 / 过滤 / 分页
 - 统计：summary / series(周/月/年) / by_symbol / by_model / open_positions / 日期区间
@@ -897,6 +898,7 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
         for col in ("take_profit", "stop_loss", "breakeven", "repo_days"):
             self.assertIn(col, tcols)
         self.assertIn("monitor_enabled", ucols)
+        self.assertIn("search_history", ucols)
         self.assertIn("monitor_alerts", tables)
 
     def test_risk_prices_optional_and_clear(self):
@@ -1184,6 +1186,216 @@ class TestReverseRepo(TradesTestCase):
             uid, {"from": "2026-08-20", "to": "2026-08-24"}, fee_config=trades.DEFAULT_FEES,
         )
         self.assertEqual(total2, 0)
+
+
+class TestSearchHistory(TradesTestCase):
+    def test_migration_adds_search_history_column(self):
+        with trades.get_conn() as conn:
+            ucols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        self.assertIn("search_history", ucols)
+
+    def test_empty_by_default(self):
+        uid = self._make_user()
+        self.assertEqual(trades.get_search_history(uid), [])
+
+    def test_roundtrip_with_ts(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "000001.SZ", "name": "平安银行", "ts": 2000},
+            {"symbol": "600000.SH", "name": "浦发银行", "ts": 1000},
+        ])
+        self.assertEqual(saved, [
+            {"symbol": "000001.SZ", "name": "平安银行", "ts": 2000},
+            {"symbol": "600000.SH", "name": "浦发银行", "ts": 1000},
+        ])
+        self.assertEqual(trades.get_search_history(uid), saved)
+
+    def test_sort_by_ts_descending(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "600000.SH", "name": "浦发", "ts": 100},
+            {"symbol": "000001.SZ", "name": "平安", "ts": 300},
+            {"symbol": "300750.SZ", "name": "宁德", "ts": 200},
+        ])
+        self.assertEqual([h["symbol"] for h in saved], [
+            "000001.SZ", "300750.SZ", "600000.SH",
+        ])
+
+    def test_legacy_without_ts_goes_after_timestamped(self):
+        """无 ts 的旧记录排在有 ts 的后面，且不伪造 ts。"""
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "LEGACY.SZ", "name": "旧股"},
+            {"symbol": "000001.SZ", "name": "平安", "ts": 100},
+            {"symbol": "OLD2.SZ", "name": "旧2"},
+            {"symbol": "600000.SH", "name": "浦发", "ts": 200},
+        ])
+        self.assertEqual([h["symbol"] for h in saved], [
+            "600000.SH", "000001.SZ", "LEGACY.SZ", "OLD2.SZ",
+        ])
+        self.assertIn("ts", saved[0])
+        self.assertIn("ts", saved[1])
+        self.assertNotIn("ts", saved[2])
+        self.assertNotIn("ts", saved[3])
+
+    def test_legacy_only_preserves_relative_order(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "000001.SZ", "name": "平安银行"},
+            {"symbol": "600000.SH", "name": "浦发银行"},
+            {"symbol": "300750.SZ", "name": "宁德时代"},
+        ])
+        self.assertEqual([h["symbol"] for h in saved], [
+            "000001.SZ", "600000.SH", "300750.SZ",
+        ])
+        for h in saved:
+            self.assertNotIn("ts", h)
+
+    def test_dedupe_prefers_timestamped_over_legacy(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "000001.SZ", "name": "无时间戳版"},
+            {"symbol": "000001.SZ", "name": "有时间戳版", "ts": 50},
+        ])
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["name"], "有时间戳版")
+        self.assertEqual(saved[0]["ts"], 50)
+
+    def test_dedupe_keeps_newer_ts(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "000001.SZ", "name": "旧名", "ts": 100},
+            {"symbol": "000001.SZ", "name": "新名", "ts": 200},
+            {"symbol": "600000.SH", "name": "浦发", "ts": 150},
+        ])
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(saved[0], {"symbol": "000001.SZ", "name": "新名", "ts": 200})
+        self.assertEqual(saved[1]["symbol"], "600000.SH")
+
+    def test_dedupe_legacy_keeps_first(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "000001.SZ", "name": "先出现"},
+            {"symbol": "000001.SZ", "name": "后出现应丢"},
+        ])
+        self.assertEqual(saved, [{"symbol": "000001.SZ", "name": "先出现"}])
+
+    def test_invalid_ts_treated_as_legacy(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "BAD.SZ", "name": "坏", "ts": "x"},
+            {"symbol": "NEG.SZ", "name": "负", "ts": -1},
+            {"symbol": "OK.SZ", "name": "好", "ts": 10},
+        ])
+        self.assertEqual(saved[0]["symbol"], "OK.SZ")
+        self.assertEqual([h["symbol"] for h in saved[1:]], ["BAD.SZ", "NEG.SZ"])
+        self.assertNotIn("ts", saved[1])
+        self.assertNotIn("ts", saved[2])
+
+    def test_merge_local_new_with_server_legacy(self):
+        """模拟：服务端旧无 ts + 本地新搜索带 ts → 新的在前。"""
+        merged = trades._normalize_search_history([
+            {"symbol": "LEGACY.SZ", "name": "旧"},
+            {"symbol": "NEW.SZ", "name": "新", "ts": 999},
+            {"symbol": "MID.SZ", "name": "中", "ts": 500},
+        ])
+        self.assertEqual([h["symbol"] for h in merged], ["NEW.SZ", "MID.SZ", "LEGACY.SZ"])
+
+    def test_truncate_keeps_timestamped_first(self):
+        uid = self._make_user()
+        raw = (
+            [{"symbol": f"L{i}.SZ", "name": f"旧{i}"} for i in range(8)]
+            + [{"symbol": f"T{i}.SZ", "name": f"新{i}", "ts": 100 + i} for i in range(5)]
+        )
+        saved = trades.set_search_history(uid, raw)
+        self.assertEqual(len(saved), trades.SEARCH_HISTORY_MAX)
+        # 5 条有 ts（按 ts 降序）应全部在前，再补无 ts
+        self.assertTrue(all("ts" in h for h in saved[:5]))
+        self.assertEqual(saved[0]["symbol"], "T4.SZ")
+        self.assertTrue(all("ts" not in h for h in saved[5:]))
+
+    def test_normalize_skips_invalid(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            None,
+            "not-a-dict",
+            {"symbol": "", "name": "空代码"},
+            {"symbol": "  000001.SZ  ", "name": "  平安  ", "ts": 50},
+            {"name": "无代码"},
+            {"symbol": "600000.SH", "ts": 40},
+        ])
+        self.assertEqual(saved[0]["symbol"], "000001.SZ")
+        self.assertEqual(saved[0]["name"], "平安")
+        self.assertEqual(saved[1]["symbol"], "600000.SH")
+        self.assertEqual(saved[1]["name"], "600000.SH")
+
+    def test_corrupt_json_returns_empty(self):
+        uid = self._make_user()
+        with trades.get_conn() as conn:
+            conn.execute(
+                "UPDATE users SET search_history=? WHERE id=?",
+                ("{not-json", uid),
+            )
+            conn.commit()
+        self.assertEqual(trades.get_search_history(uid), [])
+
+    def test_isolation_between_users(self):
+        a = self._make_user("alice", "secret123")
+        b = self._make_user("bob", "secret123")
+        trades.set_search_history(a, [{"symbol": "000001.SZ", "name": "平安银行", "ts": 1}])
+        trades.set_search_history(b, [{"symbol": "600000.SH", "name": "浦发银行", "ts": 1}])
+        self.assertEqual(trades.get_search_history(a)[0]["symbol"], "000001.SZ")
+        self.assertEqual(trades.get_search_history(b)[0]["symbol"], "600000.SH")
+
+    def test_overwrite_and_clear(self):
+        uid = self._make_user()
+        trades.set_search_history(uid, [{"symbol": "000001.SZ", "name": "平安银行", "ts": 1}])
+        cleared = trades.set_search_history(uid, [])
+        self.assertEqual(cleared, [])
+        self.assertEqual(trades.get_search_history(uid), [])
+
+    def test_empty_put_preserves_existing_when_clear_disallowed(self):
+        """模拟浏览器清缓存后上传 []：不得抹掉服务端已有记录。"""
+        uid = self._make_user()
+        trades.set_search_history(uid, [
+            {"symbol": "000001.SZ", "name": "平安银行", "ts": 100},
+            {"symbol": "600000.SH", "name": "浦发银行", "ts": 50},
+        ])
+        kept = trades.set_search_history(uid, [], allow_clear=False)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(kept[0]["symbol"], "000001.SZ")
+        self.assertEqual(trades.get_search_history(uid), kept)
+
+    def test_empty_put_allowed_when_explicit_clear(self):
+        uid = self._make_user()
+        trades.set_search_history(uid, [{"symbol": "000001.SZ", "name": "平安", "ts": 1}])
+        trades.set_search_history(uid, [], allow_clear=True)
+        self.assertEqual(trades.get_search_history(uid), [])
+
+    def test_sync_scenario_local_empty_server_intact(self):
+        """本地空 + 服务端有数据：合并后应保留服务端，且不应因 [] 上传而清空。"""
+        merged = trades._normalize_search_history([
+            {"symbol": "000636.SZ", "name": "风华", "ts": 500},
+        ])
+        self.assertEqual(len(merged), 1)
+        # 客户端若误传 []，服务端 guard 仍保留
+        uid = self._make_user()
+        trades.set_search_history(uid, merged)
+        after = trades.set_search_history(uid, [], allow_clear=False)
+        self.assertEqual(after, merged)
+
+    def test_explicit_null_ts_treated_as_legacy(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [
+            {"symbol": "NULL.SZ", "name": "空ts", "ts": None},
+            {"symbol": "OK.SZ", "name": "好", "ts": 1},
+        ])
+        self.assertEqual(saved[0]["symbol"], "OK.SZ")
+        self.assertEqual(saved[1]["symbol"], "NULL.SZ")
+        self.assertNotIn("ts", saved[1])
+
+    def test_unknown_user_get_empty(self):
+        self.assertEqual(trades.get_search_history(999999), [])
 
 
 if __name__ == "__main__":
