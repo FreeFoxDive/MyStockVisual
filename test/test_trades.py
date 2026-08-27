@@ -1187,6 +1187,35 @@ class TestReverseRepo(TradesTestCase):
         )
         self.assertEqual(total2, 0)
 
+    def test_repo_status_filter_uses_exit_date(self):
+        """逆回购 status 恒 open: 筛持仓中只含未到期, 筛已平仓含已到期。"""
+        from datetime import timedelta
+        uid = self._make_user("admin", "secret123", is_admin=True)
+        today = trades._now().date()
+        # 已到期: 买入日 = 今天-3 → 到期约今天-2
+        matured = trades.create_trade(uid, {
+            "type": "reverse_repo", "symbol": "204001.SH", "entry_price": 2.0,
+            "quantity": 100000,
+            "entry_date": (today - timedelta(days=3)).isoformat(),
+        })
+        self.assertLessEqual(matured["exit_date"], today.isoformat())
+        # 未到期: 买入日 = 今天 → 到期至少明天
+        active = trades.create_trade(uid, {
+            "type": "reverse_repo", "symbol": "131810.SZ", "entry_price": 2.0,
+            "quantity": 100000, "entry_date": today.isoformat(),
+        })
+        self.assertGreater(active["exit_date"], today.isoformat())
+        open_recs, open_n = trades.list_trades(uid, {"status": "open"})
+        closed_recs, closed_n = trades.list_trades(uid, {"status": "closed"})
+        open_ids = {r["id"] for r in open_recs}
+        closed_ids = {r["id"] for r in closed_recs}
+        self.assertIn(active["id"], open_ids)
+        self.assertNotIn(matured["id"], open_ids)
+        self.assertIn(matured["id"], closed_ids)
+        self.assertNotIn(active["id"], closed_ids)
+        self.assertEqual(open_n, 1)
+        self.assertEqual(closed_n, 1)
+
 
 class TestSearchHistory(TradesTestCase):
     def test_migration_adds_search_history_column(self):

@@ -1669,8 +1669,26 @@ def list_trades(user_id, filters=None, fee_config=None):
     args = [user_id]
 
     if filters.get("status"):
-        sql += " AND status=?"
-        args.append(filters["status"])
+        st = filters["status"]
+        # 逆回购 DB status 恒为 open, 到期由 exit_date 判定 (与前端徽章一致)
+        if st == "open":
+            today = _now().strftime("%Y-%m-%d")
+            sql += (
+                " AND ((type!='reverse_repo' AND status='open')"
+                " OR (type='reverse_repo' AND exit_date>?))"
+            )
+            args.append(today)
+        elif st == "closed":
+            today = _now().strftime("%Y-%m-%d")
+            sql += (
+                " AND ((type!='reverse_repo' AND status='closed')"
+                " OR (type='reverse_repo' AND exit_date IS NOT NULL"
+                " AND exit_date<=?))"
+            )
+            args.append(today)
+        else:
+            sql += " AND status=?"
+            args.append(st)
     if filters.get("symbol"):
         sql += " AND symbol=?"
         args.append(filters["symbol"].upper())
