@@ -42,7 +42,7 @@ function sortHistory(list) {
   }
   withTs.sort((a, b) => b.ts - a.ts);
   withoutTs.sort((a, b) => a._i - b._i);
-  return withTs.concat(withoutTs).slice(0, 10).map(e => {
+  return withTs.concat(withoutTs).slice(0, 15).map(e => {
     const row = { symbol: e.symbol, name: e.name };
     if (e.ts != null) row.ts = e.ts;
     return row;

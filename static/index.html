@@ -721,7 +721,7 @@ function updateInfo(data) {
 // SEARCH HISTORY (localStorage + 服务端跟账号同步)
 // ═══════════════════════════════════════════════════════════════
 const HIST_KEY = 'visual_search_history';
-const HIST_MAX = 10;
+const HIST_MAX = 15;
 const LS_CACHE_BUDGET = 2 * 1024 * 1024; // vk_/vi_ 缓存上限 2MB，保留历史/配置键
 const LS_KEEP_KEYS = new Set([HIST_KEY, 'visual_chart_config', 'visual-theme', 'trades-theme']);
 

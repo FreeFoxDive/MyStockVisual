@@ -1344,15 +1344,15 @@ class TestSearchHistory(TradesTestCase):
     def test_truncate_keeps_timestamped_first(self):
         uid = self._make_user()
         raw = (
-            [{"symbol": f"L{i}.SZ", "name": f"旧{i}"} for i in range(8)]
-            + [{"symbol": f"T{i}.SZ", "name": f"新{i}", "ts": 100 + i} for i in range(5)]
+            [{"symbol": f"L{i}.SZ", "name": f"旧{i}"} for i in range(10)]
+            + [{"symbol": f"T{i}.SZ", "name": f"新{i}", "ts": 100 + i} for i in range(8)]
         )
         saved = trades.set_search_history(uid, raw)
         self.assertEqual(len(saved), trades.SEARCH_HISTORY_MAX)
-        # 5 条有 ts（按 ts 降序）应全部在前，再补无 ts
-        self.assertTrue(all("ts" in h for h in saved[:5]))
-        self.assertEqual(saved[0]["symbol"], "T4.SZ")
-        self.assertTrue(all("ts" not in h for h in saved[5:]))
+        # 8 条有 ts（按 ts 降序）应全部在前，再补无 ts
+        self.assertTrue(all("ts" in h for h in saved[:8]))
+        self.assertEqual(saved[0]["symbol"], "T7.SZ")
+        self.assertTrue(all("ts" not in h for h in saved[8:]))
 
     def test_normalize_skips_invalid(self):
         uid = self._make_user()
