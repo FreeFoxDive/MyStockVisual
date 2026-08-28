@@ -1528,5 +1528,83 @@ class TestMarketBarValidation(TradesTestCase):
         self.assertIn("不能晚于今天", str(cm.exception))
 
 
+class TestGetDailyBarTodayFallback(unittest.TestCase):
+    """get_daily_bar 当日无历史 K 时回退快照。"""
+
+    def setUp(self):
+        import market as market_mod
+        self.market = market_mod
+
+    def test_today_fallback_from_quote_when_no_history(self):
+        today = _date.today().isoformat()
+        quote = {"open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 10000}
+        with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
+            with mock.patch.object(self.market, "fetch_quote", return_value=quote):
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    bar = self.market.get_daily_bar("601058.SH", today)
+        self.assertIsNotNone(bar)
+        self.assertEqual(bar["date"], today)
+        self.assertEqual(bar["high"], 11.0)
+        self.assertEqual(bar["low"], 9.5)
+        self.assertEqual(bar["close"], 10.5)
+        self.assertEqual(bar["volume"], 10000)
+
+    def test_today_prefers_history_over_quote(self):
+        today = _date.today().isoformat()
+        import pandas as pd
+        idx = pd.Timestamp(today)
+        df = pd.DataFrame([{"open": 8.0, "high": 9.0, "low": 7.5, "close": 8.5, "volume": 5000}], index=[idx])
+        with mock.patch.object(self.market, "fetch_kline", return_value=(df, "赛轮轮胎")):
+            with mock.patch.object(self.market, "fetch_quote") as fq:
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    bar = self.market.get_daily_bar("601058.SH", today)
+        fq.assert_not_called()
+        self.assertEqual(bar["high"], 9.0)
+
+    def test_past_date_no_quote_fallback(self):
+        with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
+            with mock.patch.object(self.market, "fetch_quote") as fq:
+                bar = self.market.get_daily_bar("601058.SH", "2026-01-05")
+        fq.assert_not_called()
+        self.assertIsNone(bar)
+
+    def test_today_zero_volume_no_fallback(self):
+        today = _date.today().isoformat()
+        with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
+            with mock.patch.object(self.market, "fetch_quote", return_value={
+                "open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 0,
+            }):
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    bar = self.market.get_daily_bar("601058.SH", today)
+        self.assertIsNone(bar)
+
+    def test_today_trade_entry_via_quote_bar(self):
+        """端到端: 当日卖出价在快照振幅内可通过校验。"""
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        db_path = os.path.join(tmp.name, "test_trades.db")
+        trades.init_db(db_path)
+        uid = trades.create_user("bob", "secret123")
+        today = trades._now().date().isoformat()
+        entry_date = "2026-08-01"
+        import pandas as pd
+        df = pd.DataFrame(
+            [{"open": 8.0, "high": 99999.0, "low": 0.01, "close": 8.5, "volume": 5000}],
+            index=[pd.Timestamp(entry_date)],
+        )
+        quote = {"open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 10000}
+        with mock.patch.object(self.market, "fetch_kline", return_value=(df, "赛轮轮胎")):
+            with mock.patch.object(self.market, "fetch_quote", return_value=quote):
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    t = trades.create_trade(uid, {
+                        "symbol": "601058.SH", "name": "赛轮轮胎", "status": "closed",
+                        "entry_price": 10.0, "exit_price": 10.5, "quantity": 100,
+                        "entry_date": entry_date, "exit_date": today,
+                        "entry_reason": "突破买入", "exit_reason": "止盈(达到目标价)",
+                    })
+        self.assertEqual(t["exit_date"], today)
+        self.assertEqual(t["exit_price"], 10.5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

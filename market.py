@@ -1071,8 +1071,69 @@ def normalize_symbol(raw):
     return f"{raw}.SH"
 
 
+def _row_to_daily_bar(d, row):
+    """把 K 线行转成 get_daily_bar 返回 dict；无效返回 None。"""
+    vol = row.get("volume")
+    try:
+        volume = int(vol) if vol is not None and not (isinstance(vol, float) and (np.isnan(vol) or np.isinf(vol))) else 0
+    except (TypeError, ValueError):
+        volume = 0
+    high = _safe_float(row.get("high"))
+    low = _safe_float(row.get("low"))
+    if high is None or low is None:
+        return None
+    return {
+        "date": d.isoformat(),
+        "open": _safe_float(row.get("open")),
+        "high": high,
+        "low": low,
+        "close": _safe_float(row.get("close")),
+        "volume": volume,
+    }
+
+
+def _daily_bar_from_quote(symbol, target):
+    """历史日K尚无当天 bar 时, 用实时快照拼一根 (仅今天 + 交易日 + 成交量>0)。"""
+    from datetime import date as _date
+
+    today = market_hours.now().date()
+    if target != today:
+        return None
+    if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
+        return None
+    q = fetch_quote(symbol)
+    if not q:
+        return None
+    high = _safe_float(q.get("high"))
+    low = _safe_float(q.get("low"))
+    if high is None or low is None:
+        return None
+    vol = q.get("volume")
+    try:
+        volume = int(vol) if vol is not None else 0
+    except (TypeError, ValueError):
+        volume = 0
+    if volume <= 0:
+        return None
+    close = _safe_float(q.get("last_price"))
+    if close is None:
+        close = _safe_float(q.get("open"))
+    return {
+        "date": target.isoformat(),
+        "open": _safe_float(q.get("open")),
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
+    }
+
+
 def get_daily_bar(symbol, date_str):
-    """取指定交易日日K: {date, open, high, low, close, volume}；无该日 bar 返回 None。"""
+    """取指定交易日日K: {date, open, high, low, close, volume}；无该日 bar 返回 None。
+
+    历史接口 (麦蕊 stock_history / 基金日K) 盘中往往尚无当天完整 bar;
+    若 date 为今天且为交易日, 回退到实时快照 open/high/low/last_price/volume。
+    """
     from datetime import date as _date
 
     symbol = normalize_symbol(symbol)
@@ -1081,45 +1142,35 @@ def get_daily_bar(symbol, date_str):
     except (ValueError, TypeError):
         return None
 
-    today = _date.today()
+    today = market_hours.now().date()
     # 回溯交易日约 = 自然日*1.6 + 缓冲；下限 30、上限 1500
     natural = max((today - target).days + 10, 30)
     count = min(max(int(natural * 1.6) + 20, 30), 1500)
 
+    df = None
     try:
         df, _ = fetch_kline(symbol, "1d", count)
     except Exception as e:
         log.warning(f"get_daily_bar 失败 {symbol} {date_str}: {e}")
-        return None
-    if df is None or len(df) == 0:
-        return None
 
-    for idx, row in df.iterrows():
-        try:
-            if hasattr(idx, "date"):
-                d = idx.date()
-            else:
-                d = _date.fromisoformat(str(idx)[:10])
-        except (ValueError, TypeError):
-            continue
-        if d != target:
-            continue
-        vol = row.get("volume")
-        try:
-            volume = int(vol) if vol is not None and not (isinstance(vol, float) and (np.isnan(vol) or np.isinf(vol))) else 0
-        except (TypeError, ValueError):
-            volume = 0
-        high = _safe_float(row.get("high"))
-        low = _safe_float(row.get("low"))
-        if high is None or low is None:
-            return None
-        return {
-            "date": d.isoformat(),
-            "open": _safe_float(row.get("open")),
-            "high": high,
-            "low": low,
-            "close": _safe_float(row.get("close")),
-            "volume": volume,
-        }
+    if df is not None and len(df) > 0:
+        for idx, row in df.iterrows():
+            try:
+                if hasattr(idx, "date"):
+                    d = idx.date()
+                else:
+                    d = _date.fromisoformat(str(idx)[:10])
+            except (ValueError, TypeError):
+                continue
+            if d != target:
+                continue
+            bar = _row_to_daily_bar(d, row)
+            if bar is not None:
+                return bar
+
+    quote_bar = _daily_bar_from_quote(symbol, target)
+    if quote_bar is not None:
+        return quote_bar
+
     return None
 
