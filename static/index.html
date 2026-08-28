@@ -124,11 +124,21 @@ body {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  margin-left: auto;
   font-size: 13px;
   white-space: nowrap;
+  flex-shrink: 0;
+}
+#toolbar .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  justify-content: flex-end;
 }
 .info-group .name { color: var(--text); font-weight: 600; }
+#info-code { color: var(--text-secondary); font-weight: 600; }
+#info-time { color: var(--text-secondary); font-size: 11px; }
 .info-group .price { font-size: 16px; font-weight: 700; }
 .info-group .change { font-size: 13px; font-weight: 600; }
 .info-group .up { color: var(--up-color); }
@@ -233,27 +243,8 @@ body {
 
 <!-- ═══════════════ Toolbar ═══════════ -->
 <div id="toolbar">
-  <button id="trades-entry" title="交易记录统计" onclick="location.href='/trades.html'">📒 交易记录</button>
-  <span class="search-wrap">
-    <input type="text" id="symbol-input" value="000001.SH" placeholder="输入代码或名称搜索..."
-           autocomplete="off">
-    <div class="search-dropdown" id="search-dropdown"></div>
-  </span>
-  <button id="btn-1d" class="active" onclick="switchPeriod('1d')">日K</button>
-  <button id="btn-1w" onclick="switchPeriod('1w')">周K</button>
-  <button id="btn-1M" onclick="switchPeriod('1M')">月K</button>
-  <button id="btn-intraday" onclick="switchPeriod('intraday')">分时</button>
-  <button id="btn-1m" onclick="switchPeriod('1m')">1分</button>
-  <button id="btn-5m" onclick="switchPeriod('5m')">5分</button>
-  <button id="btn-15m" onclick="switchPeriod('15m')">15分</button>
-  <button id="btn-30m" onclick="switchPeriod('30m')">30分</button>
-  <button id="btn-60m" onclick="switchPeriod('60m')">60分</button>
-  <span class="separator"></span>
-  <button id="btn-refresh" onclick="refresh()" title="手动刷新数据">🔄 刷新</button>
-  <button id="btn-theme" onclick="toggleTheme()" title="切换暗色/亮色主题">🌙</button>
-
   <div class="info-group">
-    <span id="info-code" style="color:var(--text-secondary);font-size:12px;margin-right:4px"></span>
+    <span id="info-code"></span>
     <span class="name" id="info-name">—</span>
     <a id="info-guba" href="#" target="_blank" rel="noopener noreferrer" style="display:none" title="东财股吧">股吧 ↗</a>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
@@ -263,7 +254,27 @@ body {
     <span class="oh" id="info-open">开 —</span>
     <span class="oh" id="info-high">高 —</span>
     <span class="oh" id="info-low">低 —</span>
-    <span style="color:var(--text-secondary);font-size:11px" id="info-time"></span>
+    <span id="info-time"></span>
+  </div>
+  <div class="toolbar-right">
+    <button id="trades-entry" title="交易记录统计" onclick="location.href='/trades.html'">📒 交易记录</button>
+    <span class="search-wrap">
+      <input type="text" id="symbol-input" value="000001.SH" placeholder="输入代码或名称搜索..."
+             autocomplete="off">
+      <div class="search-dropdown" id="search-dropdown"></div>
+    </span>
+    <button id="btn-1d" class="active" onclick="switchPeriod('1d')">日K</button>
+    <button id="btn-1w" onclick="switchPeriod('1w')">周K</button>
+    <button id="btn-1M" onclick="switchPeriod('1M')">月K</button>
+    <button id="btn-intraday" onclick="switchPeriod('intraday')">分时</button>
+    <button id="btn-1m" onclick="switchPeriod('1m')">1分</button>
+    <button id="btn-5m" onclick="switchPeriod('5m')">5分</button>
+    <button id="btn-15m" onclick="switchPeriod('15m')">15分</button>
+    <button id="btn-30m" onclick="switchPeriod('30m')">30分</button>
+    <button id="btn-60m" onclick="switchPeriod('60m')">60分</button>
+    <span class="separator"></span>
+    <button id="btn-refresh" onclick="refresh()" title="手动刷新数据">🔄 刷新</button>
+    <button id="btn-theme" onclick="toggleTheme()" title="切换暗色/亮色主题">🌙</button>
   </div>
 </div>
 
