@@ -59,9 +59,60 @@ input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
 /* 图表面板 */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .chart-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.chart-box--hold { overflow: visible; }
 .chart-box .chart-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-secondary); }
 .chart { width: 100%; height: 280px; }
-@media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+.hold-pie-canvas { flex: 0 0 60%; width: 60%; height: 300px; min-width: 0; overflow: visible; }
+.hold-pie-layout { display: flex; align-items: stretch; gap: 8px; min-height: 300px; overflow: visible; }
+.hold-legend { flex: 0 1 40%; max-width: 40%; min-width: 0; list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; max-height: 300px; font-size: 12px; }
+.hold-legend-item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.hold-legend-item:hover { background: var(--btn-hover); }
+.hold-legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+.hold-legend-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text); text-align: left;
+}
+.hold-legend-meta {
+  display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+  min-width: 0; white-space: nowrap; flex-shrink: 0;
+}
+.hold-legend-models {
+  display: inline-flex; align-items: center; flex-wrap: nowrap;
+  font-size: 10px; max-width: 10em; overflow: hidden;
+}
+.hold-model-tag { font-weight: 600; white-space: nowrap; }
+.hold-model-tag-sep { color: var(--text-secondary); margin: 0 1px; flex-shrink: 0; }
+.hold-legend-sep { color: var(--text-secondary); font-size: 10px; line-height: 1; flex-shrink: 0; }
+.hold-legend-pct {
+  font-weight: 600; font-variant-numeric: tabular-nums; font-size: 12px;
+}
+.hold-model-name { font-weight: 600; }
+.hold-model-table-wrap { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.hold-model-table { width: 100%; min-width: 0; font-size: 12px; border-collapse: collapse; }
+.hold-model-table th, .hold-model-table td { padding: 4px 8px; white-space: nowrap; border-bottom: 1px solid var(--border); }
+.hold-model-table th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600; font-size: 11px; }
+.hold-model-table tr:last-child td { border-bottom: none; }
+.hold-model-table tbody tr { cursor: pointer; }
+.hold-model-table tbody tr:hover td { background: var(--btn-hover); }
+@media (max-width: 900px) {
+  .charts { grid-template-columns: 1fr; }
+  .hold-pie-layout { flex-direction: column; }
+  .hold-pie-canvas { flex: none; width: 100%; }
+  .hold-legend {
+    max-height: 160px; max-width: 100%; width: 100%;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 4px 12px;
+  }
+  .hold-legend-item { width: min(100%, 360px); }
+}
 
 /* 过滤栏 */
 .filter-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
@@ -292,7 +343,19 @@ td.neg { color: var(--down-color); font-weight: 600; }
     </div>
   </div>
   <div class="charts">
-    <div class="chart-box"><div class="chart-title">持仓金额分布</div><div class="chart" id="hold-pie-chart"></div></div>
+    <div class="chart-box chart-box--hold">
+      <div class="chart-title">持仓金额分布</div>
+      <div class="hold-pie-layout">
+        <div class="chart hold-pie-canvas" id="hold-pie-chart"></div>
+        <ul class="hold-legend" id="hold-pie-legend"></ul>
+      </div>
+      <div class="hold-model-table-wrap" id="hold-model-table-wrap">
+        <table class="hold-model-table">
+          <thead><tr><th>模型</th><th>笔数</th><th>持仓金额</th><th>占比</th></tr></thead>
+          <tbody id="hold-model-tbody"></tbody>
+        </table>
+      </div>
+    </div>
     <div class="chart-box"><div class="chart-title">按期间盈亏</div><div class="chart" id="pnl-chart"></div></div>
     <div class="chart-box"><div class="chart-title">按股票盈亏</div><div class="chart" id="symbol-chart"></div></div>
     <div class="chart-box"><div class="chart-title">按模型盈亏</div><div class="chart" id="model-chart"></div></div>
@@ -945,6 +1008,7 @@ async function loadStats() {
   renderSymbolChart();
   renderModelChart();
   renderHoldChart();
+  renderHoldModelTable();
 }
 
 // 现价：持仓优先全量 + 当前页平仓 (受筛选/分页影响), 失败保留旧值, 仅首次就失败的记 null
@@ -973,6 +1037,7 @@ async function refreshQuotes(fresh) {
   renderStatCards(state.stats.summary);
   renderTable();
   renderHoldChart();
+  renderHoldModelTable();
 }
 
 // 持仓聚合 (仅未平仓): 市值 = Σ现价×数量, 浮盈亏 = Σ(现价-买入价)×数量
@@ -995,6 +1060,14 @@ function fmtMoney(v, signed = false) {
   if (v === null || v === undefined) return '—';
   const sign = signed && v > 0 ? '+' : '';
   return sign + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+}
+
+// 股价：最多三位小数，去掉尾部无意义 0（1.760 → 1.76）
+function fmtPrice(v) {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return Number(n.toFixed(3)).toString();
 }
 
 // 金额缩写: 达到万位显示 n.xx万, 千位显示 n.xx千, 否则原值 (两位小数); signed 时正数带 +
@@ -1185,6 +1258,18 @@ function downColor() {
 function neutralColor() {
   return getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#2c3e50';
 }
+function textColor() {
+  return neutralColor();
+}
+
+function refreshChartsForTheme() {
+  if (!state.stats) return;
+  renderPnlChart();
+  renderSymbolChart();
+  renderModelChart();
+  renderHoldChart();
+  renderHoldModelTable();
+}
 
 function renderPnlChart() {
   const el = document.getElementById('pnl-chart');
@@ -1251,10 +1336,80 @@ function renderModelChart() {
   });
 }
 
-// 持仓金额分布饼图：扇区大小 = 现价×数量(市值, 现价缺失回退成本), 按市值降序；圆环中心显示持仓净盈亏
-function renderHoldChart() {
-  const el = document.getElementById('hold-pie-chart');
-  if (!state.holdChart) state.holdChart = echarts.init(el);
+const PIE_COLORS = [
+  '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
+  '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b8d0',
+  '#ff9f7f', '#8d98b3',
+];
+
+function modelColors() {
+  const s = getComputedStyle(document.documentElement);
+  const palette = [];
+  for (let i = 0; i < 8; i++) {
+    const c = s.getPropertyValue(`--model-c${i}`).trim();
+    if (c) palette.push(c);
+  }
+  const none = s.getPropertyValue('--model-c-none').trim();
+  return { palette, none: none || '#787b86' };
+}
+
+function modelColorIndex(modelId) {
+  if (modelId == null || modelId === undefined) return -1;
+  const sorted = [...(state.models || [])].sort((a, b) => a.id - b.id);
+  const idx = sorted.findIndex(m => m.id === modelId);
+  return idx >= 0 ? idx : Math.abs(Number(modelId)) % 100;
+}
+
+function modelColor(modelId) {
+  const { palette, none } = modelColors();
+  if (modelId == null || modelId === undefined) return none;
+  const idx = modelColorIndex(modelId);
+  if (idx < 0) return none;
+  return palette[idx % palette.length] || none;
+}
+
+function uniqueModelIds(modelIds) {
+  const seen = new Set();
+  const ids = [];
+  for (const id of modelIds) {
+    const key = id == null ? '__none__' : String(id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function modelShortName(modelId) {
+  if (modelId === null || modelId === undefined) return '无';
+  const m = state.models.find(x => x.id === modelId);
+  if (!m) return '?';
+  const token = String(m.name || '').trim().split(/\s+/)[0];
+  return token || m.name;
+}
+
+function modelTagsForIds(modelIds) {
+  const seen = new Set();
+  const tags = [];
+  for (const id of modelIds) {
+    const tag = modelShortName(id);
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    tags.push(tag);
+  }
+  return tags.join('|');
+}
+
+function renderModelTagsHtml(modelIds) {
+  const ids = uniqueModelIds(modelIds);
+  if (!ids.length) return '';
+  return ids.map((id, i) => {
+    const bar = i > 0 ? '<span class="hold-model-tag-sep">|</span>' : '';
+    return bar + `<span class="hold-model-tag" style="color:${modelColor(id)}">${escHtml(modelShortName(id))}</span>`;
+  }).join('');
+}
+
+function buildOpenPositionRows() {
   const positions = (state.stats && state.stats.open_positions) || [];
   const rows = [];
   for (const p of positions) {
@@ -1262,12 +1417,12 @@ function renderHoldChart() {
     const q = state.quotes[p.symbol];
     const price = (q && q.last_price != null) ? q.last_price : null;
     const cost = p.entry_price * p.quantity;
-    // 现价未取到(限流/盘后/超时)时回退成本价, 保证「有持仓就画饼图」, 不再误显示「暂无持仓」
     const mv = price != null ? price * p.quantity : cost;
     if (mv <= 0) continue;
     rows.push({
       name: p.name || p.symbol,
       symbol: p.symbol,
+      model_id: p.model_id != null ? p.model_id : null,
       price,
       qty: p.quantity,
       mv,
@@ -1275,59 +1430,251 @@ function renderHoldChart() {
       floatPnl: price != null ? (price - p.entry_price) * p.quantity : null,
     });
   }
+  return rows;
+}
+
+function buildOpenHoldRows() {
+  const map = new Map();
+  for (const r of buildOpenPositionRows()) {
+    let row = map.get(r.symbol);
+    if (!row) {
+      row = {
+        name: r.name,
+        symbol: r.symbol,
+        mv: 0,
+        cost: 0,
+        floatPnl: 0,
+        allQuoted: true,
+        modelIds: [],
+      };
+      map.set(r.symbol, row);
+    }
+    row.mv += r.mv;
+    row.cost += r.cost;
+    if (r.floatPnl != null) row.floatPnl += r.floatPnl;
+    else row.allQuoted = false;
+    row.modelIds.push(r.model_id);
+  }
+  const rows = [...map.values()].map(row => ({
+    name: row.name,
+    symbol: row.symbol,
+    mv: row.mv,
+    cost: row.cost,
+    floatPnl: row.allQuoted ? row.floatPnl : null,
+    modelIds: row.modelIds,
+    models: modelTagsForIds(row.modelIds),
+  }));
   rows.sort((a, b) => b.mv - a.mv);
+  return rows;
+}
+
+function buildModelHoldRows(stockRows) {
+  const map = new Map();
+  for (const r of stockRows) {
+    const key = r.model_id == null ? '__none__' : String(r.model_id);
+    let m = map.get(key);
+    if (!m) {
+      m = {
+        model_id: r.model_id,
+        name: modelLabel(r.model_id),
+        mv: 0,
+        cost: 0,
+        count: 0,
+        floatPnl: 0,
+        allQuoted: true,
+      };
+      map.set(key, m);
+    }
+    m.mv += r.mv;
+    m.cost += r.cost;
+    m.count += 1;
+    if (r.floatPnl != null) m.floatPnl += r.floatPnl;
+    else m.allQuoted = false;
+  }
+  return [...map.values()].sort((a, b) => b.mv - a.mv);
+}
+
+function holdEmptyChart(chart) {
+  chart.off('click');
+  chart.clear();
+  chart.setOption({
+    graphic: [],
+    title: { text: '暂无持仓', left: 'center', top: 'middle', textStyle: { color: chartTheme(), fontSize: 14, fontWeight: 'normal' } },
+  });
+}
+
+function filterListByOpenModel(modelId) {
+  state.listStatus = 'open';
+  state.listModelId = (modelId === null || modelId === undefined) ? 'none' : String(modelId);
+  document.getElementById('f-status').value = 'open';
+  const modelSel = document.getElementById('f-model');
+  if (modelSel) modelSel.value = state.listModelId;
+  saveListFilterPrefs();
+  resetAndLoad();
+}
+
+function holdPieSectorLabel() {
+  return {
+    show: true,
+    position: 'outside',
+    formatter: (p) => p.percent.toFixed(0) + '%',
+    fontSize: 14,
+    fontWeight: 'bold',
+    distanceToLabelLine: 3,
+  };
+}
+
+function holdPieSectorLabelLine() {
+  return {
+    show: true,
+    length: 12,
+    length2: 10,
+    smooth: false,
+    lineStyle: { width: 1 },
+  };
+}
+
+function holdPieDataItem(row, i) {
+  const color = PIE_COLORS[i % PIE_COLORS.length];
+  const line = { show: true, length: 12, length2: 10, lineStyle: { color, width: 1 } };
+  const lbl = { show: true, color, fontSize: 14, fontWeight: 'bold' };
+  return {
+    name: row.name,
+    value: row.mv,
+    symbol: row.symbol,
+    itemStyle: { color },
+    label: lbl,
+    labelLine: line,
+  };
+}
+
+function renderHoldLegend(rows, total) {
+  const el = document.getElementById('hold-pie-legend');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '';
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = '';
+  el.innerHTML = rows.map((r, i) => {
+    const pct = total ? (r.mv / total * 100) : 0;
+    const color = PIE_COLORS[i % PIE_COLORS.length];
+    const modelTip = r.models ? ` · 模型: ${r.models.replace(/\|/g, ', ')}` : '';
+    return `<li class="hold-legend-item" data-symbol="${escHtml(r.symbol)}" title="${escHtml(r.name + modelTip)}">`
+      + `<span class="hold-legend-dot" style="background:${color}"></span>`
+      + `<span class="hold-legend-name">${escHtml(r.name)}</span>`
+      + `<span class="hold-legend-meta">`
+      + (r.modelIds && r.modelIds.length
+        ? `<span class="hold-legend-models">${renderModelTagsHtml(r.modelIds)}</span><span class="hold-legend-sep">·</span>`
+        : '')
+      + `<span class="hold-legend-pct" style="color:${color}">${pct.toFixed(0)}%</span>`
+      + '</span>'
+      + '</li>';
+  }).join('');
+  el.querySelectorAll('.hold-legend-item').forEach(li => {
+    li.onclick = () => {
+      const sym = li.getAttribute('data-symbol');
+      if (sym) location.href = '/?symbol=' + encodeURIComponent(sym);
+    };
+  });
+}
+
+function renderHoldModelTable() {
+  const wrap = document.getElementById('hold-model-table-wrap');
+  const tbody = document.getElementById('hold-model-tbody');
+  if (!wrap || !tbody) return;
+  const rows = buildModelHoldRows(buildOpenPositionRows());
+  const total = rows.reduce((s, r) => s + r.mv, 0);
+  if (!rows.length) {
+    wrap.style.display = 'none';
+    tbody.innerHTML = '';
+    return;
+  }
+  wrap.style.display = '';
+  tbody.innerHTML = rows.map(r => {
+    const pct = total ? (r.mv / total * 100) : 0;
+    const midAttr = r.model_id == null ? 'none' : String(r.model_id);
+    const mColor = modelColor(r.model_id);
+    return `<tr class="hold-model-row" data-model-id="${midAttr}">`
+      + `<td><span class="hold-model-name" style="color:${mColor}">${escHtml(r.name)}</span></td>`
+      + `<td>${r.count}</td>`
+      + `<td>${fmtAmount(r.mv)}</td>`
+      + `<td>${pct.toFixed(0)}%</td>`
+      + '</tr>';
+  }).join('');
+  tbody.querySelectorAll('.hold-model-row').forEach(tr => {
+    tr.onclick = () => {
+      const mid = tr.getAttribute('data-model-id');
+      filterListByOpenModel(mid === 'none' ? null : parseInt(mid, 10));
+    };
+  });
+}
+
+function holdCenterGraphic(floatPnl, floatPct, count) {
+  const pnlColor = floatPnl == null ? chartTheme()
+    : (floatPnl > 0 ? upColor() : (floatPnl < 0 ? downColor() : textColor()));
+  const textStyle = { textAlign: 'center', textVerticalAlign: 'middle' };
+  if (floatPnl == null) {
+    return [{
+      type: 'group',
+      left: 'center',
+      top: 'middle',
+      z: 10,
+      silent: true,
+      children: [{
+        type: 'text',
+        left: 'center',
+        style: { ...textStyle, text: '现价未取到', fill: chartTheme(), fontSize: 12 },
+      }],
+    }];
+  }
+  const pctStr = floatPct == null ? '—' : ((floatPct > 0 ? '+' : '') + floatPct.toFixed(2) + '%');
+  return [{
+    type: 'group',
+    left: 'center',
+    top: 'middle',
+    z: 10,
+    silent: true,
+    children: [
+      {
+        type: 'text', left: 'center', top: -18,
+        style: { ...textStyle, text: fmtAmount(floatPnl, true), fill: pnlColor, fontSize: 17, fontWeight: 'bold' },
+      },
+      {
+        type: 'text', left: 'center', top: 2,
+        style: { ...textStyle, text: count + ' 笔', fill: textColor(), fontSize: 12, fontWeight: 'bold' },
+      },
+      {
+        type: 'text', left: 'center', top: 20,
+        style: { ...textStyle, text: pctStr, fill: pnlColor, fontSize: 12, fontWeight: 'bold' },
+      },
+    ],
+  }];
+}
+
+// 持仓金额分布：左圆环 + 右图例；扇区 = 市值
+function renderHoldChart() {
+  const el = document.getElementById('hold-pie-chart');
+  if (!state.holdChart) state.holdChart = echarts.init(el);
+  const rows = buildOpenHoldRows();
+  const posRows = buildOpenPositionRows();
   const total = rows.reduce((s, r) => s + r.mv, 0);
 
   if (!rows.length) {
-    state.holdChart.off('click');
-    state.holdChart.clear();
-    state.holdChart.setOption({
-      title: { text: '暂无持仓', left: 'center', top: 'middle', textStyle: { color: chartTheme(), fontSize: 14, fontWeight: 'normal' } },
-    });
+    holdEmptyChart(state.holdChart);
+    renderHoldLegend([], 0);
     return;
   }
 
-  // 中心净盈亏：全部持仓现价可得才汇总浮盈亏, 部分缺失则显示占位
   const allQuoted = rows.every(r => r.floatPnl != null);
   const costTotal = rows.reduce((s, r) => s + r.cost, 0);
   const floatPnl = allQuoted ? rows.reduce((s, r) => s + r.floatPnl, 0) : null;
   const floatPct = (allQuoted && costTotal) ? (floatPnl / costTotal * 100) : null;
-  const centerColor = floatPnl == null ? chartTheme() : (floatPnl > 0 ? upColor() : (floatPnl < 0 ? downColor() : neutralColor()));
-  const pctStr = floatPct == null ? '' : (floatPct > 0 ? '+' : '') + floatPct.toFixed(2) + '%';
-  const note = floatPnl == null ? '现价未取到' : pctStr;
-  // 富文本: {pct|...} 段单独着色(红涨/绿跌/白平), 「净盈亏」标签保持主题灰
-  const capText = '净盈亏' + (note ? ' · {pct|' + note + '}' : '');
 
   state.holdChart.setOption({
     backgroundColor: 'transparent',
-    graphic: [
-      {
-        // 数字用 graphic: 靠 left:'center'/top:'middle' 让文字 box 整体对齐圆心, 不再叠 textAlign (叠加会二次偏移)
-        type: 'text',
-        left: 'center',
-        top: 'middle',
-        silent: true,
-        style: {
-          text: floatPnl == null ? '—' : fmtAmount(floatPnl, true),
-          fill: centerColor,
-          fontSize: 15,
-          fontWeight: 'bold',
-        },
-      },
-      {
-        type: 'text',
-        left: 'center',
-        top: '58%',
-        silent: true,
-        style: {
-          text: capText,
-          fill: chartTheme(),
-          fontSize: 11,
-          textVerticalAlign: 'middle',
-          rich: { pct: { fill: centerColor } },
-        },
-      },
-    ],
+    color: PIE_COLORS,
     tooltip: {
       trigger: 'item',
       formatter: p => {
@@ -1336,29 +1683,29 @@ function renderHoldChart() {
         const quoted = r.floatPnl != null;
         const pln = quoted ? fmtMoney(r.floatPnl, true) : '—';
         const pnlColor = quoted ? (r.floatPnl >= 0 ? upColor() : downColor()) : chartTheme();
-        const priceStr = quoted ? `${r.price} × ${r.qty} 股` : '—（按成本估算）';
-        return `${r.name} ${r.symbol}<br/>持仓金额: ${fmtAmount(r.mv)} (${pct.toFixed(1)}%)<br/>持仓成本: ${fmtAmount(r.cost)}<br/>现价: ${priceStr}<br/>浮盈亏: <span style="color:${pnlColor}">${pln}</span>`;
+        const modelStr = r.models ? `<br/>模型: ${escHtml(r.models.replace(/\|/g, ', '))}` : '';
+        return `${r.name} ${r.symbol}<br/>持仓金额: ${fmtAmount(r.mv)} (${pct.toFixed(1)}%)<br/>持仓成本: ${fmtAmount(r.cost)}${modelStr}<br/>浮盈亏: <span style="color:${pnlColor}">${pln}</span>`;
       },
     },
-    legend: {
-      type: 'scroll',
-      orient: 'horizontal',
-      bottom: 0,
-      textStyle: { color: chartTheme(), fontSize: 12 },
-    },
+    legend: { show: false },
+    graphic: holdCenterGraphic(floatPnl, floatPct, posRows.length),
     series: [{
       type: 'pie',
-      radius: ['42%', '70%'],
+      radius: ['42%', '58%'],
       center: ['50%', '50%'],
       avoidLabelOverlap: true,
       itemStyle: { borderColor: 'rgba(0,0,0,0.2)', borderWidth: 1 },
       cursor: 'pointer',
-      label: {
-        formatter: p => `${p.percent.toFixed(0)}%`,
-        color: chartTheme(),
-        fontSize: 12,
+      label: holdPieSectorLabel(),
+      labelLayout: { hideOverlap: true },
+      emphasis: {
+        scale: true,
+        scaleSize: 4,
+        focus: 'self',
+        blurScope: 'coordinateSystem',
       },
-      data: rows.map(r => ({ name: r.name, value: r.mv, symbol: r.symbol })),
+      labelLine: holdPieSectorLabelLine(),
+      data: rows.map((r, i) => holdPieDataItem(r, i)),
     }],
   });
   state.holdChart.off('click');
@@ -1367,6 +1714,7 @@ function renderHoldChart() {
     const symbol = r && r.symbol;
     if (symbol) location.href = '/?symbol=' + encodeURIComponent(symbol);
   });
+  renderHoldLegend(rows, total);
 }
 
 // ═══════════════ 交易列表 ═══════════════
@@ -1494,7 +1842,7 @@ function renderTable() {
         <td data-label="模型">${escHtml(modelLabel(t.model_id))}</td>
         <td data-label="${isBatch ? '成本价' : '买入价'}">${isBatch ? (t.status === 'closed' ? (t.cost_price != null ? t.cost_price : '—') : t.entry_price) : t.entry_price}</td>
         <td class="${exitCls}" data-label="退出价">${t.exit_price === null ? '—' : t.exit_price}</td>
-        <td class="${curCls}" data-label="现价">${curPrice != null ? curPrice : '—'}</td>
+        <td class="${curCls}" data-label="现价">${fmtPrice(curPrice)}</td>
         <td data-label="${isBatch ? (t.status === 'closed' ? '总股数' : '净持仓') : '数量'}">${isBatch ? (t.status === 'closed' ? (t.total_buy_qty != null ? t.total_buy_qty : t.quantity) : t.quantity) : t.quantity}</td>
         <td class="risk-mini${risk.warn ? ' warn' : ''}" data-label="止盈/保本/止损">${risk.html}</td>
         <td data-label="${isBatch ? '首买日' : '买入日'}">${escHtml(t.entry_date)}</td>
@@ -2036,6 +2384,14 @@ document.getElementById('t-symbol-input').addEventListener('input', onSymbolInpu
 
 // 初始化主题 (与主页共享 visual-theme)
 VisualTheme.init({ buttonId: 'btn-theme' });
+(function () {
+  const origToggle = window.toggleTheme;
+  window.toggleTheme = function () {
+    const t = origToggle();
+    refreshChartsForTheme();
+    return t;
+  };
+})();
 
 // 初始化佣金扣除开关 (默认勾选, localStorage 持久化)
 try {

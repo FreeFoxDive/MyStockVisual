@@ -1936,7 +1936,8 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
             (user_id,),
         ).fetchone()[0]
         open_rows = conn.execute(
-            "SELECT symbol, name, entry_price, quantity, take_profit, stop_loss, breakeven "
+            "SELECT symbol, name, entry_price, quantity, take_profit, stop_loss, "
+            "breakeven, model_id "
             "FROM trades WHERE user_id=? AND status='open' AND type != 'reverse_repo' "
             "ORDER BY entry_date",
             (user_id,),
@@ -1961,6 +1962,7 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
             "take_profit": r["take_profit"],
             "stop_loss": r["stop_loss"],
             "breakeven": r["breakeven"],
+            "model_id": r["model_id"],
         }
         for r in open_rows
     ]

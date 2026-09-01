@@ -173,13 +173,16 @@ def kline():
         count = default_count
 
     cache_key = f"{symbol}:{period}:{count}"
+    skip_1d_cache = period == "1d" and market_hours.is_trading_day(
+        market_hours.now().date().isoformat()
+    )
     if period in MINUTE_PERIODS:
         cache = kline_cache_minute
     elif period in ("1w", "1M"):
         cache = kline_cache_long
     else:
         cache = kline_cache
-    cached = cache.get(cache_key)
+    cached = None if skip_1d_cache else cache.get(cache_key)
     if cached:
         resp = cached.copy()
         resp["meta"] = dict(resp.get("meta") or {})
@@ -285,7 +288,8 @@ def kline():
         },
     }
 
-    cache.set(cache_key, resp)
+    if not skip_1d_cache:
+        cache.set(cache_key, resp)
 
     try:
         q = fetch_quote(symbol)

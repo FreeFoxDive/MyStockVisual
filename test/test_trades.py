@@ -690,6 +690,8 @@ class TestStats(TradesTestCase):
         self.assertEqual(pos[0]["symbol"], "300750.SZ")
         self.assertEqual(pos[0]["entry_price"], 200.0)
         self.assertEqual(pos[0]["quantity"], 100)
+        self.assertIn("model_id", pos[0])
+        self.assertIsNone(pos[0]["model_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -1535,11 +1537,17 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         import market as market_mod
         self.market = market_mod
 
+    def _mock_quotes(self, symbol, quote):
+        sym = self.market.normalize_symbol(symbol)
+        return mock.patch.object(
+            self.market, "fetch_quotes", return_value={sym: quote},
+        )
+
     def test_today_fallback_from_quote_when_no_history(self):
         today = _date.today().isoformat()
         quote = {"open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 10000}
         with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
-            with mock.patch.object(self.market, "fetch_quote", return_value=quote):
+            with self._mock_quotes("601058.SH", quote):
                 with mock.patch("market_hours.is_trading_day", return_value=True):
                     bar = self.market.get_daily_bar("601058.SH", today)
         self.assertIsNotNone(bar)
@@ -1555,7 +1563,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         idx = pd.Timestamp(today)
         df = pd.DataFrame([{"open": 8.0, "high": 9.0, "low": 7.5, "close": 8.5, "volume": 5000}], index=[idx])
         with mock.patch.object(self.market, "fetch_kline", return_value=(df, "赛轮轮胎")):
-            with mock.patch.object(self.market, "fetch_quote") as fq:
+            with mock.patch.object(self.market, "fetch_quotes") as fq:
                 with mock.patch("market_hours.is_trading_day", return_value=True):
                     bar = self.market.get_daily_bar("601058.SH", today)
         fq.assert_not_called()
@@ -1563,7 +1571,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
 
     def test_past_date_no_quote_fallback(self):
         with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
-            with mock.patch.object(self.market, "fetch_quote") as fq:
+            with mock.patch.object(self.market, "fetch_quotes") as fq:
                 bar = self.market.get_daily_bar("601058.SH", "2026-01-05")
         fq.assert_not_called()
         self.assertIsNone(bar)
@@ -1571,7 +1579,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
     def test_today_zero_volume_no_fallback(self):
         today = _date.today().isoformat()
         with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
-            with mock.patch.object(self.market, "fetch_quote", return_value={
+            with self._mock_quotes("601058.SH", {
                 "open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 0,
             }):
                 with mock.patch("market_hours.is_trading_day", return_value=True):
@@ -1594,7 +1602,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         )
         quote = {"open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 10000}
         with mock.patch.object(self.market, "fetch_kline", return_value=(df, "赛轮轮胎")):
-            with mock.patch.object(self.market, "fetch_quote", return_value=quote):
+            with self._mock_quotes("601058.SH", quote):
                 with mock.patch("market_hours.is_trading_day", return_value=True):
                     t = trades.create_trade(uid, {
                         "symbol": "601058.SH", "name": "赛轮轮胎", "status": "closed",

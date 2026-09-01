@@ -31,6 +31,27 @@ def _df_with_dates(dates, close=10.0):
     )
 
 
+class TestStripTodayBarDf(unittest.TestCase):
+    def test_strip_when_last_is_today(self):
+        today = date.today()
+        yesterday = (pd.Timestamp(today) - pd.Timedelta(days=1)).date()
+        df = _df_with_dates([yesterday.isoformat(), today.isoformat()], close=10.0)
+        with mock.patch("market_hours.now") as mn:
+            mn.return_value = pd.Timestamp(today)
+            out = market_mod._strip_today_bar_df(df)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(market_mod._last_bar_date(out), yesterday)
+
+    def test_keep_when_last_is_yesterday(self):
+        today = date.today()
+        yesterday = (pd.Timestamp(today) - pd.Timedelta(days=1)).date()
+        df = _df_with_dates([yesterday.isoformat()], close=10.0)
+        with mock.patch("market_hours.now") as mn:
+            mn.return_value = pd.Timestamp(today)
+            out = market_mod._strip_today_bar_df(df)
+        self.assertEqual(len(out), 1)
+
+
 class TestMaybeAppendTodayBar(unittest.TestCase):
     def test_append_when_history_ends_yesterday(self):
         today = date.today()

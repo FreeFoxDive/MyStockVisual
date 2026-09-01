@@ -658,6 +658,7 @@ def fetch_kline(symbol, period, count):
             df = df.set_index("trade_date")
         df = df.sort_index()
         if period == "1d":
+            df = _strip_today_bar_df(df)
             df = _maybe_append_today_bar(symbol, df)
         return df, cached.get("name", symbol)
 
@@ -704,12 +705,14 @@ def fetch_kline(symbol, period, count):
     if period == "1d":
         df = _maybe_append_today_bar(symbol, df)
 
-    # 存入磁盘缓存
-    cache_data = {"name": name or symbol, "data": json.loads(df.reset_index().to_json(orient="records", date_format="iso"))}
-    try:
-        _disk_cache.set(symbol, period, count, cache_data)
-    except Exception:
-        pass
+    # 存入磁盘缓存 (日K 当日 bar 不写入，默认 dirty)
+    cache_df = _strip_today_bar_df(df) if period == "1d" else df
+    if cache_df is not None and len(cache_df) > 0:
+        cache_data = {"name": name or symbol, "data": json.loads(cache_df.reset_index().to_json(orient="records", date_format="iso"))}
+        try:
+            _disk_cache.set(symbol, period, count, cache_data)
+        except Exception:
+            pass
 
     return df, name or symbol
 
@@ -1187,6 +1190,17 @@ def _last_bar_date(df):
         return None
 
 
+def _strip_today_bar_df(df):
+    """日K: 去掉末根「今天」bar，避免当日 OHLCV 写入缓存 (默认 dirty)。"""
+    if df is None or len(df) == 0:
+        return df
+    today = market_hours.now().date()
+    last = _last_bar_date(df)
+    if last is not None and last == today:
+        return df.iloc[:-1].copy()
+    return df
+
+
 def _apply_quote_bar_to_df(df, quote_bar):
     """把 quote_bar dict 写入 df 末行 (已有今天) 或 append 新行。"""
     ts = pd.Timestamp(str(quote_bar["date"])[:10])
@@ -1241,7 +1255,7 @@ def _daily_bar_from_quote(symbol, target):
         return None
     if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
         return None
-    q = fetch_quote(symbol)
+    q = fetch_quotes([symbol], fresh=True).get(normalize_symbol(symbol))
     if not q:
         return None
     high = _safe_float(q.get("high"))

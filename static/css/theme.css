@@ -20,6 +20,15 @@
   --down-color: #14b143;
   --warn-color: #d4a017;
   --scrollbar-thumb: #c1c1c1;
+  --model-c0: #2563eb;
+  --model-c1: #059669;
+  --model-c2: #d97706;
+  --model-c3: #db2777;
+  --model-c4: #7c3aed;
+  --model-c5: #0891b2;
+  --model-c6: #ea580c;
+  --model-c7: #4f46e5;
+  --model-c-none: #64748b;
 }
 
 [data-theme="dark"] {
@@ -39,6 +48,15 @@
   --btn-active-text: #ffffff;
   --warn-color: #f5c542;
   --scrollbar-thumb: #363a45;
+  --model-c0: #60a5fa;
+  --model-c1: #34d399;
+  --model-c2: #fbbf24;
+  --model-c3: #f472b6;
+  --model-c4: #a78bfa;
+  --model-c5: #22d3ee;
+  --model-c6: #fb923c;
+  --model-c7: #818cf8;
+  --model-c-none: #94a3b8;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
