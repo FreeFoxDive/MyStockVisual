@@ -657,6 +657,8 @@ def fetch_kline(symbol, period, count):
             df["trade_date"] = pd.to_datetime(df["trade_date"])
             df = df.set_index("trade_date")
         df = df.sort_index()
+        if period == "1d":
+            df = _maybe_append_today_bar(symbol, df)
         return df, cached.get("name", symbol)
 
     df, name = None, None
@@ -699,6 +701,9 @@ def fetch_kline(symbol, period, count):
     if df is None:
         return None, None
 
+    if period == "1d":
+        df = _maybe_append_today_bar(symbol, df)
+
     # 存入磁盘缓存
     cache_data = {"name": name or symbol, "data": json.loads(df.reset_index().to_json(orient="records", date_format="iso"))}
     try:
@@ -729,9 +734,66 @@ def _mr_quote_to_std(q, symbol):
 MR_QUOTE_BATCH = 20        # 麦蕊 stock_ssjy_more 单次最多 20 只
 
 
-def fetch_quotes(symbols, fresh=False):
-    """批量获取实时快照（麦蕊：股票走 ssjy_more 批量，ETF 走 fund_real_time，指数走 index_real_time）。
+def _af_quote_valid(q):
+    if not q:
+        return False
+    if _safe_float(q.get("last_price")) is None:
+        return False
+    if _safe_float(q.get("high")) is None or _safe_float(q.get("low")) is None:
+        return False
+    return True
 
+
+def _af_quote_to_std(q, symbol):
+    """把 AlphaFeed quote dict 转成标准 quote dict（与 _mr_quote_to_std 字段一致）。"""
+    return {
+        "last_price": _safe_float(q.get("last_price")),
+        "prev_close": _safe_float(q.get("prev_close")),
+        "open": _safe_float(q.get("open")),
+        "high": _safe_float(q.get("high")),
+        "low": _safe_float(q.get("low")),
+        "volume": _safe_int(q.get("volume")),
+        "amount": _safe_float(q.get("amount")),
+        "change_pct": _safe_float(q.get("change_pct")),
+        "amplitude": None,
+        "turnover_rate": None,
+        "name": q.get("name") or _lookup_name(symbol),
+    }
+
+
+def _fetch_af_quotes(symbols):
+    """批量拉 AlphaFeed 快照；失败或缺 OHLCV 的 symbol 不出现在返回中。"""
+    if not AF_API_KEY:
+        return {}
+    symbols = list(dict.fromkeys(s for s in symbols if s))
+    if not symbols:
+        return {}
+    from feed import QUOTES_BATCH, _chunks, _row_to_quote
+
+    try:
+        af = get_af()
+        out = {}
+        for batch in _chunks(symbols, QUOTES_BATCH):
+            df = af.quotes.get(symbols=batch, to_dataframe=True)
+            if df is None or getattr(df, "empty", True):
+                continue
+            for _, row in df.iterrows():
+                q = _row_to_quote(row)
+                if not q or not q.get("symbol"):
+                    continue
+                sym = q["symbol"]
+                if _af_quote_valid(q):
+                    out[sym] = q
+        return out
+    except Exception as e:
+        log.warning(f"AF 快照失败: {e}")
+        return {}
+
+
+def fetch_quotes(symbols, fresh=False):
+    """批量获取实时快照：AlphaFeed quotes.get 优先，未命中按类型回退麦蕊。
+
+    麦蕊回退：指数 index_real_time、ETF fund_real_time、股票 ssjy_more 批量。
     fresh=True 时跳过缓存强刷，失败/空数据回退到缓存（缓存超 30s 的 get() 返回 None）。
     返回 {symbol: quote}；未取到的 symbol 不出现在返回字典中。
     """
@@ -751,9 +813,33 @@ def fetch_quotes(symbols, fresh=False):
     if not to_fetch:
         return result
 
-    # 按类型分组路由
+    api = get_mr()
+
+    def _emit_mr(s, q):
+        result[s] = _mr_quote_to_std(q, s)
+        quote_cache.set(s, result[s])
+
+    def _emit_af(s, q):
+        result[s] = _af_quote_to_std(q, s)
+        quote_cache.set(s, result[s])
+
+    # AlphaFeed 优先（指数 / ETF / 股票统一）
+    for s, q in _fetch_af_quotes(to_fetch).items():
+        if s in to_fetch:
+            _emit_af(s, q)
+
+    remaining = [s for s in to_fetch if s not in result]
+    if not remaining:
+        for s in to_fetch:
+            if s not in result:
+                cached = quote_cache.get(s)
+                if cached:
+                    result[s] = cached
+        return result
+
+    # 按类型分组麦蕊回退
     index_codes, stock_codes, etf_codes = [], [], []
-    for s in to_fetch:
+    for s in remaining:
         if _is_index_symbol(s):
             index_codes.append(s)
         elif _is_etf(s):
@@ -761,18 +847,12 @@ def fetch_quotes(symbols, fresh=False):
         else:
             stock_codes.append(s)
 
-    api = get_mr()
-
-    def _emit(s, q):
-        result[s] = _mr_quote_to_std(q, s)
-        quote_cache.set(s, result[s])
-
     # 1) 指数 (单只 index_real_time)
     for s in index_codes:
         try:
             q = api.index_real_time(s)
             if isinstance(q, dict) and not q.get("error"):
-                _emit(s, q)
+                _emit_mr(s, q)
         except Exception as e:
             log.warning(f"指数快照失败 {s}: {e}")
 
@@ -781,7 +861,7 @@ def fetch_quotes(symbols, fresh=False):
         try:
             q = api.fund_real_time(s.split(".")[0])
             if isinstance(q, dict) and not q.get("error"):
-                _emit(s, q)
+                _emit_mr(s, q)
         except Exception as e:
             log.warning(f"ETF快照失败 {s}: {e}")
 
@@ -797,7 +877,7 @@ def fetch_quotes(symbols, fresh=False):
                     code = str(q.get("dm", "")).strip()
                     s = next((x for x in batch if x.split(".")[0] == code), None)
                     if s is not None:
-                        _emit(s, q)
+                        _emit_mr(s, q)
         except Exception as e:
             log.warning(f"批量快照失败 {batch}: {e}")
 
@@ -812,7 +892,7 @@ def fetch_quotes(symbols, fresh=False):
 
 
 def fetch_quote(symbol):
-    """从麦蕊获取实时快照（单只，缓存优先）"""
+    """获取实时快照（单只，AF 优先 + 麦蕊回退，缓存优先）"""
     return fetch_quotes([symbol]).get(normalize_symbol(symbol))
 
 
@@ -1090,6 +1170,66 @@ def _row_to_daily_bar(d, row):
         "close": _safe_float(row.get("close")),
         "volume": volume,
     }
+
+
+def _last_bar_date(df):
+    """取日K DataFrame 最后一根 bar 的 date; 无效返回 None。"""
+    from datetime import date as _date
+
+    if df is None or len(df) == 0:
+        return None
+    last_idx = df.index[-1]
+    try:
+        if hasattr(last_idx, "date"):
+            return last_idx.date()
+        return _date.fromisoformat(str(last_idx)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_quote_bar_to_df(df, quote_bar):
+    """把 quote_bar dict 写入 df 末行 (已有今天) 或 append 新行。"""
+    ts = pd.Timestamp(str(quote_bar["date"])[:10])
+    row = {
+        "open": quote_bar["open"],
+        "high": quote_bar["high"],
+        "low": quote_bar["low"],
+        "close": quote_bar["close"],
+        "volume": quote_bar["volume"],
+    }
+    if "amount" in df.columns:
+        row["amount"] = float("nan")
+    last_date = _last_bar_date(df)
+    if last_date is not None and last_date == ts.date():
+        for col, val in row.items():
+            if col in df.columns:
+                df.iloc[-1, df.columns.get_loc(col)] = val
+        return df
+    new_row = pd.DataFrame([row], index=[ts])
+    for col in df.columns:
+        if col not in new_row.columns:
+            new_row[col] = float("nan") if col == "amount" else 0.0
+    return pd.concat([df, new_row]).sort_index()
+
+
+def _maybe_append_today_bar(symbol, df):
+    """日K history 尚无今天时 append; 盘中已有合成 bar 时用快照刷新末根 OHLCV。"""
+    if df is None or len(df) == 0:
+        return df
+    today = market_hours.now().date()
+    if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
+        return df
+    last_date = _last_bar_date(df)
+    if last_date is None:
+        return df
+    if last_date > today:
+        return df
+    if last_date == today and not market_hours.in_session():
+        return df
+    quote_bar = _daily_bar_from_quote(symbol, today)
+    if not quote_bar:
+        return df
+    return _apply_quote_bar_to_df(df, quote_bar)
 
 
 def _daily_bar_from_quote(symbol, target):

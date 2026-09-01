@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="/css/theme.css">
 <script src="/js/theme.js"></script>
 <script src="/js/api.js"></script>
+<script src="/js/indicators.js"></script>
 <style>
 /* ═══════════════ 页面专属 (主题变量见 theme.css) ═══════════════ */
 body {
@@ -371,6 +372,7 @@ const ALL_PERIODS = ['1d', '1w', '1M', 'intraday', ...MINUTE_PERIODS];
 const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3, '60m': 3600e3 };
 const INTRADAY_REFRESH_MS = 60e3;
 const QUOTE_REFRESH_MS = 10e3;
+const LAST_BAR_PATCH_MS = 3000;  // 日K末根图表增量绘制节流
 
 // ═══════════════════════════════════════════════════════════════
 // COLORS
@@ -430,6 +432,23 @@ function isHaltBar(bar) {
 function haltCandleStyle() {
   const g = C().halt;
   return { color: g, color0: g, borderColor: g, borderColor0: g, borderColorDoji: g };
+}
+
+function buildOhlcPoint(k, impulseOn) {
+  const value = [k.open, k.close, k.low, k.high];
+  if (isHaltBar(k)) return { value, itemStyle: haltCandleStyle() };
+  if (!impulseOn) return value;
+  let c;
+  if (k.impulse === 1) c = C().up;
+  else if (k.impulse === -1) c = C().down;
+  else c = C().impulse_neutral;
+  return { value, itemStyle: { color: c, color0: c, borderColor: c, borderColor0: c } };
+}
+
+function buildVolPoint(k) {
+  if (isHaltBar(k)) return { value: k.volume || 0, itemStyle: { color: C().halt } };
+  const up = (k.close || 0) >= (k.open || 0);
+  return { value: k.volume || 0, itemStyle: { color: up ? C().up : C().down } };
 }
 
 function haltLabel(bar) {
@@ -644,8 +663,207 @@ async function fetchQuote() {
       const q = await resp.json();
       updateQuoteDisplay(q);
       if (STATE.klineData) STATE.klineData.quote = q;
+      if (patchTodayBarFromQuote(q)) requestBarPatchDraw();
     }
   } catch (e) { /* ignore */ }
+}
+
+function todayYMD() {
+  const meta = STATE.klineData && STATE.klineData.meta;
+  if (meta && meta.server_time) return String(meta.server_time).slice(0, 10);
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function buildMacdHistPoint(k) {
+  return {
+    value: k.macd_hist,
+    itemStyle: { color: (k.macd_hist || 0) >= 0 ? C().up : C().down },
+  };
+}
+
+function appendChannelSeriesPatches(seriesPatch, klines) {
+  if (!STATE.channelEnabled || STATE.period !== '1d') return;
+  const ema13Arr = klines.map((k) => k.ema13);
+  const atrArr = klines.map((k) => k.atr14);
+  [1, 2, 3].forEach((mult) => {
+    const upper = klines.map((k, i) => (ema13Arr[i] != null && atrArr[i] != null ? ema13Arr[i] + mult * atrArr[i] : null));
+    const lower = klines.map((k, i) => (ema13Arr[i] != null && atrArr[i] != null ? ema13Arr[i] - mult * atrArr[i] : null));
+    seriesPatch.push({ name: `+${mult}ATR`, data: upper });
+    seriesPatch.push({ name: `-${mult}ATR`, data: lower });
+  });
+}
+
+function appendIndicatorSeriesPatches(seriesPatch, klines, panels) {
+  panels.forEach((p) => {
+    if (p === 'macd') {
+      seriesPatch.push(
+        { name: 'DIF', data: klines.map((k) => k.macd_dif) },
+        { name: 'DEA', data: klines.map((k) => k.macd_dea) },
+        { name: 'MACD柱', data: klines.map((k) => buildMacdHistPoint(k)) },
+      );
+    } else if (p === 'kdj') {
+      seriesPatch.push(
+        { name: 'K', data: klines.map((k) => k.kdj_k) },
+        { name: 'D', data: klines.map((k) => k.kdj_d) },
+        { name: 'J', data: klines.map((k) => k.kdj_j) },
+      );
+    } else if (p === 'rsi') {
+      seriesPatch.push(
+        { name: 'RSI1', data: klines.map((k) => k.rsi6) },
+        { name: 'RSI2', data: klines.map((k) => k.rsi12) },
+        { name: 'RSI3', data: klines.map((k) => k.rsi24) },
+      );
+    } else if (p === 'atr') {
+      seriesPatch.push({ name: 'ATR(14)', data: klines.map((k) => k.atr14) });
+    }
+  });
+}
+
+function patchIndicatorLastPoints(seriesPatch, k, lastIdx, seriesByName, klines) {
+  const panels = getIndicatorPanels();
+  const copyLast = (name, point) => {
+    const s = seriesByName[name];
+    if (!s || !s.data || s.data.length !== klines.length) return;
+    const arr = s.data.slice();
+    arr[lastIdx] = point;
+    seriesPatch.push({ name, data: arr });
+  };
+
+  if (panels.includes('macd')) {
+    copyLast('DIF', k.macd_dif);
+    copyLast('DEA', k.macd_dea);
+    copyLast('MACD柱', buildMacdHistPoint(k));
+  }
+  if (panels.includes('kdj')) {
+    copyLast('K', k.kdj_k);
+    copyLast('D', k.kdj_d);
+    copyLast('J', k.kdj_j);
+  }
+  if (panels.includes('rsi')) {
+    copyLast('RSI1', k.rsi6);
+    copyLast('RSI2', k.rsi12);
+    copyLast('RSI3', k.rsi24);
+  }
+  if (panels.includes('atr')) {
+    copyLast('ATR(14)', k.atr14);
+  }
+
+  if (STATE.channelEnabled && STATE.period === '1d' && k.ema13 != null && k.atr14 != null) {
+    [1, 2, 3].forEach((mult) => {
+      copyLast(`+${mult}ATR`, k.ema13 + mult * k.atr14);
+      copyLast(`-${mult}ATR`, k.ema13 - mult * k.atr14);
+    });
+  }
+}
+
+/** 用快照更新/追加今日日K末根数据; 有变动返回 true */
+function patchTodayBarFromQuote(q) {
+  if (STATE.period !== '1d' || !STATE.klineData || !STATE.klineData.klines || !STATE.klineData.klines.length) return false;
+  if (!q || q.last_price == null || !q.volume || q.volume <= 0) return false;
+  if (q.high == null || q.low == null) return false;
+  const todayStr = todayYMD();
+  const klines = STATE.klineData.klines;
+  const last = klines[klines.length - 1];
+  const lastDate = String(last.date).slice(0, 10);
+  const next = {
+    open: q.open != null ? q.open : last.open,
+    high: q.high,
+    low: q.low,
+    close: q.last_price,
+    volume: q.volume,
+  };
+  if (lastDate < todayStr) {
+    klines.push({ date: todayStr, ...next, amount: q.amount });
+    IndicatorCalc.recalcTailIndicators(klines, '1d');
+    return true;
+  }
+  if (lastDate !== todayStr) return false;
+  const changed = last.open !== next.open || last.high !== next.high || last.low !== next.low
+    || last.close !== next.close || last.volume !== next.volume;
+  if (!changed) return false;
+  Object.assign(last, next);
+  IndicatorCalc.recalcTailIndicators(klines, '1d');
+  return true;
+}
+
+function requestBarPatchDraw() {
+  const now = Date.now();
+  if (now - (STATE._lastBarPatchDrawAt || 0) >= LAST_BAR_PATCH_MS) {
+    if (patchLastBarOnChart()) STATE._lastBarPatchDrawAt = now;
+    STATE._pendingBarPatch = false;
+  } else {
+    STATE._pendingBarPatch = true;
+  }
+}
+
+/** 增量更新末根 K 线/成交量/MA，不 chart.clear */
+function patchLastBarOnChart() {
+  const chart = STATE.chart;
+  const data = STATE.klineData;
+  if (!chart || !data || STATE.period !== '1d' || !data.klines || !data.klines.length) return false;
+  const klines = data.klines;
+  const lastIdx = klines.length - 1;
+  const k = klines[lastIdx];
+  const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
+  const opt = chart.getOption();
+  if (!opt || !opt.series) return false;
+
+  const seriesByName = {};
+  (opt.series || []).forEach((s) => { if (s.name) seriesByName[s.name] = s; });
+  const klineS = seriesByName['K线'];
+  if (!klineS || !klineS.data) return false;
+
+  const curLen = klineS.data.length;
+  if (curLen > klines.length) return false;
+
+  const patchOpts = { lazyUpdate: true, silent: true };
+
+  if (curLen < klines.length) {
+    const dates = klines.map((x) => x.date);
+    const xAxisPatch = (opt.xAxis || []).map(() => ({ data: dates }));
+    const panels = getIndicatorPanels();
+    const seriesPatch = [
+      { name: 'K线', data: klines.map((kk) => buildOhlcPoint(kk, impulseOn)) },
+      { name: 'MA5', data: klines.map((kk) => kk.ma5) },
+      { name: 'MA10', data: klines.map((kk) => kk.ma10) },
+      { name: 'MA20', data: klines.map((kk) => kk.ma20) },
+    ];
+    appendChannelSeriesPatches(seriesPatch, klines);
+    if (seriesByName['成交量']) {
+      seriesPatch.push({ name: '成交量', data: klines.map((kk) => buildVolPoint(kk)) });
+    }
+    appendIndicatorSeriesPatches(seriesPatch, klines, panels);
+    chart.setOption({ animation: false, xAxis: xAxisPatch, series: seriesPatch }, patchOpts);
+    return true;
+  }
+
+  const copyLast = (name, point) => {
+    const s = seriesByName[name];
+    if (!s || !s.data || s.data.length !== klines.length) return null;
+    const arr = s.data.slice();
+    arr[lastIdx] = point;
+    return { name, data: arr };
+  };
+
+  const seriesPatch = [];
+  const pK = copyLast('K线', buildOhlcPoint(k, impulseOn));
+  if (pK) seriesPatch.push(pK);
+  const pV = copyLast('成交量', buildVolPoint(k));
+  if (pV) seriesPatch.push(pV);
+  const maMap = { MA5: 'ma5', MA10: 'ma10', MA20: 'ma20' };
+  Object.keys(maMap).forEach((name) => {
+    const s = seriesByName[name];
+    if (!s || !s.data || s.data.length !== klines.length) return;
+    const arr = s.data.slice();
+    arr[lastIdx] = k[maMap[name]];
+    seriesPatch.push({ name, data: arr });
+  });
+  patchIndicatorLastPoints(seriesPatch, k, lastIdx, seriesByName, klines);
+
+  if (!seriesPatch.length) return false;
+  chart.setOption({ animation: false, series: seriesPatch }, patchOpts);
+  return true;
 }
 
 function showLoading(show) {
@@ -1291,21 +1509,8 @@ function updateChart(reTheme) {
 
   // ── Readonly series data ──
   const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
-  const ohlc = klines.map((k, i) => {
-    const value = [k.open, k.close, k.low, k.high];
-    if (isHaltBar(k)) return { value, itemStyle: haltCandleStyle() };
-    if (!impulseOn) return value;
-    let c;
-    if (k.impulse === 1) c = C().up;
-    else if (k.impulse === -1) c = C().down;
-    else c = C().impulse_neutral;
-    return { value, itemStyle: { color: c, color0: c, borderColor: c, borderColor0: c } };
-  });
-  const vols = klines.map((k, i) => {
-    if (isHaltBar(k)) return { value: k.volume || 0, itemStyle: { color: C().halt } };
-    const up = (k.close || 0) >= (k.open || 0);
-    return { value: k.volume || 0, itemStyle: { color: up ? C().up : C().down } };
-  });
+  const ohlc = klines.map((k) => buildOhlcPoint(k, impulseOn));
+  const vols = klines.map((k) => buildVolPoint(k));
   const ma5 = klines.map(k => k.ma5);
   const ma10 = klines.map(k => k.ma10);
   const ma20 = klines.map(k => k.ma20);
@@ -1846,6 +2051,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // 盘中自动刷新: 快照 / 分时 / 分钟K 分开间隔; 午休、周末、节假日不拉
   STATE._lastQuoteAt = 0;
   STATE._lastBarAt = 0;
+  STATE._lastBarPatchDrawAt = 0;
+  STATE._pendingBarPatch = false;
   STATE._serverTradingDay = null; // false = 节假日 (交易日历)
 
   function inAshareSession(now) {
@@ -1884,6 +2091,14 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (MINUTE_PERIODS.includes(STATE.period)) {
       const iv = MINUTE_REFRESH_MS[STATE.period] || 60e3;
       if (now - (STATE._lastBarAt || 0) >= iv) fetchData({ silent: true });
+    }
+    if (STATE._pendingBarPatch && STATE.period === '1d') {
+      if (now - (STATE._lastBarPatchDrawAt || 0) >= LAST_BAR_PATCH_MS) {
+        if (patchLastBarOnChart()) {
+          STATE._lastBarPatchDrawAt = now;
+          STATE._pendingBarPatch = false;
+        }
+      }
     }
   }, 1000);
 });

@@ -33,7 +33,7 @@ for env_dir in (SCRIPT_DIR, SCRIPT_DIR.parent):
                     os.environ[k] = v
         break
 
-PROBE_SYMBOLS = ["600519.SH", "000001.SZ"]
+PROBE_SYMBOLS = ["600519.SH", "000001.SZ", "000001.SH", "510300.SH"]
 
 
 def _ok(name, ok, extra=""):
@@ -52,6 +52,7 @@ def main():
         print("need AF_API_KEY")
         sys.exit(1)
     from alphafeed import AlphaFeed
+    import feed as feed_mod
     af = AlphaFeed(api_key=key)
 
     print("=== 1. quotes.get(symbols=) ===", flush=True)
@@ -85,9 +86,22 @@ def main():
     except Exception as e:
         _ok("instruments.batch", False, str(e))
 
-    print("=== 3. depth.batch ===", flush=True)
+    print("=== 3. depth_get_batch (depth.get 模拟, 30/min) ===", flush=True)
     try:
-        depths = af.depth.batch(PROBE_SYMBOLS)
+        bucket = feed_mod.TokenBucket(feed_mod.DEPTH_GET_RATE_PER_MIN)
+        depths = feed_mod.depth_get_batch(af, PROBE_SYMBOLS[:2], bucket, log_skip=False)
+        n = len(depths or {})
+        extra = ""
+        if n:
+            d0 = next(iter(depths.values()))
+            extra = f"ask1_vol={(d0.get('ask_volumes') or [None])[0]}"
+        _ok("depth_get_batch", n > 0, f"n={n} {extra}")
+    except Exception as e:
+        _ok("depth_get_batch", False, str(e))
+
+    print("=== 3b. depth.batch 原生 (高套餐, Starter 预期 FAIL) ===", flush=True)
+    try:
+        depths = af.depth.batch(PROBE_SYMBOLS[:1])
         n = len(depths or {})
         extra = ""
         if n:

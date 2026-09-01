@@ -150,6 +150,14 @@ class TestTokenBucket(unittest.TestCase):
         self.assertTrue(feed_mod.needs_depth(10.9, limit_up=11.0))
         self.assertFalse(feed_mod.needs_depth(10.0, stop_loss=8.0, limit_up=12.0))
 
+    def test_depth_get_batch_one_token_per_symbol(self):
+        af = mock.Mock()
+        af.depth.get.side_effect = lambda s: {"symbol": s, "ask_volumes": [1]}
+        bucket = feed_mod.TokenBucket(rate_per_min=2)
+        out = feed_mod.depth_get_batch(af, ["A.SH", "B.SH", "C.SH"], bucket, log_skip=False)
+        self.assertEqual(set(out.keys()), {"A.SH", "B.SH"})
+        self.assertEqual(af.depth.get.call_count, 2)
+
 
 class TestMetricsAndAlerts(unittest.TestCase):
     def test_accel_down_open_crash_603698(self):
@@ -917,6 +925,36 @@ class TestRestFeedMock(unittest.TestCase):
         self.assertEqual(q["last_price"], 10.5)
         self.assertAlmostEqual(q["timestamp"], 1_700_000_000.0)
         self.assertEqual(q["name"], "浦发")
+
+    def test_depth_uses_get_not_batch(self):
+        af = mock.Mock()
+        af.depth.get.return_value = {
+            "symbol": "A.SH",
+            "ask_volumes": [1, 2, 3, 4, 5],
+            "bid_volumes": [10, 9, 8, 7, 6],
+        }
+        f = feed_mod.RestFeed(lambda: af)
+        out = f.depth(["A.SH"])
+        af.depth.get.assert_called_once_with("A.SH")
+        af.depth.batch.assert_not_called()
+        self.assertIn("A.SH", out)
+
+    def test_depth_get_batch_rate_limit_raises(self):
+        af = mock.Mock()
+
+        class E(Exception):
+            retry_after_ms = 3000
+
+        af.depth.get.side_effect = E("HTTP 429")
+        f = feed_mod.RestFeed(lambda: af)
+        with self.assertRaises(feed_mod.RateLimited):
+            f.depth(["A.SH"])
+
+    def test_depth_batch_native_permission(self):
+        af = mock.Mock()
+        af.depth.batch.side_effect = PermissionError("batch not available")
+        with self.assertRaises(PermissionError):
+            feed_mod.depth_batch_native(af, ["A.SH"])
 
 
 if __name__ == "__main__":

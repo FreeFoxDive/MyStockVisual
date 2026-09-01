@@ -178,6 +178,8 @@ venv/Scripts/python.exe -u visual/monitor.py --replay 603698.SH:2026-08-19 60311
 venv/Scripts/python.exe -m unittest discover -s visual/test
 ```
 
+`discover` 会跑指标/patch 的 **Node 镜像测试**（`test_recalc_tail_ma.py`、`test_indicators_js_unit.py`、`test_patch_today_bar_js.py`、`test_chart_patch_js.py`），需本机安装 **Node.js**；无 Node 时这些用例 skip，其余 Python mock 测试仍可通过。
+
 钉钉 / ntfy 真连通（会发一条测试消息，平时不要跑）：
 
 ```

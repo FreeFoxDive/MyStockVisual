@@ -4,7 +4,8 @@
 以免挤占选股的 20/min 额度。
 
 quotes 令牌桶硬上限 6 次/分钟 (额度 60/min 的 10%)。
-instruments.batch 每日一次; depth.batch 由调用方按需触发。
+depth 走 depth_get_batch（底层 depth.get 逐只，本地 30 次/分钟）；
+与 AF 原生 depth.batch 分离，Starter 套餐可用。
 429 按响应体 retry_after_ms 退避。
 """
 from __future__ import annotations
@@ -20,6 +21,7 @@ log = logging.getLogger("feed")
 
 QUOTES_BATCH = 50
 QUOTES_RATE_PER_MIN = 6          # 硬上限, 给选股留余量
+DEPTH_GET_RATE_PER_MIN = 30      # depth.get 模拟 batch：1 只/次，本地令牌桶
 DEPTH_NEAR_LIMIT_PCT = 0.015     # 距涨跌停 1.5% 才拉盘口
 DEPTH_NEAR_STOP_PCT = 0.01       # 距止损 1% 才拉盘口
 
@@ -81,6 +83,43 @@ def _chunks(items, size):
         yield items[i:i + size]
 
 
+def depth_get_batch(af, symbols, bucket: TokenBucket, *, log_skip: bool = True):
+    """用 depth.get 逐只模拟 batch（与 AF 原生 depth.batch 分离）。
+
+    每只 symbol 消耗 bucket 1 令牌；令牌不足时跳过该只，已取得的仍返回。
+    返回 {symbol: depth_dict}。
+    """
+    symbols = list(dict.fromkeys(s for s in symbols if s))
+    out = {}
+    for sym in symbols:
+        if not bucket.try_acquire(1):
+            if log_skip:
+                log.warning("depth.get 令牌不足, 跳过 %s", sym)
+            continue
+        try:
+            d = af.depth.get(sym)
+            if d:
+                out[sym] = d
+        except Exception as e:
+            if _retry_after_ms(e) is not None:
+                raise
+            log.warning("depth.get 失败 %s: %s", sym, e)
+    return out
+
+
+def depth_batch_native(af, symbols):
+    """AF 原生 depth.batch（高套餐）。Starter 会 PermissionError，勿在监控主路径调用。"""
+    symbols = list(dict.fromkeys(s for s in symbols if s))
+    if not symbols:
+        return {}
+    out = {}
+    for batch in _chunks(symbols, QUOTES_BATCH):
+        result = af.depth.batch(batch) or {}
+        if isinstance(result, dict):
+            out.update(result)
+    return out
+
+
 class RestFeed:
     """AlphaFeed REST 轮询后端。判定逻辑对数据来源无感, 只消费本接口。"""
 
@@ -90,7 +129,7 @@ class RestFeed:
         self._get_af = get_af
         self._fallback_quotes = fallback_quotes
         self._quotes_bucket = TokenBucket(QUOTES_RATE_PER_MIN)
-        self._depth_bucket = TokenBucket(QUOTES_RATE_PER_MIN)
+        self._depth_get_bucket = TokenBucket(DEPTH_GET_RATE_PER_MIN)
         self._limit_cache = {}          # {day: {symbol: {limit_up, limit_down, name}}}
         self._limit_lock = threading.Lock()
         self.backoff_until = 0.0        # monotonic deadline
@@ -214,28 +253,20 @@ class RestFeed:
             return {s: cache[s] for s in symbols if s in cache}
 
     def depth(self, symbols):
-        """五档盘口。返回 {symbol: depth_dict}。令牌不足返回 {}。"""
+        """五档盘口 batch 语义；底层 depth_get_batch（depth.get 逐只，30/min）。"""
         symbols = list(dict.fromkeys(s for s in symbols if s))
         if not symbols:
             return {}
-        n_req = (len(symbols) + QUOTES_BATCH - 1) // QUOTES_BATCH
-        if not self._depth_bucket.try_acquire(n_req):
-            log.warning("depth 令牌不足, 跳过")
-            return {}
         try:
-            af = self._get_af()
-            out = {}
-            for batch in _chunks(symbols, QUOTES_BATCH):
-                result = af.depth.batch(batch) or {}
-                if isinstance(result, dict):
-                    out.update(result)
-            return out
+            return depth_get_batch(
+                self._get_af(), symbols, self._depth_get_bucket, log_skip=True,
+            )
         except Exception as e:
             wait = _retry_after_ms(e)
             if wait is not None:
                 self._set_backoff(wait)
                 raise RateLimited(str(e), retry_after_ms=wait) from e
-            log.warning(f"depth.batch 失败: {e}")
+            log.warning("depth_get_batch 失败: %s", e)
             return {}
 
     def seed_intraday(self, symbols):
