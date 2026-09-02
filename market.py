@@ -299,7 +299,7 @@ class TTLCache:
 
 # 分钟 K 线 (AlphaFeed 原生周期; 不做 3m 合成)
 MINUTE_PERIODS = frozenset({"1m", "5m", "15m", "30m", "60m"})
-MINUTE_COUNTS = {"1m": 1200, "5m": 480, "15m": 320, "30m": 320, "60m": 320}
+MINUTE_COUNTS = {"1m": 1200, "5m": 480, "15m": 320, "30m": 320, "60m": 1000}
 
 # 缓存: 日K 120s, 分钟K 60s, 周/月K 300s, 快照 30s, 上限 500 条目
 kline_cache = TTLCache(ttl_seconds=120)
@@ -648,19 +648,26 @@ def fetch_kline(symbol, period, count):
     cached = _disk_cache.get(symbol, period, count, ttl)
     if cached:
         df = pd.DataFrame(cached["data"])
-        # 分钟线优先 trade_time: JSON 常同时带 trade_date(日) 与 trade_time,
-        # 若先按 date 建索引, 同日多根重复 → RSI get_loc 返回 slice
-        if "trade_time" in df.columns:
-            df["trade_time"] = pd.to_datetime(df["trade_time"])
-            df = df.set_index("trade_time")
-        elif "trade_date" in df.columns:
-            df["trade_date"] = pd.to_datetime(df["trade_date"])
-            df = df.set_index("trade_date")
-        df = df.sort_index()
         if period == "1d":
-            df = _strip_today_bar_df(df)
-            df = _maybe_append_today_bar(symbol, df)
-        return df, cached.get("name", symbol)
+            # concat 后索引名可能丢失，落盘列名为 index；统一走 _normalize
+            df = _normalize(df, prefer_time=False)
+            if df is None:
+                cached = None
+            else:
+                df = _strip_today_bar_df(df)
+                df = _maybe_append_today_bar(symbol, df)
+                return df, cached.get("name", symbol)
+        else:
+            # 分钟线优先 trade_time: JSON 常同时带 trade_date(日) 与 trade_time,
+            # 若先按 date 建索引, 同日多根重复 → RSI get_loc 返回 slice
+            if "trade_time" in df.columns:
+                df["trade_time"] = pd.to_datetime(df["trade_time"])
+                df = df.set_index("trade_time")
+            elif "trade_date" in df.columns:
+                df["trade_date"] = pd.to_datetime(df["trade_date"])
+                df = df.set_index("trade_date")
+            df = df.sort_index()
+            return df, cached.get("name", symbol)
 
     df, name = None, None
 
@@ -708,7 +715,13 @@ def fetch_kline(symbol, period, count):
     # 存入磁盘缓存 (日K 当日 bar 不写入，默认 dirty)
     cache_df = _strip_today_bar_df(df) if period == "1d" else df
     if cache_df is not None and len(cache_df) > 0:
-        cache_data = {"name": name or symbol, "data": json.loads(cache_df.reset_index().to_json(orient="records", date_format="iso"))}
+        out = cache_df.reset_index()
+        if out.columns[0] != "trade_date":
+            out = out.rename(columns={out.columns[0]: "trade_date"})
+        cache_data = {
+            "name": name or symbol,
+            "data": json.loads(out.to_json(orient="records", date_format="iso")),
+        }
         try:
             _disk_cache.set(symbol, period, count, cache_data)
         except Exception:
@@ -905,9 +918,9 @@ def _normalize(df, prefer_time=False):
         return None
     # 选择正确的日期列 (分钟线优先用 trade_time，避免同日 bar 索引重复)
     if prefer_time:
-        cols = ["trade_time", "trade_date"]
+        cols = ["trade_time", "trade_date", "index"]
     else:
-        cols = ["trade_date", "trade_time"]
+        cols = ["trade_date", "trade_time", "index"]
     date_col = None
     for col in cols:
         if col in df.columns:
@@ -1197,6 +1210,12 @@ def _strip_today_bar_df(df):
     today = market_hours.now().date()
     last = _last_bar_date(df)
     if last is not None and last == today:
+        # 盘中今日 bar 不完整不缓存；收盘后视为终值可落盘
+        if (
+            market_hours.is_trading_day(today.strftime("%Y-%m-%d"))
+            and not market_hours.in_session()
+        ):
+            return df
         return df.iloc[:-1].copy()
     return df
 
@@ -1223,7 +1242,9 @@ def _apply_quote_bar_to_df(df, quote_bar):
     for col in df.columns:
         if col not in new_row.columns:
             new_row[col] = float("nan") if col == "amount" else 0.0
-    return pd.concat([df, new_row]).sort_index()
+    out = pd.concat([df, new_row]).sort_index()
+    out.index.name = df.index.name or "trade_date"
+    return out
 
 
 def _maybe_append_today_bar(symbol, df):

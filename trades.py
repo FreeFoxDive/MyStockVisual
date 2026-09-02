@@ -995,10 +995,15 @@ def _reject_future_date(date_str, label="日期"):
     return None
 
 
+def _batch_leg_label(i, n):
+    """批次 API 数组与 UI 列表同序(最新在上); 第 N 笔与界面编号一致。"""
+    return n - i
+
+
 def _validate_price_on_bar(symbol, date_str, price, side_label, leg_prefix=""):
     """校验价在当日振幅内且成交量>0。返回错误文案或 None。
 
-    side_label: '买入' / '卖出'；leg_prefix: '第N条腿 '（可空）。
+    side_label: '买入' / '卖出'；leg_prefix: '第N笔 '（可空）。
     """
     try:
         from market import get_daily_bar
@@ -1216,37 +1221,39 @@ def _clean_batch(data, existing=None):
 
     raw_legs = merged.get("legs")
     if not isinstance(raw_legs, list) or not raw_legs:
-        return None, "批次交易至少需要一条腿"
+        return None, "批次交易至少需要一笔"
 
     legs = []
     has_buy = False
+    n_legs = len(raw_legs)
     for i, leg in enumerate(raw_legs):
+        leg_no = _batch_leg_label(i, n_legs)
         if not isinstance(leg, dict):
-            return None, f"第{i + 1}条腿格式无效"
+            return None, f"第{leg_no}笔格式无效"
         side = s(leg.get("side", ""))
         if side not in ("buy", "sell"):
-            return None, f"第{i + 1}条腿 side 必须为 buy 或 sell"
+            return None, f"第{leg_no}笔方向必须为买入或卖出"
         try:
             price = float(leg.get("price"))
         except (TypeError, ValueError):
-            return None, f"第{i + 1}条腿价格无效"
+            return None, f"第{leg_no}笔价格无效"
         if price <= 0:
-            return None, f"第{i + 1}条腿价格必须大于 0"
+            return None, f"第{leg_no}笔价格必须大于 0"
         try:
             qty = int(leg.get("quantity"))
         except (TypeError, ValueError):
-            return None, f"第{i + 1}条腿数量无效"
+            return None, f"第{leg_no}笔数量无效"
         if qty <= 0:
-            return None, f"第{i + 1}条腿数量必须大于 0"
+            return None, f"第{leg_no}笔数量必须大于 0"
         date_str = s(leg.get("date", ""))
         if not _valid_date(date_str):
-            return None, f"第{i + 1}条腿日期无效 (格式 YYYY-MM-DD)"
-        fut = _reject_future_date(date_str, f"第{i + 1}条腿日期")
+            return None, f"第{leg_no}笔日期无效 (格式 YYYY-MM-DD)"
+        fut = _reject_future_date(date_str, f"第{leg_no}笔日期")
         if fut:
             return None, fut
         side_label = "买入" if side == "buy" else "卖出"
         bar_err = _validate_price_on_bar(
-            symbol, date_str, price, side_label, leg_prefix=f"第{i + 1}条腿 ",
+            symbol, date_str, price, side_label, leg_prefix=f"第{leg_no}笔 ",
         )
         if bar_err:
             return None, bar_err
@@ -1254,7 +1261,7 @@ def _clean_batch(data, existing=None):
         if time_str is not None:
             parts = time_str.split(":")
             if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
-                return None, f"第{i + 1}条腿时间无效 (格式 HH:MM 或 HH:MM:SS)"
+                return None, f"第{leg_no}笔时间无效 (格式 HH:MM 或 HH:MM:SS)"
         if side == "buy":
             has_buy = True
         legs.append({
@@ -1268,7 +1275,7 @@ def _clean_batch(data, existing=None):
         })
 
     if not has_buy:
-        return None, "批次交易至少需要一条买入腿"
+        return None, "批次交易至少需要一笔买入"
 
     # 按 (date, time) 排序后滚动校验超卖 + 计算净持仓/加权均价
     legs.sort(key=lambda l: (l["date"], l["time"] or "", 0))

@@ -32,15 +32,29 @@ def _df_with_dates(dates, close=10.0):
 
 
 class TestStripTodayBarDf(unittest.TestCase):
-    def test_strip_when_last_is_today(self):
+    def test_strip_when_last_is_today_in_session(self):
         today = date.today()
         yesterday = (pd.Timestamp(today) - pd.Timedelta(days=1)).date()
         df = _df_with_dates([yesterday.isoformat(), today.isoformat()], close=10.0)
         with mock.patch("market_hours.now") as mn:
             mn.return_value = pd.Timestamp(today)
-            out = market_mod._strip_today_bar_df(df)
+            with mock.patch("market_hours.is_trading_day", return_value=True):
+                with mock.patch("market_hours.in_session", return_value=True):
+                    out = market_mod._strip_today_bar_df(df)
         self.assertEqual(len(out), 1)
         self.assertEqual(market_mod._last_bar_date(out), yesterday)
+
+    def test_keep_when_last_is_today_after_close(self):
+        today = date.today()
+        yesterday = (pd.Timestamp(today) - pd.Timedelta(days=1)).date()
+        df = _df_with_dates([yesterday.isoformat(), today.isoformat()], close=10.0)
+        with mock.patch("market_hours.now") as mn:
+            mn.return_value = pd.Timestamp(today)
+            with mock.patch("market_hours.is_trading_day", return_value=True):
+                with mock.patch("market_hours.in_session", return_value=False):
+                    out = market_mod._strip_today_bar_df(df)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(market_mod._last_bar_date(out), today)
 
     def test_keep_when_last_is_yesterday(self):
         today = date.today()
@@ -112,6 +126,63 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
                 out = market_mod._maybe_append_today_bar("000001.SH", df)
         fq.assert_not_called()
         self.assertEqual(len(out), 1)
+
+
+class TestDailyDiskCacheRoundtrip(unittest.TestCase):
+    """日K 磁盘缓存读写：concat 后索引名丢失不应导致日期列无法还原。"""
+
+    def test_cache_records_use_trade_date_column(self):
+        today = date.today()
+        dates = [
+            (pd.Timestamp(today) - pd.Timedelta(days=i)).date().isoformat()
+            for i in range(4, -1, -1)
+        ]
+        df = _df_with_dates(dates)
+        df.index.name = None
+        quote = {
+            "date": today.isoformat(),
+            "open": 11.0,
+            "high": 12.0,
+            "low": 10.5,
+            "close": 11.5,
+            "volume": 5000,
+        }
+        with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote):
+            with mock.patch("market_hours.is_trading_day", return_value=True):
+                with mock.patch("market_hours.in_session", return_value=True):
+                    merged = market_mod._maybe_append_today_bar("000975.SZ", df)
+        out = merged.reset_index()
+        if out.columns[0] != "trade_date":
+            out = out.rename(columns={out.columns[0]: "trade_date"})
+        records = out.to_dict(orient="records")
+        reloaded = market_mod._normalize(pd.DataFrame(records), prefer_time=False)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(market_mod._last_bar_date(reloaded), today)
+
+    def test_get_daily_bar_after_cache_hit(self):
+        today = date.today()
+        yesterday = (pd.Timestamp(today) - pd.Timedelta(days=1)).date()
+        hist = _df_with_dates([yesterday.isoformat()])
+        hist.index.name = "trade_date"
+        quote_today = {
+            "date": today.isoformat(),
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.5,
+            "close": 10.5,
+            "volume": 2000,
+        }
+        with mock.patch.object(market_mod, "fetch_kline") as fk:
+            with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote_today):
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    with mock.patch("market_hours.in_session", return_value=True):
+                        merged = market_mod._maybe_append_today_bar("000975.SZ", hist.copy())
+                        fk.return_value = (merged, "山金国际")
+                        bar_today = market_mod.get_daily_bar("000975.SZ", today.isoformat())
+                        bar_yday = market_mod.get_daily_bar("000975.SZ", yesterday.isoformat())
+        self.assertIsNotNone(bar_today)
+        self.assertIsNotNone(bar_yday)
+        self.assertEqual(bar_yday["date"], yesterday.isoformat())
 
 
 if __name__ == "__main__":

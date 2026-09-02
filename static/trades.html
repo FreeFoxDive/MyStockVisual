@@ -2328,7 +2328,8 @@ async function saveTrade() {
       ...risk,
     };
     for (let i = 0; i < body.legs.length; i++) {
-      const fut = rejectFutureLocal(body.legs[i].date, `第${i + 1}条腿日期`);
+      const legNo = body.legs.length - i;
+      const fut = rejectFutureLocal(body.legs[i].date, `第${legNo}笔日期`);
       if (fut) { err(fut); return; }
     }
   } else {

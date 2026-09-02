@@ -796,7 +796,7 @@ class TestBatchTrade(TradesTestCase):
             {"side": "sell", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
         ]
         self._assert_value_error(
-            trades.create_trade, uid, self._batch(legs=legs), sub="至少需要一条买入腿")
+            trades.create_trade, uid, self._batch(legs=legs), sub="至少需要一笔买入")
 
     def test_batch_t_stats(self):
         uid = self._make_user()
@@ -1496,13 +1496,11 @@ class TestMarketBarValidation(TradesTestCase):
     def test_batch_leg_error_prefix(self):
         uid = self._make_user()
         self._bar_patch.stop()
-        calls = {"n": 0}
 
         def bar(symbol, date_str):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 1000}
-            return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 0}
+            if date_str == "2026-08-05":
+                return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 0}
+            return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 1000}
 
         with mock.patch("market.get_daily_bar", side_effect=bar):
             with self.assertRaises(ValueError) as cm:
@@ -1510,12 +1508,35 @@ class TestMarketBarValidation(TradesTestCase):
                     "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
                     "take_profit": 12, "stop_loss": 8, "breakeven": 10,
                     "legs": [
-                        {"side": "buy", "price": 10.5, "quantity": 100, "date": "2026-08-01"},
                         {"side": "sell", "price": 10.8, "quantity": 100, "date": "2026-08-05"},
+                        {"side": "buy", "price": 10.5, "quantity": 100, "date": "2026-08-01"},
                     ],
                 })
-            self.assertIn("第2条腿", str(cm.exception))
+            self.assertIn("第2笔", str(cm.exception))
             self.assertIn("成交量为0", str(cm.exception))
+
+    def test_batch_error_leg_number_newest_first(self):
+        """API 数组最新在上时, 报错笔号与 UI 一致 (非 enumerate 序)。"""
+        uid = self._make_user()
+        self._bar_patch.stop()
+
+        def bar(symbol, date_str):
+            return {"date": date_str, "high": 26.0, "low": 25.0, "volume": 1000}
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            with self.assertRaises(ValueError) as cm:
+                trades.create_trade(uid, {
+                    "type": "batch", "symbol": "000975.SZ", "name": "山金国际",
+                    "legs": [
+                        {"side": "buy", "price": 70.0, "quantity": 100, "date": "2026-09-01"},
+                        {"side": "buy", "price": 25.5, "quantity": 100, "date": "2026-09-01"},
+                        {"side": "buy", "price": 25.0, "quantity": 100, "date": "2026-08-28"},
+                    ],
+                })
+            msg = str(cm.exception)
+            self.assertIn("第3笔", msg)
+            self.assertNotIn("第1笔", msg)
+            self.assertIn("70.00", msg)
 
     def test_repo_future_only(self):
         """逆回购只拦未来日，不查 OHLC。"""
