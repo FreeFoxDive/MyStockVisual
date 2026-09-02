@@ -716,7 +716,13 @@ def fetch_kline(symbol, period, count):
     cache_df = _strip_today_bar_df(df) if period == "1d" else df
     if cache_df is not None and len(cache_df) > 0:
         out = cache_df.reset_index()
-        if out.columns[0] != "trade_date":
+        if period in MINUTE_PERIODS:
+            # 分钟线索引是 trade_time，读缓存也优先 trade_time。
+            # 勿把 index 列强行改成 trade_date：AF 数据常同时带日列 trade_date，会重复列名
+            # → to_json(orient="records") 报 ValueError。
+            if out.columns[0] != "trade_time":
+                out = out.rename(columns={out.columns[0]: "trade_time"})
+        elif out.columns[0] != "trade_date":
             out = out.rename(columns={out.columns[0]: "trade_date"})
         cache_data = {
             "name": name or symbol,
