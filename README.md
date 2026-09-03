@@ -83,7 +83,7 @@ visual/
 | 端点 | 说明 |
 |------|------|
 | `GET /` | 提供 index.html |
-| `GET /api/kline?symbol=600519.SH&period=1d&count=300` | K线数据 + 全部预计算指标 |
+| `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（日K默认 1006≈3年可见+RSI250 warmup） |
 | `GET /api/quote?symbol=600519.SH` | 实时快照 |
 | `GET /api/search?q=茅台` | 模糊搜索 (全量A股+ETF，内存+磁盘双层缓存，24h刷新) |
 | `GET /api/ping` | 健康检查 |
@@ -112,6 +112,7 @@ visual/
 
 ### 指标计算
 - **服务端 Python** 计算
+- 主图 OHLC 与 MA/MACD/RSI/KDJ/ATR 均为**未复权**；动力系统蜡烛色优先用**前复权** impulse
 - MA5/MA10/MA20 使用 **SMA** (简单移动平均，算术平均)，对标东方财富/同花顺/通达信标准
 - MACD/KDJ/RSI/ATR 算法详见 `indicators.py`，已逐项与东财 PC 端验证
 - Elder 动力系统: EMA13 方向 + MACD 柱方向 → 蜡烛颜色（红=多/绿=空/蓝=中性）

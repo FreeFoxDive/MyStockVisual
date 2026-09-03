@@ -394,6 +394,8 @@ const STATE = {
 
 const MINUTE_PERIODS = ['1m', '5m', '15m', '30m', '60m'];
 const MINUTE_COUNTS = { '1m': 1200, '5m': 480, '15m': 320, '30m': 320, '60m': 1000 };
+// 日K: 3年可见 (3×252) + RSI 收敛 warmup 250
+const DAILY_COUNT = 3 * 252 + 250; // 1006
 const ALL_PERIODS = ['1d', '1w', '1M', 'intraday', ...MINUTE_PERIODS];
 // 分钟K按周期刷新 (不再套用分时 60s); 分时仍 60s; 快照 10s
 const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3, '60m': 3600e3 };
@@ -552,7 +554,7 @@ async function fetchData(opts) {
     }
   } catch(e) { /* ignore */ }
 
-  const count = MINUTE_COUNTS[period] || 300;
+  const count = period === '1d' ? DAILY_COUNT : (MINUTE_COUNTS[period] || 300);
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
   if (!silent && !cacheHit && !sameView) {

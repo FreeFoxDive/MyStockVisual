@@ -166,7 +166,12 @@ def kline():
 
     symbol = normalize_symbol(symbol_raw)
     period = request.args.get("period") or "1d"
-    default_count = MINUTE_COUNTS.get(period, 200)
+    # 日K: 3年可见 (3×252) + RSI 收敛 warmup 250；其余非分钟默认 200
+    DAILY_COUNT = 3 * 252 + 250  # 1006
+    if period == "1d":
+        default_count = DAILY_COUNT
+    else:
+        default_count = MINUTE_COUNTS.get(period, 200)
     try:
         count = min(int(request.args.get("count") or str(default_count)), 1500)
     except ValueError:
