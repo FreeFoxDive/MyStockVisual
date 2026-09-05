@@ -80,7 +80,7 @@ class KlineCacheTest(unittest.TestCase):
         api_routes.kline_cache_minute.clear()
 
     def _patches(self, quotes=None, quote_exc=None):
-        """mock fetch_kline / fetch_quote / _is_index_symbol (不碰真实行情)。"""
+        """mock fetch_kline_ex / fetch_quote / _is_index_symbol (不碰真实行情)。"""
         it = iter(quotes or [])
 
         def quote_side(*_a, **_k):
@@ -90,8 +90,8 @@ class KlineCacheTest(unittest.TestCase):
                 return (quotes or [None])[-1]
 
         return (
-            mock.patch.object(self.api, "fetch_kline",
-                              return_value=(_kline_df(), "浦发银行")),
+            mock.patch.object(self.api, "fetch_kline_ex",
+                              return_value=(_kline_df(), "浦发银行", "mairui")),
             mock.patch.object(self.api, "fetch_quote",
                               side_effect=quote_exc or quote_side),
             mock.patch.object(self.api, "_is_index_symbol", return_value=False),

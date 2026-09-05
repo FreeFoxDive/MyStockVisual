@@ -20,6 +20,7 @@ PROJECT_DIR = SCRIPT_DIR.parent
 log = logging.getLogger("market")
 
 from logger import sanitize_error as _sanitize_error  # noqa: E402
+import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_source 惰性反向引用本模块)
 
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
@@ -644,14 +645,112 @@ def _fetch_impulse_qfq(symbol, count):
     return impulse
 
 
+def _fetch_af_daily_kline(symbol, count):
+    """从 AlphaFeed 拉取未复权日K (股票/ETF 日K备选源), 返回标准化 DataFrame 或 None。"""
+    try:
+        af = get_af()
+        dfs = af.klines.batch(
+            [symbol], period="1d", count=count, adjust="none", to_dataframe=True
+        )
+        df = dfs.get(symbol) if dfs else None
+    except Exception as e:
+        log.warning(f"AlphaFeed 获取日K失败 {symbol}: {e}")
+        return None
+    if df is None or len(df) == 0:
+        return None
+    return _normalize(df)
+
+
+MR_FSJY_PERIODS = {"5m", "15m", "30m", "60m"}
+
+
+def _fetch_mr_minute_kline(symbol, period, count):
+    """从麦蕊分时交易接口 (hszbl/fsjy, SDK 未封装) 拉取分钟K。
+
+    实测 (probe_mairui_minute.py 2026-09-05): 5m/15m/30m/60m 可用 (PAID 证书),
+    1m 不支持 (HTTP 422), 北交所 404; st/et/lt 查询参数无效, 返回固定窗口
+    (5m 上限 1488 根), 本地 tail 截取。字段 {d:"YYYY-MM-DD HH:MM",
+    o,h,l,c, v:手, e:成交额元}。数据窗口可能滞后 (当时冻结在 2026-04-30),
+    路由层分钟新鲜度守卫会把末根过旧的返回视为失败继续回退。
+    """
+    if symbol.endswith(".BJ") or period not in MR_FSJY_PERIODS:
+        return None
+    # fsjy 路径用带交易所后缀的代码 (probe 实测 600519.SH 可用, 同 stock_history 风格)
+    url = f"https://api.mairuiapi.com/hszbl/fsjy/{symbol}/{period}/{MAIRUI_API_KEY}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception as e:
+        log.warning(f"麦蕊获取分钟K线失败 {symbol} {period}: {e}")
+        return None
+
+    # dict = 错误响应, 空列表 = 无数据
+    if not rows or isinstance(rows, dict):
+        return None
+
+    df = pd.DataFrame(rows)
+    df = df.drop(columns=["zf", "hs", "zd", "zde", "ud"], errors="ignore")
+    df = df.rename(columns={
+        "o": "open", "h": "high", "l": "low", "c": "close",
+        "e": "amount", "v": "volume", "d": "trade_time",
+    })
+    df = _normalize(df, prefer_time=True)
+    if df is not None and count:
+        df = df.tail(count)
+    return df
+
+
+def _fetch_mr_kline(symbol, period, count):
+    """从麦蕊 SDK 拉取指数/股票 日/周/月K, 返回标准化 DataFrame 或 None。"""
+    api = get_mr()
+    mr_period = {"1d": "d", "1w": "w", "1M": "m"}.get(period, "d")
+    try:
+        if _is_index_symbol(symbol):
+            rows = api.index_history(symbol, mr_period, lt=count)
+        else:
+            rows = api.stock_history(symbol, mr_period, "n", lt=count)
+    except Exception as e:
+        log.warning(f"麦蕊获取K线失败 {symbol}: {e}")
+        return None
+
+    # dict = 错误响应 (如 {"error": "数据不存在"}), 空列表 = 无数据
+    if not rows or isinstance(rows, dict):
+        return None
+
+    df = pd.DataFrame(rows)
+    df = df.rename(columns={
+        "o": "open", "h": "high", "l": "low", "c": "close",
+        "a": "amount", "v": "volume", "t": "trade_date",
+    })
+    return _normalize(df)
+
+
+def _kline_category(symbol, period):
+    """K线类别路由 (kline_source 按类别选源): minute / fund(ETF) / index / stock。"""
+    if period in MINUTE_PERIODS:
+        return "minute"
+    if _is_etf(symbol):
+        return "fund"
+    if _is_index_symbol(symbol):
+        return "index"
+    return "stock"
+
+
 def fetch_kline(symbol, period, count):
     """获取 K 线数据（优先磁盘缓存），返回标准化 DataFrame。
 
-    数据源路由：
-    - 分钟 → AlphaFeed klines.batch
-    - 指数 → 麦蕊 index_history
-    - 股票 → 麦蕊 stock_history
-    - ETF  → 麦蕊基金历史K线 (jj/lskx)
+    数据源路由由 kline_source 注册表承担 (见 fetch_kline_ex):
+    默认 分钟→AlphaFeed, 股票/指数/ETF→麦蕊, 失败自动回退备用源。
+    """
+    df, name, _source = fetch_kline_ex(symbol, period, count)
+    return df, name
+
+
+def fetch_kline_ex(symbol, period, count):
+    """fetch_kline 完整版, 额外返回实际服务的数据源名 (观测/透传 meta 用)。
+
+    返回 (标准化 DataFrame, 名称, 数据源名); 失败 (None, None, None)。
     """
     # 检查磁盘缓存 (日K/分钟 盘中 60s/盘后 300s, 周月K 600s)
     now = market_hours.now()
@@ -673,7 +772,7 @@ def fetch_kline(symbol, period, count):
             else:
                 df = _strip_today_bar_df(df)
                 df = _maybe_append_today_bar(symbol, df)
-                return df, cached.get("name", symbol)
+                return df, cached.get("name", symbol), cached.get("source")
         else:
             # 分钟线优先 trade_time: JSON 常同时带 trade_date(日) 与 trade_time,
             # 若先按 date 建索引, 同日多根重复 → RSI get_loc 返回 slice
@@ -684,47 +783,14 @@ def fetch_kline(symbol, period, count):
                 df["trade_date"] = pd.to_datetime(df["trade_date"])
                 df = df.set_index("trade_date")
             df = df.sort_index()
-            return df, cached.get("name", symbol)
+            return df, cached.get("name", symbol), cached.get("source")
 
-    df, name = None, None
-
-    if period in MINUTE_PERIODS:
-        df = _fetch_minute_kline(symbol, period, count)
-        if df is not None:
-            name = _lookup_name(symbol)
-    elif _is_etf(symbol):
-        # ETF → 麦蕊基金历史K线 (jj/lskx)
-        df = _fetch_fund_kline(symbol, period, count)
-        if df is not None:
-            name = _lookup_name(symbol)
-    else:
-        # 麦蕊 K 线 (指数/股票)
-        api = get_mr()
-        mr_period = {"1d": "d", "1w": "w", "1M": "m"}.get(period, "d")
-        try:
-            if _is_index_symbol(symbol):
-                rows = api.index_history(symbol, mr_period, lt=count)
-            else:
-                rows = api.stock_history(symbol, mr_period, "n", lt=count)
-        except Exception as e:
-            log.warning(f"麦蕊获取K线失败 {symbol}: {e}")
-            return None, None
-
-        # dict = 错误响应 (如 {"error": "数据不存在"}), 空列表 = 无数据
-        if not rows or isinstance(rows, dict):
-            return None, None
-
-        df = pd.DataFrame(rows)
-        df = df.rename(columns={
-            "o": "open", "h": "high", "l": "low", "c": "close",
-            "a": "amount", "v": "volume", "t": "trade_date",
-        })
-        df = _normalize(df)
-        if df is not None:
-            name = _lookup_name(symbol)
+    category = _kline_category(symbol, period)
+    df, source = kline_source.fetch_kline_df(category, symbol, period, count)
+    name = _lookup_name(symbol) if df is not None else None
 
     if df is None:
-        return None, None
+        return None, None, None
 
     if period == "1d":
         df = _maybe_append_today_bar(symbol, df)
@@ -743,6 +809,7 @@ def fetch_kline(symbol, period, count):
             out = out.rename(columns={out.columns[0]: "trade_date"})
         cache_data = {
             "name": name or symbol,
+            "source": source,
             "data": json.loads(out.to_json(orient="records", date_format="iso")),
         }
         try:
@@ -750,7 +817,7 @@ def fetch_kline(symbol, period, count):
         except Exception:
             pass
 
-    return df, name or symbol
+    return df, name or symbol, source
 
 
 def _mr_quote_to_std(q, symbol):

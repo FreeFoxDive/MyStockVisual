@@ -7,6 +7,7 @@ import logging
 import pandas as pd
 from flask import Blueprint, g, make_response, request
 
+import kline_source
 import market_hours
 import trades
 from indicators import compute_all_indicators, _safe_list
@@ -21,14 +22,12 @@ from market import (
     _is_etf,
     _is_index_symbol,
     _load_pledge,
-    _normalize,
     _safe_float,
     _safe_int,
     _search_stocks,
-    fetch_kline,
+    fetch_kline_ex,
     fetch_quote,
     fetch_quotes,
-    get_af,
     kline_cache,
     kline_cache_long,
     kline_cache_minute,
@@ -223,7 +222,7 @@ def kline():
         return _json(resp)
 
     try:
-        df, name = fetch_kline(symbol, period, count)
+        df, name, source = fetch_kline_ex(symbol, period, count)
     except Exception as e:
         return _error(f"获取K线失败: {_sanitize_error(e)}", 500)
 
@@ -318,6 +317,7 @@ def kline():
             "cached": False,
             "server_time": str(market_hours.now()),
             "last_trade_date": klines[-1]["date"] if klines else None,
+            "source": source,
         },
     }
 
@@ -342,37 +342,19 @@ def intraday():
     except ValueError:
         count = 120
     try:
-        af = get_af()
-        dfs = af.klines.batch(
-            [symbol], period=period, count=count, adjust="none", to_dataframe=True
-        )
-        df = dfs.get(symbol)
+        # 分钟源经 kline_source 路由 (默认 alphafeed, 失败自动回退), df 已标准化
+        df, _src = kline_source.fetch_kline_df("minute", symbol, period, count)
         if df is None or len(df) == 0:
             return _error(f"无法获取 {symbol} 的分钟线", 404)
-        time_col = "trade_time" if "trade_time" in df.columns else "trade_date"
-        raw_times = (
-            df[time_col].astype(str).str[-8:-3] if time_col in df.columns else None
-        )
-        df = _normalize(df, prefer_time=True)
-        if df is None:
-            return _error("数据不足", 404)
         last_day = df.index.normalize().max()
         mask = df.index.normalize() == last_day
         df = df[mask]
-        if raw_times is not None:
-            raw_times = raw_times[mask]
         if len(df) == 0:
             return _error("无分时数据", 404)
         df, indicators = compute_all_indicators(df, period="1d", with_atr_val=True)
         bars = []
         for i, (idx, row) in enumerate(df.iterrows()):
-            ts = (
-                raw_times.iloc[i]
-                if raw_times is not None and i < len(raw_times)
-                else str(idx)
-            )
-            if ts and not ts[0].isdigit():
-                ts = str(idx)[-8:-3]
+            ts = idx.strftime("%H:%M") if hasattr(idx, "strftime") else str(idx)[-8:-3]
             bars.append({
                 "time": ts,
                 "open": _safe_float(row.get("open")),

@@ -45,10 +45,17 @@ def main():
     bootstrap_admin()
     start_background_jobs()
 
+    import kline_source
+
+    chains = kline_source.describe_chains()
     print(f"""
 ╔══════════════════════════════════════════╗
 ║   📈 Visual K线图 股票可视化              ║
-║   数据源: 麦蕊(日K) + AlphaFeed(分时/分钟) ║
+║   数据源链 (主源→回退, KLINE_SOURCE_*):   ║
+║     分钟: {chains['minute']:<28}║
+║     股票: {chains['stock']:<28}║
+║     指数: {chains['index']:<28}║
+║     基金: {chains['fund']:<28}║
 ║   地址: http://{args.host}:{args.port}             ║
 ║   速率限制: {RATE_LIMIT_PER_MIN} 次/分钟           ║
 ╚══════════════════════════════════════════╝

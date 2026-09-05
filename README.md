@@ -49,6 +49,7 @@ visual/
 ├── api_routes.py      # 其余 /api/* Blueprint
 ├── security.py        # CSP / 限流 / 登录锁定 / 会话 Cookie / CSRF
 ├── market.py          # 行情代理、缓存、质押等数据层
+├── kline_source.py    # K线数据源注册/回退路由 (KLINE_SOURCE_* 配置)
 ├── logger.py          # 日志配置 + 密钥脱敏
 ├── indicators.py      # 指标计算
 ├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
@@ -58,10 +59,13 @@ visual/
 ├── ntfy.py            # ntfy 薄包装 (myappnotify)
 ├── market_hours.py    # A 股交易日历与时段
 ├── probe_feed.py      # 探测快照刷新频率 / 接口权限
+├── probe_mairui_minute.py # 探测麦蕊分钟K接口 (权限/字段/数据窗口)
+├── probe_akshare_source.py # 探测 akshare(东财) 日/分钟K (列名/单位/覆盖度)
 ├── test/
 │   ├── test_trades.py
 │   ├── test_monitor.py
 │   ├── test_pledge.py
+│   ├── test_kline_source.py
 │   ├── test_logger_redact.py
 │   ├── test_flask_auth.py
 │   └── fixtures/
@@ -141,6 +145,29 @@ visual/
 - AlphaFeed 30次/分钟硬限制
 - 服务端缓存减少 API 调用
 - 前端交易时段30秒刷新间隔 → 安全范围
+
+### K线数据源配置
+K线按类别（分钟/股票/指数/基金）经 `kline_source.py` 注册表路由，主源失败自动回退下一源；`.env` 可自定义每类的源链（逗号分隔，依次尝试）：
+
+```bash
+KLINE_SOURCE_MINUTE=alphafeed,akshare      # 默认
+KLINE_SOURCE_STOCK=mairui,alphafeed,akshare # 默认
+KLINE_SOURCE_INDEX=mairui,akshare           # 默认
+KLINE_SOURCE_FUND=mairui,alphafeed,akshare  # 默认
+```
+
+| 数据源 | 分钟K | 股票/指数/基金 日周月K | 说明 |
+|---|---|---|---|
+| `mairui` | 5m/15m/30m/60m（`hszbl/fsjy`，1m/北交所不支持） | ✓ | 付费证书；分钟数据窗口可能滞后，默认不入分钟链 |
+| `alphafeed` | ✓ 全周期 | 仅股票/ETF 日K（指数未验证） | 付费证书 `AF_API_KEY` |
+| `akshare` | ✓（东财源，1m 仅近 5 个交易日） | ✓ 免费 | 无需 key，作兜底；东财限流期可能持续失败 |
+
+- 改 `.env` 后重启生效；启动横幅会打印各类别实际生效的链
+- 想强制单源（禁用回退）: `KLINE_SOURCE_STOCK=mairui`
+- 想把麦蕊加入分钟回退: `KLINE_SOURCE_MINUTE=alphafeed,mairui,akshare`（数据滞后会被新鲜度守卫拦截，末根 bar 距今 >30 天视为失败）
+- 基金日K口径：麦蕊 `jj/lskx` volume 为「股」、akshare/东财为「手」，`AkshareSource` 内 ×100 对齐，跨源图表一致
+- `/api/kline` 响应 `meta.source` 返回实际服务的数据源，便于观察回退是否生效
+- 实测脚本: `probe_mairui_minute.py`（麦蕊分钟K权限/字段/窗口）、`probe_akshare_source.py`（东财列名/单位/覆盖度）
 
 ### 配置持久化
 - `localStorage` key: `visual_chart_config` — 主题/面板
