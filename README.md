@@ -1,5 +1,8 @@
 # Visual — 本地股票K线可视化
 
+[![Tests](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-test.yml/badge.svg?branch=master)](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-test.yml)
+[![Docker Build](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-docker.yml/badge.svg?branch=master)](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-docker.yml)
+
 基于 **Flask + Waitress** + ECharts 5 的实时K线图表，AlphaFeed / 麦蕊数据源。
 
 ## 快速启动
