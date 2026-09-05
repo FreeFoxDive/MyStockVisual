@@ -2083,9 +2083,13 @@ document.addEventListener('DOMContentLoaded', () => {
   STATE._lastBarPatchDrawAt = 0;
   STATE._pendingBarPatch = false;
   STATE._serverTradingDay = null; // false = 节假日 (交易日历)
+  STATE._serverInSession = null;  // 服务端北京时间判定盘中 (含交易日历/午休)
 
-  function inAshareSession(now) {
-    now = now || new Date();
+  function inAshareSession() {
+    // 服务端判定优先, 浏览器时区不再影响刷新启停;
+    // ping 未就绪/失败时才回退本地时钟 (仅 UTC+8 浏览器准确)
+    if (STATE._serverInSession !== null) return STATE._serverInSession;
+    const now = new Date();
     const d = now.getDay();
     if (d === 0 || d === 6) return false;
     const t = now.getHours() * 60 + now.getMinutes();
@@ -2103,6 +2107,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const r = await fetch('/api/ping');
       const d = await r.json();
       if (typeof d.is_trading_day === 'boolean') STATE._serverTradingDay = d.is_trading_day;
+      if (typeof d.in_session === 'boolean') STATE._serverInSession = d.in_session;
     } catch (e) { /* 失败时仅用本地时段 */ }
   }
   syncSessionFlag();

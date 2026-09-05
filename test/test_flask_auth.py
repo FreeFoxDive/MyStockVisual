@@ -119,6 +119,25 @@ class AuthRouteSmokeTest(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 403)
 
+    def test_repo_maturity_endpoint(self):
+        # 未登录 401
+        c = self.app.test_client()
+        self.assertEqual(c.get("/api/repo-maturity?entry_date=2026-08-28&tenor=1").status_code, 401)
+        # 登录后: 与 trades._repo_maturity 同口径 (周末顺延)
+        headers = self._ensure_csrf()
+        self.client.post(
+            "/api/auth/login",
+            data=json.dumps({"username": "smoke_admin", "password": "password123"}),
+            content_type="application/json",
+            headers=headers,
+        )
+        r = self.client.get("/api/repo-maturity?entry_date=2026-08-28&tenor=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["maturity"], "2026-08-31")
+        # tenor 非法 → 400
+        r2 = self.client.get("/api/repo-maturity?entry_date=2026-08-28&tenor=abc")
+        self.assertEqual(r2.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

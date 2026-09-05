@@ -581,7 +581,9 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
         return []
 
     for sym, q in quotes.items():
-        ts = q.get("timestamp") or now_dt.timestamp()
+        # 兜底时间戳必须用 epoch 真钟: now_dt 是 naive 北京墙钟, 其 .timestamp()
+        # 在 UTC 容器上按 UTC 解释会产生 +8h 伪值, 毒化序列并冻结后续样本。
+        ts = q.get("timestamp") or time.time()
         append_sample(sym, ts, q.get("last_price"), q.get("volume"))
 
     elapsed = market_hours.session_elapsed_minutes(now_dt)

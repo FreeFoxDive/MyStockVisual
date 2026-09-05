@@ -140,11 +140,16 @@ _index_symbols = None
 _index_names = {}
 _index_lock = threading.Lock()
 _name_map = None
+_name_map_ts = 0.0     # _name_map 构建时的股票列表时间戳, 跟随列表刷新重建
 _name_map_lock = threading.Lock()
 
 
 def _load_index_cache():
-    """懒加载沪深指数列表 (symbol 集合 + symbol→名称), 服务生命周期内缓存一次"""
+    """懒加载沪深指数列表 (symbol 集合 + symbol→名称), 成功后缓存服务周期。
+
+    加载失败不缓存 (保持 None), 下次调用重试 —— 若把空集合固化, 进程
+    生命周期内所有指数都会被当股票路由 (index_history → stock_history)。
+    """
     global _index_symbols, _index_names
     if _index_symbols is not None:
         return _index_symbols
@@ -154,16 +159,18 @@ def _load_index_cache():
         symbols, names = set(), {}
         try:
             rows = get_mr().index_list()
-            for r in rows or []:
-                sym = str(r.get("dm", "")).strip().upper()
-                name = str(r.get("mc", "")).strip()
-                if sym:
-                    symbols.add(sym)
-                    if name:
-                        names[sym] = name
+            if rows:
+                for r in rows:
+                    sym = str(r.get("dm", "")).strip().upper()
+                    name = str(r.get("mc", "")).strip()
+                    if sym:
+                        symbols.add(sym)
+                        if name:
+                            names[sym] = name
+                if symbols:
+                    _index_symbols, _index_names = symbols, names
         except Exception as e:
             log.warning(f"加载指数列表失败: {e}")
-        _index_symbols, _index_names = symbols, names
         return symbols
 
 
@@ -173,15 +180,22 @@ def _is_index_symbol(symbol):
 
 
 def _lookup_name(symbol):
-    """查标的名称: 指数 → 股票/ETF 列表。找不到返回 symbol 本身。"""
+    """查标的名称: 指数 → 股票/ETF 列表。找不到返回 symbol 本身。
+
+    名称映射跟随股票列表的 24h 刷新重建 (比较时间戳), 否则新股上市、
+    更名、ST 戴帽/摘帽永远反映不到 quote 与 kline 的 name。
+    """
     if _is_index_symbol(symbol):
         return _index_names.get(symbol, symbol)
-    global _name_map
-    if _name_map is None:
+    global _name_map, _name_map_ts
+    if _name_map is None or _stock_list_time > _name_map_ts:
         with _name_map_lock:
-            if _name_map is None:
-                _name_map = {s["symbol"]: s["name"] for s in _load_stock_list()}
-    return _name_map.get(symbol, symbol)
+            if _name_map is None or _stock_list_time > _name_map_ts:
+                stocks = _load_stock_list()
+                if stocks:
+                    _name_map = {s["symbol"]: s["name"] for s in stocks}
+                    _name_map_ts = _stock_list_time or time.time()
+    return (_name_map or {}).get(symbol, symbol)
 
 
 # ── 指标计算 ──
@@ -330,12 +344,15 @@ def _pledge_file_path(date_str):
 def _fetch_pledge():
     """从 akshare 拉取全市场质押数据, 返回 (date_str, pledge); 失败返回 (None, None)"""
     import akshare as ak
-    from datetime import date, timedelta
+    from datetime import timedelta
+    # 必须用北京墙钟: date.today() 在 UTC 容器上北京时间 0-8 点仍是"昨天",
+    # 会晚 8 小时发现新数据、兜底日期也标错。
+    today = market_hours.now().date()
     df = None
     got_date = None
     # 收盘后数据有延迟, 回溯最近 5 天找最新有数据的交易日
     for offset in range(5):
-        d = (date.today() - timedelta(days=offset)).strftime("%Y%m%d")
+        d = (today - timedelta(days=offset)).strftime("%Y%m%d")
         try:
             df = ak.stock_gpzy_pledge_ratio_em(date=d)
             if df is not None and len(df) > 0:
@@ -346,7 +363,7 @@ def _fetch_pledge():
     if df is None:
         try:
             df = ak.stock_gpzy_pledge_ratio_em()
-            got_date = date.today().strftime("%Y%m%d")
+            got_date = today.strftime("%Y%m%d")
         except Exception:
             pass
     if df is None or len(df) == 0:
@@ -1296,6 +1313,12 @@ def _daily_bar_from_quote(symbol, target):
         volume = 0
     if volume <= 0:
         return None
+    if _is_etf(symbol):
+        # 实测 (probe_volume_units.py): 快照/股票日K volume 均为「手」,
+        # 唯麦蕊基金日K (jj/lskx) 为「股」(510300: 快照 8,414,655 手 ↔
+        # jj/lskx 841,465,543 股, cje 39.06 亿交叉验证)。合成 bar 须 ×100
+        # 对齐历史口径, 否则 ETF 当日量能差百倍、量均线被砸坑。
+        volume *= 100
     close = _safe_float(q.get("last_price"))
     if close is None:
         close = _safe_float(q.get("open"))

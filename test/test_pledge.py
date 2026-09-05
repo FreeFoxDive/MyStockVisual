@@ -106,8 +106,9 @@ class PledgeTestCase(unittest.TestCase):
     # ---- _fetch_pledge (mock akshare) ----
 
     def test_fetch_parses_and_backtracks(self):
-        from datetime import date, timedelta
-        d3 = (date.today() - timedelta(days=3)).strftime("%Y%m%d")
+        from datetime import timedelta
+        today = market.market_hours.now().date()   # 代码用北京墙钟, 期望值须同源
+        d3 = (today - timedelta(days=3)).strftime("%Y%m%d")
         df = _mk_df([
             {"股票代码": "000001", "质押比例": 12.34, "质押股数": 100,
              "质押市值": 5000, "质押笔数": 2},
@@ -128,6 +129,29 @@ class PledgeTestCase(unittest.TestCase):
         self.assertEqual(len(pledge), 2)
         self.assertEqual(pledge["000001"]["ratio"], 12.34)
         self.assertEqual(pledge["600000"]["count"], 1)
+
+    def test_fetch_uses_beijing_date_not_host_local(self):
+        """回溯起点必须是北京墙钟的"今天", 而非宿主机本地日期。
+
+        UTC 容器上北京时间 0-8 点时宿主机 date.today() 还是昨天,
+        旧实现会晚 8 小时发现新数据、兜底日期也标错。
+        """
+        from datetime import datetime
+        # 固定北京时间为周五 23:30 (UTC 容器此刻 date.today() 是周四)
+        fixed = datetime(2026, 9, 4, 23, 30)
+        requested = []
+
+        fake = mock.MagicMock()
+
+        def _em(date=None):
+            requested.append(date)
+            raise RuntimeError("no data")
+
+        fake.stock_gpzy_pledge_ratio_em.side_effect = _em
+        with mock.patch.object(market.market_hours, "now", return_value=fixed):
+            with mock.patch.dict(sys.modules, {"akshare": fake}):
+                market._fetch_pledge()
+        self.assertEqual(requested[0], "20260904")   # 北京周五, 而非宿主机本地日
 
     def test_fetch_fallback_to_noarg(self):
         df = _mk_df([{"股票代码": "000001", "质押比例": 1.0, "质押股数": 1,

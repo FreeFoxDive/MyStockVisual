@@ -52,6 +52,16 @@ def _error(msg, code=400):
     return _json({"error": msg}, code)
 
 
+def _attach_quote(resp, symbol):
+    """给 kline 响应挂实时快照 (30s 缓存); 失败静默, quote 缺席即可。"""
+    try:
+        q = fetch_quote(symbol)
+        if q:
+            resp["quote"] = q
+    except Exception:
+        pass
+
+
 def _require_user():
     user = getattr(g, "user", None)
     if not user:
@@ -156,6 +166,23 @@ def trade_reasons():
     return _json({"entry": trades.ENTRY_REASONS, "exit": trades.EXIT_REASONS})
 
 
+@api_bp.route("/api/repo-maturity", methods=["GET"])
+def repo_maturity():
+    """逆回购到期日预览。
+
+    与 create_trade 入库口径完全一致 (自然日 + XSHG 交易日历顺延, 含节假日),
+    前端不再自行用"只跳周末"的近似逻辑。
+    """
+    if not _require_user():
+        return _error("未登录", 401)
+    entry_date = (request.args.get("entry_date") or "").strip()
+    try:
+        tenor = int(request.args.get("tenor"))
+    except (TypeError, ValueError):
+        return _error("tenor 无效")
+    return _json({"maturity": trades._repo_maturity(entry_date, tenor)})
+
+
 # ── K 线 ──
 
 @api_bp.route("/api/kline", methods=["GET"])
@@ -192,6 +219,7 @@ def kline():
         resp = cached.copy()
         resp["meta"] = dict(resp.get("meta") or {})
         resp["meta"]["cached"] = True
+        _attach_quote(resp, symbol)
         return _json(resp)
 
     try:
@@ -293,15 +321,11 @@ def kline():
         },
     }
 
+    # 缓存里不存 quote: TTLCache 存引用, 事后挂 quote 会污染缓存条目,
+    # 让后续命中拿到最长 TTL 前的旧快照。改为存副本 (不含 quote), 每次返回前现挂。
+    _attach_quote(resp, symbol)
     if not skip_1d_cache:
-        cache.set(cache_key, resp)
-
-    try:
-        q = fetch_quote(symbol)
-        if q:
-            resp["quote"] = q
-    except Exception:
-        pass
+        cache.set(cache_key, {k: v for k, v in resp.items() if k != "quote"})
 
     return _json(resp)
 

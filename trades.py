@@ -976,12 +976,19 @@ def _model_exists(model_id):
 
 
 # ── 交易记录 CRUD ──
-def _valid_date(s):
+def _canonical_date(s):
+    """归一日期为 YYYY-MM-DD; 无法解析返回 None。
+
+    3.11+ 的 date.fromisoformat 还接受 'YYYYMMDD' 紧凑写法, 直接入库会打挂
+    未来日校验 (字典序 '20260805' > '2026-09-05') 和统计分桶 (split('-')),
+    入库前必须归一。
+    """
+    if s is None:
+        return None
     try:
-        date.fromisoformat(s)
-        return True
+        return date.fromisoformat(str(s).strip()[:10]).isoformat()
     except (ValueError, TypeError):
-        return False
+        return None
 
 
 def _today_iso():
@@ -1102,8 +1109,8 @@ def _clean_reverse_repo(data, existing=None):
     if principal < 1000:
         return None, "逆回购最低 1000 元"
 
-    entry_date = s(merged.get("entry_date", ""))
-    if not _valid_date(entry_date):
+    entry_date = _canonical_date(s(merged.get("entry_date", "")))
+    if not entry_date:
         return None, "买入日期无效 (格式 YYYY-MM-DD)"
     fut = _reject_future_date(entry_date, "买入日期")
     if fut:
@@ -1245,8 +1252,8 @@ def _clean_batch(data, existing=None):
             return None, f"第{leg_no}笔数量无效"
         if qty <= 0:
             return None, f"第{leg_no}笔数量必须大于 0"
-        date_str = s(leg.get("date", ""))
-        if not _valid_date(date_str):
+        date_str = _canonical_date(s(leg.get("date", "")))
+        if not date_str:
             return None, f"第{leg_no}笔日期无效 (格式 YYYY-MM-DD)"
         fut = _reject_future_date(date_str, f"第{leg_no}笔日期")
         if fut:
@@ -1368,8 +1375,8 @@ def _clean(data, existing=None):
     if quantity <= 0:
         return None, "数量必须大于 0"
 
-    entry_date = s(merged.get("entry_date", ""))
-    if not _valid_date(entry_date):
+    entry_date = _canonical_date(s(merged.get("entry_date", "")))
+    if not entry_date:
         return None, "买入日期无效 (格式 YYYY-MM-DD)"
     fut = _reject_future_date(entry_date, "买入日期")
     if fut:
@@ -1421,8 +1428,8 @@ def _clean(data, existing=None):
         if exit_price <= 0:
             return None, "退出价必须大于 0"
 
-        exit_date = s(merged.get("exit_date", ""))
-        if not _valid_date(exit_date):
+        exit_date = _canonical_date(s(merged.get("exit_date", "")))
+        if not exit_date:
             return None, "卖出日期无效 (格式 YYYY-MM-DD)"
         if exit_date < entry_date:
             return None, "卖出日期不能早于买入日期"
@@ -1914,6 +1921,9 @@ def delete_trade(user_id, tid):
 
 # ── 统计 ──
 def _bucket_label(d, granularity):
+    d = _canonical_date(d)
+    if not d:
+        return None
     y, m, day = d.split("-")
     if granularity == "year":
         return y
@@ -2097,6 +2107,8 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
         buckets = {}
         for t in trades:
             label = _bucket_label(t["exit_date"], granularity)
+            if label is None:
+                continue  # 历史遗留的坏日期行, 跳过而不是打挂整个统计
             b = buckets.setdefault(label, {"pnl": 0.0, "count": 0, "wins": 0, "losses": 0})
             b["pnl"] += t["pnl"]
             b["count"] += 1

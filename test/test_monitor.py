@@ -957,5 +957,30 @@ class TestRestFeedMock(unittest.TestCase):
             feed_mod.depth_batch_native(af, ["A.SH"])
 
 
+class TestPollTimestampFallback(PollPipelineTestCase):
+    """quote 缺 timestamp 时的兜底必须是 epoch 真钟。
+
+    修复前用 now_dt.timestamp(): now_dt 是 naive 北京墙钟, 在 UTC 容器上
+    会产生 +8h 伪 epoch, 毒化序列并冻结后续样本。
+    """
+
+    def test_missing_quote_timestamp_uses_epoch_clock(self):
+        import time as _time
+        uid = trades.create_user("admin", "secret123", is_admin=True)
+        self._open(uid, "600000.SH", "浦发",
+                   take_profit=12.0, breakeven=10.5, stop_loss=9.5)
+        q = {"last_price": 10.0, "volume": 200, "open": 10.0}  # 无 timestamp
+        feed = FakeFeed(quotes={"600000.SH": q})
+        with _notify_mocks() as (send, got):
+            fired = monitor._poll_once(feed, now_dt=self.now)
+        self.assertEqual(fired, [])
+        send.assert_not_called()
+        got.assert_not_called()
+        buf = monitor.get_buffer("600000.SH")
+        self.assertTrue(buf)
+        # now_dt 是固定的 2026-08-21 10:00 (naive); 兜底 ts 应贴近 time.time()
+        self.assertLess(abs(buf[-1]["ts"] - _time.time()), 30)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

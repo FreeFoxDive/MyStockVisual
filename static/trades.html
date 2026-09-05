@@ -2067,6 +2067,8 @@ function onRepoCodeChange() {
   repoPreview();
 }
 
+// 本地粗算 (仅跳周末) 作为即时占位; 服务端按交易日历 (含节假日) 顺延后覆盖,
+// 与 create_trade 入库口径完全一致
 function repoMaturityPreview(dateStr, tenorDays) {
   if (!dateStr) return '—';
   const d = new Date(dateStr + 'T00:00:00');
@@ -2074,6 +2076,20 @@ function repoMaturityPreview(dateStr, tenorDays) {
   while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+let _repoMaturityTimer = null;
+async function updateRepoMaturity(dateStr, tenorDays) {
+  const el = document.getElementById('repo-maturity');
+  if (!el || !dateStr || !(tenorDays > 0)) return;
+  clearTimeout(_repoMaturityTimer);
+  _repoMaturityTimer = setTimeout(async () => {
+    try {
+      const d = await api(
+        `/api/repo-maturity?entry_date=${encodeURIComponent(dateStr)}&tenor=${tenorDays}`);
+      if (d && d.maturity && el.isConnected) el.textContent = d.maturity;
+    } catch (e) { /* 保留本地粗算值 */ }
+  }, 250);
 }
 
 function repoPreview() {
@@ -2091,8 +2107,9 @@ function repoPreview() {
   const interest = principal * (rate / 100) * days / 365;
   const comm = principal * (REPO_FEE[tenor] || 0);
   const net = interest - comm;
-  el.innerHTML = `期限 <b>${tenor}</b> 天 · 计息 <b>${days}</b> 天 · 到期(约) <b>${repoMaturityPreview(date, tenor)}</b><br>` +
+  el.innerHTML = `期限 <b>${tenor}</b> 天 · 计息 <b>${days}</b> 天 · 到期(约) <b id="repo-maturity">${repoMaturityPreview(date, tenor)}</b><br>` +
     `利息 <b style="color:var(--up-color)">+${interest.toFixed(2)}</b> 元 · 佣金 <b>${comm.toFixed(2)}</b> 元 · 净收益 <b style="color:var(--up-color)">+${net.toFixed(2)}</b> 元`;
+  updateRepoMaturity(date, tenor);
 }
 
 // 单笔 → 批次切换时, 把旧的买入(及已平仓的卖出)内容带入批次腿编辑器
@@ -2439,14 +2456,32 @@ initRanges();
 
 checkAuth();
 
-// 持仓现价定时刷新：交易时段(周一~周五 9:30-15:00)每 30s 拉一次, 与首页保持一致
+// 持仓现价定时刷新：与首页同口径, 用服务端北京时间判断盘中 (含交易日历/午休);
+// ping 未就绪/失败时回退本地时钟 (仅 UTC+8 浏览器准确)
+let _serverInSession = null;
+async function syncSessionFlag() {
+  try {
+    const r = await fetch('/api/ping');
+    const d = await r.json();
+    if (typeof d.in_session === 'boolean') _serverInSession = d.in_session;
+  } catch (e) { /* 保持上次值 */ }
+}
+syncSessionFlag();
+setInterval(syncSessionFlag, 60e3);
+
+function inAshareSession() {
+  if (_serverInSession !== null) return _serverInSession;
+  const now = new Date();
+  const dow = now.getDay();
+  if (dow === 0 || dow === 6) return false;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return (mins >= 9 * 60 + 30 && mins <= 11 * 60 + 30) ||
+         (mins >= 13 * 60 && mins <= 15 * 60);
+}
+
 setInterval(() => {
   if (!state.user) return;
-  const now = new Date();
-  const d = now.getDay();
-  if (d === 0 || d === 6) return;
-  const mins = now.getHours() * 60 + now.getMinutes();
-  if (mins < 9 * 60 + 30 || mins >= 15 * 60) return;
+  if (!inAshareSession()) return;
   refreshQuotes(false);
 }, 30000);
 </script>

@@ -1634,6 +1634,66 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         self.assertEqual(t["exit_date"], today)
         self.assertEqual(t["exit_price"], 10.5)
 
+    def test_etf_quote_volume_shou_converted_to_gu(self):
+        """ETF 合成今日 bar 的快照 volume (手) 须 ×100 对齐 jj/lskx (股)。
+
+        实测 510300: 快照 v=8,414,655 手 ↔ 麦蕊基金日K 841,465,543 股,
+        不换算则 ETF 当日量能差百倍。
+        """
+        today = _date.today().isoformat()
+        quote = {"open": 4.637, "high": 4.672, "low": 4.599,
+                 "last_price": 4.616, "volume": 8414655}
+        with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
+            with self._mock_quotes("510300.SH", quote):
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    bar = self.market.get_daily_bar("510300.SH", today)
+        self.assertIsNotNone(bar)
+        self.assertEqual(bar["volume"], 841465500)
+
+
+class TestDateCanonicalization(TradesTestCase):
+    """紧凑 ISO 日期 ('YYYYMMDD') 须归一为 'YYYY-MM-DD' 再入库。
+
+    3.11+ 的 date.fromisoformat 接受紧凑写法: 直接入库会被字典序未来日校验
+    误判 ('20260805' > '2026-09-05'), 并让统计分桶 split('-') 抛 ValueError
+    打挂 /api/trades/stats。
+    """
+
+    def test_compact_dates_normalized(self):
+        uid = self._make_user()
+        trades.create_trade(uid, self._closed(
+            entry_date="20260801", exit_date="20260805"))
+        records, total = trades.list_trades(uid, {})
+        self.assertEqual(total, 1)
+        self.assertEqual(records[0]["entry_date"], "2026-08-01")
+        self.assertEqual(records[0]["exit_date"], "2026-08-05")
+
+    def test_compact_past_date_not_rejected_as_future(self):
+        uid = self._make_user()
+        # 修复前: '20260801' > '2026-09-05' 按字典序为 True → 被当未来日拒绝
+        t = trades.create_trade(uid, self._open(entry_date="20260801"))
+        self.assertEqual(t["entry_date"], "2026-08-01")
+
+    def test_stats_survives_legacy_compact_exit_date(self):
+        import sqlite3
+        uid = self._make_user()
+        trades.create_trade(uid, self._closed(
+            entry_date="2026-08-01", exit_date="2026-08-05"))
+        tid = trades.list_trades(uid, {})[0][0]["id"]
+        # 模拟修复前的遗留脏数据 (紧凑格式已入库)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("UPDATE trades SET exit_date='20260805' WHERE id=?", (tid,))
+            conn.commit()
+        finally:
+            conn.close()
+        # 统计不得抛异常; 遗留紧凑日期被 _bucket_label 归一, 落回正确的周分桶
+        stats = trades.compute_stats(uid)
+        self.assertIn("summary", stats)
+        self.assertEqual(stats["series"]["week"],
+                         [{"label": "2026-W32", "pnl": 300.0,
+                           "count": 1, "win_rate": 100.0}])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
