@@ -9,6 +9,7 @@
 <script src="/js/theme.js"></script>
 <script src="/js/api.js"></script>
 <script src="/js/indicators.js"></script>
+<script src="/js/gaps.js"></script>
 <style>
 /* ═══════════════ 页面专属 (主题变量见 theme.css) ═══════════════ */
 body {
@@ -326,6 +327,7 @@ body {
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
   <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
+  <label id="lbl-gap"><input type="checkbox" id="chk-gap" checked onchange="onConfigChange()">缺口</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>🔧 提示框:</span>
   <label><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
@@ -390,6 +392,7 @@ const STATE = {
   _themeAuto: true,      // 默认自动主题(系统偏好 > 时间)
   impulseEnabled: false, // 动力系统(Elder)
   channelEnabled: false, // ATR通道(Elder)
+  gapEnabled: true,      // 未回补跳空缺口 (60m+)
 };
 
 const MINUTE_PERIODS = ['1m', '5m', '15m', '30m', '60m'];
@@ -416,6 +419,8 @@ const COLORS = {
     crossLine: '#cccccc',
     up: '#ef232a', down: '#14b143',
     halt: '#999999',  // 停牌/无量: 同花顺浅色灰K
+    gapFill: 'rgba(158,158,158,0.28)',
+    gapBorder: 'rgba(120,120,120,0.45)',
     // ── 白/黑系: MA5 / DIF / K / RSI1 ──
     ma5: '#1a1a1a', macdDif: '#1a1a1a', kdjK: '#1a1a1a', rsi6: '#1a1a1a',
     // ── 黄色系: MA10 / DEA / D / RSI2 ──
@@ -435,6 +440,8 @@ const COLORS = {
     crossLine: '#363a45',
     up: '#ef5350', down: '#26a69a',
     halt: '#7a7e88',  // 停牌/无量: 暗色中性灰
+    gapFill: 'rgba(120,120,120,0.32)',
+    gapBorder: 'rgba(160,160,160,0.40)',
     // ── 白色系: MA5 / DIF / K / RSI1 ──
     ma5: '#eeeeee', macdDif: '#eeeeee', kdjK: '#eeeeee', rsi6: '#eeeeee',
     // ── 黄色系: MA10 / DEA / D / RSI2 ──
@@ -852,8 +859,11 @@ function patchLastBarOnChart() {
     const dates = klines.map((x) => x.date);
     const xAxisPatch = (opt.xAxis || []).map(() => ({ data: dates }));
     const panels = getIndicatorPanels();
+    const klinePatch = { name: 'K线', data: klines.map((kk) => buildOhlcPoint(kk, impulseOn)) };
+    const gapMark = buildGapMarkArea(klines, dates);
+    klinePatch.markArea = gapMark || { data: [] };
     const seriesPatch = [
-      { name: 'K线', data: klines.map((kk) => buildOhlcPoint(kk, impulseOn)) },
+      klinePatch,
       { name: 'MA5', data: klines.map((kk) => kk.ma5) },
       { name: 'MA10', data: klines.map((kk) => kk.ma10) },
       { name: 'MA20', data: klines.map((kk) => kk.ma20) },
@@ -877,7 +887,12 @@ function patchLastBarOnChart() {
 
   const seriesPatch = [];
   const pK = copyLast('K线', buildOhlcPoint(k, impulseOn));
-  if (pK) seriesPatch.push(pK);
+  if (pK) {
+    const dates = klines.map((x) => x.date);
+    const gapMark = buildGapMarkArea(klines, dates);
+    pK.markArea = gapMark || { data: [] };
+    seriesPatch.push(pK);
+  }
   const pV = copyLast('成交量', buildVolPoint(k));
   if (pV) seriesPatch.push(pV);
   const maMap = { MA5: 'ma5', MA10: 'ma10', MA20: 'ma20' };
@@ -1139,6 +1154,7 @@ function saveConfig() {
     themeAuto: STATE._themeAuto,
     impulse: document.getElementById('chk-impulse').checked,
     channel: document.getElementById('chk-channel').checked,
+    gap: document.getElementById('chk-gap').checked,
   };
   try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch(e) {}
 }
@@ -1161,6 +1177,10 @@ function loadConfig() {
     const chkChannel = document.getElementById('chk-channel');
     chkChannel.checked = !!cfg.channel;
     STATE.channelEnabled = !!cfg.channel;
+    const chkGap = document.getElementById('chk-gap');
+    // 缺省开启；仅当配置显式 false 时关闭
+    chkGap.checked = cfg.gap !== false;
+    STATE.gapEnabled = cfg.gap !== false;
     // 主题: 优先共享键 visual-theme (与交易记录页同步), 回退到本页配置
     const shared = VisualTheme.load();
     if (shared.theme && (localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY))) {
@@ -1393,8 +1413,22 @@ function renderIntraday(data) {
 function onConfigChange() {
   STATE.impulseEnabled = document.getElementById('chk-impulse').checked;
   STATE.channelEnabled = document.getElementById('chk-channel').checked;
+  STATE.gapEnabled = document.getElementById('chk-gap').checked;
   saveConfig();
   onIndicatorChange();
+}
+
+/** 当前周期是否绘制缺口 markArea */
+function gapsEnabledForPeriod() {
+  return STATE.gapEnabled && typeof GapScanner !== 'undefined' && GapScanner.isGapPeriod(STATE.period);
+}
+
+/** 扫描并构建 K 线 markArea（无缺口时返回 undefined） */
+function buildGapMarkArea(klines, dates) {
+  if (!gapsEnabledForPeriod() || !klines || !klines.length) return undefined;
+  const gaps = GapScanner.scanGaps(klines, { isHalt: isHaltBar });
+  STATE._gaps = gaps;
+  return GapScanner.buildMarkArea(gaps, dates, C());
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1450,13 +1484,26 @@ function initChart() {
       const r = STATE._gridRects[i];
       if (y >= r.top && y <= r.bottom) {
         STATE.hoveredGrid = i;
+        // 主图十字线价位：供缺口 hover 命中
+        if (i === 0 && STATE.chart) {
+          try {
+            const pt = STATE.chart.convertFromPixel({ gridIndex: 0 }, [e.offsetX, e.offsetY]);
+            STATE._pointerPrice = pt && pt.length > 1 ? pt[1] : null;
+          } catch (_) {
+            STATE._pointerPrice = null;
+          }
+        } else {
+          STATE._pointerPrice = null;
+        }
         return;
       }
     }
     STATE.hoveredGrid = -1;
+    STATE._pointerPrice = null;
   });
   STATE.chart.getZr().on('globalout', function() {
     STATE.hoveredGrid = -1;
+    STATE._pointerPrice = null;
   });
 }
 
@@ -1547,10 +1594,17 @@ function updateChart(reTheme) {
   const series = [];
 
   // ── Grid 0: K-line ──
+  const klineSeries = {
+    name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
+    itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
+    markPoint: buildTradeMarkers(klines, dates),
+  };
+  const gapMark = buildGapMarkArea(klines, dates);
+  klineSeries.markArea = gapMark || { data: [] };
+  if (!gapMark) STATE._gaps = [];
+
   series.push(
-    { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
-      itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
-      markPoint: buildTradeMarkers(klines, dates) },
+    klineSeries,
     { name: 'MA5', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: ma5,
       symbol: 'none', smooth: true, lineStyle: { color: C().ma5, width: 1 },
       itemStyle: { color: C().ma5 } },
@@ -1720,6 +1774,13 @@ function updateChart(reTheme) {
         }
         if (extras.length > 0) html += `<div>${extras.join(' | ')}</div>`;
         if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?'#ef5350':'#26a69a'}">${k.premium>=0?'+':''}${k.premium.toFixed(2)}%</span></div>`;
+        // 十字线落在未回补缺口灰区内时追加缺口信息（markArea 与 axis tooltip 冲突，走此注入）
+        if (typeof GapScanner !== 'undefined' && STATE._gaps && STATE._gaps.length) {
+          const hit = GapScanner.findGapAt(STATE._gaps, idx, STATE._pointerPrice);
+          if (hit) {
+            html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.15)">${GapScanner.gapTooltipHtml(hit)}</div>`;
+          }
+        }
         return html;
       }
 
@@ -1864,6 +1925,11 @@ function switchPeriod(period) {
   if (lblImpulse) lblImpulse.style.display = period === '1d' ? '' : 'none';
   const lblChannel = document.getElementById('lbl-channel');
   if (lblChannel) lblChannel.style.display = period === '1d' ? '' : 'none';
+  const lblGap = document.getElementById('lbl-gap');
+  if (lblGap) {
+    const showGap = typeof GapScanner !== 'undefined' && GapScanner.isGapPeriod(period);
+    lblGap.style.display = showGap ? '' : 'none';
+  }
   if (isIntra) {
     STATE.intradayData = null; // 清缓存，强制重新加载
     STATE.chart.clear();
