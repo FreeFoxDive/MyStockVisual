@@ -1665,12 +1665,8 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         self.assertEqual(t["exit_date"], today)
         self.assertEqual(t["exit_price"], 10.5)
 
-    def test_etf_quote_volume_shou_converted_to_gu(self):
-        """ETF 合成今日 bar 的快照 volume (手) 须 ×100 对齐 jj/lskx (股)。
-
-        实测 510300: 快照 v=8,414,655 手 ↔ 麦蕊基金日K 841,465,543 股,
-        不换算则 ETF 当日量能差百倍。
-        """
+    def test_etf_quote_volume_stays_shou(self):
+        """ETF 合成今日 bar 的快照 volume 保持「手」, 与 AF/东财日K同口径。"""
         today = _date.today().isoformat()
         quote = {"open": 4.637, "high": 4.672, "low": 4.599,
                  "last_price": 4.616, "volume": 8414655}
@@ -1679,7 +1675,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
                 with mock.patch("market_hours.is_trading_day", return_value=True):
                     bar = self.market.get_daily_bar("510300.SH", today)
         self.assertIsNotNone(bar)
-        self.assertEqual(bar["volume"], 841465500)
+        self.assertEqual(bar["volume"], 8414655)
 
 
 class TestDateCanonicalization(TradesTestCase):

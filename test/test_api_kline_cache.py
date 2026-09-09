@@ -112,7 +112,7 @@ class KlineCacheTest(unittest.TestCase):
         self.assertEqual(b1["quote"]["last_price"], 10.0)
         self.assertTrue(b2["meta"]["cached"])
         # 回归点: 缓存条目本身不含 quote; 命中时现挂新快照而不是首建时的旧值
-        cached = self.api.kline_cache_long.get(f"{self.SYMBOL}:1w:{self.COUNT}")
+        cached = self.api.kline_cache_long.get(f"{self.SYMBOL}:1w:{self.COUNT}:qfq")
         self.assertIsNotNone(cached)
         self.assertNotIn("quote", cached)
         self.assertEqual(b2["quote"]["last_price"], 11.0)

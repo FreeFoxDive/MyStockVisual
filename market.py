@@ -200,7 +200,7 @@ def _lookup_name(symbol):
 
 
 # ── 指标计算 ──
-from indicators import compute_all_indicators, compute_impulse, _safe_list, force_index
+from indicators import compute_all_indicators, _safe_list, force_index
 
 import market_hours
 
@@ -219,11 +219,12 @@ class DiskCache:
     def __init__(self):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _key(self, symbol, period, count):
-        return CACHE_DIR / f"{symbol}_{period}_{count}.json.gz"
+    def _key(self, symbol, period, count, adjust="forward"):
+        tag = kline_source.adjust_tag(adjust)
+        return CACHE_DIR / f"{symbol}_{period}_{count}_{tag}.json.gz"
 
-    def get(self, symbol, period, count, ttl_seconds):
-        fp = self._key(symbol, period, count)
+    def get(self, symbol, period, count, ttl_seconds, adjust="forward"):
+        fp = self._key(symbol, period, count, adjust)
         if not fp.exists():
             return None
         age = time.time() - fp.stat().st_mtime
@@ -235,8 +236,8 @@ class DiskCache:
         except Exception:
             return None
 
-    def set(self, symbol, period, count, data):
-        fp = self._key(symbol, period, count)
+    def set(self, symbol, period, count, data, adjust="forward"):
+        fp = self._key(symbol, period, count, adjust)
         try:
             with gzip.open(fp, "wt", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, cls=NumpyEncoder)
@@ -321,7 +322,6 @@ kline_cache = TTLCache(ttl_seconds=120)
 kline_cache_minute = TTLCache(ttl_seconds=60)
 kline_cache_long = TTLCache(ttl_seconds=300)
 quote_cache = TTLCache(ttl_seconds=30)
-_impulse_cache = TTLCache(ttl_seconds=120)
 
 
 # ── 质押数据缓存 ──
@@ -595,12 +595,13 @@ def _fetch_fund_kline(symbol, period, count):
     return df
 
 
-def _fetch_minute_kline(symbol, period, count):
+def _fetch_minute_kline(symbol, period, count, adjust="forward"):
     """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
+    adj = kline_source.normalize_adjust(adjust)
     try:
         af = get_af()
         dfs = af.klines.batch(
-            [symbol], period=period, count=count, adjust="none", to_dataframe=True
+            [symbol], period=period, count=count, adjust=adj, to_dataframe=True
         )
         df = dfs.get(symbol) if dfs else None
     except Exception as e:
@@ -611,46 +612,13 @@ def _fetch_minute_kline(symbol, period, count):
     return _normalize(df, prefer_time=True)
 
 
-def _fetch_impulse_qfq(symbol, count):
-    """用 AlphaFeed 前复权日K计算 Elder impulse 方向 (与 v7 动力管线口径一致)。
-
-    主图 K 线保持未复权, 但动力系统蜡烛颜色改用前复权, 避免分红除权造成
-    假的价格跳空污染 EMA13/MACD 方向。返回按 trade_date 索引的 int Series
-    (1=红 / -1=绿 / 0=蓝); 任何失败返回 None (调用方回退未复权 impulse)。
-    """
-    cache_key = f"{symbol}:{count}"
-    cached = _impulse_cache.get(cache_key)
-    if cached is not None:
-        return cached
+def _fetch_af_daily_kline(symbol, count, adjust="forward"):
+    """从 AlphaFeed 拉取日K (股票/ETF 日K备选源), 返回标准化 DataFrame 或 None。"""
+    adj = kline_source.normalize_adjust(adjust)
     try:
         af = get_af()
         dfs = af.klines.batch(
-            [symbol], period="1d", count=count, adjust="forward", to_dataframe=True
-        )
-        df = dfs.get(symbol) if dfs else None
-    except Exception as e:
-        log.warning(f"AlphaFeed 获取前复权日K失败 {symbol}: {e}")
-        return None
-    if df is None or len(df) == 0:
-        return None
-    df = _normalize(df)
-    if df is None:
-        return None
-    try:
-        impulse = compute_impulse(df["close"])
-    except Exception as e:
-        log.warning(f"前复权 impulse 计算失败 {symbol}: {e}")
-        return None
-    _impulse_cache.set(cache_key, impulse)
-    return impulse
-
-
-def _fetch_af_daily_kline(symbol, count):
-    """从 AlphaFeed 拉取未复权日K (股票/ETF 日K备选源), 返回标准化 DataFrame 或 None。"""
-    try:
-        af = get_af()
-        dfs = af.klines.batch(
-            [symbol], period="1d", count=count, adjust="none", to_dataframe=True
+            [symbol], period="1d", count=count, adjust=adj, to_dataframe=True
         )
         df = dfs.get(symbol) if dfs else None
     except Exception as e:
@@ -701,15 +669,21 @@ def _fetch_mr_minute_kline(symbol, period, count):
     return df
 
 
-def _fetch_mr_kline(symbol, period, count):
-    """从麦蕊 SDK 拉取指数/股票 日/周/月K, 返回标准化 DataFrame 或 None。"""
+def _fetch_mr_kline(symbol, period, count, adjust="forward"):
+    """从麦蕊 SDK 拉取指数/股票 日/周/月K, 返回标准化 DataFrame 或 None。
+
+    股票复权: forward→等比前复权 fr, none→不复权 n (与 AlphaFeed forward 对齐)。
+    指数无复权参数。
+    """
     api = get_mr()
     mr_period = {"1d": "d", "1w": "w", "1M": "m"}.get(period, "d")
+    adj = kline_source.normalize_adjust(adjust)
+    mr_div = "fr" if adj == kline_source.ADJUST_FORWARD else "n"
     try:
         if _is_index_symbol(symbol):
             rows = api.index_history(symbol, mr_period, lt=count)
         else:
-            rows = api.stock_history(symbol, mr_period, "n", lt=count)
+            rows = api.stock_history(symbol, mr_period, mr_div, lt=count)
     except Exception as e:
         log.warning(f"麦蕊获取K线失败 {symbol}: {e}")
         return None
@@ -737,21 +711,22 @@ def _kline_category(symbol, period):
     return "stock"
 
 
-def fetch_kline(symbol, period, count):
+def fetch_kline(symbol, period, count, adjust="forward"):
     """获取 K 线数据（优先磁盘缓存），返回标准化 DataFrame。
 
     数据源路由由 kline_source 注册表承担 (见 fetch_kline_ex):
-    默认 分钟→AlphaFeed, 股票/指数/ETF→麦蕊, 失败自动回退备用源。
+    图表默认前复权; 成交校验等传 adjust="none"。
     """
-    df, name, _source = fetch_kline_ex(symbol, period, count)
+    df, name, _source = fetch_kline_ex(symbol, period, count, adjust=adjust)
     return df, name
 
 
-def fetch_kline_ex(symbol, period, count):
+def fetch_kline_ex(symbol, period, count, adjust="forward"):
     """fetch_kline 完整版, 额外返回实际服务的数据源名 (观测/透传 meta 用)。
 
     返回 (标准化 DataFrame, 名称, 数据源名); 失败 (None, None, None)。
     """
+    adj = kline_source.normalize_adjust(adjust)
     # 检查磁盘缓存 (日K/分钟 盘中 60s/盘后 300s, 周月K 600s)
     now = market_hours.now()
     in_trading = market_hours.in_session(now)
@@ -761,7 +736,7 @@ def fetch_kline_ex(symbol, period, count):
         ttl = 60 if in_trading else 300
     else:
         ttl = 600
-    cached = _disk_cache.get(symbol, period, count, ttl)
+    cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj)
     if cached:
         df = pd.DataFrame(cached["data"])
         if period == "1d":
@@ -786,7 +761,9 @@ def fetch_kline_ex(symbol, period, count):
             return df, cached.get("name", symbol), cached.get("source")
 
     category = _kline_category(symbol, period)
-    df, source = kline_source.fetch_kline_df(category, symbol, period, count)
+    df, source = kline_source.fetch_kline_df(
+        category, symbol, period, count, adjust=adj
+    )
     name = _lookup_name(symbol) if df is not None else None
 
     if df is None:
@@ -813,7 +790,7 @@ def fetch_kline_ex(symbol, period, count):
             "data": json.loads(out.to_json(orient="records", date_format="iso")),
         }
         try:
-            _disk_cache.set(symbol, period, count, cache_data)
+            _disk_cache.set(symbol, period, count, cache_data, adjust=adj)
         except Exception:
             pass
 
@@ -1380,12 +1357,6 @@ def _daily_bar_from_quote(symbol, target):
         volume = 0
     if volume <= 0:
         return None
-    if _is_etf(symbol):
-        # 实测 (probe_volume_units.py): 快照/股票日K volume 均为「手」,
-        # 唯麦蕊基金日K (jj/lskx) 为「股」(510300: 快照 8,414,655 手 ↔
-        # jj/lskx 841,465,543 股, cje 39.06 亿交叉验证)。合成 bar 须 ×100
-        # 对齐历史口径, 否则 ETF 当日量能差百倍、量均线被砸坑。
-        volume *= 100
     close = _safe_float(q.get("last_price"))
     if close is None:
         close = _safe_float(q.get("open"))
@@ -1420,7 +1391,8 @@ def get_daily_bar(symbol, date_str):
 
     df = None
     try:
-        df, _ = fetch_kline(symbol, "1d", count)
+        # 成交校验必须未复权真实价 (拆分前 OHLC 不能被 ÷N)
+        df, _ = fetch_kline(symbol, "1d", count, adjust="none")
     except Exception as e:
         log.warning(f"get_daily_bar 失败 {symbol} {date_str}: {e}")
 

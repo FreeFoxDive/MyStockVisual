@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
 """kline_source 数据源包装层测试: 默认路由 / env 切换 / 自动回退 / 新鲜度守卫 / 列映射。
 
 契约 (README「K线数据源配置」):
-- 默认链 = 券商/付费源优先, 与既有行为一致 (分钟→alphafeed, 股票/指数/基金→mairui)
+- 默认链 = 券商/付费源优先 (分钟→alphafeed, 股票/指数→mairui, 基金→alphafeed)
+- 图表默认前复权 (forward); get_daily_bar 等传 none
 - KLINE_SOURCE_{MINUTE,STOCK,INDEX,FUND} 逗号分隔链, 主源失败自动回退
 - 分钟末根 bar 距今 > MINUTE_STALE_DAYS 天视为该源失败
-- akshare 兜底: 中文列名映射; 基金日K volume ×100 对齐麦蕊「股」口径
-- market.fetch_kline_ex 返回 (df, name, source), 磁盘缓存记录 source
+- akshare 兜底: 中文列名映射; 基金日K volume 与 AF/快照同为「手」
+- market.fetch_kline_ex 返回 (df, name, source), 磁盘缓存记录 source (key 含 qfq/raw)
 
 运行:
     venv/Scripts/python.exe -u visual/test/test_kline_source.py
@@ -90,8 +90,10 @@ def _minute_df(n=30, end=None):
 class _FakeMr:
     def __init__(self, rows):
         self.rows = rows
+        self.last_div = None
 
     def stock_history(self, symbol, period, div, lt=None):
+        self.last_div = div
         return self.rows
 
     def index_history(self, symbol, period, lt=None):
@@ -102,11 +104,11 @@ class _FakeDisk:
     def __init__(self):
         self.store = {}
 
-    def get(self, symbol, period, count, ttl):
-        return self.store.get((symbol, period, count))
+    def get(self, symbol, period, count, ttl, adjust="forward"):
+        return self.store.get((symbol, period, count, kline_source.adjust_tag(adjust)))
 
-    def set(self, symbol, period, count, data):
-        self.store[(symbol, period, count)] = data
+    def set(self, symbol, period, count, data, adjust="forward"):
+        self.store[(symbol, period, count, kline_source.adjust_tag(adjust))] = data
 
 
 class _FakeUrlopenResp:
@@ -158,7 +160,7 @@ class KlineSourceTestBase(unittest.TestCase):
 
 
 class TestDefaultRouting(KlineSourceTestBase):
-    """默认链与既有行为一致: 分钟→alphafeed, 股票/指数/基金→mairui。"""
+    """默认链: 分钟→alphafeed, 股票/指数→mairui, 基金→alphafeed。"""
 
     def test_stock_defaults_to_mairui(self):
         with _no_kline_env(), mock.patch.object(
@@ -166,22 +168,24 @@ class TestDefaultRouting(KlineSourceTestBase):
             df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 100)
         self.assertEqual(src, "mairui")
         self.assertEqual(len(df), 30)
-        mr.assert_called_once_with("600519.SH", "1d", 100)
+        mr.assert_called_once_with("600519.SH", "1d", 100, adjust="forward")
 
     def test_minute_defaults_to_alphafeed(self):
         with _no_kline_env(), mock.patch.object(
                 market, "_fetch_minute_kline", return_value=_minute_df()) as af:
             _df, src = kline_source.fetch_kline_df("minute", "600519.SH", "1m", 100)
         self.assertEqual(src, "alphafeed")
-        af.assert_called_once_with("600519.SH", "1m", 100)
+        af.assert_called_once_with("600519.SH", "1m", 100, adjust="forward")
 
-    def test_fund_defaults_to_mairui_jjlskx(self):
+    def test_fund_defaults_to_alphafeed(self):
         with _no_kline_env(), \
              mock.patch.object(market, "_is_etf", return_value=True), \
-             mock.patch.object(market, "_fetch_fund_kline", return_value=_norm_df()) as f:
+             mock.patch.object(market, "_fetch_af_daily_kline", return_value=_norm_df()) as af, \
+             mock.patch.object(market, "_fetch_fund_kline") as mr_fund:
             _df, src = kline_source.fetch_kline_df("fund", "510300.SH", "1d", 100)
-        self.assertEqual(src, "mairui")
-        f.assert_called_once_with("510300.SH", "1d", 100)
+        self.assertEqual(src, "alphafeed")
+        af.assert_called_once_with("510300.SH", 100, adjust="forward")
+        mr_fund.assert_not_called()
 
     def test_index_defaults_to_mairui(self):
         with _no_kline_env(), \
@@ -189,7 +193,7 @@ class TestDefaultRouting(KlineSourceTestBase):
              mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr:
             _df, src = kline_source.fetch_kline_df("index", "000300.SH", "1w", 100)
         self.assertEqual(src, "mairui")
-        mr.assert_called_once_with("000300.SH", "1w", 100)
+        mr.assert_called_once_with("000300.SH", "1w", 100, adjust="forward")
 
     def test_all_sources_fail_returns_none(self):
         with _no_kline_env(), \
@@ -199,6 +203,56 @@ class TestDefaultRouting(KlineSourceTestBase):
             df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 100)
         self.assertIsNone(df)
         self.assertIsNone(src)
+
+
+class TestAdjustRouting(KlineSourceTestBase):
+    def test_mairui_stock_uses_fr_for_forward(self):
+        fake = _FakeMr(_mr_rows())
+        with _no_kline_env(), mock.patch.object(market, "get_mr", return_value=fake):
+            df = market._fetch_mr_kline("600519.SH", "1d", 100, adjust="forward")
+        self.assertIsNotNone(df)
+        self.assertEqual(fake.last_div, "fr")
+
+    def test_mairui_stock_uses_n_for_none(self):
+        fake = _FakeMr(_mr_rows())
+        with _no_kline_env(), mock.patch.object(market, "get_mr", return_value=fake):
+            df = market._fetch_mr_kline("600519.SH", "1d", 100, adjust="none")
+        self.assertIsNotNone(df)
+        self.assertEqual(fake.last_div, "n")
+
+    def test_mairui_fund_skipped_on_forward(self):
+        with _no_kline_env(KLINE_SOURCE_FUND="mairui,alphafeed"), \
+             mock.patch.object(market, "_is_etf", return_value=True), \
+             mock.patch.object(market, "_fetch_fund_kline") as mr_fund, \
+             mock.patch.object(market, "_fetch_af_daily_kline", return_value=_norm_df()) as af:
+            _df, src = kline_source.fetch_kline_df(
+                "fund", "588200.SH", "1d", 100, adjust="forward")
+        self.assertEqual(src, "alphafeed")
+        mr_fund.assert_not_called()
+        af.assert_called_once()
+
+    def test_mairui_fund_allowed_on_none(self):
+        with _no_kline_env(KLINE_SOURCE_FUND="mairui,alphafeed"), \
+             mock.patch.object(market, "_is_etf", return_value=True), \
+             mock.patch.object(market, "_fetch_fund_kline", return_value=_norm_df()) as mr_fund:
+            _df, src = kline_source.fetch_kline_df(
+                "fund", "510300.SH", "1d", 100, adjust="none")
+        self.assertEqual(src, "mairui")
+        mr_fund.assert_called_once()
+
+    def test_akshare_passes_qfq(self):
+        fake = _fake_akshare(stock_daily=_cn_daily_df())
+        with _no_kline_env(KLINE_SOURCE_STOCK="akshare"), \
+             mock.patch.dict(sys.modules, {"akshare": fake}):
+            kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10, adjust="forward")
+        self.assertEqual(fake.stock_zh_a_hist.call_args.kwargs["adjust"], "qfq")
+
+    def test_akshare_passes_empty_for_none(self):
+        fake = _fake_akshare(stock_daily=_cn_daily_df())
+        with _no_kline_env(KLINE_SOURCE_STOCK="akshare"), \
+             mock.patch.dict(sys.modules, {"akshare": fake}):
+            kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10, adjust="none")
+        self.assertEqual(fake.stock_zh_a_hist.call_args.kwargs["adjust"], "")
 
 
 class TestEnvSwitch(KlineSourceTestBase):
@@ -223,6 +277,7 @@ class TestEnvSwitch(KlineSourceTestBase):
             df, src = kline_source.fetch_kline_df("minute", "600519.SH", "5m", 5)
         self.assertEqual(src, "akshare")
         self.assertEqual(fake.stock_zh_a_hist_min_em.call_args.kwargs["period"], "5")
+        self.assertEqual(fake.stock_zh_a_hist_min_em.call_args.kwargs["adjust"], "qfq")
         self.assertEqual(len(df), 5)
 
     def test_describe_chains_reflect_env(self):
@@ -230,6 +285,7 @@ class TestEnvSwitch(KlineSourceTestBase):
             chains = kline_source.describe_chains()
         self.assertEqual(chains["stock"], "akshare,mairui")
         self.assertEqual(chains["minute"], "alphafeed,akshare")
+        self.assertEqual(chains["fund"], "alphafeed,akshare")
 
 
 class TestFailover(KlineSourceTestBase):
@@ -317,15 +373,16 @@ class TestMinuteStalenessGuard(KlineSourceTestBase):
 
 
 class TestAkshareAdapter(KlineSourceTestBase):
-    def test_fund_daily_volume_x100_to_gu(self):
-        # 东财基金日K volume=「手」-> ×100 对齐麦蕊 jj/lskx「股」口径
+    def test_fund_daily_volume_stays_shou(self):
+        # 基金默认 AF/东财同为「手」, 不再 ×100
         fake = _fake_akshare(fund_daily=_cn_daily_df())
         with _no_kline_env(KLINE_SOURCE_FUND="akshare"), \
              mock.patch.object(market, "_is_etf", return_value=True), \
              mock.patch.dict(sys.modules, {"akshare": fake}):
             df, _src = kline_source.fetch_kline_df("fund", "510300.SH", "1d", 10)
-        self.assertAlmostEqual(df["volume"].iloc[-1], 8414655.0 * 100)
+        self.assertAlmostEqual(df["volume"].iloc[-1], 8414655.0)
         fake.fund_etf_hist_em.assert_called_once()
+        self.assertEqual(fake.fund_etf_hist_em.call_args.kwargs["adjust"], "qfq")
 
     def test_stock_daily_volume_unchanged(self):
         fake = _fake_akshare(stock_daily=_cn_daily_df())
@@ -390,12 +447,12 @@ class TestFetchKlineEx(KlineSourceTestBase):
             df, name, src = market.fetch_kline_ex("600519.SH", "1w", 100)
         self.assertEqual(src, "mairui")
         self.assertEqual(name, "测试名")
-        cached = self.disk.store[("600519.SH", "1w", 100)]
+        cached = self.disk.store[("600519.SH", "1w", 100, "qfq")]
         self.assertEqual(cached["source"], "mairui")
         self.assertEqual(cached["name"], "测试名")
 
     def test_cache_hit_returns_cached_source(self):
-        self.disk.store[("600519.SH", "1w", 100)] = {
+        self.disk.store[("600519.SH", "1w", 100, "qfq")] = {
             "name": "测试名", "source": "akshare",
             "data": json.loads(_norm_df(10).reset_index()
                                .rename(columns={"index": "trade_date"})
@@ -406,6 +463,14 @@ class TestFetchKlineEx(KlineSourceTestBase):
         self.assertEqual(src, "akshare")
         self.assertEqual(len(df), 10)
         mr.assert_not_called()  # 缓存命中不发起请求
+
+    def test_raw_and_qfq_cache_separated(self):
+        with mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr:
+            market.fetch_kline_ex("600519.SH", "1w", 100, adjust="forward")
+            market.fetch_kline_ex("600519.SH", "1w", 100, adjust="none")
+        self.assertIn(("600519.SH", "1w", 100, "qfq"), self.disk.store)
+        self.assertIn(("600519.SH", "1w", 100, "raw"), self.disk.store)
+        self.assertEqual(mr.call_count, 2)
 
     def test_fetch_kline_wrapper_drops_source(self):
         with mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()):

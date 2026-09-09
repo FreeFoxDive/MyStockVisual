@@ -921,7 +921,7 @@ function showLoading(show) {
 function updateInfo(data) {
   document.getElementById('info-code').textContent = (data.symbol || '').replace(/\.(SH|SZ|BJ)$/, '');
   document.getElementById('info-name').textContent = data.name || data.symbol;
-  // 东财股吧跳转: 指数用 zs+market 前缀, 个股/ETF 用裸代码
+  // 东财股吧跳转: 指数 zs+market; ETF 小写市场前缀; 个股裸代码
   const gubaEl = document.getElementById('info-guba');
   if (gubaEl) {
     const _m = (data.symbol || '').match(/\.(SH|SZ|BJ)$/);
@@ -929,6 +929,8 @@ function updateInfo(data) {
     const _mkt = _m ? _m[1] : '';
     if (data.is_index) {
       gubaEl.href = 'https://guba.eastmoney.com/list,' + (_mkt === 'SZ' ? 'zssz' : 'zssh') + _code6 + '.html';
+    } else if (data.is_etf && _mkt) {
+      gubaEl.href = 'https://guba.eastmoney.com/list,' + _mkt.toLowerCase() + _code6 + '.html';
     } else {
       gubaEl.href = 'https://guba.eastmoney.com/list,' + _code6 + '.html';
     }

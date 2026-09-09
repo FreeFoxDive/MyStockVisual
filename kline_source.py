@@ -2,16 +2,16 @@
 
 market.fetch_kline_ex 是唯一取数入口; 每个数据源实现 KlineSource 接口, 产出与
 market._normalize 一致的标准 DataFrame (DatetimeIndex + open/high/low/close/
-volume/amount, 升序, 未复权), 异常自吞返回 None。
+volume/amount, 升序)。图表默认前复权 (forward); 成交校验等可显式传 none。
 
 回退链用 .env 配置 (逗号分隔, 依次尝试, 未配置用默认链):
     KLINE_SOURCE_MINUTE=alphafeed,akshare
     KLINE_SOURCE_STOCK=mairui,alphafeed,akshare
     KLINE_SOURCE_INDEX=mairui,akshare
-    KLINE_SOURCE_FUND=mairui,alphafeed,akshare
+    KLINE_SOURCE_FUND=alphafeed,akshare
 
-默认链 = 券商/付费源优先 (与既有行为一致), akshare 只兜底。主源失败自动
-切换下一源并记日志。分钟数据带新鲜度守卫: 末根 bar 距今超过
+默认链 = 券商/付费源优先, akshare 只兜底。基金默认不含麦蕊 (jj/lskx 无复权)。
+主源失败自动切换下一源并记日志。分钟数据带新鲜度守卫: 末根 bar 距今超过
 MINUTE_STALE_DAYS 天视为该源失败 (防止滞后窗口的旧数据被当成功渲染)。
 """
 from __future__ import annotations
@@ -29,67 +29,91 @@ log = logging.getLogger("kline_source")
 # 覆盖长假 + 短期停牌; 麦蕊 fsjy 冻结窗口 (数月) 会被拦下。
 MINUTE_STALE_DAYS = 30
 
+# 内部口径: forward=前复权 / none=未复权
+ADJUST_FORWARD = "forward"
+ADJUST_NONE = "none"
+
+
+def normalize_adjust(adjust) -> str:
+    """把调用方 adjust 规范为 forward|none。"""
+    if adjust in (None, "", ADJUST_FORWARD, "qfq", "fr"):
+        return ADJUST_FORWARD
+    if adjust in (ADJUST_NONE, "raw", "n", False):
+        return ADJUST_NONE
+    return ADJUST_FORWARD
+
+
+def adjust_tag(adjust) -> str:
+    """磁盘/内存缓存 key 后缀。"""
+    return "qfq" if normalize_adjust(adjust) == ADJUST_FORWARD else "raw"
+
 
 class KlineSource(abc.ABC):
     """K线数据源接口: supports 声明能力, fetch 返回标准 df 或 None。"""
 
     name = ""
 
-    def supports(self, category: str, period: str) -> bool:
-        """该源能否服务 (category, period) 组合, 不支持直接跳过不发起请求。"""
+    def supports(self, category: str, period: str, adjust: str = ADJUST_FORWARD) -> bool:
+        """该源能否服务 (category, period, adjust) 组合, 不支持直接跳过不发起请求。"""
         raise NotImplementedError
 
     @abc.abstractmethod
-    def fetch(self, symbol: str, period: str, count: int):
+    def fetch(self, symbol: str, period: str, count: int, adjust: str = ADJUST_FORWARD):
         """拉取 K 线, 返回标准 DataFrame 或 None (异常自行吞掉并记日志)。"""
         raise NotImplementedError
 
 
 class MairuiSource(KlineSource):
-    """麦蕊智数: 股票/指数/基金 日周月K + 分钟K (hszbl/fsjy, 1m/北交所除外)。"""
+    """麦蕊智数: 股票/指数日周月K (股票支持 fr/n); 基金 jj/lskx 与分钟 fsjy 仅未复权。"""
 
     name = "mairui"
 
-    def supports(self, category, period):
-        if category in ("stock", "index", "fund"):
-            return period in ("1d", "1w", "1M")
+    def supports(self, category, period, adjust=ADJUST_FORWARD):
+        adj = normalize_adjust(adjust)
+        if category == "fund":
+            # jj/lskx 无复权参数, 仅未复权可用
+            return adj == ADJUST_NONE and period in ("1d", "1w", "1M")
         if category == "minute":
-            return period in ("5m", "15m", "30m", "60m")
+            # fsjy 无复权参数, 仅未复权可用
+            return adj == ADJUST_NONE and period in ("5m", "15m", "30m", "60m")
+        if category in ("stock", "index"):
+            return period in ("1d", "1w", "1M")
         return False
 
-    def fetch(self, symbol, period, count):
+    def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
         import market
+        adj = normalize_adjust(adjust)
         if period in market.MINUTE_PERIODS:
             return market._fetch_mr_minute_kline(symbol, period, count)
         if market._is_etf(symbol):
             return market._fetch_fund_kline(symbol, period, count)
-        return market._fetch_mr_kline(symbol, period, count)
+        return market._fetch_mr_kline(symbol, period, count, adjust=adj)
 
 
 class AlphaFeedSource(KlineSource):
-    """AlphaFeed: 分钟K主源 + 股票/ETF 日K备选 (未复权, 指数未验证)。"""
+    """AlphaFeed: 分钟K主源 + 股票/ETF 日K备选 (forward/none)。"""
 
     name = "alphafeed"
 
-    def supports(self, category, period):
+    def supports(self, category, period, adjust=ADJUST_FORWARD):
         import market
         if category == "minute":
             return period in market.MINUTE_PERIODS
         return category in ("stock", "fund") and period == "1d"
 
-    def fetch(self, symbol, period, count):
+    def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
         import market
+        adj = normalize_adjust(adjust)
         if period in market.MINUTE_PERIODS:
-            return market._fetch_minute_kline(symbol, period, count)
-        return market._fetch_af_daily_kline(symbol, count)
+            return market._fetch_minute_kline(symbol, period, count, adjust=adj)
+        return market._fetch_af_daily_kline(symbol, count, adjust=adj)
 
 
 class AkshareSource(KlineSource):
     """akshare(东财) 免费兜底: 日/周/月K + 分钟K, 无需 key。
 
-    列名映射与单位实测见 probe_akshare_source.py: 股票日K与麦蕊逐位一致;
-    基金日K东财为「手」麦蕊为「股」, fetch 内 ×100 对齐主图既有口径,
-    保证今日 bar 合成 (_daily_bar_from_quote 的 ETF ×100) 跨源一致。
+    列名映射与单位实测见 probe_akshare_source.py。
+    基金日K东财为「手」, 与 AlphaFeed / 快照同口径 (基金默认链已不含麦蕊股)。
     东财限流期可能持续拒绝连接 -> 返回 None, 由回退链下沉。
     """
 
@@ -101,60 +125,65 @@ class AkshareSource(KlineSource):
         "成交量": "volume", "成交额": "amount",
     }
 
-    def supports(self, category, period):
+    def supports(self, category, period, adjust=ADJUST_FORWARD):
         import market
         if category == "minute":
             return period in market.MINUTE_PERIODS
         return category in ("stock", "index", "fund") and period in ("1d", "1w", "1M")
 
-    def fetch(self, symbol, period, count):
+    def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
         import akshare as ak
         import market
+        adj = normalize_adjust(adjust)
         if period in market.MINUTE_PERIODS:
-            return self._fetch_minute(ak, market, symbol, period, count)
-        return self._fetch_daily(ak, market, symbol, period, count)
+            return self._fetch_minute(ak, market, symbol, period, count, adj)
+        return self._fetch_daily(ak, market, symbol, period, count, adj)
 
-    def _fetch_daily(self, ak, market, symbol, period, count):
+    @staticmethod
+    def _ak_adjust(adjust):
+        return "qfq" if adjust == ADJUST_FORWARD else ""
+
+    def _fetch_daily(self, ak, market, symbol, period, count, adjust):
         # 东财按起止日期取数: count 根日K ≈ 1.7 倍自然日 + 缓冲 (同 get_daily_bar)
         natural = int(count * 1.7) + 40
         start = (market_hours.now() - timedelta(days=natural)).strftime("%Y%m%d")
         code = symbol.split(".")[0]
+        ak_adj = self._ak_adjust(adjust)
         try:
             if market._is_etf(symbol):
                 df = ak.fund_etf_hist_em(symbol=code, period=self._AK_PERIOD[period],
-                                         start_date=start, end_date="20991231", adjust="")
+                                         start_date=start, end_date="20991231", adjust=ak_adj)
             elif market._is_index_symbol(symbol):
+                # 指数接口无复权参数
                 df = ak.index_zh_a_hist(symbol=code, period=self._AK_PERIOD[period],
                                         start_date=start, end_date="20991231")
             else:
                 df = ak.stock_zh_a_hist(symbol=code, period=self._AK_PERIOD[period],
-                                        start_date=start, end_date="20991231", adjust="")
+                                        start_date=start, end_date="20991231", adjust=ak_adj)
         except Exception as e:
             log.warning(f"akshare 获取 {symbol} {period} 失败: {market._sanitize_error(e)}")
             return None
         df = self._rename_cn(df, date_col="日期")
         if df is None:
             return None
-        if market._is_etf(symbol):
-            # 东财基金日K volume=「手」vs 麦蕊 jj/lskx=「股」(probe 实测恰差 100 倍)
-            df["volume"] = df["volume"] * 100
         df = market._normalize(df)
         if df is not None and count:
             df = df.tail(count)
         return df
 
-    def _fetch_minute(self, ak, market, symbol, period, count):
+    def _fetch_minute(self, ak, market, symbol, period, count, adjust):
         code = symbol.split(".")[0]
         minutes = period[:-1]  # "5m" -> 东财接口的 "5"
+        ak_adj = self._ak_adjust(adjust)
         # 东财分钟接口: 股票/ETF 支持 adjust, 指数接口无该参数;
         # 1m 走 trends2 仅近 5 个交易日, 5m+ 走 kline 接口全量 (服务端截 1488 根)
         try:
             if market._is_etf(symbol):
-                df = ak.fund_etf_hist_min_em(symbol=code, period=minutes, adjust="")
+                df = ak.fund_etf_hist_min_em(symbol=code, period=minutes, adjust=ak_adj)
             elif market._is_index_symbol(symbol):
                 df = ak.index_zh_a_hist_min_em(symbol=code, period=minutes)
             else:
-                df = ak.stock_zh_a_hist_min_em(symbol=code, period=minutes, adjust="")
+                df = ak.stock_zh_a_hist_min_em(symbol=code, period=minutes, adjust=ak_adj)
         except Exception as e:
             log.warning(f"akshare 获取 {symbol} {period} 失败: {market._sanitize_error(e)}")
             return None
@@ -185,11 +214,12 @@ CATEGORY_ENV = {
 # 券商/付费源优先, akshare 兜底。mairui 分钟实测数据窗口滞后 (见
 # probe_mairui_minute.py), 故默认不入分钟链; 可显式配置
 # KLINE_SOURCE_MINUTE=alphafeed,mairui,akshare 加入 (新鲜度守卫自动拦旧数据)。
+# 基金默认 alphafeed,akshare: 麦蕊 jj/lskx 无前复权。
 DEFAULT_CHAINS = {
     "minute": "alphafeed,akshare",
     "stock": "mairui,alphafeed,akshare",
     "index": "mairui,akshare",
-    "fund": "mairui,alphafeed,akshare",
+    "fund": "alphafeed,akshare",
 }
 
 _warned_names = set()
@@ -232,19 +262,20 @@ def _minute_fresh(df):
         return False
 
 
-def fetch_kline_df(category, symbol, period, count):
+def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD):
     """按类别数据源链依次尝试, 返回 (标准 df, 源名) 或 (None, None)。
 
     单源失败 (异常/空数据/分钟数据过旧) 记 warning 后继续下一源; 全部失败
     返回 (None, None), 对外表现与旧版单源一致 (调用方返回 404)。
     """
+    adj = normalize_adjust(adjust)
     chain = _chain(category)
     for i, name in enumerate(chain):
         src = SOURCES[name]
-        if not src.supports(category, period):
+        if not src.supports(category, period, adj):
             continue
         try:
-            df = src.fetch(symbol, period, count)
+            df = src.fetch(symbol, period, count, adj)
         except Exception as e:  # 单源异常不拖垮整条链
             log.warning("数据源 %s 获取 %s %s 异常: %s", name, symbol, period, e)
             df = None

@@ -16,8 +16,8 @@ from market import (
     MINUTE_COUNTS,
     MINUTE_PERIODS,
     NumpyEncoder,
+    _fetch_af_daily_kline,
     _fetch_etf_nav,
-    _fetch_impulse_qfq,
     _fetch_mairui_quota,
     _is_etf,
     _is_index_symbol,
@@ -203,7 +203,7 @@ def kline():
     except ValueError:
         count = default_count
 
-    cache_key = f"{symbol}:{period}:{count}"
+    cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag('forward')}"
     skip_1d_cache = period == "1d" and market_hours.is_trading_day(
         market_hours.now().date().isoformat()
     )
@@ -222,7 +222,7 @@ def kline():
         return _json(resp)
 
     try:
-        df, name, source = fetch_kline_ex(symbol, period, count)
+        df, name, source = fetch_kline_ex(symbol, period, count, adjust="forward")
     except Exception as e:
         return _error(f"获取K线失败: {_sanitize_error(e)}", 500)
 
@@ -235,32 +235,50 @@ def kline():
         log.warning(f"指标计算失败 {symbol} {period}: {e}")
         return _error(f"指标计算失败: {_sanitize_error(e)}", 500)
 
-    if period == "1d":
-        impulse_qfq = _fetch_impulse_qfq(symbol, count)
-        if impulse_qfq is not None:
-            aligned = impulse_qfq.reindex(df.index)
-            df["impulse"] = aligned.fillna(df["impulse"]).astype(int)
+    # 主图已是前复权, impulse 直接用 compute_all_indicators 结果 (不再另拉 qfq)
 
     premium_data = None
     is_etf = _is_etf(symbol)
     if is_etf and period not in MINUTE_PERIODS:
         nav_df = _fetch_etf_nav(symbol)
+        # 溢价必须用未复权 close 对齐单位净值 (前复权历史价与 NAV 不可比)
+        raw_df = None
+        try:
+            raw_df = _fetch_af_daily_kline(symbol, count, adjust="none")
+        except Exception as e:
+            log.warning(f"ETF 溢价用未复权日K失败 {symbol}: {e}")
         if nav_df is not None and len(nav_df) > 0:
             df_sorted = df.sort_index()
+            raw_close = None
+            if raw_df is not None and len(raw_df) > 0:
+                raw_close = raw_df["close"].copy()
+                raw_close.index = pd.to_datetime(raw_close.index).normalize()
             premiums = []
             for idx in df_sorted.index:
                 nav_matches = nav_df[nav_df.index <= idx]
-                if len(nav_matches) > 0:
-                    nav_val = float(nav_matches.iloc[-1]["nav"])
-                    close_val = float(df_sorted.loc[idx, "close"])
-                    prem = (close_val - nav_val) / nav_val * 100 if nav_val > 0 else None
-                else:
-                    prem = None
+                if len(nav_matches) == 0:
+                    premiums.append(None)
+                    continue
+                nav_val = float(nav_matches.iloc[-1]["nav"])
+                close_val = None
+                if raw_close is not None:
+                    idx_n = pd.Timestamp(idx).normalize()
+                    if idx_n in raw_close.index:
+                        close_val = float(raw_close.loc[idx_n])
+                    else:
+                        earlier = raw_close[raw_close.index <= idx_n]
+                        if len(earlier) > 0:
+                            close_val = float(earlier.iloc[-1])
+                if close_val is None:
+                    # 无未复权对齐时不拿前复权价硬算, 避免拆分前溢价失真
+                    premiums.append(None)
+                    continue
+                prem = (close_val - nav_val) / nav_val * 100 if nav_val > 0 else None
                 premiums.append(prem)
             prem_series = pd.Series(premiums, index=df_sorted.index)
             premium_data = {
                 "values": _safe_list(prem_series),
-                "params": {"source": "akshare fund_open_fund_info_em"},
+                "params": {"source": "akshare fund_open_fund_info_em", "close": "raw"},
             }
 
     klines = []
@@ -342,8 +360,10 @@ def intraday():
     except ValueError:
         count = 120
     try:
-        # 分钟源经 kline_source 路由 (默认 alphafeed, 失败自动回退), df 已标准化
-        df, _src = kline_source.fetch_kline_df("minute", symbol, period, count)
+        # 分钟源经 kline_source 路由 (默认 alphafeed, 失败自动回退), df 已标准化前复权
+        df, _src = kline_source.fetch_kline_df(
+            "minute", symbol, period, count, adjust="forward"
+        )
         if df is None or len(df) == 0:
             return _error(f"无法获取 {symbol} 的分钟线", 404)
         last_day = df.index.normalize().max()

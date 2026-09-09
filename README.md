@@ -120,7 +120,7 @@ visual/
 
 ### 指标计算
 - **服务端 Python** 计算
-- 主图 OHLC 与 MA/MACD/RSI/KDJ/ATR 均为**未复权**；动力系统蜡烛色优先用**前复权** impulse
+- 主图 OHLC 与 MA/MACD/RSI/KDJ/ATR / 动力系统均为**前复权**（与东财默认观感一致）；成交校验 `get_daily_bar` 与监控 1m 仍用**未复权**真实价
 - MA5/MA10/MA20 使用 **SMA** (简单移动平均，算术平均)，对标东方财富/同花顺/通达信标准
 - MACD/KDJ/RSI/ATR 算法详见 `indicators.py`，已逐项与东财 PC 端验证
 - Elder 动力系统: EMA13 方向 + MACD 柱方向 → 蜡烛颜色（红=多/绿=空/蓝=中性）
@@ -154,19 +154,20 @@ K线按类别（分钟/股票/指数/基金）经 `kline_source.py` 注册表路
 KLINE_SOURCE_MINUTE=alphafeed,akshare      # 默认
 KLINE_SOURCE_STOCK=mairui,alphafeed,akshare # 默认
 KLINE_SOURCE_INDEX=mairui,akshare           # 默认
-KLINE_SOURCE_FUND=mairui,alphafeed,akshare  # 默认
+KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复权)
 ```
 
 | 数据源 | 分钟K | 股票/指数/基金 日周月K | 说明 |
 |---|---|---|---|
-| `mairui` | 5m/15m/30m/60m（`hszbl/fsjy`，1m/北交所不支持） | ✓ | 付费证书；分钟数据窗口可能滞后，默认不入分钟链 |
-| `alphafeed` | ✓ 全周期 | 仅股票/ETF 日K（指数未验证） | 付费证书 `AF_API_KEY` |
-| `akshare` | ✓（东财源，1m 仅近 5 个交易日） | ✓ 免费 | 无需 key，作兜底；东财限流期可能持续失败 |
+| `mairui` | 5m/15m/30m/60m（`hszbl/fsjy`，仅未复权；1m/北交所不支持） | 股票等比前复权 `fr`；指数无复权；基金 `jj/lskx` 仅未复权 | 付费证书；分钟/基金在图表前复权链上会被跳过 |
+| `alphafeed` | ✓ 全周期前复权 | 仅股票/ETF 日K（指数未验证） | 付费证书 `AF_API_KEY` |
+| `akshare` | ✓（东财源，1m 仅近 5 个交易日） | ✓ 免费前复权 `qfq` | 无需 key，作兜底；东财限流期可能持续失败 |
 
 - 改 `.env` 后重启生效；启动横幅会打印各类别实际生效的链
 - 想强制单源（禁用回退）: `KLINE_SOURCE_STOCK=mairui`
-- 想把麦蕊加入分钟回退: `KLINE_SOURCE_MINUTE=alphafeed,mairui,akshare`（数据滞后会被新鲜度守卫拦截，末根 bar 距今 >30 天视为失败）
-- 基金日K口径：麦蕊 `jj/lskx` volume 为「股」、akshare/东财为「手」，`AkshareSource` 内 ×100 对齐，跨源图表一致
+- 想把麦蕊加入分钟回退: `KLINE_SOURCE_MINUTE=alphafeed,mairui,akshare`（仅 `adjust=none` 时可用；数据滞后会被新鲜度守卫拦截，末根 bar 距今 >30 天视为失败）
+- 基金日K口径：默认链 AlphaFeed/东财 volume 为「手」，与快照一致；麦蕊 `jj/lskx` 为「股」，仅在显式配置且未复权时可用
+- ETF 溢价线用未复权收盘价对齐单位净值；股吧链接 ETF 带 `sh`/`sz` 前缀（如 `list,sh588200.html`）
 - `/api/kline` 响应 `meta.source` 返回实际服务的数据源，便于观察回退是否生效
 - 实测脚本: `probe_mairui_minute.py`（麦蕊分钟K权限/字段/窗口）、`probe_akshare_source.py`（东财列名/单位/覆盖度）
 
