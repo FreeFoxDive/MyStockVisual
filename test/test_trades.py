@@ -731,14 +731,19 @@ class TestBatchTrade(TradesTestCase):
         return {"type": "batch", "symbol": symbol, "name": name,
                 "legs": legs or [], "model_id": model_id}
 
+    @staticmethod
+    def _ui_legs(*legs_first_to_last):
+        """笔数序第1…第N → API 数组(最新在上, 与编辑器 collectLegs 一致)。"""
+        return list(reversed(legs_first_to_last))
+
     def test_batch_weighted_avg_pnl_and_return(self):
         uid = self._make_user()
-        legs = [
+        legs = self._ui_legs(
             {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-01-05", "time": "09:30"},
             {"side": "buy", "price": 12.0, "quantity": 500, "date": "2026-01-10", "time": "09:30"},
             {"side": "sell", "price": 15.0, "quantity": 800, "date": "2026-02-01", "time": "14:00"},
             {"side": "sell", "price": 16.0, "quantity": 700, "date": "2026-02-10", "time": "14:00"},
-        ]
+        )
         t = trades.create_trade(uid, self._batch(legs=legs))
         # 累计卖出==累计买入 → 自动平仓
         self.assertEqual(t["type"], "batch")
@@ -768,10 +773,10 @@ class TestBatchTrade(TradesTestCase):
 
     def test_batch_partial_sell_stays_open(self):
         uid = self._make_user()
-        legs = [
+        legs = self._ui_legs(
             {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-03-02", "time": "09:30"},
             {"side": "sell", "price": 15.0, "quantity": 300, "date": "2026-03-03", "time": "14:00"},
-        ]
+        )
         t = trades.create_trade(uid, self._batch(legs=legs))
         self.assertEqual(t["status"], "open")
         self.assertEqual(t["quantity"], 700)
@@ -783,10 +788,10 @@ class TestBatchTrade(TradesTestCase):
 
     def test_batch_oversell_rejected(self):
         uid = self._make_user()
-        legs = [
+        legs = self._ui_legs(
             {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
             {"side": "sell", "price": 10.0, "quantity": 200, "date": "2026-03-03", "time": "14:00"},
-        ]
+        )
         self._assert_value_error(
             trades.create_trade, uid, self._batch(legs=legs), sub="卖出数量超过当前持仓")
 
@@ -798,9 +803,54 @@ class TestBatchTrade(TradesTestCase):
         self._assert_value_error(
             trades.create_trade, uid, self._batch(legs=legs), sub="至少需要一笔买入")
 
+    def test_batch_reasons_use_first_leg_each_side(self):
+        """父行 entry/exit_reason 以该侧笔数最前一笔为准。"""
+        uid = self._make_user()
+        legs = self._ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-03-02",
+             "time": "09:30", "reason": "突破买入", "note": "首仓"},
+            {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-03-03",
+             "time": "09:30", "reason": "加仓", "note": ""},
+            {"side": "sell", "price": 12.0, "quantity": 400, "date": "2026-03-04",
+             "time": "10:00", "reason": "止盈减仓"},
+            {"side": "sell", "price": 13.0, "quantity": 600, "date": "2026-03-05",
+             "time": "14:00", "reason": "清仓", "note": "全部了结"},
+        )
+        t = trades.create_trade(uid, self._batch(legs=legs))
+        self.assertEqual(t["entry_reason"], "突破买入")
+        self.assertEqual(t["entry_note"], "首仓")
+        self.assertEqual(t["exit_reason"], "止盈减仓")
+        self.assertIsNone(t["exit_note"])
+
+    def test_batch_seq_order_not_date_order(self):
+        """同日无时间: 入库/返回按笔数第1→第N, 不按日期重排。"""
+        uid = self._make_user()
+        # 笔数序第1…第N；同日多笔时间相同也保持录入顺序
+        legs = self._ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-03-02",
+             "reason": "突破买入"},
+            {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-03-02",
+             "reason": "加仓"},
+            {"side": "sell", "price": 11.5, "quantity": 600, "date": "2026-03-10",
+             "reason": "止盈减仓"},
+            {"side": "sell", "price": 12.0, "quantity": 400, "date": "2026-03-10",
+             "reason": "清仓"},
+        )
+        t = trades.create_trade(uid, self._batch(legs=legs))
+        buys = [l for l in t["legs"] if l["side"] == "buy"]
+        sells = [l for l in t["legs"] if l["side"] == "sell"]
+        self.assertEqual([b["reason"] for b in buys], ["突破买入", "加仓"])
+        self.assertEqual([s["reason"] for s in sells], ["止盈减仓", "清仓"])
+        self.assertEqual(t["entry_reason"], "突破买入")
+        self.assertEqual(t["exit_reason"], "止盈减仓")
+        self.assertEqual(
+            [l["reason"] for l in t["legs"]],
+            ["突破买入", "加仓", "止盈减仓", "清仓"],
+        )
+
     def test_batch_t_stats(self):
         uid = self._make_user()
-        legs = [
+        legs = self._ui_legs(
             # 03-02 正T: 首腿买, 买1000 卖500 → 配对500, (10.5-10.0)*500=+250
             {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-03-02", "time": "09:30"},
             {"side": "sell", "price": 10.5, "quantity": 500, "date": "2026-03-02", "time": "14:00"},
@@ -809,7 +859,7 @@ class TestBatchTrade(TradesTestCase):
             {"side": "buy", "price": 10.8, "quantity": 300, "date": "2026-03-03", "time": "14:00"},
             # 03-04 仅卖出 → 不计做T, 清仓
             {"side": "sell", "price": 11.5, "quantity": 300, "date": "2026-03-04", "time": "10:00"},
-        ]
+        )
         t = trades.create_trade(uid, self._batch(legs=legs))
         self.assertEqual(t["status"], "closed")
         ts = t["t_stats"]
@@ -831,10 +881,10 @@ class TestBatchTrade(TradesTestCase):
 
     def test_batch_list_get_returns_legs(self):
         uid = self._make_user()
-        legs = [
+        legs = self._ui_legs(
             {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
             {"side": "sell", "price": 12.0, "quantity": 100, "date": "2026-03-03", "time": "14:00"},
-        ]
+        )
         t = trades.create_trade(uid, self._batch(legs=legs))
         got = trades.get_trade(uid, t["id"])
         self.assertEqual(len(got["legs"]), 2)
@@ -846,10 +896,10 @@ class TestBatchTrade(TradesTestCase):
 
     def test_batch_update_replaces_legs(self):
         uid = self._make_user()
-        legs = [
+        legs = self._ui_legs(
             {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-03-02", "time": "09:30"},
             {"side": "sell", "price": 12.0, "quantity": 100, "date": "2026-03-03", "time": "14:00"},
-        ]
+        )
         t = trades.create_trade(uid, self._batch(legs=legs))
         new_legs = [
             {"side": "buy", "price": 20.0, "quantity": 100, "date": "2026-03-04", "time": "09:30"},
@@ -1057,22 +1107,52 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
         self.assertEqual(pos["600000.SH"]["hold_days"], 20)
 
     def test_hold_expire_batch_uses_latest_buy(self):
+        """批次起算日 = 买入腿日历最晚日 (与入库笔数序无关)。"""
         admin = self._make_user("admin", "secret123", is_admin=True)
+        # API 最新在上 (与编辑器一致): 第3买→第2卖→第1买
         trades.create_trade(admin, {
             "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
             "model_id": 1,
-            "legs": [
+            "legs": list(reversed([
                 {"side": "buy", "price": 10.0, "quantity": 1000,
                  "date": "2026-08-03", "time": "09:30"},
                 {"side": "sell", "price": 10.5, "quantity": 400,
                  "date": "2026-08-10", "time": "14:00"},
                 {"side": "buy", "price": 11.0, "quantity": 200,
                  "date": "2026-08-19", "time": "10:00"},
-            ],
+            ])),
         })
         pos = trades.list_hold_expire_positions()
         self.assertEqual(len(pos), 1)
         self.assertEqual(pos[0]["hold_anchor_date"], "2026-08-19")
+
+    def test_hold_expire_batch_anchor_ignores_seq_order(self):
+        """笔数序与买入日历序不一致时, 起算仍取 MAX(买日), 不用笔数首/末腿。"""
+        admin = self._make_user("admin", "secret123", is_admin=True)
+        # 笔数第1=晚买, 第2=早买 → 笔数末腿日期 ≠ 日历最晚
+        trades.create_trade(admin, {
+            "type": "batch", "symbol": "000002.SZ", "name": "万科A",
+            "model_id": 1,
+            "legs": list(reversed([
+                {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-08-19"},
+                {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-08-03"},
+            ])),
+        })
+        # 笔数第1=早买, 第2=晚买 → 笔数首腿日期 ≠ 日历最晚
+        trades.create_trade(admin, {
+            "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+            "model_id": 1,
+            "legs": list(reversed([
+                {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-08-03"},
+                {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-08-19"},
+            ])),
+        })
+        pos = {p["symbol"]: p for p in trades.list_hold_expire_positions()}
+        self.assertEqual(pos["000001.SZ"]["hold_anchor_date"], "2026-08-19")
+        self.assertEqual(pos["000002.SZ"]["hold_anchor_date"], "2026-08-19")
+        # 父行 entry_date 跟笔数首买, 可与起算日不同
+        self.assertEqual(pos["000002.SZ"]["entry_date"], "2026-08-19")
+        self.assertEqual(pos["000001.SZ"]["entry_date"], "2026-08-03")
 
     def test_trade_row_attaches_hold_days(self):
         uid = self._make_user()

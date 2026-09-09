@@ -1755,6 +1755,20 @@ function setListRange(mode) {
 
 function resetAndLoad() { state.page = 1; loadTrades(); }
 
+/** 批次腿理由: 按笔数序 (legs 数组第1…第N) 合并同侧非空 reason(+note), 跳过空白。 */
+function formatBatchSideReasons(legs, side) {
+  if (!Array.isArray(legs) || !legs.length) return '';
+  const parts = [];
+  for (const leg of legs) {
+    if (leg.side !== side) continue;
+    const reason = (leg.reason == null ? '' : String(leg.reason)).trim();
+    const note = (leg.note == null ? '' : String(leg.note)).trim();
+    const text = [reason, note].filter(Boolean).join('；');
+    if (text) parts.push(text);
+  }
+  return parts.map(escHtml).join('<br>');
+}
+
 async function loadTrades() {
   const data = await api('/api/trades' + listQuery());
   state.trades = data.trades;
@@ -1833,8 +1847,17 @@ function renderTable() {
           : '<span class="badge open">持仓中</span>')
         + (isBatch ? '<span class="badge batch">批次</span>' : '')
         + '</span>';
-      const entryReason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
-      const exitReason = [t.exit_reason, t.exit_note].filter(Boolean).join('；');
+      let entryReasonHtml;
+      let exitReasonHtml;
+      if (isBatch && Array.isArray(t.legs) && t.legs.length) {
+        entryReasonHtml = formatBatchSideReasons(t.legs, 'buy') || '—';
+        exitReasonHtml = formatBatchSideReasons(t.legs, 'sell') || '—';
+      } else {
+        const entryReason = [t.entry_reason, t.entry_note].filter(Boolean).join('；');
+        const exitReason = [t.exit_reason, t.exit_note].filter(Boolean).join('；');
+        entryReasonHtml = escHtml(entryReason || '—');
+        exitReasonHtml = escHtml(exitReason || '—');
+      }
       const risk = formatRiskPrices(t, curPrice);
       return `<tr>
         <td class="sym" data-label="代码"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
@@ -1847,8 +1870,8 @@ function renderTable() {
         <td class="risk-mini${risk.warn ? ' warn' : ''}" data-label="止盈/保本/止损">${risk.html}</td>
         <td data-label="${isBatch ? '首买日' : '买入日'}">${escHtml(t.entry_date)}</td>
         <td data-label="${isBatch ? '末卖日' : '卖出日'}">${t.exit_date ? escHtml(t.exit_date) : '—'}</td>
-        <td class="reason-cell" data-label="${isBatch ? '首买理由' : '买入理由'}">${escHtml(entryReason)}</td>
-        <td class="reason-cell" data-label="${isBatch ? '末卖理由' : '卖出理由'}">${escHtml(exitReason || '—')}</td>
+        <td class="reason-cell" data-label="买入理由">${entryReasonHtml}</td>
+        <td class="reason-cell" data-label="卖出理由">${exitReasonHtml}</td>
         <td class="${pnlCls}" data-label="盈亏"><span class="pnl-cell" data-tip-id="${t.id}">${pnlHtml}</span></td>
         <td class="row-actions">
           <button onclick="openModal(${t.id})">编辑</button>
@@ -1979,9 +2002,9 @@ function openModal(id) {
   if (typeRadio) typeRadio.checked = true;
   state.legs = isBatch && Array.isArray(t.legs)
     ? t.legs.map(l => ({
-        side: l.side, price: l.price, quantity: l.quantity, date: l.date,
+        id: l.id, side: l.side, price: l.price, quantity: l.quantity, date: l.date,
         time: l.time || '', reason: l.reason || '', note: l.note || '',
-      })).sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.time || '').localeCompare(a.time || ''))
+      })).reverse()  // API 笔数序第1…第N → 编辑器从上到下第N…第1
     : [];
   renderModelSelect(t ? t.model_id : null);
   if (t) state.selectedSymbol = { symbol: t.symbol, name: t.name };

@@ -1198,7 +1198,8 @@ def _parse_risk_prices(merged, enforce=True):
 def _clean_batch(data, existing=None):
     """校验并规范化批次交易 (type='batch')。返回 (clean_dict, error_msg)。
 
-    腿按 (date, time) 排序后滚动校验超卖, 并回填父行汇总字段 (净持仓/加权均价/首买日/末卖日/status)。
+    入库顺序为笔数第1…第N (API 数组先反转); 超卖仅用日期时间副本滚动校验;
+    并回填父行汇总字段 (净持仓/加权均价/首买日/末卖日/status)。
     """
     merged = {}
     if existing:
@@ -1284,11 +1285,17 @@ def _clean_batch(data, existing=None):
     if not has_buy:
         return None, "批次交易至少需要一笔买入"
 
-    # 按 (date, time) 排序后滚动校验超卖 + 计算净持仓/加权均价
-    legs.sort(key=lambda l: (l["date"], l["time"] or "", 0))
+    # 编辑器/API 数组从上到下 = 第N笔…第1笔; 反转后为笔数序 第1…第N。
+    # 理由展示与入库均按笔数, 不按日期/时间重排 (同日同时也保持笔数).
+    # 超卖/持仓滚动仍按实际日期时间校验.
+    legs.reverse()
+    chrono = sorted(
+        enumerate(legs),
+        key=lambda pair: (pair[1]["date"], pair[1]["time"] or "00:00:00", pair[0]),
+    )
     held = 0
     cost_total = 0.0
-    for leg in legs:
+    for _i, leg in chrono:
         if leg["side"] == "buy":
             held += leg["quantity"]
             cost_total += leg["price"] * leg["quantity"]
@@ -1303,7 +1310,10 @@ def _clean_batch(data, existing=None):
     avg_cost = cost_total / held if held else 0.0
     first_buy = next(l for l in legs if l["side"] == "buy")
     sells = [l for l in legs if l["side"] == "sell"]
-    last_sell = sells[-1] if sells else None
+    # 买入/卖出理由字段均以该侧笔数最前一笔为准
+    first_sell = sells[0] if sells else None
+    # 末卖日取日历上最后一笔卖出 (与笔数序无关)
+    last_sell_by_date = max(sells, key=lambda l: (l["date"], l["time"] or "")) if sells else None
 
     clean = {
         "symbol": symbol,
@@ -1316,11 +1326,11 @@ def _clean_batch(data, existing=None):
         "quantity": held,
         "entry_date": first_buy["date"],
         "exit_price": None,
-        "exit_date": last_sell["date"] if status == "closed" else None,
+        "exit_date": last_sell_by_date["date"] if status == "closed" and last_sell_by_date else None,
         "entry_reason": first_buy.get("reason") or "",
         "entry_note": first_buy.get("note"),
-        "exit_reason": last_sell.get("reason") if last_sell else None,
-        "exit_note": last_sell.get("note") if last_sell else None,
+        "exit_reason": first_sell.get("reason") if first_sell else None,
+        "exit_note": first_sell.get("note") if first_sell else None,
     }
     enforce_risk = existing is None or any(k in data for k in _RISK_KEYS)
     prices, err = _parse_risk_prices(merged, enforce=enforce_risk)
@@ -1462,12 +1472,12 @@ def _clean(data, existing=None):
 
 
 def _get_legs(trade_id):
-    """读取批次交易的全部腿 (按 date, time, id 排序)。"""
+    """读取批次交易的全部腿 (按 id = 入库笔数序 第1…第N)。"""
     conn = get_conn()
     try:
         rows = conn.execute(
             "SELECT id, side, price, quantity, date, time, reason, note "
-            "FROM trade_legs WHERE trade_id=? ORDER BY date, time, id",
+            "FROM trade_legs WHERE trade_id=? ORDER BY id",
             (trade_id,),
         ).fetchall()
         return [dict(r) for r in rows]

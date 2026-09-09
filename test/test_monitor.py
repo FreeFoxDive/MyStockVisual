@@ -881,19 +881,42 @@ class TestPollPipeline(PollPipelineTestCase):
         got3.assert_called_once()
 
     def test_hold_expire_batch_uses_latest_buy(self):
+        """批次按最晚买入日起算: A 模型 3 日, 08-19→08-21 上午应提醒。"""
         admin = trades.create_user("admin", "secret123", is_admin=True)
         trades.create_trade(admin, {
             "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
             "model_id": 1,
-            "legs": [
+            "legs": list(reversed([
                 {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-08-03"},
                 {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-08-19"},
-            ],
+            ])),
         })
         with _notify_mocks():
             fired = monitor._check_hold_expire(now_dt=self.now)
         self.assertEqual(len(fired), 1)
         self.assertEqual(fired[0]["alert"]["alert_type"], "hold_exit_am")
+        self.assertIn("2026-08-19", fired[0]["alert"]["detail"])
+
+    def test_hold_expire_batch_ignores_seq_when_dates_inverted(self):
+        """笔数末买早于笔数首买时, 仍按日历最晚买入日到期 (非笔数末腿)。"""
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        # 笔数第1=08-19, 第2=08-03; 若误用笔数末腿会起算 08-03, 08-21 不应提醒
+        trades.create_trade(admin, {
+            "type": "batch", "symbol": "000002.SZ", "name": "万科A",
+            "model_id": 1,
+            "legs": list(reversed([
+                {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-08-19"},
+                {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-08-03"},
+            ])),
+        })
+        with _notify_mocks() as (send, got):
+            fired = monitor._check_hold_expire(now_dt=self.now)
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["position"]["symbol"], "000002.SZ")
+        self.assertEqual(fired[0]["alert"]["alert_type"], "hold_exit_am")
+        self.assertIn("起算 2026-08-19", fired[0]["alert"]["detail"])
+        send.assert_called_once()
+        got.assert_called_once()
 
 
 class TestRestFeedMock(unittest.TestCase):
