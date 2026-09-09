@@ -717,6 +717,49 @@ class TestPollPipeline(PollPipelineTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["trade_id"], t["id"])
 
+    def test_batch_open_with_risk_monitored_and_sl_breach(self):
+        """批次 open + 风控价进入监控; 现价击穿止损触发告警(规则同单笔)。"""
+        uid = trades.create_user("admin", "secret123", is_admin=True)
+        t = trades.create_trade(uid, {
+            "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+            "take_profit": 12.0, "stop_loss": 9.5, "breakeven": 10.5,
+            "legs": [
+                {"side": "buy", "price": 10.0, "quantity": 500, "date": "2026-08-10"},
+                {"side": "buy", "price": 11.0, "quantity": 500, "date": "2026-08-15"},
+            ],
+        })
+        self.assertEqual(t["status"], "open")
+        pos = trades.list_monitored_positions()
+        self.assertEqual([p["id"] for p in pos], [t["id"]])
+        feed = FakeFeed(quotes={"000001.SZ": self._quote(9.0, 1_000_060)})
+        with _notify_mocks() as (send, got):
+            fired = monitor._poll_once(feed, now_dt=self.now)
+        types = [x["alert"]["alert_type"] for x in fired]
+        self.assertIn("sl_breached", types)
+        send.assert_called_once()
+        got.assert_called_once()
+        self.assertIn("000001.SZ", send.call_args[0][1])
+        rows = trades.list_monitor_alerts(uid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trade_id"], t["id"])
+        self.assertEqual(rows[0]["alert_type"], "sl_breached")
+
+    def test_batch_without_risk_not_polled(self):
+        uid = trades.create_user("admin", "secret123", is_admin=True)
+        trades.create_trade(uid, {
+            "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+            "legs": [
+                {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-08-10"},
+            ],
+        })
+        feed = FakeFeed(quotes={"000001.SZ": self._quote(9.0, 1_000_060)})
+        with _notify_mocks() as (send, got):
+            fired = monitor._poll_once(feed, now_dt=self.now)
+        self.assertEqual(fired, [])
+        self.assertEqual(feed.quotes_calls, [])
+        send.assert_not_called()
+        got.assert_not_called()
+
     def test_second_poll_same_day_throttled(self):
         trades.create_user("admin", "secret123", is_admin=True)
         uid = 1

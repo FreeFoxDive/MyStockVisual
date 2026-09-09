@@ -2012,7 +2012,7 @@ function onTypeChange() {
   document.getElementById('t-quantity-wrap').style.display = (batch || repo) ? 'none' : '';
   document.getElementById('trade-panels').style.display = (batch || repo) ? 'none' : '';
   document.getElementById('legs-editor').style.display = batch ? '' : 'none';
-  document.getElementById('risk-panel').style.display = (batch || repo) ? 'none' : '';
+  document.getElementById('risk-panel').style.display = repo ? 'none' : '';
   document.getElementById('repo-panel').style.display = repo ? '' : 'none';
   document.getElementById('t-model-wrap').style.display = repo ? 'none' : '';
   document.querySelector('.autocomplete').style.display = repo ? 'none' : '';

@@ -981,6 +981,37 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
         self.assertEqual(t["take_profit"], 12.0)
         self.assertEqual(t["status"], "open")
 
+    def test_batch_with_risk_in_monitored_positions(self):
+        """open 批次填齐风控价进监控列表; 无风控价 / 已平仓不进。"""
+        admin = self._make_user("admin", "secret123", is_admin=True)
+        with_risk = trades.create_trade(admin, {
+            "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
+            "take_profit": 12.0, "stop_loss": 9.0, "breakeven": 10.5,
+            "legs": [
+                {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-03-02"},
+            ],
+        })
+        trades.create_trade(admin, {
+            "type": "batch", "symbol": "000002.SZ", "name": "万科A",
+            "legs": [
+                {"side": "buy", "price": 8.0, "quantity": 500, "date": "2026-03-02"},
+            ],
+        })
+        closed = trades.create_trade(admin, {
+            "type": "batch", "symbol": "600000.SH", "name": "浦发银行",
+            "take_profit": 12.0, "stop_loss": 9.0, "breakeven": 10.5,
+            "legs": [
+                {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-03-01"},
+                {"side": "sell", "price": 11.0, "quantity": 1000, "date": "2026-03-03"},
+            ],
+        })
+        self.assertEqual(closed["status"], "closed")
+        pos = trades.list_monitored_positions()
+        self.assertEqual({p["id"] for p in pos}, {with_risk["id"]})
+        self.assertEqual(pos[0]["take_profit"], 12.0)
+        self.assertEqual(pos[0]["breakeven"], 10.5)
+        self.assertEqual(pos[0]["stop_loss"], 9.0)
+
     def test_open_positions_include_risk_fields(self):
         uid = self._make_user()
         trades.create_trade(uid, self._open(take_profit=240, stop_loss=180, breakeven=200))
