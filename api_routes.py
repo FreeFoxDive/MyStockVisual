@@ -16,7 +16,7 @@ from market import (
     MINUTE_COUNTS,
     MINUTE_PERIODS,
     NumpyEncoder,
-    _fetch_af_daily_kline,
+    _fetch_af_kline,
     _fetch_etf_nav,
     _fetch_mairui_quota,
     _is_etf,
@@ -244,7 +244,7 @@ def kline():
         # 溢价必须用未复权 close 对齐单位净值 (前复权历史价与 NAV 不可比)
         raw_df = None
         try:
-            raw_df = _fetch_af_daily_kline(symbol, count, adjust="none")
+            raw_df = _fetch_af_kline(symbol, "1d", count, adjust="none")
         except Exception as e:
             log.warning(f"ETF 溢价用未复权日K失败 {symbol}: {e}")
         if nav_df is not None and len(nav_df) > 0:

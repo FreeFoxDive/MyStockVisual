@@ -119,3 +119,38 @@
 
 改 `KLINE_SOURCE_*` 后仍需**重启服务**（`.env` 仅启动时加载）；重启后旧缓存 key 自然不再命中，
 无需手动删 `.cache/klines`。
+
+---
+
+## 3. 股票周/月K被 AlphaFeed 适配器挡掉 → 只剩抖动的 akshare → 间歇 404
+
+**状态**：已修复（2026-09-10）。
+
+### 现象
+
+切换到周K（`/api/kline?period=1w`）时提示
+`❌ 获取数据失败: 无法获取 688617.SH 的K线数据`（HTTP 404）。
+
+### 根因
+
+- 股票链为 `KLINE_SOURCE_STOCK=alphafeed,akshare`（`.env`；麦蕊因问题 1 被移出）。
+- `AlphaFeedSource.supports` 只放行 `period == "1d"`，周/月K被跳过 —— 尽管 AlphaFeed
+  SDK 原生支持 `1w`/`1M`（README 亦如此标注）。
+- 于是周K实际只剩 akshare（东财）单源，其接口间歇失败（实测 5 次约 2 次
+  `RemoteDisconnected`；本机系统代理 `127.0.0.1:10808` 会放大抖动）。
+- `kline_source.fetch_kline_df` 每源只尝试一次，akshare 那次抖动即返回 `(None, None)` → 404。
+
+### 修复
+
+放行 AlphaFeed 原生周/月K，使其成为股票/ETF 周月K主源：
+
+- `kline_source.AlphaFeedSource.supports`：`category in ("stock","fund")` 且
+  `period in ("1d","1w","1M")`。
+- `market._fetch_af_daily_kline` 泛化为 `_fetch_af_kline(symbol, period, count, adjust)`，
+  `af.klines.batch(..., period=period, ...)`；ETF 溢价等日K调用显式传 `"1d"` 保持原行为。
+- 日K仍以 AlphaFeed 为首源，不影响问题 1 的规避。
+
+- 代码：`visual/kline_source.py`、`visual/market.py`、`visual/api_routes.py`
+- 测试：`visual/test/test_kline_source.py`
+  - `TestDefaultRouting.test_stock_weekly_defaults_to_alphafeed`
+  - 原 `_fetch_af_daily_kline` mock/断言同步更新为 `_fetch_af_kline(symbol, period, ...)`

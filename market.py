@@ -613,17 +613,21 @@ def _fetch_minute_kline(symbol, period, count, adjust="forward"):
     return _normalize(df, prefer_time=True)
 
 
-def _fetch_af_daily_kline(symbol, count, adjust="forward"):
-    """从 AlphaFeed 拉取日K (股票/ETF 日K备选源), 返回标准化 DataFrame 或 None。"""
+def _fetch_af_kline(symbol, period, count, adjust="forward"):
+    """从 AlphaFeed 拉取日/周/月K (股票/ETF), 返回标准化 DataFrame 或 None。
+
+    AlphaFeed 原生支持 1d/1w/1M; 股票/ETF 日K为备选源, 周/月K为主源
+    (周/月K不依赖抖动的 akshare)。
+    """
     adj = kline_source.normalize_adjust(adjust)
     try:
         af = get_af()
         dfs = af.klines.batch(
-            [symbol], period="1d", count=count, adjust=adj, to_dataframe=True
+            [symbol], period=period, count=count, adjust=adj, to_dataframe=True
         )
         df = dfs.get(symbol) if dfs else None
     except Exception as e:
-        log.warning(f"AlphaFeed 获取日K失败 {symbol}: {e}")
+        log.warning(f"AlphaFeed 获取K线失败 {symbol} {period}: {e}")
         return None
     if df is None or len(df) == 0:
         return None

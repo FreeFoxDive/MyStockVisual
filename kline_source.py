@@ -92,7 +92,10 @@ class MairuiSource(KlineSource):
 
 
 class AlphaFeedSource(KlineSource):
-    """AlphaFeed: 分钟K主源 + 股票/ETF 日K备选 (forward/none)。"""
+    """AlphaFeed: 分钟K主源 + 股票/ETF 日/周/月K (forward/none)。
+
+    周/月K原生支持, 作为股票/ETF 周月K主源, 不再依赖抖动的 akshare。
+    """
 
     name = "alphafeed"
 
@@ -100,14 +103,14 @@ class AlphaFeedSource(KlineSource):
         import market
         if category == "minute":
             return period in market.MINUTE_PERIODS
-        return category in ("stock", "fund") and period == "1d"
+        return category in ("stock", "fund") and period in ("1d", "1w", "1M")
 
     def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
         import market
         adj = normalize_adjust(adjust)
         if period in market.MINUTE_PERIODS:
             return market._fetch_minute_kline(symbol, period, count, adjust=adj)
-        return market._fetch_af_daily_kline(symbol, count, adjust=adj)
+        return market._fetch_af_kline(symbol, period, count, adjust=adj)
 
 
 class AkshareSource(KlineSource):

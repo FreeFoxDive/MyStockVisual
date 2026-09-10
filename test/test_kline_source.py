@@ -189,12 +189,23 @@ class TestDefaultRouting(KlineSourceTestBase):
     def test_fund_defaults_to_alphafeed(self):
         with _no_kline_env(), \
              mock.patch.object(market, "_is_etf", return_value=True), \
-             mock.patch.object(market, "_fetch_af_daily_kline", return_value=_norm_df()) as af, \
+             mock.patch.object(market, "_fetch_af_kline", return_value=_norm_df()) as af, \
              mock.patch.object(market, "_fetch_fund_kline") as mr_fund:
             _df, src = kline_source.fetch_kline_df("fund", "510300.SH", "1d", 100)
         self.assertEqual(src, "alphafeed")
-        af.assert_called_once_with("510300.SH", 100, adjust="forward")
+        af.assert_called_once_with("510300.SH", "1d", 100, adjust="forward")
         mr_fund.assert_not_called()
+
+    def test_stock_weekly_defaults_to_alphafeed(self):
+        # AlphaFeed 原生支持周K: 股票周K不应下沉到抖动的 akshare
+        with _no_kline_env(), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=_norm_df()) as af, \
+             mock.patch.object(kline_source.AkshareSource, "fetch") as ak:
+            df, src = kline_source.fetch_kline_df("stock", "688617.SH", "1w", 200)
+        self.assertEqual(src, "alphafeed")
+        self.assertEqual(len(df), 30)
+        af.assert_called_once_with("688617.SH", "1w", 200, adjust="forward")
+        ak.assert_not_called()
 
     def test_index_defaults_to_mairui(self):
         with _no_kline_env(), \
@@ -207,7 +218,7 @@ class TestDefaultRouting(KlineSourceTestBase):
     def test_all_sources_fail_returns_none(self):
         with _no_kline_env(), \
              mock.patch.object(market, "_fetch_mr_kline", return_value=None), \
-             mock.patch.object(market, "_fetch_af_daily_kline", return_value=None), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=None), \
              mock.patch.object(kline_source.AkshareSource, "fetch", return_value=None):
             df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 100)
         self.assertIsNone(df)
@@ -233,7 +244,7 @@ class TestAdjustRouting(KlineSourceTestBase):
         with _no_kline_env(KLINE_SOURCE_FUND="mairui,alphafeed"), \
              mock.patch.object(market, "_is_etf", return_value=True), \
              mock.patch.object(market, "_fetch_fund_kline") as mr_fund, \
-             mock.patch.object(market, "_fetch_af_daily_kline", return_value=_norm_df()) as af:
+             mock.patch.object(market, "_fetch_af_kline", return_value=_norm_df()) as af:
             _df, src = kline_source.fetch_kline_df(
                 "fund", "588200.SH", "1d", 100, adjust="forward")
         self.assertEqual(src, "alphafeed")
@@ -339,7 +350,7 @@ class TestFailover(KlineSourceTestBase):
     def test_mairui_failure_falls_to_alphafeed(self):
         with _no_kline_env(), \
              mock.patch.object(market, "_fetch_mr_kline", return_value=None), \
-             mock.patch.object(market, "_fetch_af_daily_kline",
+             mock.patch.object(market, "_fetch_af_kline",
                                return_value=_norm_df()) as af, \
              mock.patch.object(kline_source.AkshareSource, "fetch", return_value=None) as ak:
             df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 100)
@@ -352,7 +363,7 @@ class TestFailover(KlineSourceTestBase):
         fake = _fake_akshare(stock_daily=_cn_daily_df())
         with _no_kline_env(), \
              mock.patch.object(market, "_fetch_mr_kline", return_value=None), \
-             mock.patch.object(market, "_fetch_af_daily_kline", return_value=None), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=None), \
              mock.patch.dict(sys.modules, {"akshare": fake}):
             _df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
         self.assertEqual(src, "akshare")
@@ -362,7 +373,7 @@ class TestFailover(KlineSourceTestBase):
         with _no_kline_env(), \
              mock.patch.object(market, "_fetch_mr_kline",
                                side_effect=RuntimeError("boom")), \
-             mock.patch.object(market, "_fetch_af_daily_kline", return_value=None), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=None), \
              mock.patch.dict(sys.modules, {"akshare": fake}):
             _df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
         self.assertEqual(src, "akshare")
@@ -371,7 +382,7 @@ class TestFailover(KlineSourceTestBase):
         # alphafeed 不支持指数 -> 即使排在前位也不该发起请求
         with _no_kline_env(KLINE_SOURCE_INDEX="alphafeed,mairui"), \
              mock.patch.object(market, "_is_index_symbol", return_value=True), \
-             mock.patch.object(market, "_fetch_af_daily_kline") as af, \
+             mock.patch.object(market, "_fetch_af_kline") as af, \
              mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()):
             _df, src = kline_source.fetch_kline_df("index", "000300.SH", "1d", 100)
         self.assertEqual(src, "mairui")
