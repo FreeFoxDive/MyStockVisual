@@ -398,9 +398,12 @@ class TestFailover(KlineSourceTestBase):
 class TestMinuteStalenessGuard(KlineSourceTestBase):
     def test_stale_minute_data_rejected(self):
         stale_end = (market.market_hours.now() - pd.Timedelta(days=40)).strftime("%Y-%m-%d %H:%M")
+        # 必须 mock 兜底源: 否则过旧的 alphafeed 被拒后链路会真实访问 akshare,
+        # CI 有网时取到新鲜数据 → 断言失败 (用例本意是验证新鲜度守卫)。
         with _no_kline_env(), \
              mock.patch.object(market, "_fetch_minute_kline",
-                               return_value=_minute_df(end=stale_end)):
+                               return_value=_minute_df(end=stale_end)), \
+             mock.patch.object(kline_source.AkshareSource, "fetch", return_value=None):
             with self.assertLogs("kline_source", level="WARNING") as logs:
                 df, src = kline_source.fetch_kline_df("minute", "600519.SH", "5m", 100)
         self.assertIsNone(df)
