@@ -87,13 +87,46 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
         self.assertEqual(out.iloc[-1]["close"], 11.5)
         self.assertEqual(out.iloc[-1]["volume"], 5000)
 
-    def test_skip_when_history_has_today_and_session_closed(self):
+    def test_refresh_when_history_has_today_after_close(self):
+        """收盘后源已含今日 bar, 仍以快照覆盖 (B1: 图表与盘中口径一致)。"""
         today = date.today()
         df = _df_with_dates([today.isoformat()], close=9.0)
-        with mock.patch.object(market_mod, "_daily_bar_from_quote") as fq:
+        quote = {
+            "date": today.isoformat(),
+            "open": 9.0,
+            "high": 10.0,
+            "low": 8.8,
+            "close": 9.6,
+            "volume": 8000,
+            "amount": 12345.0,
+        }
+        with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote):
             with mock.patch("market_hours.is_trading_day", return_value=True):
                 with mock.patch("market_hours.in_session", return_value=False):
                     out = market_mod._maybe_append_today_bar("000001.SH", df)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out.iloc[-1]["close"], 9.6)
+        self.assertEqual(out.iloc[-1]["low"], 8.8)
+        self.assertEqual(out.iloc[-1]["amount"], 12345.0)
+
+    def test_no_override_when_snapshot_unavailable(self):
+        """停牌/快照缺失 (volume=0 → None) 时保留源 bar, 不覆盖。"""
+        today = date.today()
+        df = _df_with_dates([today.isoformat()], close=9.0)
+        with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=None):
+            with mock.patch("market_hours.is_trading_day", return_value=True):
+                with mock.patch("market_hours.in_session", return_value=False):
+                    out = market_mod._maybe_append_today_bar("000001.SH", df)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out.iloc[-1]["close"], 9.0)
+
+    def test_no_override_on_non_trading_day(self):
+        """非交易日即使源含今日 bar 也不拼快照。"""
+        today = date.today()
+        df = _df_with_dates([today.isoformat()], close=9.0)
+        with mock.patch.object(market_mod, "_daily_bar_from_quote") as fq:
+            with mock.patch("market_hours.is_trading_day", return_value=False):
+                out = market_mod._maybe_append_today_bar("000001.SH", df)
         fq.assert_not_called()
         self.assertEqual(len(out), 1)
         self.assertEqual(out.iloc[-1]["close"], 9.0)

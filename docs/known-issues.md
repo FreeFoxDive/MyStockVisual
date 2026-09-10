@@ -51,12 +51,32 @@
   - `TestGetDailyBarTodayFallback.test_today_stale_history_bar_overridden_by_quote`
   - `TestGetDailyBarTodayFallback.test_today_trade_entry_stale_history_passes`
 
-### 遗留待办（方案 B，未做）
+### 图表当日 bar 快照校准（原方案 B，已修复）
 
-日K图表（`/api/kline?period=1d`，前复权）走同一源链，**收盘后当日那根 K 线仍可能显示麦蕊的滞后值**
-（本例 low=14.30 / close=14.32）。因前复权与未复权口径不同，不能直接把未复权快照塞进 `qfq` 序列。
-后续可考虑：仅在 `qfq == none`（当日无未了结除权）时，用快照 high/low 对当日 bar 做 min/max 校准；
-或对麦蕊当日 bar 加新鲜度/终值守卫，收盘后强制回退 AlphaFeed。
+日K图表（`/api/kline?period=1d`，前复权）此前只在盘中用快照覆盖当日 bar：收盘后
+`_maybe_append_today_bar` 若见源已含今日 bar 便直接返回，于是**收盘后图表当日 K 线仍是
+历史源的值**（麦蕊/指数链会滞后，如本例 low=14.30）。
+
+现改为：交易日只要快照可用就覆盖当日 bar（`market._maybe_append_today_bar` 去掉
+`last_date == today and not in_session` 早退），图表与成交校验口径一致。守卫：
+
+- 非交易日：`is_trading_day` 早退，且 `_daily_bar_from_quote` 再查一次 → 不拼快照。
+- 全天停牌：快照 `volume == 0` → `_daily_bar_from_quote` 返回 None → 保留源 bar，
+  不覆盖；成交校验仍按「成交量为0」拒绝。
+- `last_date > today`（脏数据）与空 df：原样返回。
+- 快照 `amount` 一并透传，当日成交额不再为 NaN。
+
+前复权口径安全：前复权的「今日」即原始实时价，覆盖不破坏序列连续性（除权日亦然）。
+
+- 代码：`visual/market.py`（`_maybe_append_today_bar`、`_daily_bar_from_quote`、
+  `_apply_quote_bar_to_df`）
+- 测试：`visual/test/test_market_kline.py`
+  - `test_refresh_when_history_has_today_after_close`
+  - `test_no_override_when_snapshot_unavailable`
+  - `test_no_override_on_non_trading_day`
+
+**残留（未处理）**：盘前（09:30 前）若某源快照仍带昨日 volume>0，可能被拼成“今日”bar。
+实际盘前快照 volume 通常为 0（安全）；如需彻底杜绝，可给快照透传 `timestamp` 并校验日期。
 
 ---
 

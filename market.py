@@ -1300,7 +1300,8 @@ def _apply_quote_bar_to_df(df, quote_bar):
         "volume": quote_bar["volume"],
     }
     if "amount" in df.columns:
-        row["amount"] = float("nan")
+        amt = quote_bar.get("amount")
+        row["amount"] = float(amt) if amt is not None else float("nan")
     last_date = _last_bar_date(df)
     if last_date is not None and last_date == ts.date():
         for col, val in row.items():
@@ -1317,7 +1318,11 @@ def _apply_quote_bar_to_df(df, quote_bar):
 
 
 def _maybe_append_today_bar(symbol, df):
-    """日K history 尚无今天时 append; 盘中已有合成 bar 时用快照刷新末根 OHLCV。"""
+    """日K: 用实时快照补/刷新当日 bar。
+
+    交易日只要快照可用就覆盖末根「今天」OHLCV (盘中/收盘后一致);
+    快照不可用 (非交易日/停牌 volume=0/网络/高低缺) 时原样返回源 bar。
+    """
     if df is None or len(df) == 0:
         return df
     today = market_hours.now().date()
@@ -1327,8 +1332,6 @@ def _maybe_append_today_bar(symbol, df):
     if last_date is None:
         return df
     if last_date > today:
-        return df
-    if last_date == today and not market_hours.in_session():
         return df
     quote_bar = _daily_bar_from_quote(symbol, today)
     if not quote_bar:
@@ -1369,6 +1372,7 @@ def _daily_bar_from_quote(symbol, target):
         "low": low,
         "close": close,
         "volume": volume,
+        "amount": _safe_float(q.get("amount")),
     }
 
 
