@@ -6,7 +6,8 @@
 - KLINE_SOURCE_{MINUTE,STOCK,INDEX,FUND} 逗号分隔链, 主源失败自动回退
 - 分钟末根 bar 距今 > MINUTE_STALE_DAYS 天视为该源失败
 - akshare 兜底: 中文列名映射; 基金日K volume 与 AF/快照同为「手」
-- market.fetch_kline_ex 返回 (df, name, source), 磁盘缓存记录 source (key 含 qfq/raw)
+- market.fetch_kline_ex 返回 (df, name, source), 磁盘缓存记录 source
+  (key 含 qfq/raw 与数据源链 chain_tag, 改 KLINE_SOURCE_* 即失效)
 
 运行:
     venv/Scripts/python.exe -u visual/test/test_kline_source.py
@@ -104,11 +105,12 @@ class _FakeDisk:
     def __init__(self):
         self.store = {}
 
-    def get(self, symbol, period, count, ttl, adjust="forward"):
-        return self.store.get((symbol, period, count, kline_source.adjust_tag(adjust)))
+    def get(self, symbol, period, count, ttl, adjust="forward", chain_tag=""):
+        return self.store.get(
+            (symbol, period, count, kline_source.adjust_tag(adjust), chain_tag))
 
-    def set(self, symbol, period, count, data, adjust="forward"):
-        self.store[(symbol, period, count, kline_source.adjust_tag(adjust))] = data
+    def set(self, symbol, period, count, data, adjust="forward", chain_tag=""):
+        self.store[(symbol, period, count, kline_source.adjust_tag(adjust), chain_tag)] = data
 
 
 class _FakeUrlopenResp:
@@ -149,6 +151,13 @@ def _fake_akshare(stock_daily=None, fund_daily=None, index_daily=None,
 class KlineSourceTestBase(unittest.TestCase):
     def setUp(self):
         kline_source._warned_names.clear()
+        # 隔离外部环境: 全套跑时 app 会加载真实 .env, 泄漏 KLINE_SOURCE_*,
+        # 使依赖「默认链」的用例串扰。此处临时清空, 用例内可再用 _no_kline_env 覆盖。
+        env_guard = mock.patch.dict(os.environ)
+        env_guard.start()
+        self.addCleanup(env_guard.stop)
+        for k in ENV_KEYS:
+            os.environ.pop(k, None)
         # 适配器内部走 market 属性访问, 统一屏蔽分类判定与名称查询
         for p in (
             mock.patch.object(market, "_lookup_name", return_value="测试名"),
@@ -286,6 +295,44 @@ class TestEnvSwitch(KlineSourceTestBase):
         self.assertEqual(chains["stock"], "akshare,mairui")
         self.assertEqual(chains["minute"], "alphafeed,akshare")
         self.assertEqual(chains["fund"], "alphafeed,akshare")
+
+
+class TestChainTag(unittest.TestCase):
+    """chain_tag: 磁盘缓存 key 的数据源链标识, 改链即变。"""
+
+    def test_chain_tag_reflects_env_and_is_stable(self):
+        with _no_kline_env():
+            default_tag = kline_source.chain_tag("stock")
+            self.assertEqual(default_tag, kline_source.chain_tag("stock"))
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed,akshare"):
+            new_tag = kline_source.chain_tag("stock")
+        self.assertNotEqual(default_tag, new_tag)
+        self.assertEqual(len(new_tag), 8)
+
+    def test_disk_cache_key_includes_chain_tag(self):
+        disk = market.DiskCache()
+        a = disk._key("601058.SH", "1d", 1006, "forward", "t1")
+        b = disk._key("601058.SH", "1d", 1006, "forward", "t2")
+        raw = disk._key("601058.SH", "1d", 1006, "none", "t1")
+        self.assertNotEqual(a, b)
+        self.assertIn("t1", a.name)
+        self.assertIn("raw", raw.name)
+        self.assertNotEqual(a, raw)
+
+    def test_disk_cache_isolates_across_chain_tag(self):
+        disk = market.DiskCache()
+        disk.set("ZZTEST.SH", "1d", 7, {"source": "a"}, adjust="forward",
+                 chain_tag="t1")
+        try:
+            self.assertIsNotNone(
+                disk.get("ZZTEST.SH", "1d", 7, 60, adjust="forward",
+                         chain_tag="t1"))
+            self.assertIsNone(
+                disk.get("ZZTEST.SH", "1d", 7, 60, adjust="forward",
+                         chain_tag="t2"))
+        finally:
+            disk._key("ZZTEST.SH", "1d", 7, "forward", "t1").unlink(
+                missing_ok=True)
 
 
 class TestFailover(KlineSourceTestBase):
@@ -441,18 +488,22 @@ class TestFetchKlineEx(KlineSourceTestBase):
         disk_p = mock.patch.object(market, "_disk_cache", self.disk)
         disk_p.start()
         self.addCleanup(disk_p.stop)
+        # chain_tag 固定为 "t1", 便于断言磁盘缓存 key
+        ct_p = mock.patch.object(kline_source, "chain_tag", return_value="t1")
+        ct_p.start()
+        self.addCleanup(ct_p.stop)
 
     def test_returns_source_and_records_cache(self):
         with mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()):
             df, name, src = market.fetch_kline_ex("600519.SH", "1w", 100)
         self.assertEqual(src, "mairui")
         self.assertEqual(name, "测试名")
-        cached = self.disk.store[("600519.SH", "1w", 100, "qfq")]
+        cached = self.disk.store[("600519.SH", "1w", 100, "qfq", "t1")]
         self.assertEqual(cached["source"], "mairui")
         self.assertEqual(cached["name"], "测试名")
 
     def test_cache_hit_returns_cached_source(self):
-        self.disk.store[("600519.SH", "1w", 100, "qfq")] = {
+        self.disk.store[("600519.SH", "1w", 100, "qfq", "t1")] = {
             "name": "测试名", "source": "akshare",
             "data": json.loads(_norm_df(10).reset_index()
                                .rename(columns={"index": "trade_date"})
@@ -468,9 +519,20 @@ class TestFetchKlineEx(KlineSourceTestBase):
         with mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr:
             market.fetch_kline_ex("600519.SH", "1w", 100, adjust="forward")
             market.fetch_kline_ex("600519.SH", "1w", 100, adjust="none")
-        self.assertIn(("600519.SH", "1w", 100, "qfq"), self.disk.store)
-        self.assertIn(("600519.SH", "1w", 100, "raw"), self.disk.store)
+        self.assertIn(("600519.SH", "1w", 100, "qfq", "t1"), self.disk.store)
+        self.assertIn(("600519.SH", "1w", 100, "raw", "t1"), self.disk.store)
         self.assertEqual(mr.call_count, 2)
+
+    def test_chain_tag_change_invalidates_cache(self):
+        """切数据源链 (chain_tag 变) 后旧缓存不再命中, 重新发起 fetch。"""
+        with mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr:
+            market.fetch_kline_ex("600519.SH", "1w", 100)  # 写入 t1
+            with mock.patch.object(kline_source, "chain_tag", return_value="t2"):
+                df, name, src = market.fetch_kline_ex("600519.SH", "1w", 100)
+        self.assertIsNotNone(df)
+        self.assertEqual(mr.call_count, 2)  # t2 未命中 t1 缓存
+        self.assertIn(("600519.SH", "1w", 100, "qfq", "t1"), self.disk.store)
+        self.assertIn(("600519.SH", "1w", 100, "qfq", "t2"), self.disk.store)
 
     def test_fetch_kline_wrapper_drops_source(self):
         with mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()):

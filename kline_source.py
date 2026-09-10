@@ -17,6 +17,7 @@ MINUTE_STALE_DAYS 天视为该源失败 (防止滞后窗口的旧数据被当成
 from __future__ import annotations
 
 import abc
+import hashlib
 import logging
 import os
 from datetime import timedelta
@@ -248,6 +249,17 @@ def _chain(category):
 def describe_chains():
     """启动横幅用: 各类别当前生效的数据源链。"""
     return {cat: ",".join(_chain(cat)) for cat in CATEGORY_ENV}
+
+
+def chain_tag(category) -> str:
+    """当前类别数据源链的短标识, 用作磁盘缓存 key 后缀: 改链即失效。
+
+    依据「配置的链」(env 覆盖 > 默认) 而非实际服务源生成 —— 实际源要拉完才
+    知道, 无法用于查缓存; 而改配置正是需要让旧源缓存失效的场景。同一链内主源
+    故障回退到次源时仍复用缓存 (TTL 短, 可接受)。
+    """
+    raw = ",".join(_chain(category))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
 
 
 def _minute_fresh(df):

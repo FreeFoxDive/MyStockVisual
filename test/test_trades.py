@@ -1689,17 +1689,66 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         self.assertEqual(bar["close"], 10.5)
         self.assertEqual(bar["volume"], 10000)
 
-    def test_today_prefers_history_over_quote(self):
+    def test_today_prefers_quote_over_history(self):
+        """当日校验以实时快照为准 (历史源当日 bar 可能滞后)。"""
         today = _date.today().isoformat()
         import pandas as pd
         idx = pd.Timestamp(today)
         df = pd.DataFrame([{"open": 8.0, "high": 9.0, "low": 7.5, "close": 8.5, "volume": 5000}], index=[idx])
+        quote = {"open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 10000}
         with mock.patch.object(self.market, "fetch_kline", return_value=(df, "赛轮轮胎")):
-            with mock.patch.object(self.market, "fetch_quotes") as fq:
+            with self._mock_quotes("601058.SH", quote) as fq:
                 with mock.patch("market_hours.is_trading_day", return_value=True):
                     bar = self.market.get_daily_bar("601058.SH", today)
-        fq.assert_not_called()
-        self.assertEqual(bar["high"], 9.0)
+        fq.assert_called()
+        self.assertEqual(bar["high"], 11.0)
+        self.assertEqual(bar["low"], 9.5)
+
+    def test_today_stale_history_bar_overridden_by_quote(self):
+        """回归 601058.SH 2026-09-10: 麦蕊当日 bar 滞后 (low=14.30) 时,
+        当日校验取实时快照 low=14.18, 买入价 14.20 不再被误拒。"""
+        today = _date.today().isoformat()
+        import pandas as pd
+        idx = pd.Timestamp(today)
+        stale = pd.DataFrame(
+            [{"open": 14.62, "high": 14.64, "low": 14.30, "close": 14.32, "volume": 144462}],
+            index=[idx],
+        )
+        quote = {"open": 14.62, "high": 14.64, "low": 14.18,
+                 "last_price": 14.22, "volume": 264196}
+        with mock.patch.object(self.market, "fetch_kline", return_value=(stale, "赛轮轮胎")):
+            with self._mock_quotes("601058.SH", quote):
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    bar = self.market.get_daily_bar("601058.SH", today)
+        self.assertEqual(bar["low"], 14.18)
+        self.assertEqual(bar["high"], 14.64)
+        self.assertEqual(bar["close"], 14.22)
+        self.assertEqual(bar["volume"], 264196)
+
+    def test_today_trade_entry_stale_history_passes(self):
+        """端到端: 麦蕊当日 bar 滞后时, 收盘后录入快照振幅内的买入价可通过。"""
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        db_path = os.path.join(tmp.name, "test_trades.db")
+        trades.init_db(db_path)
+        uid = trades.create_user("bob", "secret123")
+        today = trades._now().date().isoformat()
+        import pandas as pd
+        stale = pd.DataFrame(
+            [{"open": 14.62, "high": 14.64, "low": 14.30, "close": 14.32, "volume": 144462}],
+            index=[pd.Timestamp(today)],
+        )
+        quote = {"open": 14.62, "high": 14.64, "low": 14.18,
+                 "last_price": 14.22, "volume": 264196}
+        with mock.patch.object(self.market, "fetch_kline", return_value=(stale, "赛轮轮胎")):
+            with self._mock_quotes("601058.SH", quote):
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    t = trades.create_trade(uid, {
+                        "symbol": "601058.SH", "name": "赛轮轮胎",
+                        "entry_price": 14.20, "quantity": 100,
+                        "entry_date": today, "entry_reason": "突破买入",
+                    })
+        self.assertEqual(t["entry_price"], 14.20)
 
     def test_past_date_no_quote_fallback(self):
         with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):

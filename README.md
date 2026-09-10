@@ -169,6 +169,8 @@ KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复�
 - 基金日K口径：默认链 AlphaFeed/东财 volume 为「手」，与快照一致；麦蕊 `jj/lskx` 为「股」，仅在显式配置且未复权时可用
 - ETF 溢价线用未复权收盘价对齐单位净值；股吧链接 ETF 带 `sh`/`sz` 前缀（如 `list,sh588200.html`）
 - `/api/kline` 响应 `meta.source` 返回实际服务的数据源，便于观察回退是否生效
+- ⚠️ **麦蕊股票日K当日 bar 盘中为滞后/部分成交快照**：如 601058.SH 2026-09-10，麦蕊 `low=14.30/vol=144462`，而实时快照与 AlphaFeed 为 `low=14.18/vol=264196`（当日无除权）。成交校验已改为当日以实时快照为准（`market.get_daily_bar`）；日K图表收盘后当日 bar 仍可能显示麦蕊滞后值。详见 [docs/known-issues.md](docs/known-issues.md)
+- 磁盘缓存按**数据源链隔离**（key 含 `kline_source.chain_tag`）：改 `KLINE_SOURCE_*` 后旧源缓存自动失效，不会串源；改配置仍需重启生效（`.env` 仅启动时加载）
 - 实测脚本: `probe_mairui_minute.py`（麦蕊分钟K权限/字段/窗口）、`probe_akshare_source.py`（东财列名/单位/覆盖度）
 
 ### 配置持久化

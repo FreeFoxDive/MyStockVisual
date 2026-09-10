@@ -219,12 +219,13 @@ class DiskCache:
     def __init__(self):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _key(self, symbol, period, count, adjust="forward"):
+    def _key(self, symbol, period, count, adjust="forward", chain_tag=""):
         tag = kline_source.adjust_tag(adjust)
-        return CACHE_DIR / f"{symbol}_{period}_{count}_{tag}.json.gz"
+        suffix = f"_{chain_tag}" if chain_tag else ""
+        return CACHE_DIR / f"{symbol}_{period}_{count}_{tag}{suffix}.json.gz"
 
-    def get(self, symbol, period, count, ttl_seconds, adjust="forward"):
-        fp = self._key(symbol, period, count, adjust)
+    def get(self, symbol, period, count, ttl_seconds, adjust="forward", chain_tag=""):
+        fp = self._key(symbol, period, count, adjust, chain_tag)
         if not fp.exists():
             return None
         age = time.time() - fp.stat().st_mtime
@@ -236,8 +237,8 @@ class DiskCache:
         except Exception:
             return None
 
-    def set(self, symbol, period, count, data, adjust="forward"):
-        fp = self._key(symbol, period, count, adjust)
+    def set(self, symbol, period, count, data, adjust="forward", chain_tag=""):
+        fp = self._key(symbol, period, count, adjust, chain_tag)
         try:
             with gzip.open(fp, "wt", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, cls=NumpyEncoder)
@@ -727,6 +728,8 @@ def fetch_kline_ex(symbol, period, count, adjust="forward"):
     返回 (标准化 DataFrame, 名称, 数据源名); 失败 (None, None, None)。
     """
     adj = kline_source.normalize_adjust(adjust)
+    category = _kline_category(symbol, period)
+    ct = kline_source.chain_tag(category)  # 缓存按数据源链隔离, 改链即失效
     # 检查磁盘缓存 (日K/分钟 盘中 60s/盘后 300s, 周月K 600s)
     now = market_hours.now()
     in_trading = market_hours.in_session(now)
@@ -736,7 +739,7 @@ def fetch_kline_ex(symbol, period, count, adjust="forward"):
         ttl = 60 if in_trading else 300
     else:
         ttl = 600
-    cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj)
+    cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj, chain_tag=ct)
     if cached:
         df = pd.DataFrame(cached["data"])
         if period == "1d":
@@ -760,7 +763,6 @@ def fetch_kline_ex(symbol, period, count, adjust="forward"):
             df = df.sort_index()
             return df, cached.get("name", symbol), cached.get("source")
 
-    category = _kline_category(symbol, period)
     df, source = kline_source.fetch_kline_df(
         category, symbol, period, count, adjust=adj
     )
@@ -790,7 +792,7 @@ def fetch_kline_ex(symbol, period, count, adjust="forward"):
             "data": json.loads(out.to_json(orient="records", date_format="iso")),
         }
         try:
-            _disk_cache.set(symbol, period, count, cache_data, adjust=adj)
+            _disk_cache.set(symbol, period, count, cache_data, adjust=adj, chain_tag=ct)
         except Exception:
             pass
 
@@ -1385,6 +1387,15 @@ def get_daily_bar(symbol, date_str):
         return None
 
     today = market_hours.now().date()
+    # 当日: 历史源(如麦蕊)当日 bar 可能是盘中滞后/部分成交快照; 收盘后
+    # in_session()=False, _maybe_append_today_bar 不再用实时快照覆盖, 会残留
+    # 滞后 low/high (曾致 601058.SH 买入价 14.20 被 [14.30, 14.64] 误拒)。
+    # 故当日一律以实时快照为准, 快照失败再退回历史 bar。
+    if target == today:
+        quote_bar = _daily_bar_from_quote(symbol, target)
+        if quote_bar is not None:
+            return quote_bar
+
     # 回溯交易日约 = 自然日*1.6 + 缓冲；下限 30、上限 1500
     natural = max((today - target).days + 10, 30)
     count = min(max(int(natural * 1.6) + 20, 30), 1500)
