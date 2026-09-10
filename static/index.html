@@ -10,6 +10,7 @@
 <script src="/js/api.js"></script>
 <script src="/js/indicators.js"></script>
 <script src="/js/gaps.js"></script>
+<script src="/js/chips.js"></script>
 <style>
 /* ═══════════════ 页面专属 (主题变量见 theme.css) ═══════════════ */
 body {
@@ -240,6 +241,12 @@ body {
 #indicator-bar input[type="checkbox"] { accent-color: var(--btn-active); }
 
 /* ═══════════════ Chart ═══════════ */
+#chart-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+}
 #chart-container {
   flex: 1;
   min-height: 0;
@@ -256,6 +263,43 @@ body {
   display: none;
 }
 #loading.show { display: block; }
+
+/* ═══════════════ 五档盘口 (分时, 右侧) ═══════════════ */
+#depth-panel {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 180px;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  font-family: monospace;
+  font-size: 14px;
+  z-index: 6;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+#depth-panel .dp-title {
+  font-weight: 700;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 3px;
+}
+#depth-panel .dp-body { flex: 1; overflow: hidden; }
+#depth-panel .dp-row {
+  display: flex;
+  align-items: baseline;
+  line-height: 20px;
+  white-space: nowrap;
+}
+#depth-panel .dp-row .dp-label { width: 34px; color: var(--text-secondary); }
+#depth-panel .dp-row .dp-price { flex: 1; text-align: right; padding-right: 8px; }
+#depth-panel .dp-row .dp-vol { width: 58px; text-align: right; color: var(--text); }
+#depth-panel .dp-sep { height: 1px; background: var(--border); margin: 3px 0; }
+#depth-panel .dp-empty { color: var(--text-secondary); text-align: center; padding-top: 8px; }
 
 /* ═══════════════ Scrollbar ═══════════ */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -276,8 +320,11 @@ body {
     <span id="info-code"></span>
     <span class="name" id="info-name">—</span>
     <a id="info-guba" href="#" target="_blank" rel="noopener noreferrer" style="display:none" title="东财股吧">股吧 ↗</a>
+    <span id="info-turnover" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-pledge" style="font-size:12px;color:var(--text-secondary);display:none"></span>
+    <span id="info-shares" style="font-size:12px;color:var(--text-secondary);display:none"></span>
+    <span id="info-amount" style="font-size:12px;color:var(--text-secondary);display:none"></span>
     <span class="price" id="info-price">—</span>
     <span class="change" id="info-change">—</span>
     <span class="oh" id="info-open">开 —</span>
@@ -321,7 +368,10 @@ body {
   <label><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
   <label><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
+  <label title="OBV 从图表加载的首根K线起算(累计量); MAOBV=MA(OBV,30)。绝对数值随加载窗口变化, 跨平台/跨加载根数不可直接比较, 比较请看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
+  <label id="lbl-chip"><input type="checkbox" id="chk-chip" onchange="onConfigChange()">筹码</label>
+  <label id="lbl-depth" style="display:none"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">📏 MA=SMA</span>
   <span class="separator" style="height:18px;background:var(--border)"></span>
@@ -336,8 +386,13 @@ body {
 </div>
 
 <!-- ═══════════════ Chart ═══════════ -->
-<div id="chart-container">
+<div id="chart-wrap">
+  <div id="chart-container"></div>
   <div id="loading">⏳ 加载中...</div>
+  <div id="depth-panel">
+    <div class="dp-title">五档</div>
+    <div class="dp-body" id="depth-body"></div>
+  </div>
 </div>
 
 <script>
@@ -386,6 +441,8 @@ const STATE = {
   theme: 'light',
   klineData: null,       // raw JSON from server
   trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
+  chips: null,           // 筹码分布 (/api/chips, 仅日K股票)
+  depth: null,           // 五档盘口 (/api/depth, 仅分时)
   chart: null,
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
   _gridRects: null,      // cached grid pixel rects
@@ -427,10 +484,15 @@ const COLORS = {
     ma10: '#d4a017', macdDea: '#d4a017', kdjD: '#d4a017', rsi12: '#d4a017',
     // ── 玫红系: MA20 / J / RSI3 ──
     ma20: '#c2185b', kdjJ: '#c2185b', rsi24: '#c2185b',
+    // ── OBV 白/黑系 + MAOBV 黄色系 ──
+    obv: '#1a1a1a', maobv: '#d4a017',
     atr: '#888888',
     overbought: '#ef5350', oversold: '#26a69a',
     impulse_neutral: '#5b8ff9',  // Elder impulse neutral blue
     ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
+    // ── 筹码分布 ──
+    chipProfit: '#ef232a', chipTrapped: '#14b143', chipAvg: '#d4a017',
+    chipAvgLabel: '#2962ff',
     zeroLine: '#cccccc',
   },
   dark: {
@@ -448,10 +510,15 @@ const COLORS = {
     ma10: '#f5c542', macdDea: '#f5c542', kdjD: '#f5c542', rsi12: '#f5c542',
     // ── 玫红系: MA20 / J / RSI3 ──
     ma20: '#e84698', kdjJ: '#e84698', rsi24: '#e84698',
+    // ── OBV 白/黑系 + MAOBV 黄色系 ──
+    obv: '#eeeeee', maobv: '#f5c542',
     atr: '#5a5a5a',
     overbought: '#ef5350', oversold: '#26a69a',
     impulse_neutral: '#5b8ff9',  // Elder impulse neutral blue
     ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
+    // ── 筹码分布 ──
+    chipProfit: '#ef5350', chipTrapped: '#26a69a', chipAvg: '#f5c542',
+    chipAvgLabel: '#5b8ff9',
     zeroLine: '#363a45',
   }
 };
@@ -542,7 +609,7 @@ async function fetchData(opts) {
   const period = STATE.period;
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
   STATE._lastBarAt = fetchTs;
-  if (!silent) STATE.trades = null; // 切股/切周期先清空, 避免缓存命中快速渲染短暂显示上一只股票的买卖点
+  if (!silent) { STATE.trades = null; STATE.chips = null; } // 切股/切周期先清空, 避免短暂显示上一只的买卖点/筹码
   const cacheKey = `vk_${symbol}_${period}`;
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
@@ -605,7 +672,10 @@ async function fetchData(opts) {
       addToHistory(data.symbol, data.name);
     }
     updateInfo(data);
-    if (!silent) await loadTrades(data.symbol, fetchTs);
+    if (!silent) {
+      await loadTrades(data.symbol, fetchTs);
+      fetchChips(data.symbol);
+    }
     updateChart(false);
   } catch (e) {
     console.error('获取数据失败:', e);
@@ -629,6 +699,89 @@ async function loadTrades(symbol, fetchTs) {
   } catch (e) {
     STATE.trades = null; // 静默降级: 无买卖点, 不影响 K 线
   }
+}
+
+// ── 筹码分布: 仅日K股票; 服务端东财算法, 本地 5 分钟缓存 ──
+async function fetchChips(symbol) {
+  if (!isChipPeriod(STATE.period)) return;
+  if (!document.getElementById('chk-chip').checked) return;
+  symbol = symbol || STATE.symbol;
+  const key = `vc_${symbol}`;
+  let hasLocal = false;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const cached = JSON.parse(raw);
+      if (Date.now() - cached.ts < 300000 && cached.data) {
+        STATE.chips = cached.data.chips || null;
+        hasLocal = true;
+        if (STATE.symbol === symbol) updateChart(false);
+      }
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    const resp = await fetch(`/api/chips?symbol=${encodeURIComponent(symbol)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (STATE.symbol !== symbol || !isChipPeriod(STATE.period)) return; // 已切走
+    STATE.chips = data.chips || null;
+    try {
+      localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+      _cleanLocalStorage();
+    } catch (e) { /* quota */ }
+    if (STATE.symbol === symbol) updateChart(false);
+  } catch (e) {
+    if (!hasLocal) STATE.chips = null; // 网络失败且无缓存: 不显示筹码
+  }
+}
+
+// ── 五档盘口: 仅分时视图; 右侧面板, 盘中约 3s 刷新 (20/min = 2/3 × 30) ──
+function depthPanelOn() {
+  const chk = document.getElementById('chk-depth');
+  return STATE.period === 'intraday' && !!chk && chk.checked;
+}
+
+function showDepthPanel(on) {
+  const el = document.getElementById('depth-panel');
+  if (el) el.style.display = on ? 'flex' : 'none';
+}
+
+function renderDepth(depth) {
+  const body = document.getElementById('depth-body');
+  if (!body) return;
+  if (!depth) { body.innerHTML = '<div class="dp-empty">无五档数据</div>'; return; }
+  const up = C().up;
+  const down = C().down;
+  const pf = (v) => (v == null ? '—' : Number(v).toFixed(2));
+  const vf = (v) => (v == null ? '—' : String(v));
+  const row = (label, price, vol, color) =>
+    `<div class="dp-row"><span class="dp-label">${label}</span>` +
+    `<span class="dp-price" style="color:${color}">${pf(price)}</span>` +
+    `<span class="dp-vol">${vf(vol)}</span></div>`;
+  const asks = depth.ask_prices || [];
+  const av = depth.ask_volumes || [];
+  const bids = depth.bid_prices || [];
+  const bv = depth.bid_volumes || [];
+  let html = '';
+  for (let i = 4; i >= 0; i--) html += row('卖' + (i + 1), asks[i], av[i], down);
+  html += '<div class="dp-sep"></div>';
+  for (let i = 0; i < 5; i++) html += row('买' + (i + 1), bids[i], bv[i], up);
+  body.innerHTML = html;
+}
+
+async function fetchDepth() {
+  if (STATE.period !== 'intraday') return;
+  const chk = document.getElementById('chk-depth');
+  if (!chk || !chk.checked) return;
+  const symbol = STATE.symbol;
+  try {
+    const resp = await fetch(`/api/depth?symbol=${encodeURIComponent(symbol)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (STATE.symbol !== symbol || STATE.period !== 'intraday') return; // 已切走
+    STATE.depth = data.depth || null;
+    renderDepth(STATE.depth);
+  } catch (e) { /* ignore */ }
 }
 
 // 交易日期 → bar 索引 (升序 dates 里第一个 date >= d 的 bar; 日/周/月通用)
@@ -752,6 +905,11 @@ function appendIndicatorSeriesPatches(seriesPatch, klines, panels) {
       );
     } else if (p === 'atr') {
       seriesPatch.push({ name: 'ATR(14)', data: klines.map((k) => k.atr14) });
+    } else if (p === 'obv') {
+      seriesPatch.push(
+        { name: 'OBV', data: klines.map((k) => k.obv) },
+        { name: 'MAOBV', data: klines.map((k) => k.maobv) },
+      );
     }
   });
 }
@@ -783,6 +941,10 @@ function patchIndicatorLastPoints(seriesPatch, k, lastIdx, seriesByName, klines)
   }
   if (panels.includes('atr')) {
     copyLast('ATR(14)', k.atr14);
+  }
+  if (panels.includes('obv')) {
+    copyLast('OBV', k.obv);
+    copyLast('MAOBV', k.maobv);
   }
 
   if (STATE.channelEnabled && STATE.period === '1d' && k.ema13 != null && k.atr14 != null) {
@@ -871,6 +1033,9 @@ function patchLastBarOnChart() {
     appendChannelSeriesPatches(seriesPatch, klines);
     if (seriesByName['成交量']) {
       seriesPatch.push({ name: '成交量', data: klines.map((kk) => buildVolPoint(kk)) });
+      seriesPatch.push({ name: 'VOL MA5', data: klines.map((kk) => kk.vol_ma5) });
+      seriesPatch.push({ name: 'VOL MA10', data: klines.map((kk) => kk.vol_ma10) });
+      seriesPatch.push({ name: 'VOL MA20', data: klines.map((kk) => kk.vol_ma20) });
     }
     appendIndicatorSeriesPatches(seriesPatch, klines, panels);
     chart.setOption({ animation: false, xAxis: xAxisPatch, series: seriesPatch }, patchOpts);
@@ -895,7 +1060,8 @@ function patchLastBarOnChart() {
   }
   const pV = copyLast('成交量', buildVolPoint(k));
   if (pV) seriesPatch.push(pV);
-  const maMap = { MA5: 'ma5', MA10: 'ma10', MA20: 'ma20' };
+  const maMap = { MA5: 'ma5', MA10: 'ma10', MA20: 'ma20',
+    'VOL MA5': 'vol_ma5', 'VOL MA10': 'vol_ma10', 'VOL MA20': 'vol_ma20' };
   Object.keys(maMap).forEach((name) => {
     const s = seriesByName[name];
     if (!s || !s.data || s.data.length !== klines.length) return;
@@ -918,6 +1084,60 @@ function showLoading(show) {
 // ═══════════════════════════════════════════════════════════════
 // INFO BAR
 // ═══════════════════════════════════════════════════════════════
+// 人民币金额格式化: 万亿 / 亿 / 万
+function fmtCN(v) {
+  if (v == null) return '—';
+  const a = Math.abs(v);
+  if (a >= 1e12) return (v / 1e12).toFixed(2) + '万亿';
+  if (a >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+  if (a >= 1e4) return (v / 1e4).toFixed(2) + '万';
+  return v.toFixed(0);
+}
+
+// 换手 (股票) / 流值 (股票) / 份额 (ETF) / 成交额
+function updateFundInfo(q) {
+  const d = STATE.klineData || {};
+  const isEtf = !!d.is_etf;
+  const isIndex = !!d.is_index;
+  const fs = d.float_shares;
+  const last = q && q.last_price != null ? q.last_price : null;
+
+  const turnoverEl = document.getElementById('info-turnover');
+  const sharesEl = document.getElementById('info-shares');
+  const amountEl = document.getElementById('info-amount');
+
+  // 换手率 (仅股票)
+  if (q && q.turnover_rate != null && !isEtf && !isIndex) {
+    turnoverEl.textContent = `换手 ${q.turnover_rate.toFixed(2)}%`;
+    turnoverEl.style.display = '';
+  } else {
+    turnoverEl.style.display = 'none';
+  }
+
+  // 流通市值 (股票) / 基金份额 (ETF)
+  if (fs != null && fs > 0) {
+    if (isEtf) {
+      sharesEl.textContent = `份额 ${(fs / 1e8).toFixed(2)}亿份`;
+      sharesEl.style.display = '';
+    } else if (!isIndex && last != null) {
+      sharesEl.textContent = `流通 ${fmtCN(fs * last)}`;
+      sharesEl.style.display = '';
+    } else {
+      sharesEl.style.display = 'none';
+    }
+  } else {
+    sharesEl.style.display = 'none';
+  }
+
+  // 当日成交额
+  if (q && q.amount != null && q.amount > 0) {
+    amountEl.textContent = `额 ${fmtCN(q.amount)}`;
+    amountEl.style.display = '';
+  } else {
+    amountEl.style.display = 'none';
+  }
+}
+
 function updateInfo(data) {
   document.getElementById('info-code').textContent = (data.symbol || '').replace(/\.(SH|SZ|BJ)$/, '');
   document.getElementById('info-name').textContent = data.name || data.symbol;
@@ -979,6 +1199,13 @@ function updateInfo(data) {
     premLabel.style.display = 'none';
     document.getElementById('info-premium').style.display = 'none';
   }
+
+  // 换手/流值/份额/成交额 (无 quote 时用末根收盘价兜底显示流值/份额)
+  let qf = data.quote;
+  if (!qf && data.klines && data.klines.length) {
+    qf = { last_price: data.klines[data.klines.length - 1].close };
+  }
+  updateFundInfo(qf);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -998,7 +1225,7 @@ function _cleanLocalStorage() {
       if (!k) continue;
       const v = localStorage.getItem(k) || '';
       total += k.length + v.length;
-      if ((k.startsWith('vk_') || k.startsWith('vi_')) && !LS_KEEP_KEYS.has(k)) {
+      if ((k.startsWith('vk_') || k.startsWith('vi_') || k.startsWith('vc_')) && !LS_KEEP_KEYS.has(k)) {
         let ts = 0;
         try { ts = (JSON.parse(v) || {}).ts || 0; } catch (_) {}
         cacheEntries.push({ k, ts, size: k.length + v.length });
@@ -1149,6 +1376,9 @@ function saveConfig() {
     kdj: document.getElementById('chk-kdj').checked,
     rsi: document.getElementById('chk-rsi').checked,
     atr: document.getElementById('chk-atr').checked,
+    obv: document.getElementById('chk-obv').checked,
+    chip: document.getElementById('chk-chip').checked,
+    depth: document.getElementById('chk-depth').checked,
     tipRsi: document.getElementById('tip-rsi').checked,
     tipKdj: document.getElementById('tip-kdj').checked,
     tipAtr: document.getElementById('tip-atr').checked,
@@ -1170,6 +1400,9 @@ function loadConfig() {
     document.getElementById('chk-kdj').checked = !!cfg.kdj;
     document.getElementById('chk-rsi').checked = !!cfg.rsi;
     document.getElementById('chk-atr').checked = !!cfg.atr;
+    document.getElementById('chk-obv').checked = !!cfg.obv;
+    document.getElementById('chk-chip').checked = !!cfg.chip;
+    document.getElementById('chk-depth').checked = cfg.depth !== false;
     document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
     document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
     document.getElementById('tip-atr').checked = cfg.tipAtr !== false;
@@ -1221,6 +1454,7 @@ async function fetchIntraday() {
         if (Date.now() - cached.ts < 120000 && cached.data) {  // 120s TTL
           STATE.intradayData = cached.data;
           renderIntraday(cached.data);
+          fetchDepth();
           cacheHit = true;
         }
       }
@@ -1242,6 +1476,7 @@ async function fetchIntraday() {
     STATE.intradayData = id;
     updateQuoteDisplay(quote);
     renderIntraday(STATE.intradayData);
+    fetchDepth();  // 五档初始拉取
     // 保存到 localStorage
     try {
       localStorage.setItem(_cacheKey, JSON.stringify({ ts: Date.now(), data: id }));
@@ -1253,6 +1488,10 @@ async function fetchIntraday() {
 
 function renderIntraday(data) {
   const chart = STATE.chart;
+  // 五档面板 (左侧): 显隐 + 用当前缓存渲染
+  showDepthPanel(depthPanelOn());
+  if (STATE.depth) renderDepth(STATE.depth);
+  const gridLeft = depthPanelOn() ? 220 : '8%'; // 左侧给五档面板(180) + 价格标签留位
   const bars = data.bars;
   const times = bars.map(b => b.time);
   const ohlc = bars.map(b => {
@@ -1273,7 +1512,7 @@ function renderIntraday(data) {
   const nextTop = 12 + klineH + 3;
   const subStart = showVolume ? (nextTop + 13) : nextTop;
 
-  const grids = [{ left: '8%', right: '2%', top: '12%', height: `${klineH}%` }];
+  const grids = [{ left: gridLeft, right: '2%', top: '12%', height: `${klineH}%` }];
   const xAxes = [{ gridIndex: 0, type: 'category', data: times, show: false }];
   const yAxes = [{ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } }];
   const series = [
@@ -1291,7 +1530,7 @@ function renderIntraday(data) {
       const up = (b.close || 0) >= (b.open || 0);
       return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
     });
-    grids.push({ left: '8%', right: '2%', top: `${nextTop}%`, height: '11%' });
+    grids.push({ left: gridLeft, right: '2%', top: `${nextTop}%`, height: '11%' });
     xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
     yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
     series.push({ name: '成交量', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: vols });
@@ -1303,7 +1542,7 @@ function renderIntraday(data) {
 
   subList.forEach((p, pi) => {
     const top = subStart + pi * perSubH;
-    grids.push({ left: '8%', right: '2%', top: `${top}%`, height: `${perSubH - 1}%` });
+    grids.push({ left: gridLeft, right: '2%', top: `${top}%`, height: `${perSubH - 1}%` });
     xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
     yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 9 } });
     zoomIndices.push(gi);
@@ -1417,6 +1656,16 @@ function onConfigChange() {
   STATE.channelEnabled = document.getElementById('chk-channel').checked;
   STATE.gapEnabled = document.getElementById('chk-gap').checked;
   saveConfig();
+  // 打开筹码但尚未加载 → 触发拉取
+  if (isChipPeriod(STATE.period) && document.getElementById('chk-chip').checked
+      && !STATE.chips && STATE.klineData) {
+    fetchChips(STATE.symbol);
+  }
+  // 五档开关 (分时): 重排图/面板并即时拉取
+  if (STATE.period === 'intraday') {
+    showDepthPanel(depthPanelOn());
+    if (depthPanelOn()) fetchDepth();
+  }
   onIndicatorChange();
 }
 
@@ -1460,6 +1709,7 @@ function updateQuoteDisplay(quote) {
     document.getElementById('info-low').className = 'oh ' + lCls;
   }
   document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
+  updateFundInfo(quote);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1507,6 +1757,63 @@ function initChart() {
     STATE.hoveredGrid = -1;
     STATE._pointerPrice = null;
   });
+  // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样)
+  STATE.chart.on('dataZoom', function() {
+    if (!STATE._chip) return;
+    if (STATE._chipSyncPending) return;
+    STATE._chipSyncPending = true;
+    requestAnimationFrame(function() {
+      STATE._chipSyncPending = false;
+      if (STATE._chip) syncChipAxis();
+    });
+  });
+}
+
+// K 线主图 y 轴可见范围: 可见 K 线 low/high + (通道开启时) 可见 ±3ATR 带
+// (主图 yAxis scale:true 会包含通道带, 筹码轴需与之对齐, 否则错位)
+function klineVisibleYRange(klines, startPct, endPct) {
+  const r = ChipChart.visibleRange(klines, startPct, endPct);
+  if (!r) return null;
+  if (STATE.channelEnabled && STATE.period === '1d') {
+    const n = klines.length;
+    let i0 = Math.floor(n * (startPct == null ? 0 : startPct) / 100);
+    let i1 = Math.ceil(n * (endPct == null ? 100 : endPct) / 100) - 1;
+    i0 = Math.max(0, Math.min(n - 1, i0));
+    i1 = Math.max(i0, Math.min(n - 1, i1));
+    for (let i = i0; i <= i1; i++) {
+      const k = klines[i];
+      if (k.ema13 != null && k.atr14 != null) {
+        const u = k.ema13 + 3 * k.atr14;
+        const l = k.ema13 - 3 * k.atr14;
+        if (u > r.max) r.max = u;
+        if (l < r.min) r.min = l;
+      }
+    }
+  }
+  return r;
+}
+
+// 筹码面板价格轴 + 柱数据随主图 dataZoom 联动 (按可见区间重采样, 保持细密)
+function syncChipAxis() {
+  const chip = STATE._chip;
+  const chart = STATE.chart;
+  const data = STATE.klineData;
+  if (!chip || chip.gi < 0 || !chart || !data || !data.klines) return;
+  const opt = chart.getOption();
+  const dzs = opt.dataZoom || [];
+  const dz = dzs.find(z => z.type === 'inside') || dzs[0] || {};
+  const range = klineVisibleYRange(data.klines, dz.start, dz.end);
+  if (!range) return;
+  const yAxes = (opt.yAxis || []).map((y, i) => (i === chip.gi ? { min: range.min, max: range.max } : {}));
+  const patch = { yAxis: yAxes };
+  if (STATE.chips && chip.n) {
+    const bars = ChipChart.resample(STATE.chips, range.min, range.max, chip.n);
+    const seriesPatch = [{ name: '筹码', data: bars }];
+    const avg = (opt.series || []).find(s => s.name === '筹码均本');
+    if (avg) seriesPatch.push({ name: '筹码均本', data: avg.data });
+    patch.series = seriesPatch;
+  }
+  chart.setOption(patch, { lazyUpdate: true, silent: true });
 }
 
 function getIndicatorPanels() {
@@ -1515,12 +1822,14 @@ function getIndicatorPanels() {
   if (document.getElementById('chk-kdj').checked) panels.push('kdj');
   if (document.getElementById('chk-rsi').checked) panels.push('rsi');
   if (document.getElementById('chk-atr').checked) panels.push('atr');
+  if (document.getElementById('chk-obv').checked) panels.push('obv');
   if (document.getElementById('chk-premium').checked && !MINUTE_PERIODS.includes(STATE.period)) panels.push('premium');
   return panels;
 }
 
-function calcGridLayout(panels) {
+function calcGridLayout(panels, chipOn) {
   const showVolume = document.getElementById('chk-volume').checked;
+  const rightPct = chipOn ? '14%' : '2%'; // 筹码面板占用右侧空间 (含均本价格标签)
   const topGap = 2, bottomGap = 8, mGap = 2, volPct = showVolume ? 10 : 0;
   const nPanels = panels.length, totalGaps = (showVolume ? 1 : 0) + nPanels;
   const gapTotal = mGap * totalGaps;
@@ -1533,7 +1842,7 @@ function calcGridLayout(panels) {
   const yAxes = [];
 
   // K-line grid (index 0)
-  grids.push({ left: '8%', right: '2%', top: `${topGap}%`, height: `${klinePct}%` });
+  grids.push({ left: '8%', right: rightPct, top: `${topGap}%`, height: `${klinePct}%` });
   xAxes.push({ gridIndex: 0, type: 'category', data: [], show: false });
   yAxes.push({ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } });
 
@@ -1543,7 +1852,7 @@ function calcGridLayout(panels) {
 
   // 成交量 grid
   if (hasVolume) {
-    grids.push({ left: '8%', right: '2%', top: `${cursor}%`, height: `${volPct}%` });
+    grids.push({ left: '8%', right: rightPct, top: `${cursor}%`, height: `${volPct}%` });
     xAxes.push({ gridIndex: nextGi, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
     cursor += volPct + mGap;
@@ -1552,7 +1861,7 @@ function calcGridLayout(panels) {
 
   // 指标面板
   panels.forEach((p, i) => {
-    grids.push({ left: '8%', right: '2%', top: `${cursor}%`, height: `${indEach}%` });
+    grids.push({ left: '8%', right: rightPct, top: `${cursor}%`, height: `${indEach}%` });
     xAxes.push({ gridIndex: nextGi + i, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi + i, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 10 } });
     cursor += indEach + mGap;
@@ -1583,7 +1892,12 @@ function updateChart(reTheme) {
   const klines = data.klines;
   const dates = klines.map(k => k.date);
   const panels = getIndicatorPanels();
-  const { grids, xAxes, yAxes, hasVolume, indicatorStartGi } = calcGridLayout(panels);
+  const chipOn = isChipPeriod(STATE.period)
+    && document.getElementById('chk-chip').checked
+    && !!STATE.chips && !!STATE.chips.buckets;
+  const { grids, xAxes, yAxes, hasVolume, indicatorStartGi } = calcGridLayout(panels, chipOn);
+  const visibleBars = STATE.period === '1m' ? 240 : 80;
+  const startPct = Math.max(0, Math.min(100, (1 - visibleBars / dates.length) * 100));
 
   // ── Readonly series data ──
   const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
@@ -1645,10 +1959,19 @@ function updateChart(reTheme) {
     });
   }
 
-  // ── Grid 1: Volume (only if enabled) ──
+  // ── Grid 1: Volume (only if enabled) + 量均线 MA5/10/20 (东财口径) ──
   if (hasVolume) {
     series.push(
-      { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols }
+      { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols },
+      { name: 'VOL MA5', type: 'line', xAxisIndex: 1, yAxisIndex: 1,
+        data: klines.map(k => k.vol_ma5), symbol: 'none',
+        lineStyle: { color: C().ma5, width: 1 } },
+      { name: 'VOL MA10', type: 'line', xAxisIndex: 1, yAxisIndex: 1,
+        data: klines.map(k => k.vol_ma10), symbol: 'none',
+        lineStyle: { color: C().ma10, width: 1 } },
+      { name: 'VOL MA20', type: 'line', xAxisIndex: 1, yAxisIndex: 1,
+        data: klines.map(k => k.vol_ma20), symbol: 'none',
+        lineStyle: { color: C().ma20, width: 1 } }
     );
   }
 
@@ -1700,6 +2023,15 @@ function updateChart(reTheme) {
           symbol: 'none', areaStyle: { color: 'rgba(144,164,174,0.08)' },
           lineStyle: { color: C().atr, width: 1 } }
       );
+    } else if (p === 'obv') {
+      series.push(
+        { name: 'OBV', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.obv), symbol: 'none',
+          lineStyle: { color: C().obv, width: 1 } },
+        { name: 'MAOBV', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.maobv), symbol: 'none',
+          lineStyle: { color: C().maobv, width: 1 } }
+      );
     } else if (p === 'premium') {
       const premVals = klines.map(x => {
         const v = x.premium;
@@ -1712,12 +2044,35 @@ function updateChart(reTheme) {
     }
   });
 
+  // ── 筹码分布叠加 (右侧, 与主图价格轴联动) ──
+  let chipGi = -1;
+  if (chipOn) {
+    chipGi = grids.length;
+    const range = klineVisibleYRange(klines, startPct, 100)
+      || { min: STATE.chips.min, max: STATE.chips.max };
+    const chipPxH = parseFloat(grids[0].height) / 100 * chart.getHeight();
+    const overlay = ChipChart.buildOverlay(STATE.chips, {
+      gi: chipGi,
+      left: '86%', right: '3%',
+      top: grids[0].top, height: grids[0].height,
+      colors: C(),
+      lastClose: klines[klines.length - 1].close,
+      min: range.min, max: range.max,
+      pxHeight: chipPxH,
+    });
+    grids.push(overlay.grid);
+    xAxes.push(overlay.xAxis);
+    yAxes.push(overlay.yAxis);
+    overlay.series.forEach(s => series.push(s));
+    STATE._chip = { gi: chipGi, n: overlay.n, pxHeight: overlay.pxHeight };
+  } else {
+    STATE._chip = null;
+  }
+
   // ── xAxis data ──
   xAxes.forEach(x => { x.data = dates; });
 
   // ── DataZoom ──
-  const visibleBars = STATE.period === '1m' ? 240 : 80;
-  const startPct = Math.max(0, Math.min(100, (1 - visibleBars / dates.length) * 100));
   const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
   const dataZoom = [
     { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100 },
@@ -1788,7 +2143,10 @@ function updateChart(reTheme) {
 
       // Volume (only if enabled)
       if (hasVolume && g === 1) {
-        return hdr + `<div>成交量 ${fmtVolume(k.volume)}</div><div>成交额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
+        return hdr
+          + `<div>成交量 ${fmtVolume(k.volume)}</div>`
+          + `<div>VOL MA5 <span style="color:${C().ma5}">${fmtVolume(k.vol_ma5)}</span> MA10 <span style="color:${C().ma10}">${fmtVolume(k.vol_ma10)}</span> MA20 <span style="color:${C().ma20}">${fmtVolume(k.vol_ma20)}</span></div>`
+          + `<div>成交额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
       }
 
       // Grid 2+: Indicator panels
@@ -1805,6 +2163,10 @@ function updateChart(reTheme) {
       }
       if (panel === 'atr') {
         return hdr + `<div>ATR(14) ${k.atr14?.toFixed(3)||'—'}</div>`;
+      }
+      if (panel === 'obv') {
+        return hdr
+          + `<div><span style="color:${C().obv}">OBV</span> ${fmtVolume(k.obv)} <span style="color:${C().maobv}">MAOBV</span> ${fmtVolume(k.maobv)}</div>`;
       }
       if (panel === 'premium') {
         return hdr + `<div>溢价率 <span style="color:${(k.premium||0)>=0?'#ef5350':'#26a69a'}">${k.premium!=null?(k.premium>=0?'+':'')+k.premium.toFixed(2)+'%':'—'}</span></div>`;
@@ -1829,7 +2191,7 @@ function updateChart(reTheme) {
 
   // ── Reference lines for indicator panels ──
   panels.forEach((p, i) => {
-    const gi = 2 + i;
+    const gi = indicatorStartGi + i;
     if (p === 'rsi') {
       for (let s = 0; s < series.length; s++) {
         if (series[s].name === 'RSI1' && series[s].xAxisIndex === gi) {
@@ -1862,9 +2224,9 @@ function updateChart(reTheme) {
         }
       }
     }
-    if (p === 'macd' || p === 'premium') {
+    if (p === 'macd' || p === 'premium' || p === 'obv') {
       for (let s = 0; s < series.length; s++) {
-        const name = p === 'macd' ? 'DIF' : '溢价率';
+        const name = p === 'macd' ? 'DIF' : (p === 'obv' ? 'OBV' : '溢价率');
         if (series[s].name === name && series[s].xAxisIndex === gi) {
           series[s].markLine = {
             silent: true, symbol: 'none',
@@ -1887,8 +2249,8 @@ function updateChart(reTheme) {
   });
 
   // 每个指标面板左上角放名称标签 (graphic)
-  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', premium: '溢价%' };
-  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().macdDif, premium: C().macdDif };
+  const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', obv: 'OBV', premium: '溢价%' };
+  const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().macdDif, obv: C().obv, premium: C().macdDif };
   const graphics = [];
   panels.forEach((p, i) => {
     const gridTop = parseFloat(grids[indicatorStartGi + i].top) / 100 * ch;
@@ -1904,6 +2266,18 @@ function updateChart(reTheme) {
     graphics.push({
       type: 'text', left: 10, top: volGridTop + 2,
       style: { text: 'VOL', fill: C().macdDif, font: 'bold 11px monospace' },
+      z: 100,
+    });
+  }
+  // 筹码分布摘要 (筹码条正下方右侧空白窄带, 左对齐; 不压筹码/成交量)
+  if (chipOn) {
+    const klineBottom = (parseFloat(grids[0].top) + parseFloat(grids[0].height)) / 100 * ch;
+    graphics.push({
+      type: 'text', left: '86%', top: klineBottom + 4,
+      style: {
+        text: ChipChart.summaryLines(STATE.chips).join('\n'),
+        fill: C().text, font: '14px monospace', textAlign: 'left', lineHeight: 17,
+      },
       z: 100,
     });
   }
@@ -1932,13 +2306,27 @@ function switchPeriod(period) {
     const showGap = typeof GapScanner !== 'undefined' && GapScanner.isGapPeriod(period);
     lblGap.style.display = showGap ? '' : 'none';
   }
+  // 筹码: 日/周/月 K
+  const lblChip = document.getElementById('lbl-chip');
+  if (lblChip) lblChip.style.display = isChipPeriod(period) ? '' : 'none';
+  if (!isChipPeriod(period)) STATE.chips = null;
+  // 五档: 仅分时
+  const lblDepth = document.getElementById('lbl-depth');
+  if (lblDepth) lblDepth.style.display = isIntra ? '' : 'none';
+  if (!isIntra) { STATE.depth = null; showDepthPanel(false); }
   if (isIntra) {
     STATE.intradayData = null; // 清缓存，强制重新加载
+    STATE.depth = null;
     STATE.chart.clear();
     fetchIntraday();
   } else {
     refresh();
   }
+}
+
+/** 筹码仅日K (日线筹码分布, 周/月K不显示) */
+function isChipPeriod(p) {
+  return p === '1d';
 }
 
 function onIndicatorChange() {
@@ -2201,6 +2589,18 @@ document.addEventListener('DOMContentLoaded', () => {
           STATE._pendingBarPatch = false;
         }
       }
+    }
+    // 筹码分布: 盘中约 5 分钟重取一次
+    if (isChipPeriod(STATE.period) && document.getElementById('chk-chip').checked
+        && now - (STATE._lastChipsAt || 0) >= 300e3) {
+      STATE._lastChipsAt = now;
+      fetchChips(STATE.symbol);
+    }
+    // 五档: 盘中约 3s 刷新 (20/min = 2/3 × 30)
+    if (STATE.period === 'intraday' && depthPanelOn()
+        && now - (STATE._lastDepthAt || 0) >= 3000) {
+      STATE._lastDepthAt = now;
+      fetchDepth();
     }
   }, 1000);
 });

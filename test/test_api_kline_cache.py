@@ -95,16 +95,20 @@ class KlineCacheTest(unittest.TestCase):
             mock.patch.object(self.api, "fetch_quote",
                               side_effect=quote_exc or quote_side),
             mock.patch.object(self.api, "_is_index_symbol", return_value=False),
+            mock.patch.object(self.api, "_fetch_instrument_meta",
+                              return_value={"float_shares": 1.0e9,
+                                            "total_shares": 1.1e9,
+                                            "type": "stock"}),
         )
 
     def _get(self, period="1w"):
         return self.client.get(f"/api/kline?symbol={self.SYMBOL}&period={period}")
 
     def test_cached_entry_has_no_quote_and_hit_gets_fresh(self):
-        p1, p2, p3 = self._patches(
+        p1, p2, p3, p4 = self._patches(
             quotes=[{"last_price": 10.0, "prev_close": 9.9},
                     {"last_price": 11.0, "prev_close": 9.9}])
-        with p1, p2, p3:
+        with p1, p2, p3, p4:
             r1 = self._get()
             r2 = self._get()
         b1, b2 = r1.get_json(), r2.get_json()
@@ -118,8 +122,8 @@ class KlineCacheTest(unittest.TestCase):
         self.assertEqual(b2["quote"]["last_price"], 11.0)
 
     def test_quote_failure_still_serves_kline(self):
-        p1, p2, p3 = self._patches(quote_exc=RuntimeError("行情源抖动"))
-        with p1, p2, p3:
+        p1, p2, p3, p4 = self._patches(quote_exc=RuntimeError("行情源抖动"))
+        with p1, p2, p3, p4:
             r1 = self._get()
             r2 = self._get()
         b1, b2 = r1.get_json(), r2.get_json()
@@ -127,6 +131,45 @@ class KlineCacheTest(unittest.TestCase):
         self.assertTrue(b2["meta"]["cached"])
         self.assertNotIn("quote", b2)
         self.assertEqual(len(b2["klines"]), 30)
+
+    def test_chips_endpoint_returns_payload(self):
+        payload = {"buckets": [{"price": 10.0, "weight": 1.0}], "avgCost": 10.0}
+        with mock.patch.object(self.api, "get_chips", return_value=payload) as gc, \
+             mock.patch.object(self.api, "_is_etf", return_value=False):
+            r = self.client.get(f"/api/chips?symbol={self.SYMBOL}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["chips"]["avgCost"], 10.0)
+        gc.assert_called_once()
+
+    def test_chips_endpoint_etf_returns_null(self):
+        with mock.patch.object(self.api, "_is_etf", return_value=True):
+            r = self.client.get(f"/api/chips?symbol={self.SYMBOL}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.get_json()["chips"])
+
+    def test_depth_endpoint(self):
+        payload = {"symbol": self.SYMBOL, "bid_prices": [1.0], "ask_prices": [2.0]}
+        with mock.patch.object(self.api, "fetch_depth", return_value=payload) as fd:
+            r = self.client.get(f"/api/depth?symbol={self.SYMBOL}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["depth"]["bid_prices"], [1.0])
+        fd.assert_called_once()
+
+    def test_depth_endpoint_missing_symbol(self):
+        r = self.client.get("/api/depth")
+        self.assertEqual(r.status_code, 400)
+
+    def test_kline_includes_obv_vol_ma_and_meta(self):
+        p1, p2, p3, p4 = self._patches(quotes=[{"last_price": 10.0}])
+        with p1, p2, p3, p4:
+            r = self._get()
+        b = r.get_json()
+        self.assertEqual(b["float_shares"], 1.0e9)
+        self.assertEqual(b["instrument_type"], "stock")
+        self.assertEqual(b["obv_params"], {"ma_period": 30})
+        last = b["klines"][-1]
+        for key in ("obv", "maobv", "vol_ma5", "vol_ma10", "vol_ma20"):
+            self.assertIn(key, last)
 
 
 if __name__ == "__main__":

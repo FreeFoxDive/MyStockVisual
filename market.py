@@ -833,6 +833,12 @@ def _af_quote_valid(q):
     return True
 
 
+def _af_pct(v):
+    """AlphaFeed ext 比率(小数) → 百分数; None 原样返回。"""
+    f = _safe_float(v)
+    return None if f is None else f * 100.0
+
+
 def _af_quote_to_std(q, symbol):
     """把 AlphaFeed quote dict 转成标准 quote dict（与 _mr_quote_to_std 字段一致）。"""
     return {
@@ -844,10 +850,48 @@ def _af_quote_to_std(q, symbol):
         "volume": _safe_int(q.get("volume")),
         "amount": _safe_float(q.get("amount")),
         "change_pct": _safe_float(q.get("change_pct")),
-        "amplitude": None,
-        "turnover_rate": None,
+        "amplitude": _af_pct(q.get("amplitude")),        # 小数 → %
+        "turnover_rate": _af_pct(q.get("turnover_rate")),  # 小数 → %
         "name": q.get("name") or _lookup_name(symbol),
     }
+
+
+# ── 标的元数据 (AlphaFeed instruments): 流通/总股本/类型 ──
+_instrument_meta_cache = {}      # symbol -> (ts, meta|None)
+_instrument_meta_lock = threading.Lock()
+INSTRUMENT_META_TTL = 24 * 3600  # 股本/类型变化缓慢, 24h 足够
+
+
+def _fetch_instrument_meta(symbol):
+    """AlphaFeed 标的元数据 (float_shares/total_shares/type), 24h 内存缓存。
+
+    失败返回 None (静默降级: 前端隐藏流值/份额, 不影响 K 线)。
+    """
+    if not AF_API_KEY:
+        return None
+    now = time.time()
+    with _instrument_meta_lock:
+        ent = _instrument_meta_cache.get(symbol)
+        if ent and now - ent[0] < INSTRUMENT_META_TTL:
+            return ent[1]
+    try:
+        inst = get_af().instruments.get(symbol)
+    except Exception as e:
+        log.warning(f"获取标的元数据失败 {symbol}: {_sanitize_error(e)}")
+        return None
+    if not isinstance(inst, dict) or not inst:
+        return None
+    ext = inst.get("ext") or {}
+    meta = {
+        "type": inst.get("type") or ext.get("type"),
+        "name": inst.get("name"),
+        "float_shares": _safe_float(ext.get("float_shares")),
+        "total_shares": _safe_float(ext.get("total_shares")),
+        "listing_date": ext.get("listing_date"),
+    }
+    with _instrument_meta_lock:
+        _instrument_meta_cache[symbol] = (now, meta)
+    return meta
 
 
 def _fetch_af_quotes(symbols):
@@ -1009,6 +1053,58 @@ def _normalize(df, prefer_time=False):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["close"])
     return df if len(df) >= 5 else None
+
+
+# ── 五档盘口 (分时用) ──
+# AF depth 限额 30/min (实测 429: "Rate limit exceeded (30/min)");
+# 取 2/3 = 20/min 令牌桶, 给监控/其它调用留余量。
+AF_DEPTH_LIMIT_PER_MIN = float(os.environ.get("AF_DEPTH_RATE_PER_MIN", "30") or "30")
+DEPTH_RATE_PER_MIN = max(1.0, AF_DEPTH_LIMIT_PER_MIN * 2.0 / 3.0)
+_depth_cache = TTLCache(ttl_seconds=2)   # 短 TTL 去重 (同秒多客户端)
+_depth_bucket = None
+_depth_bucket_lock = threading.Lock()
+
+
+def _depth_token_bucket():
+    global _depth_bucket
+    if _depth_bucket is None:
+        with _depth_bucket_lock:
+            if _depth_bucket is None:
+                from feed import TokenBucket
+                _depth_bucket = TokenBucket(int(round(DEPTH_RATE_PER_MIN)))
+    return _depth_bucket
+
+
+def fetch_depth(symbol):
+    """获取五档盘口 (独立令牌桶 2/3 限额 + 2s 缓存); 失败/限流返回 None。
+
+    返回 {symbol, timestamp, bid_prices, bid_volumes, ask_prices, ask_volumes}。
+    """
+    if not AF_API_KEY:
+        return None
+    symbol = normalize_symbol(symbol)
+    cached = _depth_cache.get(symbol)
+    if cached is not None:
+        return cached
+    if not _depth_token_bucket().try_acquire(1):
+        return None  # 令牌不足, 本轮跳过 (不缓存, 下次再试)
+    try:
+        d = get_af().depth.get(symbol)
+    except Exception as e:
+        log.warning(f"获取五档失败 {symbol}: {_sanitize_error(e)}")
+        return None
+    if not isinstance(d, dict) or not d.get("bid_prices"):
+        return None
+    out = {
+        "symbol": symbol,
+        "timestamp": d.get("timestamp"),
+        "bid_prices": d.get("bid_prices") or [],
+        "bid_volumes": d.get("bid_volumes") or [],
+        "ask_prices": d.get("ask_prices") or [],
+        "ask_volumes": d.get("ask_volumes") or [],
+    }
+    _depth_cache.set(symbol, out)
+    return out
 
 
 # ── 全量股票搜索缓存 ──

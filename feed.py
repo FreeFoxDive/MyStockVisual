@@ -325,11 +325,16 @@ def _row_to_quote(row):
         data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
     except Exception:
         return None
-    # ext.* 列可能被 pandas 展平
-    name = data.get("ext.name") or (data.get("ext") or {}).get("name") if isinstance(data.get("ext"), dict) else data.get("ext.name")
-    change_pct = data.get("ext.change_pct")
-    if change_pct is None and isinstance(data.get("ext"), dict):
-        change_pct = data["ext"].get("change_pct")
+    # ext.* 列可能被 pandas 展平; 未展平时从 ext dict 取
+    raw_ext = data.get("ext")
+    ext = raw_ext if isinstance(raw_ext, dict) else {}
+
+    def _ext(key):
+        v = data.get(f"ext.{key}")
+        return ext.get(key) if v is None else v
+
+    name = _ext("name")
+    change_pct = _ext("change_pct")
     ts = data.get("timestamp")
     ts_sec = None
     if ts is not None:
@@ -350,6 +355,10 @@ def _row_to_quote(row):
         "timestamp": ts_sec,
         "name": name,
         "change_pct": _to_float(change_pct),  # 官方是小数
+        "turnover_rate": _to_float(_ext("turnover_rate")),  # 官方是小数
+        "amplitude": _to_float(_ext("amplitude")),          # 官方是小数
+        "change_amount": _to_float(_ext("change_amount")),
+        "type": _ext("type"),
     }
 
 

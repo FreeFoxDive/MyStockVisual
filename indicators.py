@@ -17,6 +17,17 @@ from stock_indicators_cn import (
 )
 
 
+def obv(close, volume):
+    """能量潮 OBV (通达信/东财口径): 首根为 0, 涨累加量、跌累减量、平不变。"""
+    c = pd.Series(close)
+    v = pd.Series(volume)
+    diff = c.diff()
+    sign = pd.Series(0.0, index=c.index)
+    sign[diff > 0] = 1.0
+    sign[diff < 0] = -1.0
+    return (sign * v).cumsum()
+
+
 def compute_impulse(close, macd_params=None):
     """Elder Impulse System: 1=bullish(红), -1=bearish(绿), 0=neutral(蓝)。
 
@@ -57,9 +68,16 @@ def compute_all_indicators(df, period="1d",
     result_df["ma10"] = sma(c, 10)
     result_df["ma20"] = sma(c, 20)
 
-    # Volume MA
+    # Volume MA (东财/通达信默认 5/10/20)
     result_df["vol_ma5"] = sma(v, 5)
     result_df["vol_ma10"] = sma(v, 10)
+    result_df["vol_ma20"] = sma(v, 20)
+
+    # OBV (能量潮) + MAOBV (默认 30)
+    obv_series = obv(c, v)
+    maobv = sma(obv_series, 30)
+    result_df["obv"] = obv_series
+    result_df["maobv"] = maobv
 
     # MACD
     mp = get_macd_params(period)
@@ -78,7 +96,12 @@ def compute_all_indicators(df, period="1d",
             "dif": _safe_list(dif),
             "dea": _safe_list(dea),
             "hist": _safe_list(hist),
-        }
+        },
+        "obv": {
+            "params": {"ma_period": 30},
+            "obv": _safe_list(obv_series),
+            "maobv": _safe_list(maobv),
+        },
     }
 
     # RSI

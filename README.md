@@ -22,9 +22,13 @@ venv/Scripts/python.exe -u visual/server.py
 |------|------|
 | K线视图 | 日K / 周K / 月K (AlphaFeed 原生) |
 | 默认三屏 | K线主图 + 成交量 + MACD |
-| 均线 | MA5(黄) MA10(蓝) MA20(紫) |
-| 可选指标面板 | MACD、KDJ、RSI、ATR，网页 checkbox 开关 |
-| 成交量面板 | 可开关，关闭时 K线自动拉高 |
+| 均线 | MA5/MA10/MA20（SMA，白/黄/玫红系） |
+| 可选指标面板 | MACD、KDJ、RSI、ATR、OBV，网页 checkbox 开关 |
+| OBV 面板 | OBV + MAOBV(30)（东财/通达信口径），零轴参考线 |
+| 成交量面板 | 可开关；叠加 VOL MA5/MA10/MA20（东财口径）；关闭时 K线自动拉高 |
+| 筹码分布 | 日 K 股票，东财原版 CYQ 算法（210 根日线窗口，前复权），右侧叠加、与主图价格轴联动；含获利比例/平均成本/90·70成本区间 |
+| 五档盘口 | 仅分时视图：**左侧**面板显示买1-5/卖1-5，盘中约 3s 刷新（令牌桶 2/3×30/min），可开关 |
+| 换手/流值/份额/成交额 | 顶部信息栏：股票显示换手率与流通市值；ETF 显示份额；均显示当日成交额 |
 | 动力系统 | Elder Impulse System — EMA13方向 + MACD柱方向决定蜡烛颜色(红多/绿空/蓝中性)，仅日K |
 | ATR 通道 | EMA13 ± 1/2/3 ATR 共6条虚线，仅日K，默认关闭 |
 | 跳空缺口 | 60m/日/周/月：前端扫描未回补缺口（最近 2 个），主图灰色 markArea；十字线落在灰区时提示价差；部分回补收缩；日K 随快照重算；默认开启 |
@@ -53,6 +57,7 @@ visual/
 ├── kline_source.py    # K线数据源注册/回退路由 (KLINE_SOURCE_* 配置)
 ├── logger.py          # 日志配置 + 密钥脱敏
 ├── indicators.py      # 指标计算
+├── chips.py           # 东财筹码分布 (CYQ 算法移植 + 取数/缓存)
 ├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
 ├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 钉钉/ntfy)
 ├── feed.py            # AlphaFeed REST 行情接入 (令牌桶)
@@ -74,6 +79,9 @@ visual/
 │   ├── css/theme.css  # 共享亮暗主题变量
 │   ├── js/theme.js    # 主题读写 (visual-theme)
 │   ├── js/api.js      # fetch + CSRF 头
+│   ├── js/indicators.js # 指标末根重算 (与后端口径对齐)
+│   ├── js/gaps.js     # 缺口扫描
+│   ├── js/chips.js    # 筹码分布叠加渲染
 │   ├── index.html
 │   ├── trades.html
 │   ├── admin.html
@@ -91,8 +99,10 @@ visual/
 | 端点 | 说明 |
 |------|------|
 | `GET /` | 提供 index.html |
-| `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（日K默认 1006≈3年可见+RSI250 warmup） |
-| `GET /api/quote?symbol=600519.SH` | 实时快照 |
+| `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（含 OBV/MAOBV/量均线）+ 流通股本元数据（日K默认 1006≈3年可见+RSI250 warmup） |
+| `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数） |
+| `GET /api/chips?symbol=600519.SH` | 筹码分布（仅股票；210 根窗口，返回直方图+汇总+`source`）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
+| `GET /api/depth?symbol=600519.SH` | 五档盘口（分时用；独立令牌桶 2/3×30/min，失败返回 `depth=null`） |
 | `GET /api/search?q=茅台` | 模糊搜索 (全量A股+ETF，内存+磁盘双层缓存，24h刷新) |
 | `GET /api/ping` | 健康检查 |
 | `POST /api/auth/login` | 登录，返回 `Set-Cookie: session` |
@@ -122,10 +132,26 @@ visual/
 - **服务端 Python** 计算
 - 主图 OHLC 与 MA/MACD/RSI/KDJ/ATR / 动力系统均为**前复权**（与东财默认观感一致）；成交校验 `get_daily_bar` 与监控 1m 仍用**未复权**真实价
 - MA5/MA10/MA20 使用 **SMA** (简单移动平均，算术平均)，对标东方财富/同花顺/通达信标准
-- MACD/KDJ/RSI/ATR 算法详见 `indicators.py`，已逐项与东财 PC 端验证
+- MACD/KDJ/RSI/ATR/OBV 算法详见 `indicators.py`，已逐项与东财 PC 端验证
+- OBV(能量潮): 涨累加量、跌累减量、平不变，首根为 0；MAOBV = OBV 的 SMA(30)（东财/通达信默认）
+- OBV 从**图表加载的首根 K 线**起算（累计量）：绝对数值随数据加载窗口变化，跨平台/跨加载根数不可直接比较（比较请看走势）。东财会随滚动懒加载历史而改变 OBV 起点，故其数值与我们的默认加载根数不同属正常
+- 成交量均线: VOL MA5/MA10/MA20（东财/通达信默认）
 - Elder 动力系统: EMA13 方向 + MACD 柱方向 → 蜡烛颜色（红=多/绿=空/蓝=中性）
 - Elder ATR 通道: EMA13 ± 1×/2×/3× ATR，虚线叠加在 K线主图
-- 浏览器端纯展示，不重复计算
+- 浏览器端纯展示，仅末根随快照重算（`indicators.js`，与后端口径对齐）
+- 换手率/振幅由 AlphaFeed `ext`（小数）统一 ×100 为百分数；流通/总股本取 `instruments.ext`（24h 缓存）
+
+### 筹码分布 (CYQ)
+- 服务端 `chips.py` 移植东财官网 `CYQCalculator`：150 价格分桶 + 按日换手率衰减 + 三角分布（一字板特例）
+- 数据源由 `CHIPS_SOURCE` 控制：
+  - `af`（**默认**）：AlphaFeed 前复权日K + 当前流通股本回算换手率（`换手=成交量/流通股本`），近似、不依赖东财；
+  - `em`：东财 `push2his` 日K（`fqt=1` 前复权，`f61` 真实换手率），精确；走 `http→https→备用主机` 回退重试；
+  - `auto`：先东财，失败再 AlphaFeed。
+- 前复权价与图表价格轴对齐；仅股票**日 K**（周/月 K 不显示），ETF/指数返回 `chips=null`；内存 TTL 300s（失败 30s）
+- 前端 `chips.js` 右侧叠加横向直方图（基线在 K 线右缘、向右延伸），按末收价分获利(红)/套牢(绿)，随 dataZoom 与主图价格轴联动；摘要位于筹码条下方右侧窄带，`source=af` 时标注「近似」
+- 筹码 y 轴 = 主图可见价格范围（通道开启时并入可见 `EMA13±3ATR` 带），保证与主图价格轴对齐不错位
+- 渲染时把 150 桶按**当前可见价格区间线性插值重采样**到「约 1.5px/根」（`TARGET_PX`），缩放/拉伸窗口时保持细密，不会因主图变高而变粗
+- 汇总口径：**平均成本**由 `CHIPS_AVGCOST` 控制——`weighted`（**默认**，加权平均 `Σ价×筹码/Σ筹码`，语义更准、对齐东财 App）/ `median`（50% 分位中位成本，对齐东财网页版原生输出）；90%/70% 成本为分位区间（与口径无关）；平均成本线右侧显示蓝色价格标签
 
 ### 自适应提示框
 - 用 ECharts 底层 zrender canvas 的 `mousemove` 事件追踪鼠标像素坐标
@@ -169,6 +195,7 @@ KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复�
 - 基金日K口径：默认链 AlphaFeed/东财 volume 为「手」，与快照一致；麦蕊 `jj/lskx` 为「股」，仅在显式配置且未复权时可用
 - ETF 溢价线用未复权收盘价对齐单位净值；股吧链接 ETF 带 `sh`/`sz` 前缀（如 `list,sh588200.html`）
 - `/api/kline` 响应 `meta.source` 返回实际服务的数据源，便于观察回退是否生效
+- 五档（`/api/depth`，仅分时）独立令牌桶，速率 = `AF_DEPTH_RATE_PER_MIN`（默认 30，实测 depth 限额 30/min）× 2/3 = 20/min；2s 缓存去重，仅盘中轮询
 - ⚠️ **麦蕊股票日K当日 bar 盘中为滞后/部分成交快照**：如 601058.SH 2026-09-10，麦蕊 `low=14.30/vol=144462`，而实时快照与 AlphaFeed 为 `low=14.18/vol=264196`（当日无除权）。成交校验与日K图表当日 bar 均已改为以实时快照为准（`market.get_daily_bar` / `_maybe_append_today_bar`）；非交易日、停牌（volume=0）不覆盖。详见 [docs/known-issues.md](docs/known-issues.md)
 - 磁盘缓存按**数据源链隔离**（key 含 `kline_source.chain_tag`）：改 `KLINE_SOURCE_*` 后旧源缓存自动失效，不会串源；改配置仍需重启生效（`.env` 仅启动时加载）
 - 实测脚本: `probe_mairui_minute.py`（麦蕊分钟K权限/字段/窗口）、`probe_akshare_source.py`（东财列名/单位/覆盖度）
@@ -303,12 +330,13 @@ docker compose down
 |------|------|------|------|
 | K线阳线 | — | `#ef232a` | `#ef5350` |
 | K线阴线 | — | `#14b143` | `#26a69a` |
-| 🔘 白/黑系 | MA5 / DIF / K / RSI1 | `#1a1a1a` | `#eeeeee` |
-| 🟡 黄色系 | MA10 / DEA / D / RSI2 | `#d4a017` | `#f5c542` |
-| 🟣 玫红系 | MA20 / J / RSI3 | `#c2185b` | `#e84698` |
+| 🔘 白/黑系 | MA5 / DIF / K / RSI1 / OBV / VOL MA5 | `#1a1a1a` | `#eeeeee` |
+| 🟡 黄色系 | MA10 / DEA / D / RSI2 / MAOBV / VOL MA10 | `#d4a017` | `#f5c542` |
+| 🟣 玫红系 | MA20 / J / RSI3 / VOL MA20 | `#c2185b` | `#e84698` |
 | ⚪ 灰色系 | ATR | `#888888` | `#5a5a5a` |
 | 🔵 蓝色系 | 动力系统中性 | `#5b8ff9` | `#5b8ff9` |
 | 🩶 蓝灰系 | ATR通道 ±1/2/3 | `#90a4ae` / `#78909c` / `#546e7a` | 同亮色 |
+| 🟥🟩 筹码 | 获利盘(≤现价) / 套牢盘(>现价) / 平均成本 | `#ef232a` / `#14b143` / `#d4a017` | `#ef5350` / `#26a69a` / `#f5c542` |
 
 ## 主题
 

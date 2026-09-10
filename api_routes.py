@@ -10,6 +10,7 @@ from flask import Blueprint, g, make_response, request
 import kline_source
 import market_hours
 import trades
+from chips import get_chips
 from indicators import compute_all_indicators, _safe_list
 from logger import sanitize_error as _sanitize_error
 from market import (
@@ -18,6 +19,7 @@ from market import (
     NumpyEncoder,
     _fetch_af_kline,
     _fetch_etf_nav,
+    _fetch_instrument_meta,
     _fetch_mairui_quota,
     _is_etf,
     _is_index_symbol,
@@ -25,6 +27,7 @@ from market import (
     _safe_float,
     _safe_int,
     _search_stocks,
+    fetch_depth,
     fetch_kline_ex,
     fetch_quote,
     fetch_quotes,
@@ -138,6 +141,21 @@ def quotes():
         return _json(fetch_quotes(symbols, fresh=fresh))
     except Exception as e:
         return _error(f"获取快照失败: {_sanitize_error(e)}", 500)
+
+
+@api_bp.route("/api/depth", methods=["GET"])
+def depth():
+    """五档盘口 (分时用); 失败/限流返回 depth=null。"""
+    symbol_raw = request.args.get("symbol")
+    if not symbol_raw:
+        return _error("缺少 symbol 参数")
+    symbol = normalize_symbol(symbol_raw)
+    try:
+        d = fetch_depth(symbol)
+    except Exception as e:
+        log.warning("获取五档异常 %s: %s", symbol, _sanitize_error(e))
+        return _error(f"获取五档失败: {type(e).__name__}", 500)
+    return _json({"symbol": symbol, "depth": d})
 
 
 @api_bp.route("/api/pledge", methods=["GET"])
@@ -311,6 +329,11 @@ def kline():
             "atr14": _safe_float(row.get("atr14")),
             "ema13": _safe_float(row.get("ema13")),
             "impulse": _safe_int(row.get("impulse")),
+            "obv": _safe_float(row.get("obv")),
+            "maobv": _safe_float(row.get("maobv")),
+            "vol_ma5": _safe_float(row.get("vol_ma5")),
+            "vol_ma10": _safe_float(row.get("vol_ma10")),
+            "vol_ma20": _safe_float(row.get("vol_ma20")),
         }
         klines.append(entry)
 
@@ -322,6 +345,7 @@ def kline():
             else:
                 k["premium"] = None
 
+    inst_meta = _fetch_instrument_meta(symbol) or {}
     resp = {
         "symbol": symbol,
         "name": name,
@@ -329,6 +353,10 @@ def kline():
         "count": len(klines),
         "is_etf": is_etf,
         "is_index": _is_index_symbol(symbol),
+        "float_shares": inst_meta.get("float_shares"),
+        "total_shares": inst_meta.get("total_shares"),
+        "instrument_type": inst_meta.get("type"),
+        "obv_params": indicators.get("obv", {}).get("params"),
         "macd_params": indicators["macd"]["params"],
         "klines": klines,
         "meta": {
@@ -346,6 +374,23 @@ def kline():
         cache.set(cache_key, {k: v for k, v in resp.items() if k != "quote"})
 
     return _json(resp)
+
+
+@api_bp.route("/api/chips", methods=["GET"])
+def chips():
+    """东财筹码分布 (仅股票); ETF/指数或无数据返回 chips=null。"""
+    symbol_raw = request.args.get("symbol")
+    if not symbol_raw:
+        return _error("缺少 symbol 参数")
+    symbol = normalize_symbol(symbol_raw)
+    if _is_etf(symbol) or _is_index_symbol(symbol):
+        return _json({"symbol": symbol, "chips": None})
+    try:
+        data = get_chips(symbol)
+    except Exception as e:
+        log.warning("获取筹码分布异常 %s: %s", symbol, _sanitize_error(e))
+        return _error(f"获取筹码分布失败: {type(e).__name__}", 500)
+    return _json({"symbol": symbol, "chips": data})
 
 
 @api_bp.route("/api/intraday", methods=["GET"])

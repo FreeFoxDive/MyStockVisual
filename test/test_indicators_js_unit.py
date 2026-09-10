@@ -55,6 +55,12 @@ class TestIndicatorsJsUnit(unittest.TestCase):
         out = self._calc("IndicatorCalc.rsi([10,10.5,11,10.8,11.2,11.0], 6)")
         self.assertTrue(out[-1] is None or isinstance(out[-1], (int, float)))
 
+    def test_obv_accumulates_by_close_direction(self):
+        payload = {"c": [10, 11, 10, 10, 12], "v": [100, 200, 300, 400, 500]}
+        out = self._calc("IndicatorCalc.obv(p.c, p.v)", payload)
+        # 首根 0 → +200 → -300 → 0 → +500
+        self.assertEqual(out, [0, 200, -100, -100, 400])
+
     def test_atr_first_bar_null_until_period(self):
         payload = {
             "h": [12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0],

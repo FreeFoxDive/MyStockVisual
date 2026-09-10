@@ -131,6 +131,20 @@
     return out;
   }
 
+  function obv(close, volume) {
+    const n = close.length;
+    const out = new Array(n).fill(0);
+    for (let i = 1; i < n; i++) {
+      const c = close[i];
+      const pc = close[i - 1];
+      const v = volume[i] || 0;
+      if (c > pc) out[i] = out[i - 1] + v;
+      else if (c < pc) out[i] = out[i - 1] - v;
+      else out[i] = out[i - 1];
+    }
+    return out;
+  }
+
   function atr(high, low, close, period) {
     const tr = new Array(close.length).fill(null);
     for (let i = 0; i < close.length; i++) {
@@ -157,9 +171,18 @@
     const l = slice.map((k) => k.low);
     const c = slice.map((k) => k.close);
 
+    const vv = slice.map((k) => k.volume);
     const ma5 = sma(c, 5);
     const ma10 = sma(c, 10);
     const ma20 = sma(c, 20);
+    const volMa5 = sma(vv, 5);
+    const volMa10 = sma(vv, 10);
+    const volMa20 = sma(vv, 20);
+
+    // OBV 为全量累加 (只用末段会从 0 起算而失真); MAOBV 取全量 OBV 末段
+    const obvFull = obv(klines.map((k) => k.close), klines.map((k) => k.volume));
+    const obvTail = obvFull.slice(Math.max(0, obvFull.length - TAIL_WINDOW));
+    const maobvTail = sma(obvTail, 30);
 
     const mp = getMacdParams(period || '1d');
     const { dif, dea, hist } = macd(c, mp.fast, mp.slow, mp.signal);
@@ -186,6 +209,11 @@
     last.rsi12 = rsi12[i];
     last.rsi24 = rsi24[i];
     last.atr14 = atr14[i];
+    last.vol_ma5 = volMa5[i];
+    last.vol_ma10 = volMa10[i];
+    last.vol_ma20 = volMa20[i];
+    last.obv = obvFull[obvFull.length - 1];
+    last.maobv = maobvTail[maobvTail.length - 1];
   }
 
   return {
@@ -196,6 +224,7 @@
     kdj,
     rsi,
     atr,
+    obv,
     recalcTailIndicators,
   };
 });

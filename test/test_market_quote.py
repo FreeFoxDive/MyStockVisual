@@ -134,6 +134,20 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
         api.fund_real_time.assert_called_once_with("510300")
         self.assertEqual(out["510300.SH"]["last_price"], 20.0)
 
+    def test_af_quote_to_std_turnover_decimal_to_pct(self):
+        raw = _af_row("600519.SH", turnover_rate=0.015, amplitude=0.02)
+        with mock.patch.object(market_mod, "_lookup_name", return_value="x"):
+            out = market_mod._af_quote_to_std(raw, "600519.SH")
+        self.assertAlmostEqual(out["turnover_rate"], 1.5)
+        self.assertAlmostEqual(out["amplitude"], 2.0)
+
+    def test_af_quote_to_std_turnover_none(self):
+        raw = _af_row("600519.SH")
+        with mock.patch.object(market_mod, "_lookup_name", return_value="x"):
+            out = market_mod._af_quote_to_std(raw, "600519.SH")
+        self.assertIsNone(out["turnover_rate"])
+        self.assertIsNone(out["amplitude"])
+
     def test_af_quote_to_std_maps_fields(self):
         raw = _af_row("600519.SH", name="茅台", change_pct=0.05)
         with mock.patch.object(market_mod, "_lookup_name", return_value="备用名"):
@@ -158,6 +172,36 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
                 out = market_mod._fetch_af_quotes(["600519.SH", "000001.SH"])
         self.assertIn("600519.SH", out)
         self.assertNotIn("000001.SH", out)
+
+    def test_fetch_depth_maps_fields(self):
+        market_mod._depth_cache._cache.clear()
+        market_mod._depth_bucket = None
+        af = mock.Mock()
+        af.depth.get.return_value = {
+            "symbol": "600519.SH", "timestamp": 1,
+            "bid_prices": [10.0, 9.9], "bid_volumes": [1, 2],
+            "ask_prices": [10.1, 10.2], "ask_volumes": [3, 4],
+        }
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af):
+            out = market_mod.fetch_depth("600519.SH")
+        self.assertEqual(out["bid_prices"], [10.0, 9.9])
+        self.assertEqual(out["ask_volumes"], [3, 4])
+        # 二次调用走缓存 (不再打 API)
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af):
+            out2 = market_mod.fetch_depth("600519.SH")
+        self.assertIs(out, out2)
+        af.depth.get.assert_called_once()
+
+    def test_fetch_depth_none_on_empty(self):
+        market_mod._depth_cache._cache.clear()
+        market_mod._depth_bucket = None
+        af = mock.Mock()
+        af.depth.get.return_value = {}
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af):
+            self.assertIsNone(market_mod.fetch_depth("600519.SH"))
 
     def test_quote_cache_skips_af(self):
         api = mock.Mock()

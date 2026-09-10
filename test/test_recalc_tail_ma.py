@@ -57,6 +57,23 @@ class TestRecalcTailIndicators(unittest.TestCase):
             if py[key] is not None:
                 self.assertAlmostEqual(js[key], py[key], places=4, msg=key)
 
+    def test_obv_and_volume_ma_parity_full_series(self):
+        """OBV 为全量累加, 必须用全量 Python 口径对照 (不能用 tail 切片)。"""
+        require_node()
+        import pandas as pd
+        from indicators import compute_all_indicators
+
+        klines = make_kline_fixture(120, seed=9)
+        df = pd.DataFrame(klines).set_index(pd.to_datetime([k["date"] for k in klines]))
+        out, _ = compute_all_indicators(df, period="1d")
+        keys = ("obv", "maobv", "vol_ma5", "vol_ma10", "vol_ma20")
+        py = {key: (None if pd.isna(out.iloc[-1][key]) else float(out.iloc[-1][key]))
+              for key in keys}
+        js = recalc_tail_js(copy.deepcopy(klines), "1d")
+        for key in keys:
+            self.assertIsNotNone(js.get(key), msg=key)
+            self.assertAlmostEqual(js[key], py[key], places=4, msg=key)
+
     def test_append_new_bar_recalc(self):
         require_node()
         klines = make_kline_fixture(80, seed=5)
