@@ -1556,7 +1556,7 @@ class TestMarketBarValidation(TradesTestCase):
 
     def test_reject_future_entry_date(self):
         uid = self._make_user()
-        future = (_date.today() + timedelta(days=3)).isoformat()
+        future = (trades._now().date() + timedelta(days=3)).isoformat()
         with self.assertRaises(ValueError) as cm:
             trades.create_trade(uid, self._open(entry_date=future))
         self.assertIn("不能晚于今天", str(cm.exception))
@@ -1652,7 +1652,7 @@ class TestMarketBarValidation(TradesTestCase):
     def test_repo_future_only(self):
         """逆回购只拦未来日，不查 OHLC。"""
         uid = self._make_user()
-        future = (_date.today() + timedelta(days=2)).isoformat()
+        future = (trades._now().date() + timedelta(days=2)).isoformat()
         with self.assertRaises(ValueError) as cm:
             trades.create_trade(uid, {
                 "type": "reverse_repo", "symbol": "204001.SH",
@@ -1676,7 +1676,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         )
 
     def test_today_fallback_from_quote_when_no_history(self):
-        today = _date.today().isoformat()
+        today = trades._now().date().isoformat()
         quote = {"open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 10000}
         with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
             with self._mock_quotes("601058.SH", quote):
@@ -1691,7 +1691,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
 
     def test_today_prefers_quote_over_history(self):
         """当日校验以实时快照为准 (历史源当日 bar 可能滞后)。"""
-        today = _date.today().isoformat()
+        today = trades._now().date().isoformat()
         import pandas as pd
         idx = pd.Timestamp(today)
         df = pd.DataFrame([{"open": 8.0, "high": 9.0, "low": 7.5, "close": 8.5, "volume": 5000}], index=[idx])
@@ -1707,7 +1707,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
     def test_today_stale_history_bar_overridden_by_quote(self):
         """回归 601058.SH 2026-09-10: 麦蕊当日 bar 滞后 (low=14.30) 时,
         当日校验取实时快照 low=14.18, 买入价 14.20 不再被误拒。"""
-        today = _date.today().isoformat()
+        today = trades._now().date().isoformat()
         import pandas as pd
         idx = pd.Timestamp(today)
         stale = pd.DataFrame(
@@ -1758,7 +1758,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
         self.assertIsNone(bar)
 
     def test_today_zero_volume_no_fallback(self):
-        today = _date.today().isoformat()
+        today = trades._now().date().isoformat()
         with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
             with self._mock_quotes("601058.SH", {
                 "open": 10.0, "high": 11.0, "low": 9.5, "last_price": 10.5, "volume": 0,
@@ -1796,7 +1796,7 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
 
     def test_etf_quote_volume_stays_shou(self):
         """ETF 合成今日 bar 的快照 volume 保持「手」, 与 AF/东财日K同口径。"""
-        today = _date.today().isoformat()
+        today = trades._now().date().isoformat()
         quote = {"open": 4.637, "high": 4.672, "low": 4.599,
                  "last_price": 4.616, "volume": 8414655}
         with mock.patch.object(self.market, "fetch_kline", return_value=(None, None)):
