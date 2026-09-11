@@ -5,7 +5,7 @@ import json
 import logging
 
 import pandas as pd
-from flask import Blueprint, g, make_response, request
+from flask import Blueprint, Response, g, request
 
 import kline_source
 import market_hours
@@ -44,8 +44,7 @@ api_bp = Blueprint("api", __name__)
 
 def _json(data, code=200):
     body = json.dumps(data, ensure_ascii=False, cls=NumpyEncoder)
-    resp = make_response(body, code)
-    resp.headers["Content-Type"] = "application/json; charset=utf-8"
+    resp = Response(body, status=code, mimetype="application/json")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
@@ -127,7 +126,8 @@ def quote():
             return _error(f"无法获取 {symbol} 的快照", 404)
         return _json(q)
     except Exception as e:
-        return _error(f"获取快照失败: {_sanitize_error(e)}", 500)
+        log.warning("获取快照失败 %s: %s", symbol, _sanitize_error(e))
+        return _error("获取快照失败，请稍后重试", 500)
 
 
 @api_bp.route("/api/quotes", methods=["GET"])
@@ -140,7 +140,8 @@ def quotes():
     try:
         return _json(fetch_quotes(symbols, fresh=fresh))
     except Exception as e:
-        return _error(f"获取快照失败: {_sanitize_error(e)}", 500)
+        log.warning("批量快照失败: %s", _sanitize_error(e))
+        return _error("获取快照失败，请稍后重试", 500)
 
 
 @api_bp.route("/api/depth", methods=["GET"])
@@ -154,7 +155,7 @@ def depth():
         d = fetch_depth(symbol)
     except Exception as e:
         log.warning("获取五档异常 %s: %s", symbol, _sanitize_error(e))
-        return _error(f"获取五档失败: {type(e).__name__}", 500)
+        return _error("获取五档失败", 500)
     return _json({"symbol": symbol, "depth": d})
 
 
@@ -242,7 +243,8 @@ def kline():
     try:
         df, name, source = fetch_kline_ex(symbol, period, count, adjust="forward")
     except Exception as e:
-        return _error(f"获取K线失败: {_sanitize_error(e)}", 500)
+        log.warning("获取K线失败 %s %s: %s", symbol, period, _sanitize_error(e))
+        return _error("获取K线失败，请稍后重试", 500)
 
     if df is None:
         return _error(f"无法获取 {symbol} 的K线数据", 404)
@@ -250,8 +252,8 @@ def kline():
     try:
         df, indicators = compute_all_indicators(df, period)
     except Exception as e:
-        log.warning(f"指标计算失败 {symbol} {period}: {e}")
-        return _error(f"指标计算失败: {_sanitize_error(e)}", 500)
+        log.warning("指标计算失败 %s %s: %s", symbol, period, _sanitize_error(e))
+        return _error("指标计算失败", 500)
 
     # 主图已是前复权, impulse 直接用 compute_all_indicators 结果 (不再另拉 qfq)
 
@@ -389,7 +391,7 @@ def chips():
         data = get_chips(symbol)
     except Exception as e:
         log.warning("获取筹码分布异常 %s: %s", symbol, _sanitize_error(e))
-        return _error(f"获取筹码分布失败: {type(e).__name__}", 500)
+        return _error("获取筹码分布失败", 500)
     return _json({"symbol": symbol, "chips": data})
 
 
@@ -440,7 +442,8 @@ def intraday():
             })
         return _json({"symbol": symbol, "period": period, "bars": bars})
     except Exception as e:
-        return _error(f"获取分钟线失败: {_sanitize_error(e)}", 500)
+        log.warning("获取分钟线失败 %s %s: %s", symbol, period, _sanitize_error(e))
+        return _error("获取分钟线失败，请稍后重试", 500)
 
 
 # ── 搜索历史 ──

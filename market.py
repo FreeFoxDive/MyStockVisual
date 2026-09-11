@@ -94,7 +94,8 @@ def _fetch_mairui_quota():
         with urllib.request.urlopen(req, timeout=5) as resp:
             html = resp.read().decode("utf-8", "ignore")
     except Exception as e:
-        return {"ok": False, "error": _sanitize_error(e)}
+        log.warning("查询额度失败: %s", _sanitize_error(e))
+        return {"ok": False, "error": "查询额度失败，请稍后重试"}
 
     # 表格结构: <td>版本</td><td class="licence-code">KEY</td><td>今日已用|剩余</td><td>总已用|剩余</td><td>有效期</td>
     m = re.search(
@@ -222,7 +223,12 @@ class DiskCache:
     def _key(self, symbol, period, count, adjust="forward", chain_tag=""):
         tag = kline_source.adjust_tag(adjust)
         suffix = f"_{chain_tag}" if chain_tag else ""
-        return CACHE_DIR / f"{symbol}_{period}_{count}_{tag}{suffix}.json.gz"
+        name = f"{symbol}_{period}_{count}_{tag}{suffix}.json.gz"
+        base = os.path.realpath(CACHE_DIR)
+        fp = os.path.realpath(os.path.join(base, name))
+        if not fp.startswith(base + os.sep):
+            raise ValueError("invalid cache key")
+        return Path(fp)
 
     def get(self, symbol, period, count, ttl_seconds, adjust="forward", chain_tag=""):
         fp = self._key(symbol, period, count, adjust, chain_tag)

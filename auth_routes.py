@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 
-from flask import Blueprint, g, make_response, request
+from flask import Blueprint, Response, g, request
 
 import trades
 from security import (
@@ -26,8 +26,7 @@ auth_bp = Blueprint("auth", __name__)
 
 def _json(data, code=200):
     body = json.dumps(data, ensure_ascii=False)
-    resp = make_response(body, code)
-    resp.headers["Content-Type"] = "application/json; charset=utf-8"
+    resp = Response(body, status=code, mimetype="application/json")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 

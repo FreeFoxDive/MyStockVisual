@@ -32,7 +32,7 @@ def _load_dotenv():
 
 _load_dotenv()
 
-from flask import Flask, g, make_response, redirect, request, send_from_directory  # noqa: E402
+from flask import Flask, Response, g, redirect, request, send_from_directory  # noqa: E402
 
 from security import (  # noqa: E402
     CSP_HEADER,
@@ -53,8 +53,8 @@ STATIC_DIR = SCRIPT_DIR / "static"
 
 def _api_json_error(msg, code):
     import json
-    resp = make_response(json.dumps({"error": msg}, ensure_ascii=False), code)
-    resp.headers["Content-Type"] = "application/json; charset=utf-8"
+    resp = Response(json.dumps({"error": msg}, ensure_ascii=False), status=code,
+                    mimetype="application/json")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
