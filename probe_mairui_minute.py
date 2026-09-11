@@ -85,10 +85,12 @@ def raw_matrix():
         return
     print("[0] 裸测矩阵 (api.mairuiapi.com vs api.mairui.club)")
     for host in ("api.mairuiapi.com", "api.mairui.club"):
-        for path in (f"hsstock/vip/600519.SH/5m/n/{lic}",
-                     f"hsstock/history/600519.SH/5m/n/{lic}",
-                     f"bj/history/833533.BJ/5m/n/{lic}"):
-            _raw_get(f"https://{host}/{path}?lt=3", f"{host} {path.split('/')[0]}..{path.split('/')[2]}/{path.split('/')[3]}")
+        for name, path in (
+            ("hsstock/vip", f"hsstock/vip/600519.SH/5m/n/{lic}"),
+            ("hsstock/history", f"hsstock/history/600519.SH/5m/n/{lic}"),
+            ("bj/history", f"bj/history/833533.BJ/5m/n/{lic}"),
+        ):
+            _raw_get(f"https://{host}/{path}?lt=3", f"{host} {name}")
     print("[0b] 候选路径/周期补充试探 (404 不耗额度)")
     base = "https://api.mairuiapi.com"
     for suffix, label in (

@@ -62,11 +62,12 @@ async function api(path, options) {
 
 function setAuthErr(msg) { document.getElementById('auth-err').textContent = msg || ''; }
 
-// next 回跳参数: 仅接受以 "/" 开头且非 "//" 的值, 防开放重定向
+// next 回跳参数: 仅允许已知站内页面 (授权列表), 防开放重定向
 function resolveNext() {
-  const next = new URLSearchParams(location.search).get('next') || '/';
-  if (next.startsWith('/') && !next.startsWith('//')) return next;
-  return '/';
+  const next = new URLSearchParams(location.search).get('next');
+  if (next === '/trades.html') return '/trades.html';
+  if (next === '/admin.html') return '/admin.html';
+  return '/index.html';
 }
 
 async function doLogin() {

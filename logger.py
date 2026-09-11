@@ -22,11 +22,11 @@ _CST = timezone(timedelta(hours=8))
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s %(message)s"
 
 # 密码类: 整段替换, 不留前后缀
-_PASSWORD_KEYS = (
+_WHOLE_MASK_KEYS = (
     "password", "passwd", "pwd", "口令", "secret", "client_secret",
 )
 # token/key 类: mask 前后缀
-_SECRET_KEYS = (
+_PARTIAL_MASK_KEYS = (
     "api_key", "apikey", "access_token", "refresh_token", "session",
     "token", "licence", "license", "lid", "authorization", "bearer",
     "af_api_key", "mairui", "webhook",
@@ -36,7 +36,7 @@ _REDACTED = "[REDACTED]"
 _MASK_MIN = 8  # 短于此时全 ***
 
 
-def mask_secret(value, head=4, tail=4):
+def mask_value(value, head=4, tail=4):
     """行业惯例: 保留前 head / 后 tail 字符, 中间 ***。过短则全 ***。密码请用 redact_message。"""
     if value is None:
         return _REDACTED
@@ -59,17 +59,17 @@ def _mask_kv(match):
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
         raw = raw[1:-1]
     key_l = key.lower()
-    if any(k in key_l for k in _PASSWORD_KEYS):
+    if any(k in key_l for k in _WHOLE_MASK_KEYS):
         return f"{key}{sep}{_REDACTED}"
-    if any(k in key_l for k in _SECRET_KEYS) or any(
+    if any(k in key_l for k in _PARTIAL_MASK_KEYS) or any(
         x in key_l for x in ("api_key", "token", "licence", "license", "webhook", "authorization", "secret")
     ):
-        return f"{key}{sep}{mask_secret(raw)}"
+        return f"{key}{sep}{mask_value(raw)}"
     return match.group(0)
 
 
 # ENV 风格: MAIRUI_PAID_API_KEY=... / password: ...
-_ENV_SECRET_RE = re.compile(
+_ENV_ASSIGN_RE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PWD|SECRET|TOKEN|API_KEY|LICENCE|LICENSE|WEBHOOK|AUTHORIZATION)[A-Z0-9_]*)"
     r"(\s*[=:]\s*)([^\s&;,\"'}]+|\"[^\"]*\"|'[^']*')"
 )
@@ -77,7 +77,7 @@ _ENV_SECRET_RE = re.compile(
 # 短字段名: password= / token= / api_key=
 _KV_RE = re.compile(
     r"(?i)\b("
-    + "|".join(re.escape(k) for k in sorted(set(_PASSWORD_KEYS + _SECRET_KEYS), key=len, reverse=True))
+    + "|".join(re.escape(k) for k in sorted(set(_WHOLE_MASK_KEYS + _PARTIAL_MASK_KEYS), key=len, reverse=True))
     + r")\b(\s*[=:]\s*)([^\s&;,\"'}]+|\"[^\"]*\"|'[^']*')"
 )
 
@@ -89,7 +89,7 @@ _URL_QUERY_RE = re.compile(
 )
 
 # 麦蕊等: path 末段疑似 licence (长 hex/alnum)
-_PATH_LICENCE_RE = re.compile(
+_PATH_TAIL_RE = re.compile(
     r"(https?://[^\s\"']*?/(?:lskx|hsrl|licenceinfo)[^\s\"']*?/)([A-Za-z0-9_-]{16,})(/?|\?|$)"
 )
 
@@ -97,13 +97,13 @@ _PATH_LICENCE_RE = re.compile(
 def _mask_url_query(match):
     prefix, key, val = match.group(1), match.group(2), match.group(3)
     key_l = key.lower()
-    if any(k in key_l for k in _PASSWORD_KEYS):
+    if any(k in key_l for k in _WHOLE_MASK_KEYS):
         return f"{prefix}{key}={_REDACTED}"
-    return f"{prefix}{key}={mask_secret(val)}"
+    return f"{prefix}{key}={mask_value(val)}"
 
 
-def _mask_path_licence(match):
-    return f"{match.group(1)}{mask_secret(match.group(2))}{match.group(3)}"
+def _mask_path_tail(match):
+    return f"{match.group(1)}{mask_value(match.group(2))}{match.group(3)}"
 
 
 def redact_message(msg):
@@ -114,8 +114,8 @@ def redact_message(msg):
     if not s:
         return s
     s = _URL_QUERY_RE.sub(_mask_url_query, s)
-    s = _PATH_LICENCE_RE.sub(_mask_path_licence, s)
-    s = _ENV_SECRET_RE.sub(_mask_kv, s)
+    s = _PATH_TAIL_RE.sub(_mask_path_tail, s)
+    s = _ENV_ASSIGN_RE.sub(_mask_kv, s)
     s = _KV_RE.sub(_mask_kv, s)
     return s
 

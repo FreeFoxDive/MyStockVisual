@@ -11,25 +11,25 @@ if str(VISUAL) not in sys.path:
     sys.path.insert(0, str(VISUAL))
 
 from logger import (  # noqa: E402
-    mask_secret,
+    mask_value,
     redact_message,
     sanitize_error,
     _RedactFilter,
 )
 
 
-class TestMaskSecret(unittest.TestCase):
+class TestMaskValue(unittest.TestCase):
     def test_short_all_stars(self):
-        self.assertEqual(mask_secret("abc"), "***")
-        self.assertEqual(mask_secret("1234567"), "***")
+        self.assertEqual(mask_value("abc"), "***")
+        self.assertEqual(mask_value("1234567"), "***")
 
     def test_head_tail(self):
         s = "abcdefghijklmnop"
-        self.assertEqual(mask_secret(s), "abcd***mnop")
+        self.assertEqual(mask_value(s), "abcd***mnop")
 
     def test_none_empty(self):
-        self.assertEqual(mask_secret(None), "[REDACTED]")
-        self.assertEqual(mask_secret(""), "[REDACTED]")
+        self.assertEqual(mask_value(None), "[REDACTED]")
+        self.assertEqual(mask_value(""), "[REDACTED]")
 
 
 class TestRedactMessage(unittest.TestCase):
