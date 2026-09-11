@@ -646,7 +646,7 @@ MR_FSJY_PERIODS = {"5m", "15m", "30m", "60m"}
 def _fetch_mr_minute_kline(symbol, period, count):
     """从麦蕊分时交易接口 (hszbl/fsjy, SDK 未封装) 拉取分钟K。
 
-    实测 (probe_mairui_minute.py 2026-09-05): 5m/15m/30m/60m 可用 (PAID 证书),
+    实测 (2026-09-05): 5m/15m/30m/60m 可用 (PAID 证书),
     1m 不支持 (HTTP 422), 北交所 404; st/et/lt 查询参数无效, 返回固定窗口
     (5m 上限 1488 根), 本地 tail 截取。字段 {d:"YYYY-MM-DD HH:MM",
     o,h,l,c, v:手, e:成交额元}。数据窗口可能滞后 (当时冻结在 2026-04-30),

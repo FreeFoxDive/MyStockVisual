@@ -116,7 +116,7 @@ class AlphaFeedSource(KlineSource):
 class AkshareSource(KlineSource):
     """akshare(东财) 免费兜底: 日/周/月K + 分钟K, 无需 key。
 
-    列名映射与单位实测见 probe_akshare_source.py。
+    列名映射与单位以 akshare/东财实测为准。
     基金日K东财为「手」, 与 AlphaFeed / 快照同口径 (基金默认链已不含麦蕊股)。
     东财限流期可能持续拒绝连接 -> 返回 None, 由回退链下沉。
     """
@@ -215,8 +215,8 @@ CATEGORY_ENV = {
     "fund": "KLINE_SOURCE_FUND",
 }
 
-# 券商/付费源优先, akshare 兜底。mairui 分钟实测数据窗口滞后 (见
-# probe_mairui_minute.py), 故默认不入分钟链; 可显式配置
+# 券商/付费源优先, akshare 兜底。mairui 分钟实测数据窗口滞后,
+# 故默认不入分钟链; 可显式配置
 # KLINE_SOURCE_MINUTE=alphafeed,mairui,akshare 加入 (新鲜度守卫自动拦旧数据)。
 # 基金默认 alphafeed,akshare: 麦蕊 jj/lskx 无前复权。
 DEFAULT_CHAINS = {
