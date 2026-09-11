@@ -76,19 +76,17 @@ class TestComputeChips(unittest.TestCase):
         buckets = ch["buckets"]
         total = sum(b["weight"] for b in buckets)
         wmean = sum(b["price"] * b["weight"] for b in buckets) / total
-        # 默认 avgCost 为加权平均 (对齐东财 App), 与桶加权均值一致
+        # avgCost 为加权平均 (对齐东财 App), 与桶加权均值一致
         self.assertLess(abs(ch["avgCost"] - wmean), 0.02)
-        self.assertEqual(ch["avgCostMode"], "weighted")
 
-    def test_avg_cost_median_mode(self):
-        bars = [_bar(i) for i in range(40)]
-        w = chips.compute_chips(bars, avg_mode="weighted")
-        m = chips.compute_chips(bars, avg_mode="median")
-        self.assertEqual(m["avgCostMode"], "median")
-        # 两种口径都应落在价格区间内, 且中位数 <= 加权平均 (右偏)
-        self.assertGreaterEqual(m["avgCost"], m["min"])
-        self.assertLessEqual(m["avgCost"], m["max"])
-        self.assertNotAlmostEqual(m["avgCost"], w["avgCost"], places=2)
+    def test_returns_weighted_and_median_costs(self):
+        ch = chips.compute_chips([_bar(i) for i in range(40)])
+        # 两种口径都返回, 均落在价格区间内且通常不相等 (分布右偏)
+        self.assertIn("medianCost", ch)
+        for key in ("avgCost", "medianCost"):
+            self.assertGreaterEqual(ch[key], ch["min"])
+            self.assertLessEqual(ch[key], ch["max"])
+        self.assertNotAlmostEqual(ch["avgCost"], ch["medianCost"], places=2)
 
     def test_higher_turnover_pulls_average_toward_latest(self):
         low = chips.compute_chips([_bar(i, hsl=1.0) for i in range(40)])

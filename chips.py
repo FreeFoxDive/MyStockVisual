@@ -199,14 +199,14 @@ def fetch_af_chip_bars(symbol, count=WINDOW):
     return bars or None
 
 
-def compute_chips(bars, factor=FACTOR, avg_mode="weighted"):
+def compute_chips(bars, factor=FACTOR):
     """移植东财 CYQCalculator, 返回直方图与汇总; 无效返回 None。
 
     bars 需含 open/close/high/low/hsl (按时间升序)。
-    avg_mode 决定 avgCost 口径:
-        weighted (默认) 加权平均成本 Σ(价×筹码)/Σ筹码 (语义更准, 对齐东财 App);
-        median          50% 分位成本 (对齐东财网页版 CYQ 原生输出)。
-    pct90/pct70 为成本区间, 与 avg_mode 无关。
+    同时返回两种成本口径:
+        avgCost    加权平均成本 Σ(价×筹码)/Σ筹码 (语义更准, 对齐东财 App);
+        medianCost 50% 分位成本 (对齐东财网页版 CYQ 原生输出)。
+    pct90/pct70 为成本区间, 与口径无关。
     """
     if not bars:
         return None
@@ -285,12 +285,11 @@ def compute_chips(bars, factor=FACTOR, avg_mode="weighted"):
     p90, c90 = percent_chips(0.9)
     p70, c70 = percent_chips(0.7)
 
-    # 平均成本: 加权平均 (默认) 或 50% 分位中位成本
+    # 平均成本: 加权平均 (均本) 与 50% 分位中位成本 (中位价)
     weighted_cost = sum(
         (minprice + accuracy * i) * xdata[i] for i in range(factor)
     ) / total
     median_cost = cost_by_chip(total * 0.5)
-    avg_cost = median_cost if avg_mode == "median" else weighted_cost
 
     return {
         "min": round(minprice, 2),
@@ -300,8 +299,8 @@ def compute_chips(bars, factor=FACTOR, avg_mode="weighted"):
             {"price": yrange[i], "weight": xdata[i] / total}
             for i in range(factor)
         ],
-        "avgCost": round(avg_cost, 2),
-        "avgCostMode": avg_mode,
+        "avgCost": round(weighted_cost, 2),
+        "medianCost": round(median_cost, 2),
         "profitRatio": below / total,
         "pct90": p90,
         "pct70": p70,
@@ -315,12 +314,6 @@ def compute_chips(bars, factor=FACTOR, avg_mode="weighted"):
 def _chips_source():
     """当前筹码数据源: af(默认) / em / auto。"""
     return os.environ.get("CHIPS_SOURCE", "af").strip().lower() or "af"
-
-
-def _avgcost_mode():
-    """平均成本口径: weighted(默认, 加权平均) / median(中位数, 东财网页版)。"""
-    mode = os.environ.get("CHIPS_AVGCOST", "weighted").strip().lower()
-    return "median" if mode == "median" else "weighted"
 
 
 def _load_bars(symbol):
@@ -341,7 +334,7 @@ def get_chips(symbol):
 
     成功缓存 CACHE_TTL, 失败仅缓存 CACHE_TTL_FAIL (抖动后尽快重试)。
     结果含 "source": af(AlphaFeed 近似) / em(东财精确)。
-    平均成本口径由 CHIPS_AVGCOST 控制: weighted(默认)/median。
+    同时返回 avgCost(加权平均) 与 medianCost(50% 分位中位价)。
     """
     now = time.time()
     with _lock:
@@ -351,7 +344,7 @@ def get_chips(symbol):
             if now - ent[0] < ttl:
                 return ent[1]
     bars, source = _load_bars(symbol)
-    result = compute_chips(bars, avg_mode=_avgcost_mode()) if bars else None
+    result = compute_chips(bars) if bars else None
     if result:
         result["source"] = source
     with _lock:

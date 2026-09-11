@@ -108,5 +108,85 @@ class TestChipsResample(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+@unittest.skipUnless(shutil.which("node"), "需要 node")
+class TestChipsOverlay(unittest.TestCase):
+    BUCKETS = TestChipsResample.BUCKETS
+    COLORS = {
+        "chipProfit": "#ef232a", "chipTrapped": "#14b143",
+        "chipAvg": "#d4a017", "chipMedian": "#7e57c2",
+    }
+
+    def _overlay(self, chip):
+        cfg = {
+            "gi": 1, "left": "86%", "right": "3%", "top": "2%", "height": "80%",
+            "colors": self.COLORS, "lastClose": 11.0,
+            "min": 10.0, "max": 12.0, "pxHeight": 600,
+        }
+        return json.loads(run_chips_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "const out = ChipChart.buildOverlay(p.chip, p.cfg);"
+            "const pick = function(n){return out.series.filter(function(s){return s.name===n;})[0]||{};};"
+            "process.stdout.write(JSON.stringify({"
+            "names: out.series.map(function(s){return s.name;}),"
+            "avgLabel: (pick('筹码均本').endLabel||{}).color,"
+            "medianLabel: (pick('筹码中位价').endLabel||{}).color,"
+            "medianLine: (pick('筹码中位价').lineStyle||{}).color"
+            "}));",
+            json.dumps({"chip": chip, "cfg": cfg}),
+        ))
+
+    def test_overlay_draws_both_cost_lines(self):
+        chip = {"buckets": self.BUCKETS, "avgCost": 11.0, "medianCost": 10.8, "profitRatio": 0.5}
+        out = self._overlay(chip)
+        self.assertIn("筹码均本", out["names"])
+        self.assertIn("筹码中位价", out["names"])
+        # 数字标签颜色与对应线颜色一致
+        self.assertEqual(out["medianLine"], self.COLORS["chipMedian"])
+        self.assertEqual(out["medianLabel"], self.COLORS["chipMedian"])
+        self.assertEqual(out["avgLabel"], self.COLORS["chipAvg"])
+
+    def test_overlay_omits_median_when_absent(self):
+        chip = {"buckets": self.BUCKETS, "avgCost": 11.0}
+        out = self._overlay(chip)
+        self.assertIn("筹码均本", out["names"])
+        self.assertNotIn("筹码中位价", out["names"])
+        self.assertEqual(out["avgLabel"], self.COLORS["chipAvg"])
+
+    def test_line_color_matches_cost_lines(self):
+        out = json.loads(run_chips_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "const c = p.colors;"
+            "process.stdout.write(JSON.stringify(["
+            "ChipChart.lineColor('均本 11.00', c),"
+            "ChipChart.lineColor('中位价 10.80', c),"
+            "ChipChart.lineColor('获利 50.0%', c)"
+            "]));",
+            json.dumps({"colors": self.COLORS}),
+        ))
+        self.assertEqual(out[0], self.COLORS["chipAvg"])
+        self.assertEqual(out[1], self.COLORS["chipMedian"])
+        self.assertIsNone(out[2])
+
+    def test_summary_lines_include_median(self):
+        chip = {"buckets": self.BUCKETS, "avgCost": 11.0, "medianCost": 10.8, "profitRatio": 0.5}
+        out = json.loads(run_chips_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "process.stdout.write(JSON.stringify(ChipChart.summaryLines(p)));",
+            json.dumps(chip),
+        ))
+        self.assertTrue(any("中位价" in line for line in out))
+        self.assertTrue(any(line.startswith("均本") for line in out))
+
+    def test_summary_lines_no_median_when_absent(self):
+        chip = {"buckets": self.BUCKETS, "avgCost": 11.0, "profitRatio": 0.5}
+        out = json.loads(run_chips_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "process.stdout.write(JSON.stringify(ChipChart.summaryLines(p)));",
+            json.dumps(chip),
+        ))
+        self.assertFalse(any("中位价" in line for line in out))
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -29,13 +29,17 @@
   /** 纯文本多行摘要 (ECharts graphic text 用) */
   function summaryLines(chip) {
     if (!chip) return [];
-    return [
+    const lines = [
       chip.source === 'af' ? '筹码分布·近似' : '筹码分布',
       '获利 ' + fmtPct(chip.profitRatio),
-      '均本 ' + fmtNum(chip.avgCost) + (chip.avgCostMode === 'median' ? '(中位)' : ''),
+      '均本 ' + fmtNum(chip.avgCost),
+    ];
+    if (chip.medianCost != null) lines.push('中位价 ' + fmtNum(chip.medianCost));
+    lines.push(
       '90% ' + fmtNum(chip.pct90 && chip.pct90[0]) + '~' + fmtNum(chip.pct90 && chip.pct90[1]),
       '70% ' + fmtNum(chip.pct70 && chip.pct70[0]) + '~' + fmtNum(chip.pct70 && chip.pct70[1]),
-    ];
+    );
+    return lines;
   }
 
   /** HTML 摘要 (tooltip / 状态栏用) */
@@ -43,11 +47,22 @@
     if (!chip) return '';
     const parts = [
       '获利比例 <b style="color:' + colors.chipProfit + '">' + fmtPct(chip.profitRatio) + '</b>',
-      '平均成本 ' + fmtNum(chip.avgCost),
+      '均本 ' + fmtNum(chip.avgCost),
+    ];
+    if (chip.medianCost != null) parts.push('中位价 ' + fmtNum(chip.medianCost));
+    parts.push(
       '90%成本 ' + fmtNum(chip.pct90 && chip.pct90[0]) + '~' + fmtNum(chip.pct90 && chip.pct90[1]),
       '70%成本 ' + fmtNum(chip.pct70 && chip.pct70[0]) + '~' + fmtNum(chip.pct70 && chip.pct70[1]),
-    ];
+    );
     return parts.join(' &nbsp; ');
+  }
+
+  /** 摘要行的语义颜色 (与叠加线一致); 无特殊语义返回 null (调用方用主题文本色) */
+  function lineColor(text, colors) {
+    if (!text) return null;
+    if (text.indexOf('均本') === 0) return colors.chipAvg;
+    if (text.indexOf('中位价') === 0) return colors.chipMedian;
+    return null;
   }
 
   /**
@@ -164,12 +179,35 @@
       endLabel: {
         show: true,
         formatter: function () { return Number(chip.avgCost).toFixed(2); },
-        color: colors.chipAvgLabel || '#2962ff',
+        color: colors.chipAvg,
         fontSize: 11,
         fontWeight: 'bold',
         offset: [2, 0],
       },
     };
+
+    const lines = [barSeries, avgLine];
+    if (chip.medianCost != null) {
+      lines.push({
+        name: '筹码中位价',
+        type: 'line',
+        xAxisIndex: gi,
+        yAxisIndex: gi,
+        silent: true,
+        symbol: 'none',
+        data: [[0, chip.medianCost], [xMax, chip.medianCost]],
+        encode: { x: 0, y: 1 },
+        lineStyle: { color: colors.chipMedian, type: 'dotted', width: 1 },
+        endLabel: {
+          show: true,
+          formatter: function () { return Number(chip.medianCost).toFixed(2); },
+          color: colors.chipMedian,
+          fontSize: 11,
+          fontWeight: 'bold',
+          offset: [2, 0],
+        },
+      });
+    }
 
     return {
       grid: { left: cfg.left, right: cfg.right, top: cfg.top, height: cfg.height, show: false },
@@ -188,7 +226,7 @@
         show: false,
         position: 'right',
       },
-      series: [barSeries, avgLine],
+      series: lines,
       n: n,
       pxHeight: pxHeight,
       barPx: barPx,
@@ -220,6 +258,7 @@
     colorFor: colorFor,
     summaryLines: summaryLines,
     summaryHtml: summaryHtml,
+    lineColor: lineColor,
     buildOverlay: buildOverlay,
     visibleRange: visibleRange,
     weightAt: weightAt,

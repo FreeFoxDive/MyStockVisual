@@ -253,17 +253,6 @@ body {
   position: relative;
 }
 
-#loading {
-  position: absolute;
-  top: 50%; left: 50%;
-  transform: translate(-50%,-50%);
-  font-size: 14px;
-  color: var(--text-secondary);
-  z-index: 5;
-  display: none;
-}
-#loading.show { display: block; }
-
 /* ═══════════════ 五档盘口 (分时, 右侧) ═══════════════ */
 #depth-panel {
   position: absolute;
@@ -388,7 +377,6 @@ body {
 <!-- ═══════════════ Chart ═══════════ -->
 <div id="chart-wrap">
   <div id="chart-container"></div>
-  <div id="loading">⏳ 加载中...</div>
   <div id="depth-panel">
     <div class="dp-title">五档</div>
     <div class="dp-body" id="depth-body"></div>
@@ -492,7 +480,7 @@ const COLORS = {
     ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
     // ── 筹码分布 ──
     chipProfit: '#ef232a', chipTrapped: '#14b143', chipAvg: '#d4a017',
-    chipAvgLabel: '#2962ff',
+    chipMedian: '#7e57c2',
     zeroLine: '#cccccc',
   },
   dark: {
@@ -518,7 +506,7 @@ const COLORS = {
     ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
     // ── 筹码分布 ──
     chipProfit: '#ef5350', chipTrapped: '#26a69a', chipAvg: '#f5c542',
-    chipAvgLabel: '#5b8ff9',
+    chipMedian: '#b39ddb',
     zeroLine: '#363a45',
   }
 };
@@ -633,7 +621,6 @@ async function fetchData(opts) {
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
   if (!silent && !cacheHit && !sameView) {
     STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
-    showLoading(true);
   }
   try {
     const resp = await fetch(url);
@@ -683,7 +670,6 @@ async function fetchData(opts) {
   } finally {
     if (!silent) {
       STATE.chart.hideLoading();
-      showLoading(false);
     }
   }
 }
@@ -752,7 +738,7 @@ function renderDepth(depth) {
   if (!depth) { body.innerHTML = '<div class="dp-empty">无五档数据</div>'; return; }
   const up = C().up;
   const down = C().down;
-  const pf = (v) => (v == null ? '—' : Number(v).toFixed(2));
+  const pf = (v) => (v == null ? '—' : Number(Number(v).toFixed(3)).toString());
   const vf = (v) => (v == null ? '—' : String(v));
   const row = (label, price, vol, color) =>
     `<div class="dp-row"><span class="dp-label">${label}</span>` +
@@ -1074,11 +1060,6 @@ function patchLastBarOnChart() {
   if (!seriesPatch.length) return false;
   chart.setOption({ animation: false, series: seriesPatch }, patchOpts);
   return true;
-}
-
-function showLoading(show) {
-  const el = document.getElementById('loading');
-  if (el) el.classList.toggle('show', show);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1793,6 +1774,20 @@ function klineVisibleYRange(klines, startPct, endPct) {
   return r;
 }
 
+// 主图 y 轴实际渲染范围 (scale:true 会取整为 nice 范围); 筹码轴须用同一范围才能像素对齐
+function resolvedKlineYExtent() {
+  const chart = STATE.chart;
+  if (!chart) return null;
+  try {
+    const m = chart.getModel().getComponent('yAxis', 0);
+    const ext = m && m.axis && m.axis.scale && m.axis.scale.getExtent();
+    if (ext && isFinite(ext[0]) && isFinite(ext[1]) && ext[1] > ext[0]) {
+      return { min: ext[0], max: ext[1] };
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
 // 筹码面板价格轴 + 柱数据随主图 dataZoom 联动 (按可见区间重采样, 保持细密)
 function syncChipAxis() {
   const chip = STATE._chip;
@@ -1802,15 +1797,17 @@ function syncChipAxis() {
   const opt = chart.getOption();
   const dzs = opt.dataZoom || [];
   const dz = dzs.find(z => z.type === 'inside') || dzs[0] || {};
-  const range = klineVisibleYRange(data.klines, dz.start, dz.end);
+  const range = resolvedKlineYExtent() || klineVisibleYRange(data.klines, dz.start, dz.end);
   if (!range) return;
   const yAxes = (opt.yAxis || []).map((y, i) => (i === chip.gi ? { min: range.min, max: range.max } : {}));
   const patch = { yAxis: yAxes };
   if (STATE.chips && chip.n) {
     const bars = ChipChart.resample(STATE.chips, range.min, range.max, chip.n);
     const seriesPatch = [{ name: '筹码', data: bars }];
-    const avg = (opt.series || []).find(s => s.name === '筹码均本');
-    if (avg) seriesPatch.push({ name: '筹码均本', data: avg.data });
+    ['筹码均本', '筹码中位价'].forEach(function (nm) {
+      const s = (opt.series || []).find(x => x.name === nm);
+      if (s) seriesPatch.push({ name: nm, data: s.data });
+    });
     patch.series = seriesPatch;
   }
   chart.setOption(patch, { lazyUpdate: true, silent: true });
@@ -2241,6 +2238,7 @@ function updateChart(reTheme) {
 
   chart.clear();
   chart.setOption(option, true);
+  if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
   // 缓存 grid 像素位置 (供 zrender mousemove 判断鼠标在哪个面板)
   const cw = chart.getWidth(), ch = chart.getHeight();
   STATE._gridRects = grids.map(g => {
@@ -2272,13 +2270,17 @@ function updateChart(reTheme) {
   // 筹码分布摘要 (筹码条正下方右侧空白窄带, 左对齐; 不压筹码/成交量)
   if (chipOn) {
     const klineBottom = (parseFloat(grids[0].top) + parseFloat(grids[0].height)) / 100 * ch;
-    graphics.push({
-      type: 'text', left: '86%', top: klineBottom + 4,
-      style: {
-        text: ChipChart.summaryLines(STATE.chips).join('\n'),
-        fill: C().text, font: '14px monospace', textAlign: 'left', lineHeight: 17,
-      },
-      z: 100,
+    const chipColors = C();
+    ChipChart.summaryLines(STATE.chips).forEach(function (line, i) {
+      graphics.push({
+        type: 'text', left: '86%', top: klineBottom + 4 + i * 17,
+        style: {
+          text: line,
+          fill: ChipChart.lineColor(line, chipColors) || chipColors.text,
+          font: '14px monospace', textAlign: 'left',
+        },
+        z: 100,
+      });
     });
   }
   chart.setOption({ graphic: graphics });
