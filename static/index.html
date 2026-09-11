@@ -359,7 +359,7 @@ body {
   <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label title="OBV 从图表加载的首根K线起算(累计量); MAOBV=MA(OBV,30)。绝对数值随加载窗口变化, 跨平台/跨加载根数不可直接比较, 比较请看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
-  <label id="lbl-chip"><input type="checkbox" id="chk-chip" onchange="onConfigChange()">筹码</label>
+  <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
   <label id="lbl-depth" style="display:none"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">📏 MA=SMA</span>
@@ -1388,7 +1388,7 @@ function loadConfig() {
     document.getElementById('chk-rsi').checked = !!cfg.rsi;
     document.getElementById('chk-atr').checked = !!cfg.atr;
     document.getElementById('chk-obv').checked = !!cfg.obv;
-    document.getElementById('chk-chip').checked = !!cfg.chip;
+    document.getElementById('chk-chip').checked = cfg.chip !== false;
     document.getElementById('chk-depth').checked = cfg.depth !== false;
     document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
     document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
