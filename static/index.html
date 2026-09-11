@@ -738,7 +738,7 @@ function renderDepth(depth) {
   if (!depth) { body.innerHTML = '<div class="dp-empty">无五档数据</div>'; return; }
   const up = C().up;
   const down = C().down;
-  const pf = (v) => (v == null ? '—' : Number(Number(v).toFixed(3)).toString());
+  const pf = fmtPrice3;
   const vf = (v) => (v == null ? '—' : String(v));
   const row = (label, price, vol, color) =>
     `<div class="dp-row"><span class="dp-label">${label}</span>` +
@@ -1075,6 +1075,11 @@ function fmtCN(v) {
   return v.toFixed(0);
 }
 
+// 价格: 三位小数并去掉尾随0 (1.50→1.5, 1.234→1.234)
+function fmtPrice3(v) {
+  return v == null ? '—' : Number(Number(v).toFixed(3)).toString();
+}
+
 // 换手 (股票) / 流值 (股票) / 份额 (ETF) / 成交额
 function updateFundInfo(q) {
   const d = STATE.klineData || {};
@@ -1138,9 +1143,10 @@ function updateInfo(data) {
     gubaEl.style.display = _code6 ? '' : 'none';
   }
   const q = data.quote;
+  const pf = fmtPrice3;
 
   if (q && q.last_price) {
-    document.getElementById('info-price').textContent = q.last_price.toFixed(2);
+    document.getElementById('info-price').textContent = pf(q.last_price);
     if (q.change_pct != null) {
       const pct = q.change_pct;
       const cls = pct >= 0 ? 'up' : 'down';
@@ -1151,7 +1157,7 @@ function updateInfo(data) {
     }
   } else if (data.klines && data.klines.length > 0) {
     const last = data.klines[data.klines.length - 1];
-    document.getElementById('info-price').textContent = last.close.toFixed(2);
+    document.getElementById('info-price').textContent = pf(last.close);
     if (data.klines.length > 1) {
       const prev = data.klines[data.klines.length - 2];
       const chg = ((last.close - prev.close) / prev.close * 100);
@@ -1582,7 +1588,7 @@ function renderIntraday(data) {
         if (!b) return '';
         const prevBar = idx > 0 ? data.bars[idx - 1] : null;
         const pc = prevBar ? prevBar.close : b.open;
-        const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${v.toFixed(2)}</span>`;
+        const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${fmtPrice3(v)}</span>`;
         let h = `<div><b>${b.time}</b>${haltLabel(b)}</div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
@@ -1671,10 +1677,11 @@ function updateQuoteDisplay(quote) {
   const p = quote.last_price, pc = quote.prev_close || p;
   const colorCls = p > pc ? 'up' : (p < pc ? 'down' : ''); // 红涨 绿跌 黑平
   const chgPct = pc > 0 ? ((p - pc) / pc * 100) : 0;
+  const pf = fmtPrice3;
 
   document.getElementById('info-code').textContent = STATE.symbol.replace(/\.(SH|SZ|BJ)$/, '');
   document.getElementById('info-name').textContent = quote.name || '';
-  document.getElementById('info-price').textContent = p.toFixed(2);
+  document.getElementById('info-price').textContent = pf(p);
   document.getElementById('info-price').className = 'price ' + colorCls;
   document.getElementById('info-change').textContent = (chgPct >= 0 ? '+' : '') + chgPct.toFixed(2) + '%';
   document.getElementById('info-change').className = 'change ' + colorCls;
@@ -1682,11 +1689,11 @@ function updateQuoteDisplay(quote) {
     const oCls = quote.open > pc ? 'up' : (quote.open < pc ? 'down' : '');
     const hCls = quote.high > pc ? 'up' : (quote.high < pc ? 'down' : '');
     const lCls = quote.low > pc ? 'up' : (quote.low < pc ? 'down' : '');
-    document.getElementById('info-open').textContent = '开 ' + quote.open.toFixed(2);
+    document.getElementById('info-open').textContent = '开 ' + pf(quote.open);
     document.getElementById('info-open').className = 'oh ' + oCls;
-    document.getElementById('info-high').textContent = '高 ' + quote.high.toFixed(2);
+    document.getElementById('info-high').textContent = '高 ' + pf(quote.high);
     document.getElementById('info-high').className = 'oh ' + hCls;
-    document.getElementById('info-low').textContent = '低 ' + quote.low.toFixed(2);
+    document.getElementById('info-low').textContent = '低 ' + pf(quote.low);
     document.getElementById('info-low').className = 'oh ' + lCls;
   }
   document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
@@ -1887,6 +1894,7 @@ function updateChart(reTheme) {
 
   const chart = STATE.chart;
   const klines = data.klines;
+  const pf = fmtPrice3;
   const dates = klines.map(k => k.date);
   const panels = getIndicatorPanels();
   const chipOn = isChipPeriod(STATE.period)
@@ -2102,14 +2110,14 @@ function updateChart(reTheme) {
       // ── Helper ──
       const pc = prev ? prev.close : k.close; // 前一根收盘价
       const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${escHtml(k.date)}${haltLabel(k)}</div>`;
-      const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'};font-weight:700">${v.toFixed(2)}</span>`;
+      const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'};font-weight:700">${pf(v)}</span>`;
 
       // Grid 0: K-line — full detail
       if (g === 0) {
         let html = hdr;
         html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)} 低 ${cfn(k.low)} 收 ${cfn(k.close)}`;
         if (chgPct != null) html += ` <span style="color:${chgPct>=0?'#ef5350':'#26a69a'}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
-        html += `</div><div>MA5 <span style="color:${C().ma5}">${k.ma5?.toFixed(2)||'—'}</span> MA10 <span style="color:${C().ma10}">${k.ma10?.toFixed(2)||'—'}</span> MA20 <span style="color:${C().ma20}">${k.ma20?.toFixed(2)||'—'}</span></div>`;
+        html += `</div><div>MA5 <span style="color:${C().ma5}">${pf(k.ma5)}</span> MA10 <span style="color:${C().ma10}">${pf(k.ma10)}</span> MA20 <span style="color:${C().ma20}">${pf(k.ma20)}</span></div>`;
         html += `<div>量 ${fmtVolume(k.volume)} 额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
         if (document.getElementById('chk-macd').checked) {
           html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
@@ -2170,7 +2178,7 @@ function updateChart(reTheme) {
       }
 
       // fallback
-      return hdr + `<div>收 <b>${k.close?.toFixed(2)}</b></div>`;
+      return hdr + `<div>收 <b>${pf(k.close)}</b></div>`;
     }
   };
 
