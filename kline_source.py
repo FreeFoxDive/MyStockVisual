@@ -110,6 +110,9 @@ class AlphaFeedSource(KlineSource):
         import market
         if category == "minute":
             return period in market.MINUTE_PERIODS
+        if category in ("hk", "us"):
+            # 港/美股 v1: 仅日/周/月K (分时能力待探测)
+            return period in ("1d", "1w", "1M")
         return category in ("stock", "fund") and period in ("1d", "1w", "1M")
 
     def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
@@ -235,6 +238,9 @@ DEFAULT_CHAINS = {
     "stock": "mairui,alphafeed,akshare",
     "index": "mairui,akshare",
     "fund": "alphafeed,akshare",
+    # 港/美股: 仅 AlphaFeed 可服务 (限频由 market 令牌桶 8/min 控制)
+    "hk": "alphafeed",
+    "us": "alphafeed",
 }
 
 _warned_names = set()

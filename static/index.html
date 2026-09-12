@@ -266,6 +266,12 @@ body {
   border-color: var(--btn-active);
 }
 .history-tag .sym { color: var(--text-secondary); font-size: 11px; margin-left: 2px; }
+.type-badge {
+  display: inline-block; padding: 0 5px; margin-right: 4px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; line-height: 16px; vertical-align: 1px;
+  background: rgba(var(--btn-active-rgb), 0.12); color: var(--btn-active);
+}
+.search-dropdown .item .type-badge { margin-right: 6px; }
 
 /* ═══════════════ Indicator config ═══════════ */
 #indicator-bar {
@@ -937,6 +943,10 @@ async function fetchData(opts) {
   STATE._lastBarAt = fetchTs;
   if (!silent) { STATE.trades = null; STATE.chips = null; } // 切股/切周期先清空, 避免短暂显示上一只的买卖点/筹码
   const cacheKey = `vk_${symbol}_${period}_${STATE.adjust}`;
+  if (STATE._quoteEsSym !== symbol) {  // SSE 快照流随标的重启
+    STATE._quoteEsSym = symbol;
+    startQuoteStream();
+  }
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
   let cacheHit = false;
@@ -996,7 +1006,8 @@ async function fetchData(opts) {
             el.style.display = 'none';
           }
         }).catch(() => {});
-      addToHistory(data.symbol, data.name);
+      addToHistory(data.symbol, data.name,
+        data.is_index ? 'index' : (data.is_etf ? 'etf' : deriveSymbolType(data.symbol)));
     }
     updateInfo(data);
     if (!silent) {
@@ -1177,11 +1188,44 @@ async function fetchQuote() {
     const resp = await fetch(`/api/quote?symbol=${encodeURIComponent(STATE.symbol)}`);
     if (resp.ok) {
       const q = await resp.json();
-      updateQuoteDisplay(q);
-      if (STATE.klineData) STATE.klineData.quote = q;
-      if (patchTodayBarFromQuote(q)) requestBarPatchDraw();
+      applyQuoteData(q);
     }
   } catch (e) { /* ignore */ }
+}
+
+/** 快照落地 (轮询与 SSE 共用) */
+function applyQuoteData(q) {
+  if (!q || (q.symbol && q.symbol !== STATE.symbol)) return;
+  updateQuoteDisplay(q);
+  if (STATE.klineData) STATE.klineData.quote = q;
+  if (patchTodayBarFromQuote(q)) requestBarPatchDraw();
+}
+
+/** 快照 SSE 推送: 一条长连接替代 10s 轮询 (断线/超限自动回退轮询) */
+function startQuoteStream() {
+  if (!window.EventSource) return; // 老浏览器回退轮询
+  try { if (STATE._quoteEs) STATE._quoteEs.close(); } catch (e) { /* ignore */ }
+  STATE._quoteEs = null;
+  const sym = STATE.symbol;
+  try {
+    const es = new EventSource(`/api/stream/quotes?symbols=${encodeURIComponent(sym)}`);
+    es.onmessage = (ev) => {
+      if (!ev.data || ev.data[0] !== "{") return;
+      try {
+        const quotes = JSON.parse(ev.data);
+        const q = quotes[sym] || quotes[STATE.symbol];
+        if (q) { STATE._lastQuoteAt = Date.now(); applyQuoteData(q); }
+      } catch (e) { /* ignore */ }
+    };
+    es.onerror = () => {
+      // readyState=CLOSED (如服务端 429 超限) → 不再重连, 回退轮询;
+      // CONNECTING 状态则是原生自动重连, 不干预
+      if (es.readyState === EventSource.CLOSED && STATE._quoteEs === es) {
+        STATE._quoteEs = null;
+      }
+    };
+    STATE._quoteEs = es;
+  } catch (e) { /* 回退轮询 */ }
 }
 
 function todayYMD() {
@@ -1685,12 +1729,27 @@ async function syncHistoryWithServer() {
   } catch (_) { /* 未登录或网络失败: 仅用本地 */ }
 }
 
-function addToHistory(symbol, name) {
+function addToHistory(symbol, name, type) {
   const list = loadHistory().filter(h => h.symbol !== symbol);
-  list.unshift({ symbol, name, ts: Date.now() });
+  list.unshift({ symbol, name, ts: Date.now(), type: type || deriveSymbolType(symbol) });
   saveHistory(list);
   pushHistoryToServer(list);
   renderHistoryTags();
+}
+
+/** 按代码形态推断类型 (搜索/行情入口未显式给出 type 时兜底) */
+function deriveSymbolType(symbol) {
+  const s = String(symbol || '').toUpperCase();
+  if (s.endsWith('.HK')) return 'hk';
+  const code = s.split('.')[0];
+  if (/^[A-Z]+$/.test(code)) return 'us';
+  return ''; // A股/ETF/指数: 历史标签不区分 (旧数据兼容)
+}
+
+/** 类型徽标 (历史标签) */
+function typeBadge(type) {
+  const MAP = { index: '指数', etf: 'ETF', hk: '港', us: '美' };
+  return MAP[type] ? `<span class="type-badge tb-${esc(type)}">${MAP[type]}</span>` : '';
 }
 
 function esc(s) {
@@ -1707,7 +1766,7 @@ function renderHistoryTags() {
   bar.style.display = 'flex';
   tags.innerHTML = list.map(h =>
     `<span class="history-tag" onclick="switchToHistory('${esc(h.symbol)}')" title="${esc(h.symbol)}">
-      ${esc(h.name)}<span class="sym">${esc(h.symbol.replace(/\.(SH|SZ|BJ)$/,''))}</span>
+      ${typeBadge(h.type)}${esc(h.name)}<span class="sym">${esc(h.symbol.replace(/\.(SH|SZ|BJ|HK)$/,''))}</span>
     </span>`
   ).join('');
 }
@@ -4095,11 +4154,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderDropdown() {
     if (searchResults.length === 0) { closeDropdown(); return; }
-    dropdown.innerHTML = searchResults.map((r, i) =>
-      `<div class="item${i === activeIdx ? ' active' : ''}" data-idx="${i}">
-        ${esc(r.name)}<span class="code">${esc(r.code)}</span>
-      </div>`
-    ).join('');
+    const TYPE_BADGES = { index: '指数', etf: 'ETF', hk: '港', us: '美' };
+    dropdown.innerHTML = searchResults.map((r, i) => {
+      const badge = TYPE_BADGES[r.type]
+        ? `<span class="type-badge tb-${r.type}">${TYPE_BADGES[r.type]}</span>` : '';
+      return `<div class="item${i === activeIdx ? ' active' : ''}" data-idx="${i}">
+        ${badge}${esc(r.name)}<span class="code">${esc(r.code)}</span>
+      </div>`;
+    }).join('');
     dropdown.classList.add('show');
     // Click + hover handlers
     dropdown.querySelectorAll('.item').forEach(el => {
@@ -4126,6 +4188,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (idx < 0 || idx >= searchResults.length) return;
     const r = searchResults[idx];
     closeDropdown();
+    STATE._lastSearchType = r.type || '';
     switchSymbol(r.symbol);
     if (STATE.period === 'intraday') {
       STATE.intradayData = null;

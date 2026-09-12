@@ -20,6 +20,7 @@ PROJECT_DIR = SCRIPT_DIR.parent
 log = logging.getLogger("market")
 
 from logger import sanitize_error as _sanitize_error  # noqa: E402
+import feed
 import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_source 惰性反向引用本模块)
 
 # ── AlphaFeed ──
@@ -542,6 +543,8 @@ def _pledge_scheduler():
 
 def _is_etf(symbol):
     """判断是否为场内基金 (ETF/LOF/封闭式; 代码前缀: 51, 58, 15, 16, 56, 11, 18等)"""
+    if _symbol_market(symbol) != "cn":
+        return False  # 港/美股不走 A 股代码前缀判定 (港股 11/15 开头会误判)
     code = symbol.split(".")[0]
     return code[:2] in ("51", "58", "15", "16", "56", "11", "18") or code.startswith("5")
 
@@ -605,6 +608,12 @@ def _fetch_fund_kline(symbol, period, count):
 def _fetch_minute_kline(symbol, period, count, adjust="forward"):
     """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
     adj = kline_source.normalize_adjust(adjust)
+    # 港/美股 K线限频 (额度 10/min 的 4/5); 桶空返回 None 走缓存/回退
+    if _symbol_market(symbol) in ("hk", "us"):
+        with _hkus_lock:
+            if not _hkus_kline_bucket.try_acquire():
+                log.warning(f"港美股K线限频跳过 {symbol} {period}")
+                return None
     try:
         af = get_af()
         dfs = af.klines.batch(
@@ -712,7 +721,9 @@ def _fetch_mr_kline(symbol, period, count, adjust="forward"):
 
 
 def _kline_category(symbol, period):
-    """K线类别路由 (kline_source 按类别选源): minute / fund(ETF) / index / stock。"""
+    """K线类别路由 (kline_source 按类别选源): minute / fund(ETF) / index / stock / hk / us。"""
+    if _symbol_market(symbol) in ("hk", "us"):
+        return _symbol_market(symbol)
     if period in MINUTE_PERIODS:
         return "minute"
     if _is_etf(symbol):
@@ -963,7 +974,15 @@ def fetch_quotes(symbols, fresh=False):
         quote_cache.set(s, result[s])
 
     # AlphaFeed 优先（指数 / ETF / 股票统一）
-    for s, q in _fetch_af_quotes(to_fetch).items():
+    af_set = list(to_fetch)
+    # 港/美股走 AF 专用令牌桶 (额度 10/min 的 4/5); 桶空则本轮跳过沿用缓存
+    if any(_symbol_market(s) in ("hk", "us") for s in af_set):
+        with _hkus_lock:
+            if not _hkus_quote_bucket.try_acquire():
+                af_set = []
+    for s, q in _fetch_af_quotes(af_set).items():
+        if s in af_set:
+            _emit_af(s, q)
         if s in to_fetch:
             _emit_af(s, q)
 
@@ -1258,16 +1277,115 @@ def _load_stock_list():
         return _stock_list
 
 
+_HK_LIST_FILE = SCRIPT_DIR / ".cache" / "hk_list.json"
+_US_LIST_FILE = SCRIPT_DIR / ".cache" / "us_list.json"
+_hk_list, _us_list = None, None
+_hkus_list_lock = threading.Lock()
+
+
+def _load_universe_file(path, fetcher, cache_attr):
+    """通用列表加载: 内存 → 磁盘(24h, 支持过期回退) → akshare 现拉。"""
+    global _hk_list, _us_list
+    mem = _hk_list if cache_attr == "hk" else _us_list
+    if mem is not None:
+        return mem
+    fetcher_map = {"hk": _fetch_hk_list, "us": _fetch_us_list}
+    with _hkus_list_lock:
+        mem = _hk_list if cache_attr == "hk" else _us_list
+        if mem is not None:
+            return mem
+        rows = None
+        try:
+            if path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and raw.get("rows"):
+                    age = time.time() - float(raw.get("ts") or 0)
+                    if age < STOCK_LIST_TTL:
+                        mem = raw["rows"]
+                    elif raw["rows"]:
+                        rows = raw["rows"]  # 过期: 先回退, 拉取成功再覆盖
+        except Exception as e:
+            log.warning(f"读取列表缓存失败 {path.name}: {e}")
+        if mem is None:
+            try:
+                fresh = fetcher_map[cache_attr]()
+                if fresh:
+                    mem = fresh
+                    try:
+                        path.write_text(json.dumps(
+                            {"ts": time.time(), "rows": mem}, ensure_ascii=False),
+                            encoding="utf-8")
+                    except Exception:
+                        pass
+                elif rows is not None:
+                    mem = rows  # 现拉失败回退过期数据
+            except Exception as e:
+                log.warning(f"拉取列表失败 {path.name}: {e}")
+                mem = rows or []
+        if cache_attr == "hk":
+            _hk_list = mem or []
+            return _hk_list
+        _us_list = mem or []
+        return _us_list
+
+
+def _fetch_hk_list():
+    """港股列表 (东财): 代码 5 位数字 → symbol 00700.HK"""
+    import akshare as ak
+    df = ak.stock_hk_spot_em()
+    out = []
+    for _, row in df.iterrows():
+        code = str(row.get("代码", "")).strip().zfill(5)
+        name = str(row.get("名称", "")).strip()
+        if code and name:
+            out.append({"symbol": f"{code}.HK", "name": name, "code": code})
+    return out
+
+
+def _fetch_us_list():
+    """美股列表 (东财): 代码形如 105.MSFT → symbol MSFT"""
+    import akshare as ak
+    df = ak.stock_us_spot_em()
+    out = []
+    for _, row in df.iterrows():
+        raw = str(row.get("代码", "")).strip()
+        ticker = raw.split(".")[-1].strip().upper()
+        name = str(row.get("名称", "")).strip()
+        if ticker and name:
+            out.append({"symbol": ticker, "name": name, "code": ticker})
+    return out
+
+
+def _load_hk_list():
+    return _load_universe_file(_HK_LIST_FILE, _fetch_hk_list, "hk")
+
+
+def _load_us_list():
+    return _load_universe_file(_US_LIST_FILE, _fetch_us_list, "us")
+
+
 def _search_stocks(query):
-    """模糊搜索: 名称/代码精确 > 名称前缀 > 代码前缀 > 名称包含 > 代码包含"""
+    """模糊搜索: 名称/代码精确 > 名称前缀 > 代码前缀 > 名称包含 > 代码包含。
+
+    覆盖 A股/基金/指数/港股/美股; 结果带 type (stock/etf/index/hk/us)。
+    指数命中加权 +60 —— 用户输入代码/名称匹配指数时排在同分股票前面。
+    """
     stocks = _load_stock_list()
-    if not stocks:
-        return []
+    universe = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
+                 "type": "etf" if _is_etf(s["symbol"]) else "stock"} for s in stocks]
+    _load_index_cache()
+    if _index_names:
+        for sym, name in _index_names.items():
+            universe.append({"symbol": sym, "name": name,
+                             "code": sym.split(".")[0], "type": "index"})
+    universe.extend(_load_hk_list() or [])
+    universe.extend(_load_us_list() or [])
+
     q = query.strip().lower()
     results = []
-    for s in stocks:
-        name = s["name"].lower()
-        code = s["code"]
+    for s in universe:
+        name = str(s.get("name") or "").lower()
+        code = str(s.get("code") or "").lower()
         score = 0
         if name == q or code == q:
             score = 200   # 名称/代码精确匹配
@@ -1280,9 +1398,11 @@ def _search_stocks(query):
         elif q in code:
             score = 30    # 代码包含
         if score > 0:
+            if s.get("type") == "index":
+                score += 60  # 指数匹配靠前
             results.append({**s, "score": score})
     results.sort(key=lambda x: -x["score"])
-    return [{"symbol": r["symbol"], "name": r["name"], "code": r["code"]}
+    return [{"symbol": r["symbol"], "name": r["name"], "code": r["code"], "type": r.get("type", "stock")}
             for r in results[:30]]
 
 
@@ -1321,11 +1441,39 @@ def _safe_int(v):
 
 
 # ── 股票代码标准化 ──
+def _symbol_market(symbol):
+    """市场归类: cn (A股/ETF/指数, 默认) / hk (港股, 5位数字代码) / us (美股字母代码)。"""
+    s = str(symbol).upper().strip()
+    if s.endswith(".HK"):
+        return "hk"
+    if s.endswith(".US"):
+        return "us"
+    code = s.split(".")[0]
+    if code.isalpha() and 1 <= len(code) <= 6:
+        return "us"
+    if code.isdigit() and len(code) == 5:
+        return "hk"
+    return "cn"
+
+
+# 港/美股 AF 快照与 K线令牌桶: 额度 10/min 的 4/5 = 8/min (env 可调)
+_hkus_quote_bucket = feed.TokenBucket(rate_per_min=int(os.environ.get("HKUS_AF_QUOTE_PER_MIN", "8")))
+_hkus_kline_bucket = feed.TokenBucket(rate_per_min=int(os.environ.get("HKUS_AF_KLINE_PER_MIN", "8")))
+_hkus_lock = threading.Lock()
+
+
 def normalize_symbol(raw):
     """将用户输入标准化为带交易所后缀的 symbol 格式 (如 000001.SZ)"""
     raw = raw.strip().upper()
-    if raw.endswith(".SH") or raw.endswith(".SZ") or raw.endswith(".BJ"):
+    if raw.endswith((".SH", ".SZ", ".BJ", ".HK")):
         return raw
+    if raw.endswith(".US"):
+        return raw[:-3]
+    code0 = raw.split(".")[0]
+    if code0.isalpha() and 1 <= len(code0) <= 6:
+        return code0  # 美股字母代码
+    if code0.isdigit() and len(code0) == 5:
+        return code0 + ".HK"  # 港股 5 位数字
     if raw.startswith("SH") or raw.startswith("SZ"):
         return raw
     if raw.startswith(("60", "68")):

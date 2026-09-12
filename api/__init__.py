@@ -18,6 +18,7 @@ from api import market  # noqa: E402,F401
 from api import me  # noqa: E402,F401
 from api import models  # noqa: E402,F401
 from api import monitor  # noqa: E402,F401
+from api import stream  # noqa: E402,F401
 from api import trades  # noqa: E402,F401
 from api.auth import auth_bp  # noqa: E402,F401
 
