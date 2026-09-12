@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎯 条件选股 — Visual</title>
+<link rel="stylesheet" href="/css/theme.css">
+<script src="/js/theme.js"></script>
+<script>
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
+<style>
+body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+#toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: var(--bg-panel); border-bottom: 1px solid var(--border); }
+#toolbar .title { font-weight: 700; font-size: 15px; }
+#toolbar button { padding: 6px 12px; border: 1px solid var(--input-border); border-radius: 6px; background: transparent; color: var(--text); font-size: 13px; cursor: pointer; }
+#toolbar button:hover { background: var(--btn-hover); }
+#toolbar .spacer { flex: 1; }
+#main-view { padding: 18px 22px; max-width: 1100px; margin: 0 auto; }
+.cond-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.cond-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+.cond-row select, .cond-row input { padding: 5px 8px; border: 1px solid var(--input-border); border-radius: 4px; background: var(--input-bg); color: var(--text); font-size: 13px; }
+.cond-row input { width: 90px; }
+button.primary { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
+.progress { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin: 10px 0; }
+.progress .fill { height: 100%; background: var(--btn-active); width: 0; transition: width 0.3s; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); margin-top: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { background: var(--bg-panel); color: var(--text-secondary); }
+tr:hover td { background: var(--btn-hover); }
+td.sym a { color: var(--btn-active); text-decoration: none; }
+.pos { color: var(--up-text); font-weight: 600; }
+.neg { color: var(--down-text); font-weight: 600; }
+.empty { text-align: center; color: var(--text-secondary); padding: 26px 0; }
+#err { display: none; color: var(--down-text); font-size: 13px; margin: 8px 0; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span class="title">🎯 条件选股</span>
+  <span class="spacer"></span>
+  <button onclick="location.href='/'">← 主页</button>
+  <button id="btn-theme" onclick="toggleTheme()">🌙</button>
+</div>
+<div id="main-view">
+  <div class="cond-box">
+    <div class="cond-row">
+      <select id="cond-metric">
+        <option value="macd_cross_up">MACD 金叉 (当日)</option>
+        <option value="above_ma20">收盘站上 MA20</option>
+        <option value="chip_profit_gt">筹码获利盘 &gt; %</option>
+        <option value="rsi6_lt">RSI6 &lt; 数值</option>
+        <option value="change_pct_gt">5日涨幅 &gt; %</option>
+      </select>
+      <input type="number" id="cond-value" step="any" placeholder="数值 (如 60)" style="display:none">
+      <button onclick="addCond()">+ 添加条件 (AND)</button>
+      <button onclick="runScan()" class="primary">开始扫描</button>
+    </div>
+    <div id="cond-list" style="font-size:12px;color:var(--text-secondary)">未添加条件</div>
+    <div id="err"></div>
+    <div class="progress" id="prog-wrap" style="display:none"><div class="fill" id="prog-fill"></div></div>
+    <div style="font-size:12px;color:var(--text-secondary)" id="scan-hint"></div>
+  </div>
+  <div class="table-wrap" id="result-wrap" style="display:none">
+    <table>
+      <thead><tr><th>代码</th><th>名称</th><th>现价</th><th>5日涨幅</th><th>筹码获利盘</th></tr></thead>
+      <tbody id="result-tbody"></tbody>
+    </table>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script>
+const METRIC_LABELS = {
+  macd_cross_up: "MACD 金叉", above_ma20: "收盘站上 MA20",
+  chip_profit_gt: "筹码获利盘 > %", rsi6_lt: "RSI6 < 数值", change_pct_gt: "5日涨幅 > %",
+};
+let conditions = [];
+let scanning = false;
+
+function api(path, options = {}) {
+  return VisualApi.api(path, options, {
+    onUnauthorized: () => { location.href = "/login.html?next=" + encodeURIComponent(location.pathname); },
+  });
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+function showErr(m) { const e = document.getElementById("err"); e.textContent = m; e.style.display = m ? "block" : "none"; }
+
+function addCond() {
+  const metric = document.getElementById("cond-metric").value;
+  const value = parseFloat(document.getElementById("cond-value").value);
+  const needsValue = metric !== "macd_cross_up" && metric !== "above_ma20";
+  if (needsValue && !Number.isFinite(value)) { showErr("请填写数值"); return; }
+  conditions.push({ metric, value: Number.isFinite(value) ? value : null });
+  renderConds();
+}
+function delCond(i) { conditions.splice(i, 1); renderConds(); }
+function renderConds() {
+  document.getElementById("cond-list").innerHTML = conditions.length
+    ? conditions.map((c, i) => `<span style="display:inline-flex;gap:4px;align-items:center;border:1px solid var(--border);border-radius:6px;padding:2px 8px;margin-right:6px">
+        ${esc(METRIC_LABELS[c.metric])}${c.value != null ? " " + c.value : ""}
+        <a href="javascript:void(0)" onclick="delCond(${i})" style="color:var(--down-text)">✕</a></span>`).join("")
+    : "未添加条件";
+}
+async function runScan() {
+  if (scanning) return;
+  if (!conditions.length) { showErr("请先添加条件"); return; }
+  showErr("");
+  document.getElementById("prog-wrap").style.display = "block";
+  scanning = true;
+  try {
+    const r = await api("/api/screener/run", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conditions }) });
+    if (!r.ok) { showErr(r.error || "启动失败"); scanning = false; return; }
+    pollStatus();
+  } catch (e) { showErr(e.message || e); scanning = false; }
+}
+async function pollStatus() {
+  try {
+    const s = await api("/api/screener/status");
+    document.getElementById("prog-fill").style.width =
+      s.total ? Math.round(s.progress / s.total * 100) + "%" : "0%";
+    document.getElementById("scan-hint").textContent = s.running
+      ? `扫描中 ${s.progress}/${s.total}…` : (s.done_at ? `完成: 命中 ${s.results.length} 只` : "");
+    if (s.running) { setTimeout(pollStatus, 1500); return; }
+    scanning = false;
+    renderResults(s.results);
+  } catch (e) { scanning = false; }
+}
+function renderResults(results) {
+  const wrap = document.getElementById("result-wrap");
+  if (!results.length) {
+    wrap.style.display = "block";
+    document.getElementById("result-tbody").innerHTML = '<tr><td colspan="5" class="empty">无命中</td></tr>';
+    return;
+  }
+  wrap.style.display = "block";
+  document.getElementById("result-tbody").innerHTML = results.map(r => `<tr>
+    <td class="sym"><a href="/?symbol=${encodeURIComponent(r.symbol)}">${esc(r.symbol)}</a></td>
+    <td>${esc(r.name)}</td><td>${r.close == null ? "—" : r.close.toFixed(2)}</td>
+    <td class="${(r.change_pct || 0) >= 0 ? "pos" : "neg"}">${r.change_pct == null ? "—" : r.change_pct.toFixed(2) + "%"}</td>
+    <td>${r.chip_profit == null ? "—" : r.chip_profit.toFixed(1) + "%"}</td></tr>`).join("");
+}
+document.getElementById("cond-metric").addEventListener("change", (e) => {
+  const m = e.target.value;
+  document.getElementById("cond-value").style.display =
+    (m === "macd_cross_up" || m === "above_ma20") ? "none" : "";
+});
+setInterval(() => { if (scanning) pollStatus(); }, 3000);
+</script>
+</body>
+</html>

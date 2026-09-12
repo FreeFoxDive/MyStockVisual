@@ -185,6 +185,20 @@ CREATE TABLE IF NOT EXISTS monitor_alerts (
 CREATE INDEX IF NOT EXISTS idx_monitor_alerts_lookup
     ON monitor_alerts(user_id, symbol, alert_type, fired_at);
 
+CREATE TABLE IF NOT EXISTS price_alerts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
+    symbol        TEXT NOT NULL,
+    name          TEXT,
+    rule          TEXT NOT NULL,        -- JSON 数组: [{"metric":"price","op":">=","value":2000}, ...] AND 组合
+    note          TEXT,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    last_fired_at TEXT,
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_price_alerts_user ON price_alerts(user_id, enabled);
+
 CREATE TABLE IF NOT EXISTS chart_drawings (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL,
@@ -2390,5 +2404,137 @@ def delete_chart_drawings(user_id, symbol, period):
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ── 任意条件预警 (price alerts) ──
+
+_ALERT_METRICS = {"price", "change_pct"}
+_ALERT_OPS = (">=", "<=")
+
+
+def _clean_price_alert_rule(rule):
+    """校验规则数组: 1-3 条 {metric, op, value}, metric/op 白名单, value 数值。"""
+    if not isinstance(rule, list) or not (1 <= len(rule) <= 3):
+        raise ValueError("规则须为 1-3 条条件")
+    clean = []
+    for cond in rule:
+        if not isinstance(cond, dict):
+            raise ValueError("条件格式无效")
+        metric = str(cond.get("metric") or "").strip()
+        op = str(cond.get("op") or "").strip()
+        try:
+            value = float(cond.get("value"))
+        except (TypeError, ValueError):
+            raise ValueError("条件 value 必须为数值")
+        if metric not in _ALERT_METRICS:
+            raise ValueError(f"不支持的指标: {metric} (可选 price / change_pct)")
+        if op not in _ALERT_OPS:
+            raise ValueError(f"不支持的操作符: {op} (可选 >= / <=)")
+        clean.append({"metric": metric, "op": op, "value": value})
+    return clean
+
+
+def list_price_alerts(user_id):
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, symbol, name, rule, note, enabled, last_fired_at, created_at "
+            "FROM price_alerts WHERE user_id=? ORDER BY id DESC", (user_id,)
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["rule"] = json.loads(d["rule"])
+            except (TypeError, json.JSONDecodeError):
+                d["rule"] = []
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def list_enabled_price_alerts():
+    """监控循环用: 全部启用中的预警 (跨用户)。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, user_id, symbol, name, rule, note, last_fired_at "
+            "FROM price_alerts WHERE enabled=1"
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["rule"] = json.loads(d["rule"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def create_price_alert(user_id, symbol, name, rule, note=None):
+    clean = _clean_price_alert_rule(rule)
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO price_alerts(user_id, symbol, name, rule, note, enabled, created_at) "
+            "VALUES(?,?,?,?,?,1,?)",
+            (user_id, str(symbol).strip().upper(), str(name or "").strip(),
+             json.dumps(clean, ensure_ascii=False), str(note or "").strip(), _now_iso()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def update_price_alert(user_id, alert_id, data):
+    """部分更新: rule / note / enabled。返回是否更新。"""
+    sets, args = [], []
+    if "rule" in data:
+        clean = _clean_price_alert_rule(data["rule"])
+        sets.append("rule=?")
+        args.append(json.dumps(clean, ensure_ascii=False))
+    if "note" in data:
+        sets.append("note=?")
+        args.append(str(data["note"] or "").strip())
+    if "enabled" in data:
+        sets.append("enabled=?")
+        args.append(1 if data["enabled"] in (True, 1) else 0)
+    if not sets:
+        return False
+    args += [user_id, alert_id]
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            f"UPDATE price_alerts SET {', '.join(sets)} WHERE user_id=? AND id=?", args)
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_price_alert(user_id, alert_id):
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM price_alerts WHERE user_id=? AND id=?", (user_id, alert_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def mark_price_alert_fired(alert_id):
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE price_alerts SET last_fired_at=? WHERE id=?",
+                     (_now_iso(), alert_id))
+        conn.commit()
     finally:
         conn.close()

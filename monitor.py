@@ -544,11 +544,76 @@ def _check_hold_expire(now_dt=None, persist=True, notify=True):
     return fired
 
 
+PRICE_ALERT_COOLDOWN_SEC = 1800  # 同一条预警 30 分钟冷却
+
+
+def _price_alert_metric(q, metric):
+    if metric == "price":
+        return q.get("last_price")
+    if metric == "change_pct":
+        return q.get("change_pct")
+    return None
+
+
+def _evaluate_price_alerts(alerts, quotes, now_dt, persist=True, notify=True):
+    """任意条件预警: AND 组合逐条评估, 30 分钟冷却, 钉钉/ntfy 推送。"""
+    fired = []
+    for a in alerts:
+        q = quotes.get(a["symbol"])
+        if not q:
+            continue
+        last = q.get("last_price")
+        if last is None:
+            continue
+        ok = True
+        for cond in a["rule"]:
+            val = _price_alert_metric(q, cond["metric"])
+            if val is None:
+                ok = False
+                break
+            if cond["op"] == ">=" and not val >= cond["value"]:
+                ok = False
+                break
+            if cond["op"] == "<=" and not val <= cond["value"]:
+                ok = False
+                break
+        if not ok:
+            continue
+        if a.get("last_fired_at"):
+            try:
+                dt = datetime.fromisoformat(str(a["last_fired_at"]))
+                if (now_dt - dt).total_seconds() < PRICE_ALERT_COOLDOWN_SEC:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        if persist:
+            trades.mark_price_alert_fired(a["id"])
+            trades.insert_monitor_alert(
+                a["user_id"], None, a["symbol"], "price_alert",
+                now_dt.strftime("%Y-%m-%d"), price=last,
+                detail=a.get("note") or str(a["rule"]),
+            )
+        fired.append({"alert": a, "price": last})
+    if fired and notify:
+        lines = [
+            f"**{f['alert'].get('name') or f['alert']['symbol']}** "
+            f"{f['alert']['symbol']} 现价 {f['price']}"
+            for f in fired
+        ]
+        md = "价格预警触发\n" + "\n".join(lines)
+        dingtalk.send_markdown("价格预警", md)
+        ntfy.send_markdown("价格预警", md)
+    return fired
+
+
 def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     """一轮: 取持仓 → 补种 → 快照 → 判定 → 节流 → 推送。返回 fired 列表。"""
     now_dt = now_dt or market_hours.now()
     positions = trades.list_monitored_positions()
-    symbols = list(dict.fromkeys(p["symbol"] for p in positions))
+    price_alerts = trades.list_enabled_price_alerts()
+    alert_symbols = {a["symbol"] for a in price_alerts}
+    symbols = list(dict.fromkeys(
+        [p["symbol"] for p in positions] + sorted(alert_symbols)))
     _set_status(n_symbols=len(symbols), last_poll=now_dt.isoformat(timespec="seconds"))
     if not symbols:
         return []
@@ -585,6 +650,13 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
         # 在 UTC 容器上按 UTC 解释会产生 +8h 伪值, 毒化序列并冻结后续样本。
         ts = q.get("timestamp") or time.time()
         append_sample(sym, ts, q.get("last_price"), q.get("volume"))
+
+    # 任意条件预警 (价格/涨跌幅, AND 组合, 30 分钟冷却)
+    if price_alerts:
+        try:
+            _evaluate_price_alerts(price_alerts, quotes, now_dt)
+        except Exception as e:
+            log.warning(f"价格预警评估失败: {e}")
 
     elapsed = market_hours.session_elapsed_minutes(now_dt)
 
