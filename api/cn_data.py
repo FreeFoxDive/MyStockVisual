@@ -213,10 +213,11 @@ def cn_north():
 
     def fetch():
         import akshare as ak
-        df = ak.stock_hsgt_fund_flow_summary_em()
+        # 带日期的北向资金历史 (汇总接口无日期列, 展示不直观)
+        df = ak.stock_hsgt_hist_em(symbol="北向资金")
         return {"rows": _rows_pick(df, [
-            ("交易日期", "日期"), ("类型", "类型"),
-            ("净买额", "净买额(亿)"), ("成交净值比", "成交净值比%"),
+            ("日期", "日期"), ("当日成交净买额", "净买额(亿)"),
+            ("当日成交净买额-净占比", "净占比%"),
         ], limit=10)}
 
     return _json(_cached("north", fetch, ttl=1800))

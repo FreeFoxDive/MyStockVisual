@@ -20,6 +20,8 @@ PROJECT_DIR = SCRIPT_DIR.parent
 log = logging.getLogger("market")
 
 from logger import sanitize_error as _sanitize_error  # noqa: E402
+import datetime as dt_mod
+import decimal as dec_mod
 import feed
 import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_source 惰性反向引用本模块)
 
@@ -1419,6 +1421,12 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         if isinstance(obj, pd.Timestamp):
             return str(obj)
+        if isinstance(obj, dt_mod.datetime):
+            return obj.isoformat(sep=" ", timespec="seconds")
+        if isinstance(obj, dt_mod.date):
+            return obj.isoformat()
+        if isinstance(obj, dec_mod.Decimal):
+            return float(obj)
         return super().default(obj)
 
 
