@@ -641,7 +641,7 @@ body {
   <label class="extra-ind"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
   <label class="extra-ind"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
   <label title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" onchange="onConfigChange()">金叉死叉</label>
-  <label title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" onchange="onConfigChange()">K线形态</label>
+  <label title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" checked onchange="onConfigChange()">K线形态</label>
   <label class="extra-ind" title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
   <button class="cfg-mini more-btn" id="btn-ind-more" onclick="toggleIndMore()" title="展开/收起更多指标">▾ 更多</button>
   <span class="separator" style="height:18px;background:var(--border)"></span>
@@ -1954,7 +1954,7 @@ function loadConfig() {
     document.getElementById('chk-bias').checked = !!cfg.bias;
     document.getElementById('chk-dmi').checked = !!cfg.dmi;
     document.getElementById('chk-cross').checked = !!cfg.cross;
-    document.getElementById('chk-patterns').checked = !!cfg.patterns;
+    document.getElementById('chk-patterns').checked = cfg.patterns !== false; // 默认开启
     document.getElementById('chk-log').checked = !!cfg.logScale;
     STATE.logScale = !!cfg.logScale;
     STATE.adjust = ['forward', 'hfq', 'none'].includes(cfg.adjust) ? cfg.adjust : 'forward';
@@ -2546,6 +2546,17 @@ function clientBoll(values, n, k) {
   return { mid, up, low };
 }
 
+/** K线形态扫描缓存 (数据未变化时不重扫; tooltip 与 markPoint 共用) */
+function cachedPatterns(klines) {
+  if (!klines || !klines.length) return [];
+  const key = STATE.symbol + ':' + STATE.period + ':' + klines.length + ':'
+    + String(klines[klines.length - 1].date) + ':' + String(klines[klines.length - 1].close);
+  if (STATE._patternCache && STATE._patternCache.key === key) return STATE._patternCache.vals;
+  const vals = (typeof PatternScanner !== 'undefined') ? PatternScanner.scanPatterns(klines) : [];
+  STATE._patternCache = { key, vals };
+  return vals;
+}
+
 /** 生效的 MA/BOLL 序列: 自定义参数 → 客户端重算; 否则用服务器列 (带缓存) */
 function effectiveMaBoll(klines) {
   const closes = klines.map(k => k.close);
@@ -2614,7 +2625,7 @@ function updateChart(reTheme) {
     }
   }
   if (document.getElementById('chk-patterns').checked && window.PatternScanner) {
-    PatternScanner.scanPatterns(klines).forEach(pt => {
+    cachedPatterns(klines).forEach(pt => {
       extraMarks.push({
         coord: [pt.idx, pt.dir > 0 ? klines[pt.idx].low : klines[pt.idx].high],
         symbol: pt.dir > 0 ? 'triangle' : 'triangle', symbolSize: 7,
@@ -2887,7 +2898,7 @@ function updateChart(reTheme) {
       const pc = prev ? prev.close : k.close; // 前一根收盘价
       const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${escHtml(k.date)}${haltLabel(k)}</div>`;
       const patternTip = (typeof PatternScanner !== 'undefined' && document.getElementById('chk-patterns').checked)
-        ? PatternScanner.patternsAt(klines, idx) : null;
+        ? (cachedPatterns(klines).find(p => p.idx === idx) || null) : null;
       const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?C().up:v<pc?C().down:C().tipText};font-weight:700">${pf(v)}</span>`;
 
       // Grid 0: K-line — full detail
