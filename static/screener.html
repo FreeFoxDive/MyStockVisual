@@ -62,6 +62,7 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
       <input type="number" id="cond-value" step="any" placeholder="数值 (如 60)" style="display:none">
       <button onclick="addCond()">+ 添加条件 (AND)</button>
       <button onclick="runScan()" class="primary">开始扫描</button>
+      <button id="btn-stop" onclick="stopScan()" style="display:none;color:var(--down-text)">取消扫描</button>
     </div>
     <div id="cond-list" style="font-size:12px;color:var(--text-secondary)">未添加条件</div>
     <div id="err"></div>
@@ -114,22 +115,52 @@ async function runScan() {
   showErr("");
   document.getElementById("prog-wrap").style.display = "block";
   scanning = true;
+  setStopBtn(true);
   try {
     const r = await api("/api/screener/run", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conditions }) });
-    if (!r.ok) { showErr(r.error || "启动失败"); scanning = false; return; }
+    if (!r.ok) { showErr(r.error || "启动失败"); scanning = false; setStopBtn(false); return; }
     pollStatus();
-  } catch (e) { showErr(e.message || e); scanning = false; }
+  } catch (e) { showErr(e.message || e); scanning = false; setStopBtn(false); }
 }
+
+async function stopScan() {
+  try { await api("/api/screener/stop", { method: "POST" }); } catch (e) { /* ignore */ }
+}
+
+function setStopBtn(on) {
+  document.getElementById("btn-stop").style.display = on ? "" : "none";
+}
+
+// 页面加载: 恢复进行中的扫描或最近一次结果 (与后台任务解耦, 关页不中断)
+(async function initResume() {
+  try {
+    const s = await api("/api/screener/status");
+    if (s.running) {
+      scanning = true;
+      setStopBtn(true);
+      document.getElementById("prog-wrap").style.display = "block";
+      pollStatus();
+    } else if (s.results && s.results.length) {
+      renderResults(s.results);
+      document.getElementById("scan-hint").textContent =
+        (s.stopped ? "上次扫描已取消, " : "上次扫描 ") +
+        `命中 ${s.results.length} 只` + (s.done_at ? " · " + new Date(s.done_at * 1000).toLocaleString() : "");
+    }
+  } catch (e) { /* ignore */ }
+})();
 async function pollStatus() {
   try {
     const s = await api("/api/screener/status");
     document.getElementById("prog-fill").style.width =
       s.total ? Math.round(s.progress / s.total * 100) + "%" : "0%";
     document.getElementById("scan-hint").textContent = s.running
-      ? `扫描中 ${s.progress}/${s.total}…` : (s.done_at ? `完成: 命中 ${s.results.length} 只` : "");
+      ? `扫描中 ${s.progress}/${s.total}… (关页不中断, 数据源限频约 6 只/分钟)`
+      : s.stopped ? `已取消: 扫描了 ${s.progress}/${s.total}, 命中 ${s.results.length} 只 (保留部分结果)`
+      : (s.done_at ? `完成: 命中 ${s.results.length} 只` : "");
     if (s.running) { setTimeout(pollStatus, 1500); return; }
     scanning = false;
+    setStopBtn(false);
     renderResults(s.results);
   } catch (e) { scanning = false; }
 }
