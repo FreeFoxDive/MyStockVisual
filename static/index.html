@@ -21,6 +21,7 @@
 <script src="/js/indicators.js"></script>
 <script src="/js/gaps.js"></script>
 <script src="/js/chips.js"></script>
+<script src="/js/drawings.js"></script>
 <style>
 /* ═══════════════ 页面专属 (主题变量见 theme.css) ═══════════════ */
 body {
@@ -125,6 +126,23 @@ body {
 #toolbar #trades-entry {
   padding: 6px 9px;
   font-size: 12px;
+}
+/* 图标按钮统一: SVG 取代 emoji 字形, 消除基线/尺寸错位 (主题按钮由 theme.js 注入同类 SVG) */
+#toolbar .icon-text-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+#toolbar .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 9px;
+}
+#toolbar .ico-svg {
+  width: 15px;
+  height: 15px;
+  display: block;
 }
 
 /* 周期切换: TradingView 式分段控件 (1 个控件替代 9 个描边按钮) */
@@ -382,7 +400,7 @@ body {
 /* 刷新按钮加载态: 图标旋转 + 防连点 */
 @keyframes spin-ico { to { transform: rotate(360deg); } }
 #btn-refresh.loading { pointer-events: none; opacity: 0.65; }
-#btn-refresh.loading .ico { display: inline-block; animation: spin-ico 0.9s linear infinite; }
+#btn-refresh.loading .ico-svg { animation: spin-ico 0.9s linear infinite; }
 
 /* ═══════════════ 响应式 (平板/手机) ═══════════════ */
 @media (max-width: 900px) {
@@ -433,6 +451,50 @@ body {
   #indicator-bar label { padding: 4px 12px; }
   #indicator-bar input[type="checkbox"] { width: 14px; height: 14px; }
 }
+
+/* ═══ 画线模式 ═══ */
+#draw-palette {
+  position: absolute; left: 8px; top: 8px; z-index: 30;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--bg-panel, rgba(128,128,128,.12));
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.18);
+}
+#draw-palette .dp-btn {
+  width: 30px; height: 30px; border: none; border-radius: 4px;
+  background: transparent; color: var(--text); font-size: 15px;
+  cursor: pointer; line-height: 1; display: flex; align-items: center; justify-content: center;
+}
+#draw-palette .dp-btn:hover { background: rgba(128,128,128,.22); }
+#draw-palette .dp-btn.active { background: #e6a23c; color: #fff; }
+#draw-palette .dp-sep { height: 1px; margin: 3px 2px; background: var(--border); }
+#draw-palette .dp-btn.toggled { background: rgba(64,158,255,.25); color: #409eff; }
+#draw-menu {
+  position: absolute; z-index: 31; display: none;
+  background: var(--bg-panel, rgba(128,128,128,.12));
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; box-shadow: 0 2px 8px rgba(0,0,0,.18);
+  align-items: center; gap: 6px;
+}
+#draw-menu .dm-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+#draw-menu .dm-dot.active { border-color: var(--text); }
+#draw-menu button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 8px; font-size: 12px; }
+#draw-text-input {
+  position: absolute; z-index: 31; display: none;
+}
+#draw-text-input input {
+  font-size: 13px; padding: 3px 6px; border: 1px solid #e6a23c; border-radius: 3px;
+  background: var(--bg-card); color: var(--text); width: 160px;
+}
+#draw-suggest {
+  position: absolute; z-index: 31; display: none; align-items: center; gap: 6px;
+  background: var(--bg-panel); border: 1px dashed #e6a23c; border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; color: var(--text);
+  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+}
+#draw-suggest button { cursor: pointer; border: none; border-radius: 4px; padding: 2px 8px; font-size: 12px; }
+#draw-suggest .ds-ok { background: #e6a23c; color: #fff; }
+#draw-suggest .ds-no { background: transparent; color: var(--text-secondary); }
 </style>
 </head>
 <body>
@@ -479,9 +541,10 @@ body {
       <button id="btn-60m" onclick="switchPeriod('60m')" title="60分 (快捷键 9)">60分</button>
     </span>
     <span class="separator"></span>
-    <button id="btn-refresh" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><span class="ico">🔄</span> 刷新</button>
-    <button id="btn-shot" onclick="saveChartImage()" title="保存图表为图片">📷</button>
-    <button id="btn-theme" onclick="toggleTheme()" title="切换暗色/亮色主题">🌙</button>
+    <button id="btn-refresh" class="icon-text-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
+    <button id="btn-draw" class="icon-btn" onclick="toggleDrawMode()" title="画线模式: 趋势线/水平线/斐波那契/回归通道等"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
+    <button id="btn-shot" class="icon-btn" onclick="saveChartImage()" title="保存图表为图片"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
+    <button id="btn-theme" class="icon-btn" onclick="toggleTheme()" title="切换暗色/亮色主题"></button>
   </div>
 </div>
 
@@ -519,9 +582,24 @@ body {
 <!-- ═══════════════ Chart ═══════════ -->
 <div id="chart-wrap">
   <div id="chart-container"></div>
+  <canvas id="draw-overlay" style="position:absolute;left:0;top:0;pointer-events:none;z-index:12"></canvas>
   <div id="depth-panel">
     <div class="dp-title">五档</div>
     <div class="dp-body" id="depth-body"></div>
+  </div>
+  <div id="draw-palette" style="display:none"></div>
+  <div id="draw-menu">
+    <span style="font-size:11px;color:var(--text-secondary)">颜色</span>
+    <span id="draw-menu-colors" style="display:flex;gap:4px"></span>
+    <button id="dm-width" title="线宽 1px/2px">细</button>
+    <button id="dm-extend" title="向右延伸至最新bar之后 (预测区)">延伸</button>
+    <button id="dm-delete" style="color:#f56c6c">删除</button>
+  </div>
+  <div id="draw-text-input"><input type="text" id="draw-text-field" maxlength="60" placeholder="输入文字, Enter确认 / Esc取消"></div>
+  <div id="draw-suggest">
+    <span>建议修正线 (触点更多)</span>
+    <button class="ds-ok" id="ds-adopt">采纳</button>
+    <button class="ds-no" id="ds-ignore">忽略</button>
   </div>
 </div>
 
@@ -593,11 +671,30 @@ function showToast(msg, opts) {
 function saveChartImage() {
   if (!STATE.chart) { showToast('图表未就绪'); return; }
   try {
-    const a = document.createElement('a');
-    a.href = STATE.chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: C().bg });
-    a.download = `${STATE.symbol}_${STATE.period}_${new Date().toISOString().slice(0, 10)}.png`;
-    a.click();
-    showToast('图表图片已保存');
+    const base = STATE.chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: C().bg });
+    const overlay = document.getElementById('draw-overlay');
+    const finish = (url) => {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${STATE.symbol}_${STATE.period}_${new Date().toISOString().slice(0, 10)}.png`;
+      a.click();
+      showToast('图表图片已保存');
+    };
+    if (!overlay || !overlay.width) { finish(base); return; }
+    // 合成画线层 (K线图与 overlay 同尺寸, 2x pixelRatio)
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = img.width; cv.height = img.height;
+        const ctx = cv.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        ctx.drawImage(overlay, 0, 0, cv.width, cv.height);
+        finish(cv.toDataURL('image/png'));
+      } catch (err) { finish(base); }
+    };
+    img.onerror = () => finish(base);
+    img.src = base;
   } catch (e) {
     showToast('保存失败: ' + e.message, { type: 'err' });
   }
@@ -621,6 +718,24 @@ const STATE = {
   impulseEnabled: false, // 动力系统(Elder)
   channelEnabled: false, // ATR通道(Elder)
   gapEnabled: true,      // 未回补跳空缺口 (60m+)
+  draw: {                // 画线模式 (Drawings 模块; 数据模型见 static/js/drawings.js)
+    enabled: false,      // 画线模式开关 (工具面板可见)
+    tool: 'select',      // 当前工具
+    magnet: true,        // 磁吸吸附 K 线开高低收
+    autoLines: false,    // 自动建议支撑/压力趋势线
+    visible: true,       // 画线可见性
+    drawings: [],        // 当前 symbol+period 的画线 (服务器同步)
+    selectedId: null,
+    draft: null,         // 进行中的画线 {tool, pts:[{idx,price}], need}
+    drag: null,          // 手柄拖拽 {id, ptIdx, before}
+    suggest: null,       // 修正建议 {forId, points, touches}
+    undo: [],
+    _loadedKey: null,    // 最近一次从服务器加载的 symbol:period
+    _autoLines: null,    // 自动建议线缓存
+    _autoKey: null,
+    _labels: [],         // updateChart 的面板标签 graphic (重绘时合并)
+    _raf: false,
+  },
 };
 
 const MINUTE_PERIODS = ['1m', '5m', '15m', '30m', '60m'];
@@ -1825,6 +1940,13 @@ function renderIntraday(data) {
     });
   }
   chart.setOption({ graphic: igraphics });
+  // 分时视图无画线层: 清空 overlay, 避免 K 线周期的画线残留
+  const ov = document.getElementById('draw-overlay');
+  if (ov && ov.width) {
+    const c2 = ov.getContext('2d');
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+    c2.clearRect(0, 0, ov.width, ov.height);
+  }
 }
 
 function onConfigChange() {
@@ -1946,20 +2068,22 @@ function initChart() {
     STATE.hoveredGrid = -1;
     STATE._pointerPrice = null;
   });
-  // 双击复位缩放 (TradingView 惯例): 回到全景
-  STATE.chart.getZr().on('dblclick', function() {
+  // 双击复位缩放 (TradingView 惯例): 回到全景; 折线草稿进行中时用于结束画线
+  STATE.chart.getZr().on('dblclick', function(e) {
+    if (STATE.draw && STATE.draw.draft) { finishPolyDraft(); return; }
     try { STATE.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); } catch (e) { /* ignore */ }
   });
-  // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样)
+  // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样); 画线层同步重投影
   STATE.chart.on('dataZoom', function() {
-    if (!STATE._chip) return;
     if (STATE._chipSyncPending) return;
     STATE._chipSyncPending = true;
     requestAnimationFrame(function() {
       STATE._chipSyncPending = false;
       if (STATE._chip) syncChipAxis();
+      redrawDrawings();
     });
   });
+  initDrawEvents();
 }
 
 // K 线主图 y 轴可见范围: 可见 K 线 low/high + (通道开启时) 可见 ±3ATR 带
@@ -2108,7 +2232,9 @@ function updateChart(reTheme) {
     && !!STATE.chips && !!STATE.chips.buckets;
   const { grids, xAxes, yAxes, hasVolume, indicatorStartGi } = calcGridLayout(panels, chipOn);
   const visibleBars = STATE.period === '1m' ? 240 : 80;
-  const startPct = Math.max(0, Math.min(100, (1 - visibleBars / dates.length) * 100));
+  const futureBars = drawNeedsFuture() ? (window.Drawings ? Drawings.FUTURE_BARS : 0) : 0;
+  const totalSlots = Math.max(dates.length, 1) + futureBars;
+  const startPct = Math.max(0, Math.min(100, (1 - (visibleBars + futureBars) / totalSlots) * 100));
 
   // ── Readonly series data ──
   const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
@@ -2282,12 +2408,14 @@ function updateChart(reTheme) {
   }
 
   // ── xAxis data ──
-  xAxes.forEach(x => { x.data = dates; });
+  // 画线模式/预测延伸存在时, 右侧预留未来 bar 空间 (趋势线/回归通道向右虚线延伸)
+  xAxes.forEach(x => { x.data = dates; if (futureBars > 0) x.max = dates.length - 1 + futureBars; });
 
   // ── DataZoom ──
   const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
+  const dzLocked = STATE.draw.enabled && STATE.draw.tool !== 'select'; // 画线工具激活时禁用拖拽平移(滚轮缩放保留)
   const dataZoom = [
-    { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100 },
+    { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100, moveOnMouseMove: !dzLocked },
     { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16,
       borderColor: C().gridLine, backgroundColor: 'transparent',
       fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().text },
@@ -2350,6 +2478,8 @@ function updateChart(reTheme) {
             html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid ${C().tipBorder}">${GapScanner.gapTooltipHtml(hit)}</div>`;
           }
         }
+        // 线型画线与该 bar 相交时: 相交价 + 相对 close 的偏离百分比 (正负着色)
+        html += drawingCrossTooltipHtml(idx, k.close);
         return html;
       }
 
@@ -2454,32 +2584,32 @@ function updateChart(reTheme) {
   chart.clear();
   chart.setOption(option, true);
   if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
-  // 缓存 grid 像素位置 (供 zrender mousemove 判断鼠标在哪个面板)
+  // 缓存 grid 像素位置 (供 zrender mousemove 判断鼠标在哪个面板 + 画线层裁剪)
   const cw = chart.getWidth(), ch = chart.getHeight();
   STATE._gridRects = grids.map(g => {
     const topPct = parseFloat(g.top) / 100, heightPct = parseFloat(g.height) / 100;
-    return { top: topPct * ch, bottom: (topPct + heightPct) * ch };
+    return { top: topPct * ch, bottom: (topPct + heightPct) * ch,
+             left: parseFloat(g.left) / 100 * cw, right: cw - parseFloat(g.right) / 100 * cw };
   });
 
   // 每个指标面板左上角放名称标签 (graphic)
   const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', obv: 'OBV', premium: '溢价%' };
   const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().macdDif, obv: C().obv, premium: C().macdDif };
   const graphics = [];
+  // 面板标签: 抽象文本规格, 由画线 overlay canvas (paintLabels) 绘制
   panels.forEach((p, i) => {
     const gridTop = parseFloat(grids[indicatorStartGi + i].top) / 100 * ch;
     graphics.push({
-      type: 'text', left: 10, top: gridTop + 4,
-      style: { text: PANEL_LABELS[p] || p.toUpperCase(), fill: LABEL_COLORS[p] || C().text, font: 'bold 11px monospace' },
-      z: 100,
+      text: PANEL_LABELS[p] || p.toUpperCase(), x: 10, y: gridTop + 12,
+      fill: LABEL_COLORS[p] || C().text, font: 'bold 11px monospace',
     });
   });
   // 成交量面板也加标签
   if (hasVolume) {
     const volGridTop = parseFloat(grids[1].top) / 100 * ch;
     graphics.push({
-      type: 'text', left: 10, top: volGridTop + 2,
-      style: { text: 'VOL', fill: C().macdDif, font: 'bold 11px monospace' },
-      z: 100,
+      text: 'VOL', x: 10, y: volGridTop + 12,
+      fill: C().macdDif, font: 'bold 11px monospace',
     });
   }
   // 筹码分布摘要 (筹码条正下方右侧空白窄带, 左对齐; 不压筹码/成交量)
@@ -2488,17 +2618,14 @@ function updateChart(reTheme) {
     const chipColors = C();
     ChipChart.summaryLines(STATE.chips).forEach(function (line, i) {
       graphics.push({
-        type: 'text', left: '86%', top: klineBottom + 4 + i * 17,
-        style: {
-          text: line,
-          fill: ChipChart.lineColor(line, chipColors) || chipColors.text,
-          font: '14px monospace', textAlign: 'left',
-        },
-        z: 100,
+        text: line, x: cw * 0.86, y: klineBottom + 14 + i * 17,
+        fill: ChipChart.lineColor(line, chipColors) || chipColors.text,
+        font: '14px monospace',
       });
     });
   }
-  chart.setOption({ graphic: graphics });
+  loadDrawings();            // 画线: 切代码/周期后从服务器同步 (_loadedKey 防重复拉取)
+  redrawDrawings(graphics);  // 面板标签 + 画线层绘制到 overlay canvas
   // 首次渲染延迟 resize，解决底部日期轴被截断
   if (!STATE._initResized) { STATE._initResized = true; setTimeout(() => chart.resize(), 100); }
 }
@@ -2601,6 +2728,900 @@ function refresh() {
   switchSymbol(input);
   loadCurrent();
 }
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWING MODE (画线模式): 工具面板 / 指针交互 / graphic 渲染 / 服务器同步
+// 纯逻辑在 static/js/drawings.js (Drawings 全局), 此处只做集成。
+// ═══════════════════════════════════════════════════════════════
+const DRAW_TOOLS = [
+  { id: 'select',     icon: '↖', title: '选择/编辑 (Esc 退出工具)' },
+  { id: 'trend',      icon: '╱', title: '趋势线 (两次点击)' },
+  { id: 'ray',        icon: '→', title: '射线 (向右无限延伸)' },
+  { id: 'hline',      icon: '─', title: '水平线 (单击, 轴上带价格标签)' },
+  { id: 'vline',      icon: '│', title: '垂直线 (单击)' },
+  { id: 'poly',       icon: '⋯', title: '折线 (多点, Enter/双击结束)' },
+  { id: 'rect',       icon: '▭', title: '矩形' },
+  { id: 'channel',    icon: '∥', title: '平行通道 (3 点)' },
+  { id: 'fib',        icon: 'ƒ', title: '斐波那契回撤' },
+  { id: 'regression', icon: '≈', title: '线性回归通道 (±2σ)' },
+  { id: 'arrow',      icon: '↗', title: '箭头线' },
+  { id: 'text',       icon: 'A', title: '文本标注' },
+  { id: 'position',   icon: '±', title: '多空仓位盒 (入场→目标→止损, 自动盈亏比)' },
+  { id: 'measure',    icon: '⤢', title: '测量尺 (涨跌幅/根数/天数)' },
+];
+const DRAW_POINT_NEEDS = { hline: 1, vline: 1, text: 1, poly: Infinity, channel: 3, position: 3 };
+
+function drawSupported() {
+  return !!Drawings && !!STATE.chart && STATE.klineData && STATE.klineData.klines
+    && STATE.klineData.klines.length > 1 && STATE.period !== 'intraday';
+}
+
+/** 画线纯逻辑上下文: {n, dateMap:{map,dates}, bars} */
+function drawCtx() {
+  if (!drawSupported()) return null;
+  if (!STATE.draw._dateMap || STATE.draw._dateMapKey !== STATE.klineData.klines[STATE.klineData.klines.length - 1].date + ':' + STATE.klineData.klines.length) {
+    STATE.draw._dateMap = Drawings.buildDateIndexMap(STATE.klineData.klines);
+    STATE.draw._dateMapKey = STATE.klineData.klines[STATE.klineData.klines.length - 1].date + ':' + STATE.klineData.klines.length;
+  }
+  return {
+    n: STATE.klineData.klines.length,
+    dateMap: STATE.draw._dateMap,
+    bars: STATE.klineData.klines,
+  };
+}
+
+/** 像素投影 P: x(idx)/y(price) 线性外推 (支持未来bar越界换算), grid=主图像素矩形 */
+function drawMapper() {
+  const chart = STATE.chart, n = STATE.klineData.klines.length;
+  const pxLast = chart.convertToPixel({ gridIndex: 0 }, [n - 1, 0])[0];
+  const pxPrev = n >= 2 ? chart.convertToPixel({ gridIndex: 0 }, [n - 2, 0])[0] : pxLast - 10;
+  const xStep = (n >= 2 && pxLast !== pxPrev) ? pxLast - pxPrev : 10;
+  const py0 = chart.convertToPixel({ gridIndex: 0 }, [n - 1, 0])[1];
+  const py1 = chart.convertToPixel({ gridIndex: 0 }, [n - 1, 1])[1];
+  const yStep = py1 - py0; // price=1 处像素 (线性轴)
+  const gr = (STATE._gridRects && STATE._gridRects[0]) || { left: 0, right: chart.getWidth(), top: 0, bottom: chart.getHeight() };
+  return {
+    W: chart.getWidth(), H: chart.getHeight(), grid: gr,
+    x: (idx) => pxLast + (idx - (n - 1)) * xStep,
+    y: (price) => py0 + price * yStep,
+    idxAt: (px) => (n - 1) + (px - pxLast) / xStep,
+    priceAt: (py) => (py - py0) / yStep,
+  };
+}
+
+function drawNeedsFuture() {
+  const dr = STATE.draw;
+  if (dr.enabled || dr.autoLines) return true;
+  return dr.drawings.some(d => d.extendRight || (d.points || []).some(p => p.off > 0));
+}
+
+// ── 主图 tooltip 相交提示: 线型画线在该 bar 的价位与相对 close 的偏离 ──
+const DRAW_SHORT_LABELS = {
+  trend: '趋势线', ray: '射线', arrow: '箭头线', hline: '水平线',
+  channel: '通道线', regression: '回归中线',
+};
+
+function drawingCrossTooltipHtml(idx, close) {
+  const dr = STATE.draw;
+  if (!dr || !dr.visible) return '';
+  const hasAuto = dr.autoLines && (dr._autoLines || []).length > 0;
+  if (!dr.drawings.length && !hasAuto) return '';
+  const ctx = drawCtx();
+  if (!ctx) return '';
+  const rows = [];
+  const pushRow = (label, color, val) => {
+    if (val == null || !Number.isFinite(val)) return;
+    let pctHtml = '';
+    if (close) {
+      const pct = (close - val) / Math.abs(close) * 100;
+      const clr = pct >= 0 ? C().up : C().down;
+      pctHtml = ` <span style="color:${clr};font-weight:700">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>`;
+    }
+    rows.push(`<div><span style="color:${color}">${escHtml(label)}</span> <b>${fmtPrice3(val)}</b>${pctHtml}</div>`);
+  };
+  dr.drawings.forEach(d => {
+    const label = DRAW_SHORT_LABELS[d.type];
+    if (!label) return;
+    pushRow(label, d.style.color, Drawings.valueAt(d, idx, ctx));
+  });
+  if (hasAuto) {
+    (dr._autoLines || []).forEach(a => {
+      if (idx < a.points[0].i) return;
+      const v = Drawings.lineValue(a.points[0], a.points[1], idx);
+      pushRow(a.kind === 'L' ? '自动支撑' : '自动压力', a.kind === 'L' ? C().up : C().down, v);
+    });
+  }
+  if (!rows.length) return '';
+  return `<div style="margin-top:4px;padding-top:4px;border-top:1px solid ${C().tipBorder}">${rows.join('')}</div>`;
+}
+
+// ── 渲染: 面板标签 + 画线 + 自动建议线 + 草稿 (replaceMerge 整层刷新) ──
+// ── 渲染: 独立覆盖 canvas ──
+// 画线层不进 ECharts graphic (其增量合并对新增元素不可靠且静默失败),
+// 改为透明 overlay canvas 重绘; 事件仍由 zrender 派发 (pointer-events:none 不遮挡图表)。
+function redrawDrawings(panelLabels) {
+  if (panelLabels) STATE.draw._labels = panelLabels;
+  if (STATE.draw._raf) return;
+  STATE.draw._raf = true;
+  requestAnimationFrame(() => {
+    STATE.draw._raf = false;
+    _renderDrawingsNow();
+  });
+}
+
+function drawOverlayCtx() {
+  const chart = STATE.chart;
+  const cv = document.getElementById('draw-overlay');
+  if (!chart || !cv) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const W = chart.getWidth(), H = chart.getHeight();
+  const bw = Math.round(W * dpr), bh = Math.round(H * dpr);
+  if (cv.width !== bw || cv.height !== bh) {
+    cv.width = bw; cv.height = bh;
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  }
+  const c2 = cv.getContext('2d');
+  c2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c2.clearRect(0, 0, W, H);
+  return c2;
+}
+
+function strokeSeg(c2, x1, y1, x2, y2, color, width, dash) {
+  if (![x1, y1, x2, y2].every(Number.isFinite)) return; // 脏坐标会毒化整个 canvas 状态
+  c2.beginPath();
+  c2.moveTo(x1, y1);
+  c2.lineTo(x2, y2);
+  c2.strokeStyle = color;
+  c2.lineWidth = width || 1;
+  c2.setLineDash(dash || []);
+  c2.stroke();
+  c2.setLineDash([]);
+}
+
+function hexToRgba(hex, alpha) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return hex;
+  const v = parseInt(m[1], 16);
+  return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${alpha})`;
+}
+
+function paintHandle(c2, x, y, color) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  c2.beginPath();
+  c2.arc(x, y, Drawings.HANDLE_R, 0, Math.PI * 2);
+  c2.fillStyle = '#fff';
+  c2.fill();
+  c2.lineWidth = 2;
+  c2.strokeStyle = color;
+  c2.stroke();
+}
+
+function paintTag(c2, text, xRight, y, bg) {
+  c2.font = '10px monospace';
+  const w = c2.measureText(text).width + 8;
+  const h = 15;
+  c2.fillStyle = bg;
+  c2.fillRect(xRight + 2, y - h / 2, w, h);
+  c2.fillStyle = '#fff';
+  c2.fillText(text, xRight + 6, y + 3.5);
+  c2.font = '12px monospace';
+}
+
+function paintLabels(c2, labels) {
+  (labels || []).forEach(l => {
+    c2.font = l.font || 'bold 11px monospace';
+    c2.fillStyle = l.fill;
+    c2.fillText(l.text, l.x, l.y);
+  });
+  c2.font = '12px monospace';
+}
+
+function paintDrawing(c2, d, P, ctx, selected) {
+  const g = Drawings.geom(d, P, ctx);
+  if (!g) return;
+  const color = d.style.color, width = d.style.width, dash = d.style.dash ? [6, 4] : [];
+  switch (d.type) {
+    case 'trend': case 'ray': case 'arrow': {
+      if (!g.c) break;
+      strokeSeg(c2, g.c[0], g.c[1], g.c[2], g.c[3], color, width, dash);
+      if (d.type === 'arrow' && g.c[2] !== g.c[0]) {
+        const tail = Drawings.arrowHead(g.c[0], g.c[1], g.c[2], g.c[3], 4 + width * 3);
+        strokeSeg(c2, tail.lx, tail.ly, g.c[2], g.c[3], color, width, []);
+        strokeSeg(c2, tail.rx, tail.ry, g.c[2], g.c[3], color, width, []);
+      }
+      break;
+    }
+    case 'hline':
+      strokeSeg(c2, P.grid.left, g.y, P.grid.right, g.y, color, width, dash);
+      paintTag(c2, fmtPrice3(g.price), P.grid.right, g.y, color);
+      break;
+    case 'vline':
+      strokeSeg(c2, g.x, P.grid.top, g.x, P.grid.bottom, color, width, dash);
+      break;
+    case 'poly': {
+      if (g.pts.length < 2) break;
+      c2.beginPath();
+      g.pts.forEach((p, i) => i ? c2.lineTo(p.x, p.y) : c2.moveTo(p.x, p.y));
+      c2.strokeStyle = color; c2.lineWidth = width; c2.setLineDash(dash);
+      c2.stroke(); c2.setLineDash([]);
+      break;
+    }
+    case 'rect':
+      c2.fillStyle = hexToRgba(color, 0.08);
+      c2.fillRect(g.x, g.y, g.w, g.h);
+      c2.strokeStyle = color; c2.lineWidth = width; c2.setLineDash(dash);
+      c2.strokeRect(g.x, g.y, g.w, g.h); c2.setLineDash([]);
+      break;
+    case 'channel': {
+      const c1 = Drawings.clipSeg(g.a.x, g.a.y, g.b.x, g.b.y, P.grid);
+      const c2b = Drawings.clipSeg(g.a.x + g.dx, g.a.y + g.dy, g.b.x + g.dx, g.b.y + g.dy, P.grid);
+      if (c1) strokeSeg(c2, c1[0], c1[1], c1[2], c1[3], color, width, dash);
+      if (c2b) strokeSeg(c2, c2b[0], c2b[1], c2b[2], c2b[3], color, width, dash);
+      break;
+    }
+    case 'fib': {
+      c2.font = '10px monospace';
+      for (let i = 0; i < g.levels.length; i++) {
+        const lv = g.levels[i];
+        if (i < g.levels.length - 1) {
+          const y2 = g.levels[i + 1].y;
+          c2.fillStyle = hexToRgba(color, i % 2 ? 0.04 : 0.08);
+          c2.fillRect(g.xStart, Math.min(lv.y, y2), g.xEnd - g.xStart, Math.abs(y2 - lv.y));
+        }
+        strokeSeg(c2, g.xStart, lv.y, g.xEnd, lv.y, color, 1, []);
+        c2.fillStyle = color;
+        c2.fillText((lv.r * 100).toFixed(1) + '%  ' + fmtPrice3(lv.price), g.xStart + 4, lv.y - 4);
+      }
+      break;
+    }
+    case 'regression':
+      strokeSeg(c2, g.up1.x, g.up1.y, g.up2.x, g.up2.y, color, 1, [4, 4]);
+      strokeSeg(c2, g.lo1.x, g.lo1.y, g.lo2.x, g.lo2.y, color, 1, [4, 4]);
+      strokeSeg(c2, g.mid1.x, g.mid1.y, g.mid2.x, g.mid2.y, color, width, dash);
+      c2.font = '10px monospace'; c2.fillStyle = color;
+      c2.textAlign = 'center';
+      c2.fillText('REG ±' + Drawings.REG_SIGMA + 'σ', (g.x1 + g.x2) / 2, g.up2.y - 8);
+      c2.textAlign = 'left';
+      break;
+    case 'text':
+      c2.font = '13px sans-serif';
+      c2.fillStyle = color;
+      c2.fillText(g.text || ' ', g.x, g.y);
+      break;
+    case 'position': {
+      const profitCol = g.dir === 'long' ? C().up : C().down;
+      const lossCol = g.dir === 'long' ? C().down : C().up;
+      const boxW = Math.max(g.x2 - g.x1, 10);
+      c2.fillStyle = hexToRgba(profitCol, 0.15);
+      c2.fillRect(g.x1, Math.min(g.entryY, g.targetY), boxW, Math.abs(g.targetY - g.entryY));
+      c2.fillStyle = hexToRgba(lossCol, 0.15);
+      c2.fillRect(g.x1, Math.min(g.entryY, g.stopY), boxW, Math.abs(g.stopY - g.entryY));
+      strokeSeg(c2, g.x1, g.entryY, g.x2, g.entryY, color, width, []);
+      strokeSeg(c2, g.x1, g.targetY, g.x2, g.targetY, profitCol, 1, [4, 4]);
+      strokeSeg(c2, g.x1, g.stopY, g.x2, g.stopY, lossCol, 1, [4, 4]);
+      c2.font = '10px monospace'; c2.fillStyle = color;
+      c2.fillText((g.dir === 'long' ? '做多' : '做空') + '  R:R ' + g.rr.toFixed(2), g.x1 + 4, g.entryY - 8);
+      break;
+    }
+  }
+  if (selected) {
+    Drawings.handlesOf(d, P, ctx).forEach(h => paintHandle(c2, h.x, h.y, color));
+  }
+}
+
+function refreshAutoLines(ctx) {
+  const key = STATE.symbol + ':' + STATE.period + ':' + ctx.n + ':' + ctx.bars[ctx.n - 1].date;
+  if (STATE.draw._autoKey === key && STATE.draw._autoLines) return;
+  STATE.draw._autoKey = key;
+  STATE.draw._autoLines = Drawings.detectTrendlines(ctx.bars, {});
+}
+
+function paintAutoLines(c2, P, ctx) {
+  (STATE.draw._autoLines || []).forEach(a => {
+    if (a.points[1].i === a.points[0].i) return;
+    const x1 = P.x(a.points[0].i), y1 = P.y(a.points[0].p);
+    const slope = (a.points[1].p - a.points[0].p) / (a.points[1].i - a.points[0].i);
+    const y2 = P.y(a.points[1].p + slope * (P.idxAt(P.grid.right) - a.points[1].i));
+    const clipped = Drawings.clipSeg(x1, y1, P.grid.right, y2, P.grid);
+    if (!clipped) return;
+    const color = a.kind === 'L' ? C().up : C().down;
+    strokeSeg(c2, clipped[0], clipped[1], clipped[2], clipped[3], color, 1, [3, 5]);
+    c2.font = '10px monospace'; c2.fillStyle = color;
+    c2.fillText((a.kind === 'L' ? '自动支撑' : '自动压力') + ' · ' + a.touches + '触点', clipped[0] + 4, clipped[1] - 6);
+    c2.font = '12px monospace';
+  });
+}
+
+function paintSuggest(c2, P, ctx) {
+  const sug = STATE.draw.suggest;
+  if (!sug) return;
+  const d = STATE.draw.drawings.find(x => x.id === sug.forId);
+  if (!d) return;
+  const ghost = {
+    id: 'sug', type: d.type,
+    points: sug.points.map(pt => Drawings.pointFromIdx(pt.i, pt.p, ctx.dateMap, ctx.n)),
+    style: { color: '#e6a23c', width: 2, dash: true }, extendRight: d.extendRight,
+  };
+  const g = Drawings.geom(ghost, P, ctx);
+  if (!g || !g.c) return;
+  strokeSeg(c2, g.c[0], g.c[1], g.c[2], g.c[3], '#e6a23c', 2, [6, 4]);
+  paintHandle(c2, g.raw1.x, g.raw1.y, '#e6a23c');
+  paintHandle(c2, g.raw2.x, g.raw2.y, '#e6a23c');
+}
+
+function paintDraft(c2, P, ctx) {
+  const draft = STATE.draw.draft;
+  if (!draft) return;
+  const pts = draft.pts;
+  const pointer = STATE.draw._pointer;
+  const color = '#e6a23c';
+  if (draft.tool === 'measure') {
+    if (pts.length >= 1) {
+      const a = pts[0], b = pts[1] || pointer;
+      if (b) {
+        const x1 = P.x(a.idx), y1 = P.y(a.price), x2 = P.x(b.idx), y2 = P.y(b.price);
+        c2.fillStyle = 'rgba(230,162,60,0.12)';
+        c2.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+        c2.strokeStyle = color; c2.lineWidth = 1;
+        c2.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+        const st = Drawings.measureStats(ctx.dateMap.dates, Math.round(a.idx), Math.round(b.idx), a.price, b.price);
+        c2.font = '12px monospace';
+        c2.fillStyle = st.dp >= 0 ? C().up : C().down;
+        c2.fillText((st.dp >= 0 ? '+' : '') + st.pct.toFixed(2) + '%', Math.max(x1, x2) + 6, Math.min(y1, y2) + 4);
+        c2.fillText(st.bars + ' 根 / ' + Math.abs(st.days) + ' 天', Math.max(x1, x2) + 6, Math.min(y1, y2) + 20);
+      }
+    }
+    return;
+  }
+  if (draft.tool === 'hline' && pts.length >= 1) {
+    strokeSeg(c2, P.grid.left, P.y(pts[0].price), P.grid.right, P.y(pts[0].price), color, 1, []);
+  } else if (draft.tool === 'vline' && pts.length >= 1) {
+    strokeSeg(c2, P.x(pts[0].idx), P.grid.top, P.x(pts[0].idx), P.grid.bottom, color, 1, []);
+  } else if (draft.tool === 'text') {
+    /* 文本: 输入框交互, 无需预览 */
+  } else if (pts.length >= 1) {
+    const all = pointer ? pts.concat([pointer]) : pts;
+    if (draft.tool === 'poly' && all.length >= 2) {
+      c2.beginPath();
+      all.forEach((p, i) => { const x = P.x(p.idx), y = P.y(p.price); i ? c2.lineTo(x, y) : c2.moveTo(x, y); });
+      c2.strokeStyle = color; c2.lineWidth = 1; c2.stroke();
+    } else if (draft.tool === 'channel' && pts.length >= 2 && pointer) {
+      strokeSeg(c2, P.x(pts[0].idx), P.y(pts[0].price), P.x(pts[1].idx), P.y(pts[1].price), color, 1, []);
+      const dx = P.x(pointer.idx) - P.x(pts[0].idx), dy = P.y(pointer.price) - P.y(pts[0].price);
+      strokeSeg(c2, P.x(pts[0].idx) + dx, P.y(pts[0].price) + dy, P.x(pts[1].idx) + dx, P.y(pts[1].price) + dy, color, 1, []);
+    } else if (all.length >= 2) {
+      strokeSeg(c2, P.x(all[0].idx), P.y(all[0].price), P.x(all[1].idx), P.y(all[1].price), color, 1, []);
+    }
+    all.forEach(p => paintHandle(c2, P.x(p.idx), P.y(p.price), color));
+  }
+}
+
+function _renderDrawingsNow() {
+  const chart = STATE.chart;
+  if (!chart) return;
+  const c2 = drawOverlayCtx();
+  if (!c2) return;
+  const dctx = drawCtx();
+  if (!dctx || !STATE.draw.visible) { positionDrawMenu(); return; }
+  const P = drawMapper();
+  if (STATE.draw.autoLines) refreshAutoLines(dctx);
+  paintLabels(c2, STATE.draw._labels);
+  if (STATE.draw.autoLines) paintAutoLines(c2, P, dctx);
+  STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id));
+  if (STATE.draw.suggest) paintSuggest(c2, P, dctx);
+  if (STATE.draw.draft) paintDraft(c2, P, dctx);
+  positionDrawMenu();
+}
+
+// ── 指针交互 ──
+function initDrawEvents() {
+  const zr = STATE.chart.getZr();
+  zr.on('mousedown', onDrawMouseDown);
+  zr.on('mousemove', onDrawMouseMove);
+  zr.on('mouseup', onDrawMouseUp);
+  zr.on('contextmenu', (e) => {
+    if (!STATE.draw.enabled) return;
+    if (e.event && e.event.preventDefault) e.event.preventDefault();
+    if (STATE.draw.draft) cancelDraft();
+    else selectDrawing(null);
+  });
+}
+
+function drawPointer(e) {
+  const ctx = drawCtx();
+  if (!ctx) return null;
+  const px = e.offsetX, py = e.offsetY;
+  const gr = (STATE._gridRects && STATE._gridRects[0]) || null;
+  if (!gr || py < gr.top - 4 || py > gr.bottom + 4) return null;
+  const P = drawMapper();
+  return { px, py, P, ctx, idxF: P.idxAt(px), price: P.priceAt(py) };
+}
+
+function snappedPoint(ptInfo) {
+  if (STATE.draw.magnet && ptInfo.idxF <= ptInfo.ctx.n - 1) {
+    const s = Drawings.snap(ptInfo.ctx.bars, ptInfo.idxF, ptInfo.price, ptInfo.P, Drawings.MAGNET_PX);
+    return { idx: s.idx, price: s.price };
+  }
+  return { idx: ptInfo.idxF, price: ptInfo.price };
+}
+
+function onDrawMouseDown(e) {
+  if (!STATE.draw.enabled || !drawSupported()) return;
+  if (e.event && (e.event.button === 2)) return; // 右键: cancelDraft 在 contextmenu 处理
+  if (e.event && e.event.button !== 0) return;
+  const info = drawPointer(e);
+  if (!info) return;
+  const dr = STATE.draw;
+  // 拖拽选中画线的手柄
+  if (dr.tool === 'select' && dr.selectedId) {
+    const d = dr.drawings.find(x => x.id === dr.selectedId);
+    if (d) {
+      const hit = Drawings.hitTest(d, info.P, info.ctx, info.px, info.py);
+      if (hit && hit.part.startsWith('h')) {
+        const ptIdx = parseInt(hit.part.slice(1), 10);
+        dr.drag = { id: d.id, ptIdx, before: JSON.parse(JSON.stringify(d.points)) };
+        try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: false }] }); } catch (err) { /* ignore */ }
+        return;
+      }
+    }
+  }
+  if (dr.tool === 'select') {
+    // 命中任一画线 → 选中
+    for (let i = dr.drawings.length - 1; i >= 0; i--) {
+      const hit = Drawings.hitTest(dr.drawings[i], info.P, info.ctx, info.px, info.py);
+      if (hit) { selectDrawing(dr.drawings[i].id); return; }
+    }
+    selectDrawing(null);
+    return;
+  }
+  // 画线工具: 逐点落子
+  const pt = snappedPoint(info);
+  if (dr.tool === 'text') {
+    // 阻止 mousedown 默认行为(焦点转移到画布/body), 否则输入框刚 focus 即被 blur
+    if (e.event && e.event.preventDefault) e.event.preventDefault();
+    openTextInput(info, pt);
+    return;
+  }
+  if (dr.tool === 'measure') {
+    if (!dr.draft) {
+      dr.draft = { tool: 'measure', pts: [pt] };
+    } else {
+      dr.draft.pts.push(pt);
+      const snapshot = dr.draft;
+      setTimeout(() => {
+        if (STATE.draw.draft === snapshot) { STATE.draw.draft = null; redrawDrawings(); }
+      }, 2500);
+    }
+    return;
+  }
+  if (!dr.draft) dr.draft = { tool: dr.tool, pts: [pt], need: DRAW_POINT_NEEDS[dr.tool] || 2 };
+  else {
+    // 折线: 双击结束的第二次按下与上一点重合, 不重复落点 (dblclick 事件负责结束)
+    const lastPt = dr.draft.pts[dr.draft.pts.length - 1];
+    if (dr.tool === 'poly' && lastPt
+        && Math.abs(info.P.x(lastPt.idx) - info.px) < 6
+        && Math.abs(info.P.y(lastPt.price) - info.py) < 6) return;
+    dr.draft.pts.push(pt);
+  }
+  const need = dr.draft.need;
+  if (dr.draft.pts.length >= need) finalizeDraft();
+  else redrawDrawings();
+}
+
+function onDrawMouseMove(e) {
+  if (!STATE.draw.enabled) return;
+  const info = drawPointer(e);
+  if (!info) return;
+  STATE.draw._pointer = { idx: info.idxF, price: info.price };
+  const dr = STATE.draw;
+  if (dr.drag) {
+    const d = dr.drawings.find(x => x.id === dr.drag.id);
+    if (d) {
+      const pt = snappedPoint(info);
+      d.points[dr.drag.ptIdx] = Drawings.pointFromIdx(pt.idx, pt.price, info.ctx.dateMap, info.ctx.n);
+      d.points[dr.drag.ptIdx].p = pt.price;
+      redrawDrawings();
+    }
+    return;
+  }
+  if (dr.draft && dr.tool !== 'text') {
+    // 预览端点跟随指针由 paintDraft 用 _pointer 绘制;
+    // 已落子的锚点不可跟随鼠标, 否则第二击前 pt1 会被移动到 pt2 位置 (两点重合)
+    redrawDrawings();
+  }
+}
+
+function onDrawMouseUp() {
+  const dr = STATE.draw;
+  if (!dr.drag) return;
+  const d = dr.drawings.find(x => x.id === dr.drag.id);
+  if (d) {
+    dr.undo.push({ op: 'move', id: d.id, before: dr.drag.before, after: JSON.parse(JSON.stringify(d.points)) });
+    if (dr.undo.length > 50) dr.undo.shift();
+    runSuggest(d);
+    scheduleSave();
+  }
+  dr.drag = null;
+  // 选择工具下恢复拖拽平移
+  if (dr.enabled && dr.tool === 'select') {
+    try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: true }] }); } catch (err) { /* ignore */ }
+  }
+  redrawDrawings();
+}
+
+// ── 草稿定稿 / 工具切换 / 选择 / 删除 / 撤销 ──
+function finalizeDraft() {
+  const dr = STATE.draw;
+  const draft = dr.draft;
+  if (!draft) return;
+  dr.draft = null;
+  if (!draft.pts.length) return;
+  const ctx = drawCtx();
+  if (!ctx) return;
+  const pts = draft.pts.map(p => Drawings.pointFromIdx(p.idx, p.price, ctx.dateMap, ctx.n));
+  let extra;
+  if (draft.tool === 'position') {
+    extra = { dir: draft.pts[1].price >= draft.pts[0].price ? 'long' : 'short' };
+  }
+  const d = Drawings.createDrawing(draft.tool, pts, extra);
+  dr.drawings.push(d);
+  dr.undo.push({ op: 'add', id: d.id });
+  if (dr.undo.length > 50) dr.undo.shift();
+  selectDrawing(d.id);
+  if (draft.tool === 'trend' || draft.tool === 'ray') runSuggest(d);
+  scheduleSave();
+  redrawDrawings();
+}
+
+function finishPolyDraft() {
+  const dr = STATE.draw;
+  if (dr.draft && dr.draft.tool === 'poly' && dr.draft.pts.length >= 2) finalizeDraft();
+  else cancelDraft();
+}
+
+function cancelDraft() {
+  STATE.draw.draft = null;
+  redrawDrawings();
+}
+
+/** 画线修正建议: 趋势线/射线定稿或拖拽后, 找触点更多的锚点方案 */
+function runSuggest(d) {
+  const ctx = drawCtx();
+  if (!ctx || (d.type !== 'trend' && d.type !== 'ray')) return;
+  const opt = Drawings.optimizeTrendline(ctx.bars, d, ctx, {});
+  STATE.draw.suggest = opt ? { forId: d.id, points: opt.points, touches: opt.touches } : null;
+  positionSuggestBox();
+}
+
+function selectDrawing(id) {
+  STATE.draw.selectedId = id;
+  if (!id) { STATE.draw.suggest = null; hideSuggestBox(); }
+  if (id) showDrawMenu(); else hideDrawMenu();
+  redrawDrawings();
+}
+
+function deleteSelectedDrawing() {
+  const dr = STATE.draw;
+  if (!dr.enabled || !dr.selectedId) return false;
+  const idx = dr.drawings.findIndex(d => d.id === dr.selectedId);
+  if (idx < 0) return false;
+  dr.undo.push({ op: 'del', d: dr.drawings[idx], at: idx });
+  dr.drawings.splice(idx, 1);
+  dr.selectedId = null;
+  dr.suggest = null;
+  scheduleSave();
+  redrawDrawings();
+  return true;
+}
+
+function drawUndo() {
+  const dr = STATE.draw;
+  const op = dr.undo.pop();
+  if (!op) return;
+  if (op.op === 'add') {
+    const i = dr.drawings.findIndex(d => d.id === op.id);
+    if (i >= 0) dr.drawings.splice(i, 1);
+    if (dr.selectedId === op.id) dr.selectedId = null;
+  } else if (op.op === 'del') {
+    dr.drawings.splice(Math.min(op.at, dr.drawings.length), 0, op.d);
+  } else if (op.op === 'move') {
+    const d = dr.drawings.find(x => x.id === op.id);
+    if (d) d.points = op.before;
+  }
+  dr.suggest = null;
+  scheduleSave();
+  redrawDrawings();
+}
+
+// ── 工具面板 ──
+function toggleDrawMode() {
+  const dr = STATE.draw;
+  if (!dr.enabled) {
+    if (STATE.period === 'intraday') { showToast('分时视图暂不支持画线, 请切换到 K 线周期', { type: 'warn' }); return; }
+    if (!drawSupported()) { showToast('图表尚未就绪', { type: 'warn' }); return; }
+    dr.enabled = true;
+    document.getElementById('btn-draw').classList.add('active');
+    buildPalette();
+    document.getElementById('draw-palette').style.display = 'flex';
+  } else {
+    dr.enabled = false;
+    dr.draft = null;
+    dr.drag = null;
+    selectDrawing(null);
+    document.getElementById('btn-draw').classList.remove('active');
+    document.getElementById('draw-palette').style.display = 'none';
+    hideDrawMenu();
+    hideSuggestBox();
+  }
+  updateChart(false); // 未来bar空间随开关变化, 需重建坐标轴
+}
+
+function buildPalette() {
+  const pal = document.getElementById('draw-palette');
+  pal.innerHTML = '';
+  DRAW_TOOLS.forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'dp-btn' + (STATE.draw.tool === t.id ? ' active' : '');
+    b.textContent = t.icon;
+    b.title = t.title;
+    b.dataset.tool = t.id;
+    b.addEventListener('click', () => setDrawTool(t.id));
+    pal.appendChild(b);
+  });
+  const sep = document.createElement('div');
+  sep.className = 'dp-sep';
+  pal.appendChild(sep);
+  [['magnet', '🧲', '磁吸吸附 K 线开高低收'], ['auto', '⚡', '自动建议支撑/压力趋势线'], ['hide', '👁', '显示/隐藏画线'], ['undo', '↩', '撤销 (Ctrl+Z)'], ['clear', '🗑', '清空全部画线']].forEach(([id, icon, tip]) => {
+    const b = document.createElement('button');
+    b.className = 'dp-btn' + ((id === 'magnet' && STATE.draw.magnet) || (id === 'auto' && STATE.draw.autoLines) ? ' toggled' : '');
+    b.textContent = icon;
+    b.title = tip;
+    b.dataset.act = id;
+    b.addEventListener('click', () => onPaletteAction(id, b));
+    pal.appendChild(b);
+  });
+}
+
+function setDrawTool(tool) {
+  STATE.draw.tool = tool;
+  STATE.draw.draft = null;
+  if (tool !== 'select') selectDrawing(null);
+  document.querySelectorAll('#draw-palette .dp-btn[data-tool]').forEach(b => {
+    b.classList.toggle('active', b.dataset.tool === tool);
+  });
+  // 拖拽平移锁: 非选择工具时禁用 (滚轮缩放不受影响)
+  if (STATE.chart) {
+    try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: tool === 'select' }] }); } catch (e) { /* ignore */ }
+  }
+  redrawDrawings();
+}
+
+function onPaletteAction(id, btn) {
+  const dr = STATE.draw;
+  if (id === 'magnet') {
+    dr.magnet = !dr.magnet;
+    btn.classList.toggle('toggled', dr.magnet);
+    showToast('磁吸' + (dr.magnet ? '开启' : '关闭'));
+  } else if (id === 'auto') {
+    dr.autoLines = !dr.autoLines;
+    btn.classList.toggle('toggled', dr.autoLines);
+    dr._autoLines = null;
+    updateChart(false); // 未来空间 + 重算
+  } else if (id === 'hide') {
+    dr.visible = !dr.visible;
+    btn.classList.toggle('toggled', !dr.visible);
+    redrawDrawings();
+  } else if (id === 'undo') {
+    drawUndo();
+  } else if (id === 'clear') {
+    if (!dr.drawings.length) return;
+    if (!confirm('清空当前代码/周期下的全部 ' + dr.drawings.length + ' 条画线?')) return;
+    dr.undo.push({ op: 'del-all', list: dr.drawings });
+    dr.drawings = [];
+    dr.selectedId = null;
+    dr.suggest = null;
+    scheduleSave();
+    redrawDrawings();
+  }
+}
+
+// ── 选中画线的迷你菜单 ──
+function buildDrawMenu() {
+  const box = document.getElementById('draw-menu-colors');
+  box.innerHTML = '';
+  Drawings.PALETTE.forEach(c => {
+    const b = document.createElement('button');
+    b.className = 'dm-dot';
+    b.style.background = c;
+    b.title = c;
+    b.addEventListener('click', () => {
+      const d = getSelected();
+      if (!d) return;
+      d.style.color = c;
+      scheduleSave();
+      redrawDrawings();
+    });
+    box.appendChild(b);
+  });
+  document.getElementById('dm-width').addEventListener('click', () => {
+    const d = getSelected();
+    if (!d) return;
+    d.style.width = d.style.width === 2 ? 1 : 2;
+    document.getElementById('dm-width').textContent = d.style.width === 2 ? '粗' : '细';
+    scheduleSave();
+    redrawDrawings();
+  });
+  document.getElementById('dm-extend').addEventListener('click', () => {
+    const d = getSelected();
+    if (!d) return;
+    d.extendRight = !d.extendRight;
+    document.getElementById('dm-extend').style.color = d.extendRight ? '#e6a23c' : '';
+    scheduleSave();
+    updateChart(false); // 延伸开关影响未来bar空间
+  });
+  document.getElementById('dm-delete').addEventListener('click', () => deleteSelectedDrawing());
+}
+
+function getSelected() {
+  return STATE.draw.drawings.find(d => d.id === STATE.draw.selectedId) || null;
+}
+
+function showDrawMenu() {
+  const d = getSelected();
+  const menu = document.getElementById('draw-menu');
+  if (!d) { hideDrawMenu(); return; }
+  menu.style.display = 'flex';
+  document.querySelectorAll('#draw-menu .dm-dot').forEach(b => {
+    b.classList.toggle('active', b.title === d.style.color);
+  });
+  document.getElementById('dm-width').textContent = d.style.width === 2 ? '粗' : '细';
+  const ext = document.getElementById('dm-extend');
+  ext.style.color = d.extendRight ? '#e6a23c' : '';
+  const canExtend = ['trend', 'fib', 'regression', 'position', 'rect'].includes(d.type);
+  ext.style.display = canExtend ? '' : 'none';
+  positionDrawMenu();
+}
+
+function positionDrawMenu() {
+  const d = getSelected();
+  const menu = document.getElementById('draw-menu');
+  if (!d || menu.style.display === 'none') return;
+  const ctx = drawCtx();
+  if (!ctx) return;
+  const P = drawMapper();
+  const hs = Drawings.handlesOf(d, P, ctx);
+  if (!hs.length) return;
+  const wrap = document.getElementById('chart-wrap');
+  menu.style.left = Math.max(4, Math.min(hs[0].x, wrap.clientWidth - menu.offsetWidth - 4)) + 'px';
+  menu.style.top = Math.max(4, hs[0].y + 14) + 'px';
+}
+
+function hideDrawMenu() {
+  document.getElementById('draw-menu').style.display = 'none';
+}
+
+// ── 修正建议浮框 ──
+function positionSuggestBox() {
+  const sug = STATE.draw.suggest;
+  const box = document.getElementById('draw-suggest');
+  if (!sug) { box.style.display = 'none'; return; }
+  const ctx = drawCtx();
+  if (!ctx) return;
+  const P = drawMapper();
+  const x = P.x(sug.points[0].i), y = P.y(sug.points[0].p);
+  const wrap = document.getElementById('chart-wrap');
+  box.style.display = 'flex';
+  box.style.left = Math.max(4, Math.min(x + 12, wrap.clientWidth - box.offsetWidth - 4)) + 'px';
+  box.style.top = Math.max(4, y - 30) + 'px';
+}
+
+function hideSuggestBox() {
+  document.getElementById('draw-suggest').style.display = 'none';
+}
+
+function adoptSuggest() {
+  const dr = STATE.draw;
+  const sug = dr.suggest;
+  if (!sug) return;
+  const d = dr.drawings.find(x => x.id === sug.forId);
+  const ctx = drawCtx();
+  if (d && ctx) {
+    dr.undo.push({ op: 'move', id: d.id, before: JSON.parse(JSON.stringify(d.points)) });
+    d.points = sug.points.map(pt => Drawings.pointFromIdx(pt.i, pt.p, ctx.dateMap, ctx.n));
+    scheduleSave();
+  }
+  dr.suggest = null;
+  redrawDrawings();
+}
+
+// ── 文本标注输入 ──
+function openTextInput(info, pt) {
+  const box = document.getElementById('draw-text-input');
+  const field = document.getElementById('draw-text-field');
+  const wrap = document.getElementById('chart-wrap');
+  box.style.display = 'block';
+  box.style.left = Math.min(info.px + 8, wrap.clientWidth - 180) + 'px';
+  box.style.top = Math.max(4, info.py - 14) + 'px';
+  field.value = '';
+  // mousedown 处理器内同步 focus 仍可能被浏览器默认行为覆盖, 延迟到下一拍再聚焦
+  setTimeout(() => field.focus(), 0);
+  const commit = () => {
+    const text = field.value.trim();
+    cleanup();
+    if (!text) return;
+    const ctx = drawCtx();
+    if (!ctx) return;
+    const d = Drawings.createDrawing('text', [Drawings.pointFromIdx(pt.idx, pt.price, ctx.dateMap, ctx.n)], { text });
+    STATE.draw.drawings.push(d);
+    STATE.draw.undo.push({ op: 'add', id: d.id });
+    scheduleSave();
+    redrawDrawings();
+  };
+  const cleanup = () => {
+    box.style.display = 'none';
+    field.removeEventListener('keydown', onKey);
+    field.removeEventListener('blur', commit);
+  };
+  const onKey = (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+    else if (ev.key === 'Escape') { cleanup(); }
+  };
+  field.addEventListener('keydown', onKey);
+  field.addEventListener('blur', commit);
+}
+
+function onDrawEscape() {
+  const dr = STATE.draw;
+  if (dr.draft) { cancelDraft(); return true; }
+  if (dr.selectedId) { selectDrawing(null); return true; }
+  if (dr.tool !== 'select') { setDrawTool('select'); return true; }
+  return false;
+}
+
+// ── 服务器同步 ──
+async function loadDrawings() {
+  const key = STATE.symbol + ':' + STATE.period;
+  if (STATE.draw._loadedKey === key) { redrawDrawings(); return; }
+  if (STATE.period === 'intraday') return;
+  STATE.draw._loadedKey = key;
+  try {
+    const resp = await fetch(`/api/drawings?symbol=${encodeURIComponent(STATE.symbol)}&period=${encodeURIComponent(STATE.period)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (STATE.symbol + ':' + STATE.period !== key) return; // 竞态
+    STATE.draw.drawings = (data.drawings || []).map(d => Drawings.normalize(d));
+    STATE.draw.undo = [];
+    STATE.draw.selectedId = null;
+    STATE.draw.suggest = null;
+    STATE.draw._autoLines = null;
+  } catch (e) { /* 离线/未登录: 画线仅本会话内存态 */ }
+  redrawDrawings();
+}
+
+let _saveTimer = null;
+function scheduleSave() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(saveDrawings, 800);
+}
+
+async function saveDrawings() {
+  if (STATE.period === 'intraday') return;
+  try {
+    await fetch('/api/drawings', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol: STATE.symbol, period: STATE.period, drawings: STATE.draw.drawings,
+      }),
+    });
+  } catch (e) { /* 静默: 下次编辑再同步 */ }
+}
+
+// 修正建议浮框按钮
+document.getElementById('ds-adopt').addEventListener('click', adoptSuggest);
+document.getElementById('ds-ignore').addEventListener('click', () => { STATE.draw.suggest = null; hideSuggestBox(); });
+buildDrawMenu();
 
 // ═══════════════════════════════════════════════════════════════
 // INIT
@@ -2721,16 +3742,34 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── 全局快捷键 (输入时失效): / 或 Ctrl+K 聚焦搜索, 1-9 切周期, Esc 关弹层 ──
   const PERIOD_KEYS = { '1': '1d', '2': '1w', '3': '1M', '4': 'intraday', '5': '1m', '6': '5m', '7': '15m', '8': '30m', '9': '60m' };
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closeDropdown(); return; }
+    // 文本标注输入中: Esc/Enter 由输入框自身处理, 画线快捷键全部让路
+    if (e.target && e.target.id === 'draw-text-field') return;
+    if (e.key === 'Escape') {
+      if (STATE.draw.enabled && onDrawEscape()) return;
+      closeDropdown(); return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       symInput.focus();
       symInput.select();
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && STATE.draw.enabled) {
+      e.preventDefault();
+      drawUndo();
+      return;
+    }
     const tag = (e.target.tagName || '').toUpperCase();
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (deleteSelectedDrawing()) e.preventDefault();
+      return;
+    }
+    if (e.key === 'Enter' && STATE.draw.enabled && STATE.draw.draft && STATE.draw.draft.tool === 'poly') {
+      finishPolyDraft();
+      return;
+    }
     if (e.key === '/') {
       e.preventDefault();
       symInput.focus();
@@ -2803,6 +3842,7 @@ document.addEventListener('DOMContentLoaded', () => {
     syncHistoryWithServer();
     scheduleInit();
   }
+
 
   // 时间 1s 刷新
   setInterval(() => {

@@ -165,7 +165,7 @@ def fetch_af_chip_bars(symbol, count=WINDOW):
     换手率 = 成交量(股) / 流通股本 × 100 (%)。近似点: 用当前流通股本回算,
     忽略历史股本变化; 价格前复权, 与图表价格轴对齐。
     """
-    import market  # 惰性导入, 避免与 api_routes 的导入顺序纠缠
+    import market  # 惰性导入, 避免与 api/ 包的导入顺序纠缠
     try:
         df = market._fetch_af_kline(symbol, "1d", count, adjust="forward")
     except Exception as e:

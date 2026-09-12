@@ -73,8 +73,7 @@ def create_app():
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_PATH"] = "/"
 
-    from auth_routes import auth_bp
-    from api_routes import api_bp
+    from api import api_bp, auth_bp
     app.register_blueprint(auth_bp)
     app.register_blueprint(api_bp)
 

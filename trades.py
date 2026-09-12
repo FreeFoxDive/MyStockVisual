@@ -184,6 +184,17 @@ CREATE TABLE IF NOT EXISTS monitor_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_monitor_alerts_lookup
     ON monitor_alerts(user_id, symbol, alert_type, fired_at);
+
+CREATE TABLE IF NOT EXISTS chart_drawings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    symbol     TEXT NOT NULL,
+    period     TEXT NOT NULL,
+    drawings   TEXT NOT NULL,           -- JSON 数组 (前端 drawings.js 结构)
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, symbol, period),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 
@@ -2307,3 +2318,69 @@ def list_monitor_alerts(user_id, limit=20):
     finally:
         conn.close()
 
+
+
+# ── 图表画线 (主面板画线模式, 按 用户+代码+周期 整体同步) ──
+
+CHART_DRAWINGS_MAX = 500          # 单 (symbol, period) 画线数量上限
+_CHART_DRAWINGS_BYTES = 512 * 1024  # JSON 序列化大小上限
+
+
+def get_chart_drawings(user_id, symbol, period):
+    """该用户在 (symbol, period) 下的画线数组; 无记录返回 []。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT drawings FROM chart_drawings WHERE user_id=? AND symbol=? AND period=?",
+            (user_id, symbol, period),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["drawings"]:
+        return []
+    try:
+        data = json.loads(row["drawings"])
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_chart_drawings(user_id, symbol, period, drawings):
+    """整体 upsert 该 (user, symbol, period) 的画线数组, 返回保存条数。
+
+    结构由前端 drawings.js 保证; 后端只做基础校验 (list[dict]、数量与体积上限)。
+    """
+    if not isinstance(drawings, list) or any(not isinstance(d, dict) for d in drawings):
+        raise ValueError("drawings 必须为对象数组")
+    if len(drawings) > CHART_DRAWINGS_MAX:
+        raise ValueError(f"画线数量超过上限 {CHART_DRAWINGS_MAX}")
+    payload = json.dumps(drawings, ensure_ascii=False, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > _CHART_DRAWINGS_BYTES:
+        raise ValueError("画线数据过大")
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO chart_drawings (user_id, symbol, period, drawings, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, symbol, period)
+               DO UPDATE SET drawings=excluded.drawings, updated_at=excluded.updated_at""",
+            (user_id, symbol, period, payload, _now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return len(drawings)
+
+
+def delete_chart_drawings(user_id, symbol, period):
+    """删除该 (user, symbol, period) 的画线记录, 返回是否删除了记录。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM chart_drawings WHERE user_id=? AND symbol=? AND period=?",
+            (user_id, symbol, period),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()

@@ -32,6 +32,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 动力系统 | Elder Impulse System — EMA13方向 + MACD柱方向决定蜡烛颜色(红多/绿空/蓝中性)，仅日K |
 | ATR 通道 | EMA13 ± 1/2/3 ATR 共6条虚线，仅日K，默认关闭 |
 | 跳空缺口 | 60m/日/周/月：前端扫描未回补缺口（最近 2 个），主图灰色 markArea；十字线落在灰区时提示价差；部分回补收缩；日K 随快照重算；默认开启 |
+| 图表画线 | 主面板 14 种工具（趋势线/射线/水平线/垂直线/折线/矩形/平行通道/斐波那契/回归通道/箭头/文本/多空仓位盒/测量尺）；磁吸、自动支撑压力线、画线修正建议、未来 8 根预测延伸；悬停显示线上相交价与相对 close 的 ±%；按 账户+代码+周期 服务器同步（详见 [docs/drawing-mode.md](docs/drawing-mode.md)） |
 | 自适应提示框 | 鼠标在不同面板显示对应数据；MACD跟随面板开关，RSI/KDJ/ATR 独立提示框开关 |
 | 股票搜索 | 模糊匹配代码/名称，实时下拉 + 键盘↑↓导航 |
 | 搜索历史 | 跟账号持久化（兼浏览器本地），刷新不丢失 |
@@ -50,8 +51,17 @@ venv/Scripts/python.exe -u visual/server.py
 visual/
 ├── server.py          # 入口: Flask create_app + Waitress
 ├── app.py             # Flask 工厂 / 静态页鉴权 / 后台任务启动
-├── auth_routes.py     # /api/auth/* Blueprint
-├── api_routes.py      # 其余 /api/* Blueprint
+├── api/               # 所有 /api/* 路由 (Blueprint 包)
+│   ├── __init__.py    # api_bp 蓝图 + 子模块 import 注册
+│   ├── common.py      # 共用: JSON 响应 / 登录态助手
+│   ├── auth.py        # /api/auth/*
+│   ├── market.py      # /api/ping|search|quote|quotes|depth|pledge|quota
+│   ├── kline.py       # /api/kline|chips|intraday
+│   ├── trades.py      # /api/trades*|fees|trade-reasons|repo-maturity
+│   ├── models.py      # /api/models*
+│   ├── admin.py       # /api/admin/users*
+│   ├── me.py          # /api/me/search-history、/api/monitor/status
+│   └── drawings.py    # /api/drawings 画线同步 (用户+代码+周期)
 ├── security.py        # CSP / 限流 / 登录锁定 / 会话 Cookie / CSRF
 ├── market.py          # 行情代理、缓存、质押等数据层
 ├── kline_source.py    # K线数据源注册/回退路由 (KLINE_SOURCE_* 配置)
@@ -65,6 +75,7 @@ visual/
 ├── ntfy.py            # ntfy 薄包装 (myappnotify)
 ├── market_hours.py    # A 股交易日历与时段
 ├── probe_feed.py      # 探测快照刷新频率 / 接口权限
+├── smoke_server.py    # 冒烟测试工具 (临时 DB + 8899 端口完整服务)
 ├── test/
 │   ├── test_trades.py
 │   ├── test_monitor.py
@@ -80,6 +91,7 @@ visual/
 │   ├── js/indicators.js # 指标末根重算 (与后端口径对齐)
 │   ├── js/gaps.js     # 缺口扫描
 │   ├── js/chips.js    # 筹码分布叠加渲染
+│   ├── js/drawings.js # 画线模式纯逻辑 (坐标/命中/磁吸/ZigZag/评分/回归)
 │   ├── index.html
 │   ├── trades.html
 │   ├── admin.html
@@ -88,7 +100,8 @@ visual/
 ├── docker-compose.yml
 ├── requirements.txt   # Python 依赖
 ├── docs/
-│   └── trades.md      # 交易记录功能文档 (数据表 / API / 统计口径)
+│   ├── trades.md      # 交易记录功能文档 (数据表 / API / 统计口径)
+│   └── drawing-mode.md # 图表画线模式文档 (工具 / 智能辅助 / 数据模型 / 同步)
 └── README.md          # 本文件
 ```
 
@@ -106,6 +119,9 @@ visual/
 | `POST /api/auth/login` | 登录，返回 `Set-Cookie: session` |
 | `POST /api/auth/logout` | 登出（需登录） |
 | `GET /api/auth/me` | 当前用户，返回 `{username,is_admin,monitor_enabled}`（未登录 401） |
+| `GET /api/drawings?symbol=&period=` | 当前用户的图表画线（用户+代码+周期隔离） |
+| `PUT /api/drawings` | 整体保存画线 `{symbol,period,drawings}`（登录+CSRF，≤500条） |
+| `DELETE /api/drawings?symbol=&period=` | 清空该代码/周期的画线（登录+CSRF） |
 | `GET /api/admin/users` | 用户列表（仅管理员） |
 | `POST /api/admin/users` | 添加用户 `{username,password}`（仅管理员） |
 | `DELETE /api/admin/users/{id}` | 删除用户（仅管理员） |

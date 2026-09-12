@@ -73,11 +73,12 @@ class KlineCacheTest(unittest.TestCase):
         return headers
 
     def setUp(self):
-        import api_routes
-        self.api = api_routes
-        api_routes.kline_cache.clear()
-        api_routes.kline_cache_long.clear()
-        api_routes.kline_cache_minute.clear()
+        from api import kline as kline_api
+        from market import kline_cache, kline_cache_long, kline_cache_minute
+        self.api = kline_api
+        kline_cache.clear()
+        kline_cache_long.clear()
+        kline_cache_minute.clear()
 
     def _patches(self, quotes=None, quote_exc=None):
         """mock fetch_kline_ex / fetch_quote / _is_index_symbol (不碰真实行情)。"""
@@ -148,8 +149,9 @@ class KlineCacheTest(unittest.TestCase):
         self.assertIsNone(r.get_json()["chips"])
 
     def test_depth_endpoint(self):
+        from api import market as market_api
         payload = {"symbol": self.SYMBOL, "bid_prices": [1.0], "ask_prices": [2.0]}
-        with mock.patch.object(self.api, "fetch_depth", return_value=payload) as fd:
+        with mock.patch.object(market_api, "fetch_depth", return_value=payload) as fd:
             r = self.client.get(f"/api/depth?symbol={self.SYMBOL}")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()["depth"]["bid_prices"], [1.0])
