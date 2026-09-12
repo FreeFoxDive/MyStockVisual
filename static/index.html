@@ -311,6 +311,15 @@ body {
   font-weight: 600;
 }
 #indicator-bar label.dim { color: var(--text-secondary); }
+/* 低频项折叠: 周期组 1/5/15/30/60 分与指标栏 WR/CCI/BIAS/DMI/对数轴, ▾ 展开 (状态持久化) */
+#toolbar .period-group .extra-period { display: none; }
+#toolbar .period-group.expanded .extra-period { display: inline-block; }
+#toolbar .period-group .more-btn { padding: 5px 7px; font-size: 12px; color: var(--text-secondary); }
+#toolbar .period-group.expanded .more-btn { color: var(--btn-active); }
+#indicator-bar .extra-ind { display: none; }
+#indicator-bar.show-extra .extra-ind { display: inline-flex; }
+#indicator-bar .more-btn { border: 1px solid var(--border); }
+#indicator-bar.show-extra .more-btn { border-color: var(--btn-active); color: var(--btn-active); }
 #indicator-bar input[type="checkbox"] { accent-color: var(--btn-active); width: 13px; height: 13px; margin: 0; }
 #indicator-bar label:has(input:focus-visible) { outline: 2px solid var(--btn-active); outline-offset: 1px; }
 
@@ -571,11 +580,12 @@ body {
       <button id="btn-1w" onclick="switchPeriod('1w')" title="周K (快捷键 2)">周K</button>
       <button id="btn-1M" onclick="switchPeriod('1M')" title="月K (快捷键 3)">月K</button>
       <button id="btn-intraday" onclick="switchPeriod('intraday')" title="分时 (快捷键 4)">分时</button>
-      <button id="btn-1m" onclick="switchPeriod('1m')" title="1分 (快捷键 5)">1分</button>
-      <button id="btn-5m" onclick="switchPeriod('5m')" title="5分 (快捷键 6)">5分</button>
-      <button id="btn-15m" onclick="switchPeriod('15m')" title="15分 (快捷键 7)">15分</button>
-      <button id="btn-30m" onclick="switchPeriod('30m')" title="30分 (快捷键 8)">30分</button>
-      <button id="btn-60m" onclick="switchPeriod('60m')" title="60分 (快捷键 9)">60分</button>
+      <button id="btn-1m" class="extra-period" onclick="switchPeriod('1m')" title="1分 (快捷键 5)">1分</button>
+      <button id="btn-5m" class="extra-period" onclick="switchPeriod('5m')" title="5分 (快捷键 6)">5分</button>
+      <button id="btn-15m" class="extra-period" onclick="switchPeriod('15m')" title="15分 (快捷键 7)">15分</button>
+      <button id="btn-30m" class="extra-period" onclick="switchPeriod('30m')" title="30分 (快捷键 8)">30分</button>
+      <button id="btn-60m" class="extra-period" onclick="switchPeriod('60m')" title="60分 (快捷键 9)">60分</button>
+      <button id="btn-period-more" class="more-btn" onclick="togglePeriodMore()" title="展开/收起更多周期">▾</button>
     </span>
     <span class="separator"></span>
     <button id="btn-refresh" class="icon-text-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
@@ -612,17 +622,17 @@ body {
     <option value="none">不复权</option>
   </select>
   <span class="separator" style="height:18px;background:var(--border)"></span>
-  <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">MA=SMA</span>
-  <button class="cfg-mini" id="cfg-ma" onclick="openParamEditor('ma')" title="编辑均线参数">⚙</button>
+  <button class="cfg-mini" id="cfg-ma" onclick="openParamEditor('ma')" title="均线参数 (SMA 简单移动平均, 对标东财)">MA⚙</button>
   <label><input type="checkbox" id="chk-boll" onchange="onConfigChange()">BOLL</label>
   <button class="cfg-mini" id="cfg-boll" onclick="openParamEditor('boll')" title="编辑布林带参数 (N,K)">⚙</button>
-  <label><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
-  <label><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
-  <label><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
-  <label><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
+  <label class="extra-ind"><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
+  <label class="extra-ind"><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
+  <label class="extra-ind"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
+  <label class="extra-ind"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
   <label title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" onchange="onConfigChange()">金叉死叉</label>
   <label title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" onchange="onConfigChange()">K线形态</label>
-  <label title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
+  <label class="extra-ind" title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
+  <button class="cfg-mini more-btn" id="btn-ind-more" onclick="toggleIndMore()" title="展开/收起更多指标">▾ 更多</button>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
   <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
@@ -1874,6 +1884,8 @@ function saveConfig() {
     adjust: STATE.adjust,
     maPeriods: STATE.maPeriods,
     bollParams: STATE.bollParams,
+    periodMore: STATE._periodMore === true,
+    indMore: STATE._indMore === true,
   };
   try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch(e) {}
 }
@@ -1943,6 +1955,12 @@ function loadConfig() {
     if (cfg.bollParams && Number.isInteger(cfg.bollParams.n) && cfg.bollParams.n > 1
         && Number.isFinite(cfg.bollParams.k) && cfg.bollParams.k > 0) {
       STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
+    }
+    // 折叠状态恢复
+    if (cfg.periodMore === true) { STATE._periodMore = true; document.querySelector('.period-group').classList.add('expanded'); }
+    if (cfg.indMore === true) {
+      STATE._indMore = true;
+      document.getElementById('indicator-bar').classList.add('show-extra');
     }
   } catch(e) {}
 }
@@ -2192,6 +2210,30 @@ function onConfigChange() {
     if (depthPanelOn()) fetchDepth();
   }
   onIndicatorChange();
+}
+
+/** 周期组折叠切换 (1/5/15/30/60 分) */
+function togglePeriodMore() {
+  const pg = document.querySelector('.period-group');
+  pg.classList.toggle('expanded');
+  STATE._periodMore = pg.classList.contains('expanded');
+  saveConfig();
+}
+
+/** 指标栏低频项折叠切换 (WR/CCI/BIAS/DMI/对数轴) */
+function toggleIndMore() {
+  const bar = document.getElementById('indicator-bar');
+  bar.classList.toggle('show-extra');
+  STATE._indMore = bar.classList.contains('show-extra');
+  saveConfig();
+}
+
+/** 折叠状态下选中了被折叠的周期 → 自动展开按钮组 */
+function ensurePeriodVisible(period) {
+  const btn = document.getElementById('btn-' + period);
+  if (btn && btn.classList.contains('extra-period') && !STATE._periodMore) {
+    togglePeriodMore();
+  }
 }
 
 /** 复权切换: 重新拉取 (分钟周期固定前复权, 由后端钳制) */
@@ -3069,6 +3111,7 @@ function updateChart(reTheme) {
 // ═══════════════════════════════════════════════════════════════
 function switchPeriod(period) {
   STATE.period = period;
+  ensurePeriodVisible(period);
   ALL_PERIODS.forEach(p => {
     const btn = document.getElementById('btn-' + p);
     if (btn) btn.classList.toggle('active', p === period);
