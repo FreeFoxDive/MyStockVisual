@@ -30,15 +30,18 @@ log = logging.getLogger("kline_source")
 # 覆盖长假 + 短期停牌; 麦蕊 fsjy 冻结窗口 (数月) 会被拦下。
 MINUTE_STALE_DAYS = 30
 
-# 内部口径: forward=前复权 / none=未复权
+# 内部口径: forward=前复权 / hfq=后复权 / none=未复权
 ADJUST_FORWARD = "forward"
+ADJUST_HFQ = "hfq"
 ADJUST_NONE = "none"
 
 
 def normalize_adjust(adjust) -> str:
-    """把调用方 adjust 规范为 forward|none。"""
+    """把调用方 adjust 规范为 forward|hfq|none。"""
     if adjust in (None, "", ADJUST_FORWARD, "qfq", "fr"):
         return ADJUST_FORWARD
+    if adjust in (ADJUST_HFQ, "backward", "hy"):
+        return ADJUST_HFQ
     if adjust in (ADJUST_NONE, "raw", "n", False):
         return ADJUST_NONE
     return ADJUST_FORWARD
@@ -46,7 +49,10 @@ def normalize_adjust(adjust) -> str:
 
 def adjust_tag(adjust) -> str:
     """磁盘/内存缓存 key 后缀。"""
-    return "qfq" if normalize_adjust(adjust) == ADJUST_FORWARD else "raw"
+    adj = normalize_adjust(adjust)
+    if adj == ADJUST_HFQ:
+        return "hfq"
+    return "qfq" if adj == ADJUST_FORWARD else "raw"
 
 
 class KlineSource(abc.ABC):
@@ -78,7 +84,8 @@ class MairuiSource(KlineSource):
             # fsjy 无复权参数, 仅未复权可用
             return adj == ADJUST_NONE and period in ("5m", "15m", "30m", "60m")
         if category in ("stock", "index"):
-            return period in ("1d", "1w", "1M")
+            # 麦蕊股票接口仅 fr(前复权)/n(不复权), 无后复权 → hfq 跳过下沉
+            return period in ("1d", "1w", "1M") and adj != ADJUST_HFQ
         return False
 
     def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
@@ -145,7 +152,11 @@ class AkshareSource(KlineSource):
 
     @staticmethod
     def _ak_adjust(adjust):
-        return "qfq" if adjust == ADJUST_FORWARD else ""
+        if adjust == ADJUST_FORWARD:
+            return "qfq"
+        if adjust == ADJUST_HFQ:
+            return "hfq"
+        return ""
 
     def _fetch_daily(self, ak, market, symbol, period, count, adjust):
         # 东财按起止日期取数: count 根日K ≈ 1.7 倍自然日 + 缓冲 (同 get_daily_bar)

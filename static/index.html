@@ -22,6 +22,7 @@
 <script src="/js/gaps.js"></script>
 <script src="/js/chips.js"></script>
 <script src="/js/drawings.js"></script>
+<script src="/js/patterns.js"></script>
 <style>
 /* ═══════════════ 页面专属 (主题变量见 theme.css) ═══════════════ */
 body {
@@ -452,6 +453,25 @@ body {
   #indicator-bar input[type="checkbox"] { width: 14px; height: 14px; }
 }
 
+/* ═══ 指标配置 mini 按钮 + 参数弹窗 ═══ */
+#indicator-bar .cfg-mini {
+  padding: 1px 6px; font-size: 11px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-panel); color: var(--text-secondary);
+  cursor: pointer; margin-right: 4px;
+}
+#indicator-bar .cfg-mini:hover { color: var(--btn-active); border-color: var(--btn-active); }
+#param-pop {
+  display: none; position: absolute; z-index: 320;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.2); padding: 10px 12px; font-size: 12px; color: var(--text);
+}
+#param-pop .pp-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+#param-pop input { width: 56px; padding: 3px 6px; font-size: 12px; }
+#param-pop .pp-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+#param-pop button { padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border);
+  background: transparent; color: var(--text); cursor: pointer; font-size: 12px; }
+#param-pop button.pp-ok { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
+
 /* ═══ 画线模式 ═══ */
 #draw-palette {
   position: absolute; left: 8px; top: 8px; z-index: 30;
@@ -523,6 +543,7 @@ body {
     <span id="info-time"></span>
   </div>
   <div class="toolbar-right">
+    <button id="monitor-entry" onclick="location.href='/monitor.html'" title="持仓监控: 监控股票/条件/告警一览">🛡 监控</button>
     <button id="trades-entry" title="交易记录统计" onclick="location.href='/trades.html'">📒 交易记录</button>
     <span class="search-wrap">
       <input type="text" id="symbol-input" value="000001.SH" placeholder="输入代码或名称搜索..."
@@ -566,8 +587,24 @@ body {
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
   <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
   <label id="lbl-depth" style="display:none"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
+  <span>复权:</span>
+  <select id="adj-select" onchange="onAdjustChange(this.value)" title="复权方式 (分钟周期固定前复权)">
+    <option value="forward">前复权</option>
+    <option value="hfq">后复权</option>
+    <option value="none">不复权</option>
+  </select>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">MA=SMA</span>
+  <button class="cfg-mini" id="cfg-ma" onclick="openParamEditor('ma')" title="编辑均线参数">⚙</button>
+  <label><input type="checkbox" id="chk-boll" onchange="onConfigChange()">BOLL</label>
+  <button class="cfg-mini" id="cfg-boll" onclick="openParamEditor('boll')" title="编辑布林带参数 (N,K)">⚙</button>
+  <label><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
+  <label><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
+  <label><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
+  <label><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
+  <label title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" onchange="onConfigChange()">金叉死叉</label>
+  <label title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" onchange="onConfigChange()">K线形态</label>
+  <label title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
   <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
@@ -602,6 +639,9 @@ body {
     <button class="ds-no" id="ds-ignore">忽略</button>
   </div>
 </div>
+
+<!-- 指标参数编辑弹窗 -->
+<div id="param-pop"></div>
 
 <!-- Toast 通知 (非阻塞) -->
 <div id="toast-box"></div>
@@ -718,6 +758,10 @@ const STATE = {
   impulseEnabled: false, // 动力系统(Elder)
   channelEnabled: false, // ATR通道(Elder)
   gapEnabled: true,      // 未回补跳空缺口 (60m+)
+  adjust: 'forward',     // 复权: forward(前) / hfq(后) / none(不复权); 分钟固定 forward
+  logScale: false,       // 主图对数坐标轴
+  maPeriods: [5, 10, 20],// 均线参数 (客户端重算)
+  bollParams: { n: 20, k: 2 }, // BOLL 参数 (客户端重算)
   draw: {                // 画线模式 (Drawings 模块; 数据模型见 static/js/drawings.js)
     enabled: false,      // 画线模式开关 (工具面板可见)
     tool: 'select',      // 当前工具
@@ -892,7 +936,7 @@ async function fetchData(opts) {
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
   STATE._lastBarAt = fetchTs;
   if (!silent) { STATE.trades = null; STATE.chips = null; } // 切股/切周期先清空, 避免短暂显示上一只的买卖点/筹码
-  const cacheKey = `vk_${symbol}_${period}`;
+  const cacheKey = `vk_${symbol}_${period}_${STATE.adjust}`;
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
   let cacheHit = false;
@@ -911,7 +955,8 @@ async function fetchData(opts) {
   } catch(e) { /* ignore */ }
 
   const count = period === '1d' ? DAILY_COUNT : (MINUTE_COUNTS[period] || 300);
-  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}`;
+  const adjParam = MINUTE_PERIODS.includes(period) ? '' : `&adjust=${STATE.adjust}`;
+  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
   if (!silent && !cacheHit && !sameView) {
     document.getElementById('btn-refresh')?.classList.add('loading');
@@ -1192,6 +1237,22 @@ function appendIndicatorSeriesPatches(seriesPatch, klines, panels) {
         { name: 'OBV', data: klines.map((k) => k.obv) },
         { name: 'MAOBV', data: klines.map((k) => k.maobv) },
       );
+    } else if (p === 'wr') {
+      seriesPatch.push({ name: 'WR14', data: klines.map((k) => k.wr14) });
+    } else if (p === 'cci') {
+      seriesPatch.push({ name: 'CCI14', data: klines.map((k) => k.cci14) });
+    } else if (p === 'bias') {
+      seriesPatch.push(
+        { name: 'BIAS6', data: klines.map((k) => k.bias6) },
+        { name: 'BIAS12', data: klines.map((k) => k.bias12) },
+        { name: 'BIAS24', data: klines.map((k) => k.bias24) },
+      );
+    } else if (p === 'dmi') {
+      seriesPatch.push(
+        { name: '+DI', data: klines.map((k) => k.dmi_pdi) },
+        { name: '-DI', data: klines.map((k) => k.dmi_mdi) },
+        { name: 'ADX', data: klines.map((k) => k.dmi_adx) },
+      );
     }
   });
 }
@@ -1227,6 +1288,22 @@ function patchIndicatorLastPoints(seriesPatch, k, lastIdx, seriesByName, klines)
   if (panels.includes('obv')) {
     copyLast('OBV', k.obv);
     copyLast('MAOBV', k.maobv);
+  }
+  if (panels.includes('wr')) {
+    copyLast('WR14', k.wr14);
+  }
+  if (panels.includes('cci')) {
+    copyLast('CCI14', k.cci14);
+  }
+  if (panels.includes('bias')) {
+    copyLast('BIAS6', k.bias6);
+    copyLast('BIAS12', k.bias12);
+    copyLast('BIAS24', k.bias24);
+  }
+  if (panels.includes('dmi')) {
+    copyLast('+DI', k.dmi_pdi);
+    copyLast('-DI', k.dmi_mdi);
+    copyLast('ADX', k.dmi_adx);
   }
 
   if (STATE.channelEnabled && STATE.period === '1d' && k.ema13 != null && k.atr14 != null) {
@@ -1307,11 +1384,10 @@ function patchLastBarOnChart() {
     const gapMark = buildGapMarkArea(klines, dates);
     klinePatch.markArea = gapMark || { data: [] };
     klinePatch.markLine = buildLastPriceLine(klines);
+    const eff = effectiveMaBoll(klines);
     const seriesPatch = [
       klinePatch,
-      { name: 'MA5', data: klines.map((kk) => kk.ma5) },
-      { name: 'MA10', data: klines.map((kk) => kk.ma10) },
-      { name: 'MA20', data: klines.map((kk) => kk.ma20) },
+      ...eff.ma.map((arr, i) => ({ name: `MA${STATE.maPeriods[i]}`, data: arr })),
     ];
     appendChannelSeriesPatches(seriesPatch, klines);
     if (seriesByName['成交量']) {
@@ -1669,6 +1745,17 @@ function saveConfig() {
     impulse: document.getElementById('chk-impulse').checked,
     channel: document.getElementById('chk-channel').checked,
     gap: document.getElementById('chk-gap').checked,
+    boll: document.getElementById('chk-boll').checked,
+    wr: document.getElementById('chk-wr').checked,
+    cci: document.getElementById('chk-cci').checked,
+    bias: document.getElementById('chk-bias').checked,
+    dmi: document.getElementById('chk-dmi').checked,
+    cross: document.getElementById('chk-cross').checked,
+    patterns: document.getElementById('chk-patterns').checked,
+    logScale: document.getElementById('chk-log').checked,
+    adjust: STATE.adjust,
+    maPeriods: STATE.maPeriods,
+    bollParams: STATE.bollParams,
   };
   try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch(e) {}
 }
@@ -1719,6 +1806,26 @@ function loadConfig() {
     // 缺省开启；仅当配置显式 false 时关闭
     chkGap.checked = cfg.gap !== false;
     STATE.gapEnabled = cfg.gap !== false;
+    // 新指标面板 / 复权 / 对数轴 / 参数
+    document.getElementById('chk-boll').checked = !!cfg.boll;
+    document.getElementById('chk-wr').checked = !!cfg.wr;
+    document.getElementById('chk-cci').checked = !!cfg.cci;
+    document.getElementById('chk-bias').checked = !!cfg.bias;
+    document.getElementById('chk-dmi').checked = !!cfg.dmi;
+    document.getElementById('chk-cross').checked = !!cfg.cross;
+    document.getElementById('chk-patterns').checked = !!cfg.patterns;
+    document.getElementById('chk-log').checked = !!cfg.logScale;
+    STATE.logScale = !!cfg.logScale;
+    STATE.adjust = ['forward', 'hfq', 'none'].includes(cfg.adjust) ? cfg.adjust : 'forward';
+    document.getElementById('adj-select').value = STATE.adjust;
+    if (Array.isArray(cfg.maPeriods) && cfg.maPeriods.length === 3
+        && cfg.maPeriods.every(n => Number.isInteger(n) && n > 0 && n <= 250)) {
+      STATE.maPeriods = cfg.maPeriods.slice();
+    }
+    if (cfg.bollParams && Number.isInteger(cfg.bollParams.n) && cfg.bollParams.n > 1
+        && Number.isFinite(cfg.bollParams.k) && cfg.bollParams.k > 0) {
+      STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
+    }
   } catch(e) {}
 }
 
@@ -1953,6 +2060,8 @@ function onConfigChange() {
   STATE.impulseEnabled = document.getElementById('chk-impulse').checked;
   STATE.channelEnabled = document.getElementById('chk-channel').checked;
   STATE.gapEnabled = document.getElementById('chk-gap').checked;
+  STATE.logScale = document.getElementById('chk-log').checked;
+  STATE._maCache = null;  // 自定义 MA/BOLL 参数时客户端重算缓存失效
   saveConfig();
   // 打开筹码但尚未加载 → 触发拉取
   if (isChipPeriod(STATE.period) && document.getElementById('chk-chip').checked
@@ -1965,6 +2074,15 @@ function onConfigChange() {
     if (depthPanelOn()) fetchDepth();
   }
   onIndicatorChange();
+}
+
+/** 复权切换: 重新拉取 (分钟周期固定前复权, 由后端钳制) */
+function onAdjustChange(v) {
+  STATE.adjust = ['forward', 'hfq', 'none'].includes(v) ? v : 'forward';
+  document.getElementById('adj-select').value = STATE.adjust;
+  saveConfig();
+  STATE._maCache = null;
+  fetchData();
 }
 
 /** 当前周期是否绘制缺口 markArea */
@@ -2157,6 +2275,10 @@ function getIndicatorPanels() {
   if (document.getElementById('chk-atr').checked) panels.push('atr');
   if (document.getElementById('chk-obv').checked) panels.push('obv');
   if (document.getElementById('chk-premium').checked && !MINUTE_PERIODS.includes(STATE.period)) panels.push('premium');
+  if (document.getElementById('chk-wr').checked) panels.push('wr');
+  if (document.getElementById('chk-cci').checked) panels.push('cci');
+  if (document.getElementById('chk-bias').checked) panels.push('bias');
+  if (document.getElementById('chk-dmi').checked) panels.push('dmi');
   return panels;
 }
 
@@ -2177,7 +2299,7 @@ function calcGridLayout(panels, chipOn) {
   // K-line grid (index 0)
   grids.push({ left: '8%', right: rightPct, top: `${topGap}%`, height: `${klinePct}%` });
   xAxes.push({ gridIndex: 0, type: 'category', data: [], show: false });
-  yAxes.push({ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } });
+  yAxes.push({ gridIndex: 0, type: STATE.logScale ? 'log' : 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } });
 
   let cursor = topGap + klinePct + mGap;
   let nextGi = 1;
@@ -2217,6 +2339,56 @@ function fmtVolume(v) {
   return v.toFixed(0);
 }
 
+/** 客户端 SMA (自定义均线参数时使用); 返回数组与 klines 等长 (前 n-1 为 null) */
+function clientSma(values, n) {
+  const out = new Array(values.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i];
+    if (i >= n) sum -= values[i - n];
+    if (i >= n - 1) out[i] = sum / n;
+  }
+  return out;
+}
+
+/** 客户端 BOLL(N,K); 返回 {mid, up, low} 数组 */
+function clientBoll(values, n, k) {
+  const mid = clientSma(values, n);
+  const up = new Array(values.length).fill(null);
+  const low = new Array(values.length).fill(null);
+  for (let i = n - 1; i < values.length; i++) {
+    let acc = 0;
+    for (let j = i - n + 1; j <= i; j++) {
+      const d = values[j] - mid[i];
+      acc += d * d;
+    }
+    const std = Math.sqrt(acc / (n - 1)); // 样本标准差 (与后端口径一致)
+    up[i] = mid[i] + k * std;
+    low[i] = mid[i] - k * std;
+  }
+  return { mid, up, low };
+}
+
+/** 生效的 MA/BOLL 序列: 自定义参数 → 客户端重算; 否则用服务器列 (带缓存) */
+function effectiveMaBoll(klines) {
+  const closes = klines.map(k => k.close);
+  const key = STATE.symbol + ':' + STATE.period + ':' + klines.length + ':'
+    + (klines.length ? String(klines[klines.length - 1].close) : '') + ':'
+    + STATE.maPeriods.join(',') + ':' + STATE.bollParams.n + ',' + STATE.bollParams.k;
+  if (STATE._maCache && STATE._maCache.key === key) return STATE._maCache.val;
+  const customMa = JSON.stringify(STATE.maPeriods) !== JSON.stringify([5, 10, 20]);
+  const customBoll = STATE.bollParams.n !== 20 || STATE.bollParams.k !== 2;
+  const val = {
+    ma: customMa
+      ? STATE.maPeriods.map(n => clientSma(closes, n))
+      : [klines.map(k => k.ma5), klines.map(k => k.ma10), klines.map(k => k.ma20)],
+    boll: customBoll ? clientBoll(closes, STATE.bollParams.n, STATE.bollParams.k)
+      : { mid: klines.map(k => k.boll_mid), up: klines.map(k => k.boll_up), low: klines.map(k => k.boll_low) },
+  };
+  STATE._maCache = { key, val };
+  return val;
+}
+
 function updateChart(reTheme) {
   const data = STATE.klineData;
   if (!data || !data.klines || data.klines.length === 0) return;
@@ -2240,35 +2412,76 @@ function updateChart(reTheme) {
   const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
   const ohlc = klines.map((k) => buildOhlcPoint(k, impulseOn));
   const vols = klines.map((k) => buildVolPoint(k));
-  const ma5 = klines.map(k => k.ma5);
-  const ma10 = klines.map(k => k.ma10);
-  const ma20 = klines.map(k => k.ma20);
+  const eff = effectiveMaBoll(klines);
+  const maDefs = eff.ma.map((arr, i) => ({ name: `MA${STATE.maPeriods[i]}`, data: arr }));
+  const maColors = [C().ma5, C().ma10, C().ma20];
 
   const series = [];
+
+  // ── 金叉死叉 + K线形态 markPoint (与交易标记合并进 K线 series) ──
+  const extraMarks = [];
+  if (document.getElementById('chk-cross').checked) {
+    // 短均线上/下穿 MA20 (基于生效均线序列)
+    const a = eff.ma[0], c20 = eff.ma[eff.ma.length - 1];
+    for (let i = 1; i < klines.length; i++) {
+      if (a[i] == null || a[i - 1] == null || c20[i] == null || c20[i - 1] == null) continue;
+      if (a[i - 1] <= c20[i - 1] && a[i] > c20[i]) {
+        extraMarks.push({ coord: [i, klines[i].low], symbol: 'triangle', symbolSize: 8,
+          symbolRotate: 0, itemStyle: { color: C().up },
+          label: { show: true, position: 'bottom', formatter: '金叉', fontSize: 9, color: C().up } });
+      } else if (a[i - 1] >= c20[i - 1] && a[i] < c20[i]) {
+        extraMarks.push({ coord: [i, klines[i].high], symbol: 'triangle', symbolSize: 8,
+          symbolRotate: 180, itemStyle: { color: C().down },
+          label: { show: true, position: 'top', formatter: '死叉', fontSize: 9, color: C().down } });
+      }
+    }
+  }
+  if (document.getElementById('chk-patterns').checked && window.PatternScanner) {
+    PatternScanner.scanPatterns(klines).forEach(pt => {
+      extraMarks.push({
+        coord: [pt.idx, pt.dir > 0 ? klines[pt.idx].low : klines[pt.idx].high],
+        symbol: pt.dir > 0 ? 'triangle' : 'triangle', symbolSize: 7,
+        symbolRotate: pt.dir > 0 ? 0 : 180,
+        itemStyle: { color: pt.dir > 0 ? C().up : C().down, opacity: 0.85 },
+      });
+    });
+  }
+  const mpBase = buildTradeMarkers(klines, dates);
+  const klineMarkPoint = mpBase || { data: [] };
+  if (extraMarks.length) {
+    klineMarkPoint.data = (klineMarkPoint.data || []).concat(extraMarks);
+  }
 
   // ── Grid 0: K-line ──
   const klineSeries = {
     name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
     itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
-    markPoint: buildTradeMarkers(klines, dates),
+    markPoint: klineMarkPoint,
   };
   const gapMark = buildGapMarkArea(klines, dates);
   klineSeries.markArea = gapMark || { data: [] };
   klineSeries.markLine = buildLastPriceLine(klines);
   if (!gapMark) STATE._gaps = [];
 
-  series.push(
-    klineSeries,
-    { name: 'MA5', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: ma5,
-      symbol: 'none', smooth: true, lineStyle: { color: C().ma5, width: 1 },
-      itemStyle: { color: C().ma5 } },
-    { name: 'MA10', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: ma10,
-      symbol: 'none', smooth: true, lineStyle: { color: C().ma10, width: 1 },
-      itemStyle: { color: C().ma10 } },
-    { name: 'MA20', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: ma20,
-      symbol: 'none', smooth: true, lineStyle: { color: C().ma20, width: 1 },
-      itemStyle: { color: C().ma20 } }
-  );
+  series.push(klineSeries);
+  maDefs.forEach((d, i) => {
+    series.push({ name: d.name, type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: d.data,
+      symbol: 'none', smooth: true, lineStyle: { color: maColors[i], width: 1 },
+      itemStyle: { color: maColors[i] } });
+  });
+
+  // ── BOLL(N,K) 主图叠加 ──
+  if (document.getElementById('chk-boll').checked) {
+    const bNames = ['BOLL中轨', 'BOLL上轨', 'BOLL下轨'];
+    [eff.boll.mid, eff.boll.up, eff.boll.low].forEach((arr, i) => {
+      series.push({
+        name: bNames[i], type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: arr,
+        symbol: 'none', smooth: true,
+        lineStyle: { color: C().ma10, width: 1, type: i === 0 ? 'solid' : 'dashed', opacity: 0.9 },
+        itemStyle: { color: C().ma10 }, silent: true,
+      });
+    });
+  }
 
   // ── ATR Channel (Elder, daily only) ──
   if (STATE.channelEnabled && STATE.period === '1d') {
@@ -2323,9 +2536,24 @@ function updateChart(reTheme) {
         value: k.macd_hist,
         itemStyle: { color: (k.macd_hist || 0) >= 0 ? C().up : C().down }
       }));
+      const macdCross = [];
+      if (document.getElementById('chk-cross').checked) {
+        for (let ci = 1; ci < klines.length; ci++) {
+          const d0 = dif[ci - 1], d1 = dif[ci], e0 = dea[ci - 1], e1 = dea[ci];
+          if (d0 == null || d1 == null || e0 == null || e1 == null) continue;
+          if (d0 <= e0 && d1 > e1) {
+            macdCross.push({ coord: [ci, dif[ci]], symbol: 'triangle', symbolSize: 7,
+              symbolRotate: 0, itemStyle: { color: C().up } });
+          } else if (d0 >= e0 && d1 < e1) {
+            macdCross.push({ coord: [ci, dif[ci]], symbol: 'triangle', symbolSize: 7,
+              symbolRotate: 180, itemStyle: { color: C().down } });
+          }
+        }
+      }
       series.push(
         { name: 'DIF', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: dif,
-          symbol: 'none', lineStyle: { color: C().macdDif, width: 1 } },
+          symbol: 'none', lineStyle: { color: C().macdDif, width: 1 },
+          markPoint: macdCross.length ? { data: macdCross, animation: false } : undefined },
         { name: 'DEA', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: dea,
           symbol: 'none', lineStyle: { color: C().macdDea, width: 1 } },
         { name: 'MACD柱', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: hist }
@@ -2378,6 +2606,42 @@ function updateChart(reTheme) {
       });
       series.push(
         { name: '溢价率', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: premVals }
+      );
+    } else if (p === 'wr') {
+      series.push(
+        { name: 'WR14', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.wr14), symbol: 'none',
+          lineStyle: { color: C().rsi6, width: 1 } }
+      );
+    } else if (p === 'cci') {
+      series.push(
+        { name: 'CCI14', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.cci14), symbol: 'none',
+          lineStyle: { color: C().macdDif, width: 1 } }
+      );
+    } else if (p === 'bias') {
+      series.push(
+        { name: 'BIAS6', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.bias6), symbol: 'none',
+          lineStyle: { color: C().ma5, width: 1 } },
+        { name: 'BIAS12', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.bias12), symbol: 'none',
+          lineStyle: { color: C().ma10, width: 1 } },
+        { name: 'BIAS24', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.bias24), symbol: 'none',
+          lineStyle: { color: C().ma20, width: 1 } }
+      );
+    } else if (p === 'dmi') {
+      series.push(
+        { name: '+DI', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.dmi_pdi), symbol: 'none',
+          lineStyle: { color: C().up, width: 1 } },
+        { name: '-DI', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.dmi_mdi), symbol: 'none',
+          lineStyle: { color: C().down, width: 1 } },
+        { name: 'ADX', type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+          data: klines.map(x => x.dmi_adx), symbol: 'none',
+          lineStyle: { color: C().macdDea, width: 1 } }
       );
     }
   });
@@ -2445,6 +2709,8 @@ function updateChart(reTheme) {
       // ── Helper ──
       const pc = prev ? prev.close : k.close; // 前一根收盘价
       const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${escHtml(k.date)}${haltLabel(k)}</div>`;
+      const patternTip = (typeof PatternScanner !== 'undefined' && document.getElementById('chk-patterns').checked)
+        ? PatternScanner.patternsAt(klines, idx) : null;
       const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?C().up:v<pc?C().down:C().tipText};font-weight:700">${pf(v)}</span>`;
 
       // Grid 0: K-line — full detail
@@ -2452,7 +2718,10 @@ function updateChart(reTheme) {
         let html = hdr;
         html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)} 低 ${cfn(k.low)} 收 ${cfn(k.close)}`;
         if (chgPct != null) html += ` <span style="color:${chgPct>=0?C().up:C().down}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
-        html += `</div><div>MA5 <span style="color:${C().ma5}">${pf(k.ma5)}</span> MA10 <span style="color:${C().ma10}">${pf(k.ma10)}</span> MA20 <span style="color:${C().ma20}">${pf(k.ma20)}</span></div>`;
+        const effTip = effectiveMaBoll(klines);
+        const maLabels = STATE.maPeriods.map((n, i) =>
+          `MA${n} <span style="color:${maColors[i] || C().ma5}">${pf(effTip.ma[i][idx])}</span>`).join(' ');
+        html += `</div><div>${maLabels}</div>`;
         html += `<div>量 ${fmtVolume(k.volume)} 额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
         if (document.getElementById('chk-macd').checked) {
           html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
@@ -2477,6 +2746,11 @@ function updateChart(reTheme) {
           if (hit) {
             html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid ${C().tipBorder}">${GapScanner.gapTooltipHtml(hit)}</div>`;
           }
+        }
+        if (patternTip) {
+          html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid ${C().tipBorder}">`
+            + `<span style="color:${patternTip.dir > 0 ? C().up : C().down};font-weight:700">▲ ${escHtml(patternTip.name)}</span>`
+            + ` <span class="dim">${escHtml(patternTip.note || '')}</span></div>`;
         }
         // 线型画线与该 bar 相交时: 相交价 + 相对 close 的偏离百分比 (正负着色)
         html += drawingCrossTooltipHtml(idx, k.close);
@@ -2505,6 +2779,18 @@ function updateChart(reTheme) {
       }
       if (panel === 'atr') {
         return hdr + `<div>ATR(14) ${k.atr14?.toFixed(3)||'—'}</div>`;
+      }
+      if (panel === 'wr') {
+        return hdr + `<div>WR(14) ${k.wr14?.toFixed(2)||'—'} <span class="dim">(越小越强势)</span></div>`;
+      }
+      if (panel === 'cci') {
+        return hdr + `<div>CCI(14) ${k.cci14?.toFixed(1)||'—'}</div>`;
+      }
+      if (panel === 'bias') {
+        return hdr + `<div>BIAS6 ${k.bias6?.toFixed(2)||'—'}% BIAS12 ${k.bias12?.toFixed(2)||'—'}% BIAS24 ${k.bias24?.toFixed(2)||'—'}%</div>`;
+      }
+      if (panel === 'dmi') {
+        return hdr + `<div>+DI ${k.dmi_pdi?.toFixed(1)||'—'} -DI ${k.dmi_mdi?.toFixed(1)||'—'} ADX ${k.dmi_adx?.toFixed(1)||'—'}</div>`;
       }
       if (panel === 'obv') {
         return hdr
@@ -2566,14 +2852,44 @@ function updateChart(reTheme) {
         }
       }
     }
-    if (p === 'macd' || p === 'premium' || p === 'obv') {
+    if (p === 'macd' || p === 'premium' || p === 'obv' || p === 'bias') {
       for (let s = 0; s < series.length; s++) {
-        const name = p === 'macd' ? 'DIF' : (p === 'obv' ? 'OBV' : '溢价率');
+        const name = p === 'macd' ? 'DIF' : (p === 'obv' ? 'OBV' : (p === 'bias' ? 'BIAS6' : '溢价率'));
         if (series[s].name === name && series[s].xAxisIndex === gi) {
           series[s].markLine = {
             silent: true, symbol: 'none',
             lineStyle: { color: C().zeroLine, type: 'solid', width: 1 },
             data: [{ yAxis: 0 }]
+          };
+          break;
+        }
+      }
+    }
+    if (p === 'wr') {
+      for (let s = 0; s < series.length; s++) {
+        if (series[s].name === 'WR14' && series[s].xAxisIndex === gi) {
+          series[s].markLine = {
+            silent: true, symbol: 'none',
+            lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
+            data: [
+              { yAxis: 80, label: { show: true, formatter: '80', color: C().text, fontSize: 10, position: 'end' } },
+              { yAxis: 20, label: { show: true, formatter: '20', color: C().text, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
+            ]
+          };
+          break;
+        }
+      }
+    }
+    if (p === 'cci') {
+      for (let s = 0; s < series.length; s++) {
+        if (series[s].name === 'CCI14' && series[s].xAxisIndex === gi) {
+          series[s].markLine = {
+            silent: true, symbol: 'none',
+            lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
+            data: [
+              { yAxis: 100, label: { show: true, formatter: '+100', color: C().text, fontSize: 10, position: 'end' } },
+              { yAxis: -100, label: { show: true, formatter: '-100', color: C().text, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
+            ]
           };
           break;
         }
@@ -2916,6 +3232,118 @@ function paintLabels(c2, labels) {
   c2.font = '12px monospace';
 }
 
+/** 面板图例: 每个面板名下方常显最近可见 bar 的指标值 ( TradingView 图例栏) */
+function paintLegend(c2, dctx) {
+  if (!STATE.klineData || !STATE.klineData.klines) return;
+  const klines = STATE.klineData.klines;
+  const n = klines.length;
+  let endIdx = n - 1;
+  try {
+    const dz = STATE.chart.getOption().dataZoom[0];
+    if (dz && dz.endValue != null) endIdx = Math.max(0, Math.min(n - 1, Math.round(dz.endValue)));
+  } catch (e) { /* 用最新 bar */ }
+  const k = klines[endIdx];
+  if (!k) return;
+  const fmt3 = (v) => (v == null || !Number.isFinite(v)) ? '—' : Number(v).toFixed(2);
+  const hasVolume = document.getElementById('chk-volume').checked;
+  const panels = getIndicatorPanels();
+  const startGi = hasVolume ? 2 : 1;
+  if (!STATE._gridRects || STATE._gridRects.length <= startGi) return;
+
+  c2.font = '10px monospace';
+  c2.globalAlpha = 0.92;
+  // 主图: MA + BOLL
+  const eff = effectiveMaBoll(klines);
+  const maTxt = STATE.maPeriods.map((p, i) => `MA${p} ${fmt3(eff.ma[i][endIdx])}`).join('  ');
+  const parts = [maTxt];
+  if (document.getElementById('chk-boll').checked) {
+    parts.push(`BOLL(${STATE.bollParams.n},${STATE.bollParams.k}) `
+      + `${fmt3(eff.boll.up[endIdx])}/${fmt3(eff.boll.mid[endIdx])}/${fmt3(eff.boll.low[endIdx])}`);
+  }
+  c2.fillStyle = C().text;
+  c2.fillText(parts.join('   '), 12, STATE._gridRects[0].top + 26);
+
+  // 各指标面板
+  const valText = {
+    macd: () => `DIF ${fmt3(k.macd_dif)}  DEA ${fmt3(k.macd_dea)}  柱 ${fmt3(k.macd_hist)}`,
+    kdj: () => `K ${fmt3(k.kdj_k)}  D ${fmt3(k.kdj_d)}  J ${fmt3(k.kdj_j)}`,
+    rsi: () => `RSI ${fmt3(k.rsi6, 1)} / ${fmt3(k.rsi12, 1)} / ${fmt3(k.rsi24, 1)}`,
+    atr: () => `ATR14 ${fmt3(k.atr14, 3)}`,
+    obv: () => `OBV ${fmtVolume(k.obv)}  MAOBV ${fmtVolume(k.maobv)}`,
+    premium: () => `溢价率 ${k.premium == null ? '—' : k.premium.toFixed(2) + '%'}`,
+    wr: () => `WR14 ${fmt3(k.wr14)}`,
+    cci: () => `CCI14 ${fmt3(k.cci14, 1)}`,
+    bias: () => `BIAS ${fmt3(k.bias6)} / ${fmt3(k.bias12)} / ${fmt3(k.bias24)}`,
+    dmi: () => `+DI ${fmt3(k.dmi_pdi, 1)}  -DI ${fmt3(k.dmi_mdi, 1)}  ADX ${fmt3(k.dmi_adx, 1)}`,
+  };
+  panels.forEach((p, i) => {
+    const rect = STATE._gridRects[startGi + i];
+    if (!rect || !valText[p]) return;
+    c2.fillStyle = C().text;
+    c2.fillText(valText[p](), 12, rect.top + 26);
+  });
+  c2.globalAlpha = 1;
+  c2.font = '12px monospace';
+}
+
+/** 指标参数编辑弹窗 (MA / BOLL) */
+function openParamEditor(kind) {
+  const pop = document.getElementById('param-pop');
+  const btn = document.getElementById(kind === 'ma' ? 'cfg-ma' : 'cfg-boll');
+  const rect = btn.getBoundingClientRect();
+  const defs = kind === 'ma'
+    ? { title: '均线参数', rows: [
+        { label: '短', key: 0, val: STATE.maPeriods[0] },
+        { label: '中', key: 1, val: STATE.maPeriods[1] },
+        { label: '长', key: 2, val: STATE.maPeriods[2] }] }
+    : { title: 'BOLL 参数', rows: [
+        { label: 'N', key: 'n', val: STATE.bollParams.n },
+        { label: 'K', key: 'k', val: STATE.bollParams.k }] };
+  pop.innerHTML = `<div style="font-weight:700;margin-bottom:8px">${defs.title}</div>`
+    + defs.rows.map(r => `<div class="pp-row"><span style="width:14px">${r.label}</span>`
+      + `<input type="number" step="any" min="1" id="pp-${r.key}" value="${r.val}"></div>`).join('')
+    + '<div class="pp-actions"><button id="pp-reset">默认</button><button class="pp-ok" id="pp-ok">应用</button></div>';
+  pop.style.display = 'block';
+  pop.style.left = Math.min(rect.left, window.innerWidth - 160) + 'px';
+  pop.style.top = (rect.bottom + 6) + 'px';
+  document.getElementById('pp-ok').onclick = () => {
+    if (kind === 'ma') {
+      const vals = defs.rows.map(r => parseInt(document.getElementById('pp-' + r.key).value, 10));
+      if (vals.some(v => !Number.isInteger(v) || v < 1 || v > 250)) { showToast('均线参数须为 1-250 整数', { type: 'warn' }); return; }
+      STATE.maPeriods = vals;
+    } else {
+      const n = parseInt(document.getElementById('pp-n').value, 10);
+      const k = parseFloat(document.getElementById('pp-k').value);
+      if (!Number.isInteger(n) || n < 2 || n > 250) { showToast('N 须为 2-250 整数', { type: 'warn' }); return; }
+      if (!Number.isFinite(k) || k <= 0 || k > 10) { showToast('K 须为 0-10 数值', { type: 'warn' }); return; }
+      STATE.bollParams = { n, k };
+    }
+    STATE._maCache = null;
+    closeParamPop();
+    saveConfig();
+    updateChart(false);
+    showToast('参数已应用');
+  };
+  document.getElementById('pp-reset').onclick = () => {
+    if (kind === 'ma') STATE.maPeriods = [5, 10, 20];
+    else STATE.bollParams = { n: 20, k: 2 };
+    STATE._maCache = null;
+    closeParamPop();
+    saveConfig();
+    updateChart(false);
+  };
+}
+
+function closeParamPop() {
+  const pop = document.getElementById('param-pop');
+  if (pop) pop.style.display = 'none';
+}
+document.addEventListener('click', (e) => {
+  const pop = document.getElementById('param-pop');
+  if (pop && pop.style.display === 'block'
+      && !pop.contains(e.target) && !e.target.closest('.cfg-mini')) closeParamPop();
+});
+
 function paintDrawing(c2, d, P, ctx, selected) {
   const g = Drawings.geom(d, P, ctx);
   if (!g) return;
@@ -3106,6 +3534,7 @@ function _renderDrawingsNow() {
   const P = drawMapper();
   if (STATE.draw.autoLines) refreshAutoLines(dctx);
   paintLabels(c2, STATE.draw._labels);
+  paintLegend(c2, dctx);
   if (STATE.draw.autoLines) paintAutoLines(c2, P, dctx);
   STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id));
   if (STATE.draw.suggest) paintSuggest(c2, P, dctx);

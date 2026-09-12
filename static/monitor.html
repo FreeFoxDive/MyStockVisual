@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🛡 持仓监控 — Visual</title>
+<link rel="stylesheet" href="/css/theme.css">
+<script src="/js/theme.js"></script>
+<script>
+/* 主题预置: 首帧渲染前应用已存/系统主题, 消除暗色用户刷新闪白 */
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
+<style>
+body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+
+/* ═══════════════ 顶栏 ═══════════════ */
+#toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; background: var(--bg-panel);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50;
+}
+#toolbar .title { font-weight: 700; font-size: 15px; }
+#toolbar button {
+  padding: 6px 12px; border: 1px solid var(--input-border); border-radius: 6px;
+  background: transparent; color: var(--text); font-size: 13px; cursor: pointer;
+  transition: all 0.15s; white-space: nowrap;
+}
+#toolbar button:hover { background: var(--btn-hover); }
+#toolbar button.danger { color: var(--down-text); }
+#toolbar .spacer { flex: 1; }
+.status-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 10px; border-radius: 999px;
+  background: var(--bg-card); border: 1px solid var(--border); color: var(--text-secondary);
+}
+.status-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #9e9e9e; }
+.status-badge.on .dot { background: var(--up-text); box-shadow: 0 0 6px var(--up-text); }
+.status-badge.off .dot { background: var(--down-text); }
+
+/* 开关 */
+.switch { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }
+.switch input { display: none; }
+.switch .track {
+  width: 34px; height: 18px; border-radius: 999px; background: var(--border);
+  position: relative; transition: background 0.2s; flex-shrink: 0;
+}
+.switch .track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: #fff; transition: left 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+.switch input:checked + .track { background: var(--btn-active); }
+.switch input:checked + .track::after { left: 18px; }
+.switch input:disabled + .track { opacity: 0.5; }
+
+/* ═══════════════ 主视图 ═══════════════ */
+#main-view { padding: 18px 22px; max-width: 1280px; margin: 0 auto; }
+.section-title { font-size: 15px; font-weight: 700; margin: 22px 0 12px; display: flex; align-items: center; gap: 8px; }
+.section-title .bar { width: 4px; height: 16px; background: var(--btn-active); border-radius: 2px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.card .label { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px; white-space: nowrap; }
+.card .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .sub { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+
+/* 表格 */
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 1080px; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; }
+tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: var(--btn-hover); }
+td.num { font-variant-numeric: tabular-nums; }
+td.sym .code { color: var(--text-secondary); font-size: 12px; }
+td.sym a { color: inherit; text-decoration: none; display: block; }
+td.sym a:hover { color: var(--btn-active); }
+.pos { color: var(--up-text); font-weight: 600; }
+.neg { color: var(--down-text); font-weight: 600; }
+.dim { color: var(--text-secondary); }
+.triggered { background: rgba(var(--down-rgb), 0.08); }
+.level-hit { color: var(--up-text); font-weight: 700; }
+
+/* 条件徽标 */
+.cond-badges { display: flex; flex-wrap: wrap; gap: 4px; max-width: 300px; white-space: normal; }
+.badge {
+  padding: 1px 8px; border-radius: 10px; font-size: 11px;
+  background: var(--bg-panel); border: 1px solid var(--border); color: var(--text-secondary);
+}
+.badge.on { background: rgba(var(--up-rgb), 0.14); color: var(--up-text); border-color: rgba(var(--up-rgb), 0.4); font-weight: 600; }
+.badge.risk { background: rgba(var(--down-rgb), 0.12); color: var(--down-text); border-color: rgba(var(--down-rgb), 0.4); }
+.badge.expired { background: var(--down-text); color: #fff; border-color: var(--down-text); font-weight: 700; }
+
+/* 图例 */
+.legend-bar { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 10px 2px 0; font-size: 12px; color: var(--text-secondary); }
+.legend-bar b { color: var(--text); font-weight: 600; }
+
+.empty { text-align: center; color: var(--text-secondary); padding: 40px 0; line-height: 2; }
+.empty .btn-row { margin-top: 10px; display: flex; gap: 10px; justify-content: center; }
+.empty button {
+  padding: 8px 16px; border: 1px solid var(--btn-active); border-radius: 6px;
+  background: var(--btn-active); color: var(--btn-active-text); font-size: 13px; cursor: pointer;
+}
+.empty button.ghost { background: transparent; color: var(--btn-active); }
+.err-banner {
+  display: none; margin: 14px 0; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+  background: rgba(var(--down-rgb), 0.1); border: 1px solid rgba(var(--down-rgb), 0.4); color: var(--down-text);
+}
+@media (max-width: 640px) {
+  #toolbar { flex-wrap: wrap; }
+  #main-view { padding: 14px 10px; }
+}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span class="title">🛡 持仓监控</span>
+  <span class="status-badge off" id="svc-badge"><span class="dot"></span><span id="svc-text">检查中…</span></span>
+  <button onclick="location.href='/'" title="返回K线主页">← 主页</button>
+  <span class="spacer"></span>
+  <label class="switch" id="mon-switch-wrap" title="关闭后你的持仓将退出监控循环" style="display:none">
+    <input type="checkbox" id="mon-switch" onchange="onMonToggle(this.checked)">
+    <span class="track"></span>
+    <span>我的监控</span>
+  </label>
+  <span id="admin-hint" class="dim" style="display:none;font-size:12px">管理员监控恒开</span>
+  <button id="btn-theme" onclick="toggleTheme()" title="切换主题">🌙</button>
+  <button id="btn-logout" class="danger" onclick="doLogout()">退出登录</button>
+</div>
+
+<div id="main-view" style="display:none">
+  <div class="err-banner" id="err-banner"></div>
+
+  <div class="cards" id="stat-cards">
+    <div class="card"><div class="label">监控标的数</div><div class="value" id="st-n">—</div><div class="sub" id="st-last">最近轮询 —</div></div>
+    <div class="card"><div class="label">生效风控持仓</div><div class="value" id="st-risk">—</div><div class="sub">已填止盈/保本/止损</div></div>
+    <div class="card"><div class="label">到期提醒持仓</div><div class="value" id="st-hold">—</div><div class="sub">关联模型推荐周期</div></div>
+    <div class="card"><div class="label">近 20 条告警</div><div class="value" id="st-alerts">—</div><div class="sub" id="st-backend">推送后端 —</div></div>
+  </div>
+
+  <div id="pos-section">
+    <div class="section-title"><span class="bar"></span>监控股票与生效条件</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>标的</th><th>现价</th><th>成本</th><th>数量</th>
+            <th>止盈 / 距离</th><th>保本 / 距离</th><th>止损 / 距离</th>
+            <th>模型 / 周期</th><th style="min-width:240px">生效条件</th><th>最近触发</th>
+          </tr>
+        </thead>
+        <tbody id="pos-tbody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="legend-bar">
+      <span><b class="pos">止盈达成</b> 现价 ≥ 止盈价</span>
+      <span><b class="pos">保本命中</b> 现价 ≥ 保本价</span>
+      <span><b class="neg">止损触发</b> 现价 ≤ 止损价</span>
+      <span><b>加速上涨/下跌</b> 30 分钟窗口量价加速度异动</span>
+      <span><b>涨停封板</b> 触及涨停价后封住</span>
+      <span><b>到期提醒</b> 持有满模型推荐交易日（到期日 10:00/14:00 推送）</span>
+    </div>
+  </div>
+
+  <div class="section-title"><span class="bar"></span>最近告警</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>时间</th><th>类型</th><th>标的</th><th>价格</th><th>详情</th></tr></thead>
+      <tbody id="alert-tbody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="empty" id="empty-box" style="display:none">
+    <div>当前没有纳入监控的持仓</div>
+    <div>在交易记录中为持仓填入 止盈 / 保本 / 止损 任一风控价即可自动纳入；<br>
+         关联量化模型并填写推荐持有天数可获得到期提醒。</div>
+    <div class="btn-row">
+      <button onclick="location.href='/trades.html'">📒 去交易记录</button>
+      <button class="ghost" onclick="location.href='/'">← 返回主面板</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+const ALERT_LABELS = {
+  sl_breached: "止损触发", tp_reached: "止盈达成", breakeven_hit: "保本命中",
+  be_broken: "保本跌破", limit_up_sealed: "涨停封板", accel_down: "加速下跌",
+  accel_up: "加速上涨", hold_expire: "到期提醒",
+};
+
+function api(path, options = {}) {
+  return VisualApi.api(path, options, {
+    onUnauthorized: () => { location.href = "/login.html?next=" + encodeURIComponent(location.pathname); },
+  });
+}
+
+function fmt(v, d = 2) {
+  return (v == null || isNaN(v)) ? "—" : Number(v).toFixed(d);
+}
+function pctStr(v) {
+  return (v == null || isNaN(v)) ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
+}
+function distPct(last, level) {
+  // 现价相对触发价的距离: 越线为正(已触发方向)
+  if (last == null || level == null || !Number.isFinite(last) || !Number.isFinite(level) || level === 0) return null;
+  return (last - level) / Math.abs(level) * 100;
+}
+
+let STATE = { overview: null, quotes: {}, me: null, timer: null };
+
+async function loadOverview() {
+  try {
+    const data = await api("/api/monitor/overview");
+    STATE.overview = data;
+    render(data);
+    document.getElementById("err-banner").style.display = "none";
+  } catch (e) {
+    const box = document.getElementById("err-banner");
+    box.textContent = "加载失败: " + (e.message || e);
+    box.style.display = "block";
+  }
+}
+
+function render(data) {
+  // 状态徽标与卡片
+  const st = data.status || {};
+  const running = !!st.running;
+  const badge = document.getElementById("svc-badge");
+  badge.className = "status-badge " + (running ? "on" : "off");
+  document.getElementById("svc-text").textContent = running
+    ? `监控运行中 · ${st.n_symbols || 0} 标的` : "监控未运行";
+  document.getElementById("st-n").textContent = st.n_symbols ?? "—";
+  document.getElementById("st-last").textContent = "最近轮询 " + (st.last_poll || "—");
+  document.getElementById("st-backend").textContent = "推送后端 " + (st.backend || "—");
+  const positions = data.positions || [];
+  document.getElementById("st-risk").textContent = positions.filter(p => p.has_risk_prices).length;
+  document.getElementById("st-hold").textContent = positions.filter(p => p.has_hold_expire).length;
+  document.getElementById("st-alerts").textContent = (data.alerts || []).length;
+
+  // 我的监控开关
+  const wrap = document.getElementById("mon-switch-wrap");
+  const hint = document.getElementById("admin-hint");
+  if (data.is_admin) {
+    hint.style.display = "";
+    wrap.style.display = "none";
+  } else {
+    wrap.style.display = "";
+    document.getElementById("mon-switch").checked = !!data.monitor_enabled;
+  }
+
+  renderPositions(positions);
+  renderAlerts(data.alerts || []);
+  const empty = document.getElementById("empty-box");
+  const posSection = document.getElementById("pos-section");
+  if (!positions.length) {
+    empty.style.display = "";
+    posSection.style.display = "none";
+  } else {
+    empty.style.display = "none";
+    posSection.style.display = "";
+  }
+  loadQuotes(positions);
+}
+
+function condBadges(p, last) {
+  const out = [];
+  const hitCls = (triggered) => triggered ? "badge on" : "badge";
+  if (p.has_risk_prices) {
+    if (p.stop_loss != null) {
+      const hit = last != null && last <= p.stop_loss;
+      out.push(`<span class="${hit ? "badge risk" : "badge"}" title="现价 ≤ 止损价 ${fmt(p.stop_loss)} 时推送">止损</span>`);
+    }
+    if (p.breakeven != null) {
+      const hit = last != null && last >= p.breakeven;
+      out.push(`<span class="${hit ? "badge on" : "badge"}" title="现价 ≥ 保本价 ${fmt(p.breakeven)} 时推送">保本</span>`);
+    }
+    if (p.take_profit != null) {
+      const hit = last != null && last >= p.take_profit;
+      out.push(`<span class="${hit ? "badge on" : "badge"}" title="现价 ≥ 止盈价 ${fmt(p.take_profit)} 时推送">止盈</span>`);
+    }
+  }
+  if (p.has_hold_expire) {
+    const left = p.hold_days_left;
+    const expired = left != null && left <= 0;
+    out.push(`<span class="badge ${expired ? "expired" : ""}" title="持有满 ${p.hold_days} 个交易日到期推送, 剩余 ${left ?? "—"} 个交易日">到期${left != null ? (expired ? "已到期" : "·剩" + left + "日") : ""}</span>`);
+  }
+  out.push('<span class="badge" title="30 分钟窗口量价加速度异动自动告警">加速</span>');
+  out.push('<span class="badge" title="触及涨停价后封住自动告警">涨停</span>');
+  return out.join("");
+}
+
+function renderPositions(positions) {
+  const tbody = document.getElementById("pos-tbody");
+  if (!positions.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">无数据</td></tr>';
+    return;
+  }
+  const lastAlertByTrade = {};
+  (STATE.overview.alerts || []).forEach(a => {
+    const k = a.trade_id || ("s:" + a.symbol);
+    if (!lastAlertByTrade[k]) lastAlertByTrade[k] = a;
+  });
+  tbody.innerHTML = positions.map(p => {
+    const last = STATE.quotes[p.symbol]?.last_price ?? null;
+    const chg = STATE.quotes[p.symbol]?.change_pct ?? null;
+    const heldDays = p.entry_date
+      ? Math.max(0, Math.round((Date.now() - new Date(p.entry_date + "T00:00:00")) / 864e5))
+      : null;
+    const riskCell = (level, dir) => {
+      if (level == null) return '<span class="dim">—</span>';
+      const d = distPct(last, level);
+      const hit = (dir === "up") ? (last != null && last >= level) : (last != null && last <= level);
+      return `${fmt(level)} <span class="${hit ? "level-hit" : "dim"}" style="font-size:11px">(${dir === "up" ? "+" : ""}${d == null ? "—" : d.toFixed(1)}%)</span>`;
+    };
+    const holdCell = p.has_hold_expire
+      ? `${p.model_name ? escHtml(p.model_name) + "<br>" : ""}<span class="dim" style="font-size:11px">${p.hold_days} 交易日 · 到期 ${p.hold_end_date || "—"}</span>`
+      : '<span class="dim">—</span>';
+    const lastA = lastAlertByTrade[p.id] || lastAlertByTrade["s:" + p.symbol];
+    const triggered = (last != null && (
+      (p.stop_loss != null && last <= p.stop_loss) ||
+      (p.take_profit != null && last >= p.take_profit)));
+    return `<tr class="${triggered ? "triggered" : ""}">
+      <td class="sym"><a href="/?symbol=${encodeURIComponent(p.symbol)}"><b>${escHtml(p.name || p.symbol)}</b><br><span class="code">${escHtml(p.symbol)}</span></a></td>
+      <td class="num"><span id="q-last-${escAttr(p.symbol)}">${fmt(last)}</span><br><span class="${chg >= 0 ? "pos" : "neg"}" style="font-size:11px" id="q-chg-${escAttr(p.symbol)}">${chg == null ? "—" : pctStr(chg)}</span></td>
+      <td class="num">${fmt(p.entry_price)}</td>
+      <td class="num">${p.quantity ?? "—"}</td>
+      <td class="num">${riskCell(p.take_profit, "up")}</td>
+      <td class="num">${riskCell(p.breakeven, "up")}</td>
+      <td class="num">${riskCell(p.stop_loss, "down")}</td>
+      <td>${holdCell}</td>
+      <td><div class="cond-badges">${condBadges(p, last)}</div></td>
+      <td class="dim" style="font-size:11px">${lastA ? (ALERT_LABELS[lastA.alert_type] || lastA.alert_type) + "<br>" + (lastA.fired_at || "").replace("T", " ").slice(0, 16) : "—"}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderAlerts(alerts) {
+  const tbody = document.getElementById("alert-tbody");
+  if (!alerts.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无告警记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = alerts.map(a => `<tr>
+    <td class="dim">${(a.fired_at || "").replace("T", " ").slice(0, 16)}</td>
+    <td>${ALERT_LABELS[a.alert_type] || escHtml(a.alert_type)}</td>
+    <td class="sym"><b>${escHtml(a.name || "")}</b> <span class="code">${escHtml(a.symbol || "")}</span></td>
+    <td class="num">${fmt(a.price)}</td>
+    <td class="dim" style="white-space:normal">${escHtml(a.detail || "")}</td>
+  </tr>`).join("");
+}
+
+async function loadQuotes(positions) {
+  const symbols = [...new Set(positions.map(p => p.symbol))].slice(0, 50);
+  if (!symbols.length) return;
+  try {
+    const quotes = await api("/api/quotes?symbols=" + encodeURIComponent(symbols.join(",")));
+    STATE.quotes = quotes || {};
+    // 只更新现价单元格, 不重建整表 (保留悬停状态)
+    positions.forEach(p => {
+      const q = STATE.quotes[p.symbol];
+      if (!q) return;
+      const lastEl = document.getElementById("q-last-" + cssEsc(p.symbol));
+      const chgEl = document.getElementById("q-chg-" + cssEsc(p.symbol));
+      if (lastEl) lastEl.textContent = fmt(q.last_price);
+      if (chgEl) {
+        chgEl.textContent = q.change_pct == null ? "—" : pctStr(q.change_pct);
+        chgEl.className = (q.change_pct >= 0 ? "pos" : "neg");
+        chgEl.style.fontSize = "11px";
+      }
+    });
+  } catch (e) { /* 快照失败保持上次值 */ }
+}
+
+function cssEsc(s) { return (s || "").replace(/([^a-zA-Z0-9_-])/g, "\\$1"); }
+function escAttr(s) { return escHtml(String(s ?? "")); }
+function escHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+async function onMonToggle(enabled) {
+  try {
+    const r = await api("/api/monitor/enabled", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (r && r.ok === false) {
+      document.getElementById("mon-switch").checked = true;
+      showToast(r.message || "管理员监控恒开");
+      return;
+    }
+    showToast(enabled ? "已开启监控" : "已关闭监控");
+  } catch (e) {
+    document.getElementById("mon-switch").checked = !enabled;
+    showToast("更新失败: " + (e.message || e));
+  }
+}
+
+function showToast(msg) {
+  const box = document.getElementById("err-banner");
+  box.textContent = msg;
+  box.style.display = "block";
+  setTimeout(() => { box.style.display = "none"; }, 3000);
+}
+
+async function doLogout() {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch (e) { /* ignore */ }
+  location.href = "/login.html";
+}
+
+async function init() {
+  try {
+    STATE.me = await api("/api/auth/me");
+    document.getElementById("main-view").style.display = "";
+  } catch (e) { return; /* 未登录已跳转 */ }
+  await loadOverview();
+  setInterval(() => { if (!document.hidden) loadOverview(); }, 15000);
+}
+init();
+</script>
+</body>
+</html>

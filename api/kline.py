@@ -52,6 +52,10 @@ def kline():
 
     symbol = normalize_symbol(symbol_raw)
     period = request.args.get("period") or "1d"
+    # 复权: forward(前,默认) / hfq(后) / none(不复权); 分钟周期固定前复权 (源口径)
+    adjust = kline_source.normalize_adjust(request.args.get("adjust"))
+    if period in MINUTE_PERIODS:
+        adjust = kline_source.ADJUST_FORWARD
     # 日K: 3年可见 (3×252) + RSI 收敛 warmup 250；其余非分钟默认 200
     DAILY_COUNT = 3 * 252 + 250  # 1006
     if period == "1d":
@@ -63,7 +67,7 @@ def kline():
     except ValueError:
         count = default_count
 
-    cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag('forward')}"
+    cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
     skip_1d_cache = period == "1d" and market_hours.is_trading_day(
         market_hours.now().date().isoformat()
     )
@@ -82,7 +86,7 @@ def kline():
         return _json(resp)
 
     try:
-        df, name, source = fetch_kline_ex(symbol, period, count, adjust="forward")
+        df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust)
     except Exception as e:
         log.warning("获取K线失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("获取K线失败，请稍后重试", 500)
@@ -177,6 +181,17 @@ def kline():
             "vol_ma5": _safe_float(row.get("vol_ma5")),
             "vol_ma10": _safe_float(row.get("vol_ma10")),
             "vol_ma20": _safe_float(row.get("vol_ma20")),
+            "boll_mid": _safe_float(row.get("boll_mid")),
+            "boll_up": _safe_float(row.get("boll_up")),
+            "boll_low": _safe_float(row.get("boll_low")),
+            "wr14": _safe_float(row.get("wr14")),
+            "cci14": _safe_float(row.get("cci14")),
+            "bias6": _safe_float(row.get("bias6")),
+            "bias12": _safe_float(row.get("bias12")),
+            "bias24": _safe_float(row.get("bias24")),
+            "dmi_pdi": _safe_float(row.get("dmi_pdi")),
+            "dmi_mdi": _safe_float(row.get("dmi_mdi")),
+            "dmi_adx": _safe_float(row.get("dmi_adx")),
         }
         klines.append(entry)
 
@@ -201,12 +216,14 @@ def kline():
         "instrument_type": inst_meta.get("type"),
         "obv_params": indicators.get("obv", {}).get("params"),
         "macd_params": indicators["macd"]["params"],
+        "boll_params": indicators.get("boll", {}).get("params"),
         "klines": klines,
         "meta": {
             "cached": False,
             "server_time": str(market_hours.now()),
             "last_trade_date": klines[-1]["date"] if klines else None,
             "source": source,
+            "adjust": adjust,
         },
     }
 

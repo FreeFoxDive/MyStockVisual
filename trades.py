@@ -2217,13 +2217,16 @@ def compute_stats(user_id, start=None, end=None, deduct_fees=False, fee_config=N
 
 
 # ── 持仓监控 ──
-def list_monitored_positions():
-    """授权用户 (管理员恒开 / monitor_enabled=1) 的 open 持仓, 且至少填了一个风控价。"""
+def list_monitored_positions(user_id=None):
+    """授权用户 (管理员恒开 / monitor_enabled=1) 的 open 持仓, 且至少填了一个风控价。
+
+    user_id 非空时只返回该用户的持仓 (监控页自视图); 缺省返回全部授权用户 (监控循环用)。
+    """
     conn = get_conn()
     try:
-        rows = conn.execute(
-            "SELECT t.id, t.user_id, t.symbol, t.name, t.status, t.entry_price, "
-            "t.quantity, t.take_profit, t.stop_loss, t.breakeven, "
+        sql = (
+            "SELECT t.id, t.user_id, t.symbol, t.name, t.status, t.entry_date, "
+            "t.entry_price, t.quantity, t.take_profit, t.stop_loss, t.breakeven, "
             "u.username, u.is_admin, u.monitor_enabled "
             "FROM trades t JOIN users u ON u.id = t.user_id "
             "WHERE t.status='open' "
@@ -2231,8 +2234,13 @@ def list_monitored_positions():
             "AND (u.is_admin=1 OR u.monitor_enabled=1) "
             "AND (t.take_profit IS NOT NULL OR t.stop_loss IS NOT NULL "
             "     OR t.breakeven IS NOT NULL) "
-            "ORDER BY t.user_id, t.symbol"
-        ).fetchall()
+        )
+        args = []
+        if user_id is not None:
+            sql += "AND t.user_id=? "
+            args.append(user_id)
+        sql += "ORDER BY t.user_id, t.symbol"
+        rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()

@@ -17,6 +17,63 @@ from stock_indicators_cn import (
 )
 
 
+def boll(close, n=20, k=2):
+    """布林带 BOLL(N,K) (通达信/东财口径): MID=MA(C,N), STD=样本标准差(N-1),
+    UP=MID+K*STD, LOW=MID-K*STD。返回 (mid, up, low)。"""
+    c = pd.Series(close)
+    mid = sma(c, n)
+    std = c.rolling(n, min_periods=n).std(ddof=1)
+    return mid, mid + k * std, mid - k * std
+
+
+def wr(high, low, close, n=14):
+    """威廉指标 WR(N): 100*(HHV(H,N)-C)/(HHV(H,N)-LLV(L,N))。0-100, 越小越强势。"""
+    h, l, c = pd.Series(high), pd.Series(low), pd.Series(close)
+    hhv = h.rolling(n, min_periods=n).max()
+    llv = l.rolling(n, min_periods=n).min()
+    rng = hhv - llv
+    return pd.Series(np.where(rng > 0, 100 * (hhv - c) / rng, np.nan), index=c.index)
+
+
+def cci(high, low, close, n=14):
+    """顺势指标 CCI(N): (TP-MA(TP,N))/(0.015*MD), TP=(H+L+C)/3, MD=N内|TP-MA|均值。"""
+    h, l, c = pd.Series(high), pd.Series(low), pd.Series(close)
+    tp = (h + l + c) / 3
+    ma_tp = tp.rolling(n, min_periods=n).mean()
+    md = (tp - ma_tp).abs().rolling(n, min_periods=n).mean()
+    return pd.Series(np.where(md > 0, (tp - ma_tp) / (0.015 * md), np.nan), index=c.index)
+
+
+def bias(close, periods=(6, 12, 24)):
+    """乖离率 BIAS(N): (C-MA(C,N))/MA(C,N)*100。返回 {f"bias{n}": Series}。"""
+    c = pd.Series(close)
+    out = {}
+    for n in periods:
+        ma = sma(c, n)
+        out[f"bias{n}"] = (c - ma) / ma * 100
+    return out
+
+
+def dmi(high, low, close, n=14, m=6):
+    """动向指标 DMI(N,M) (通达信 SUM 平滑口径):
+    TR=max(H-L,|H-前C|,|L-前C|); +DM=HD(HD>LD>0), -DM=LD(LD>HD>0);
+    +DI=SUM(+DM,N)/SUM(TR,N)*100; DX=|+DI-(-DI)|/(+DI+(-DI))*100; ADX=MA(DX,M)。
+    返回 (pdi, mdi, adx)。"""
+    h, l, c = pd.Series(high), pd.Series(low), pd.Series(close)
+    prev_c, prev_h, prev_l = c.shift(1), h.shift(1), l.shift(1)
+    tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    hd = h - prev_h
+    ld = prev_l - l
+    pdm = pd.Series(np.where((hd > 0) & (hd > ld), hd, 0.0), index=h.index)
+    mdm = pd.Series(np.where((ld > 0) & (ld > hd), ld, 0.0), index=h.index)
+    tr_n = tr.rolling(n, min_periods=n).sum()
+    pdi = pdm.rolling(n, min_periods=n).sum() / tr_n * 100
+    mdi = mdm.rolling(n, min_periods=n).sum() / tr_n * 100
+    dx = (pdi - mdi).abs() / (pdi + mdi) * 100
+    adx = dx.rolling(m, min_periods=m).mean()
+    return pdi, mdi, adx
+
+
 def obv(close, volume):
     """能量潮 OBV (通达信/东财口径): 首根为 0, 涨累加量、跌累减量、平不变。"""
     c = pd.Series(close)
@@ -147,6 +204,51 @@ def compute_all_indicators(df, period="1d",
     indicators["impulse"] = {
         "params": {"ema_period": 13},
         "values": _safe_list(impulse),
+    }
+
+    # BOLL(N=20, K=2) 主图叠加
+    boll_mid, boll_up, boll_low = boll(c, 20, 2)
+    result_df["boll_mid"] = boll_mid
+    result_df["boll_up"] = boll_up
+    result_df["boll_low"] = boll_low
+    indicators["boll"] = {
+        "params": {"n": 20, "k": 2},
+        "mid": _safe_list(boll_mid),
+        "up": _safe_list(boll_up),
+        "low": _safe_list(boll_low),
+    }
+
+    # WR(14) 面板
+    wr14 = wr(h, l, c, 14)
+    result_df["wr14"] = wr14
+    indicators["wr"] = {"params": {"period": 14}, "values": _safe_list(wr14)}
+
+    # CCI(14) 面板
+    cci14 = cci(h, l, c, 14)
+    result_df["cci14"] = cci14
+    indicators["cci"] = {"params": {"period": 14}, "values": _safe_list(cci14)}
+
+    # BIAS(6/12/24) 面板
+    bias_map = bias(c, (6, 12, 24))
+    for name, series in bias_map.items():
+        result_df[name] = series
+    indicators["bias"] = {
+        "params": {"periods": [6, 12, 24]},
+        "bias6": _safe_list(bias_map["bias6"]),
+        "bias12": _safe_list(bias_map["bias12"]),
+        "bias24": _safe_list(bias_map["bias24"]),
+    }
+
+    # DMI(14,6) 面板: +DI / -DI / ADX
+    pdi, mdi, adx = dmi(h, l, c, 14, 6)
+    result_df["dmi_pdi"] = pdi
+    result_df["dmi_mdi"] = mdi
+    result_df["dmi_adx"] = adx
+    indicators["dmi"] = {
+        "params": {"period": 14, "ma": 6},
+        "pdi": _safe_list(pdi),
+        "mdi": _safe_list(mdi),
+        "adx": _safe_list(adx),
     }
 
     return result_df, indicators
