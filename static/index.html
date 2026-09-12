@@ -3494,15 +3494,19 @@ function showCnTab(tab) {
   api(url).then(data => {
     if (data.error) { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(data.error)}</div>`; return; }
     const rows = data.rows || [];
-    if (!rows.length) { body.innerHTML = '<div style="color:var(--text-secondary)">暂无数据</div>'; return; }
+    const hint = data.hint ? `<div style="color:var(--text-secondary);margin-bottom:6px">${escHtml(data.hint)}</div>` : "";
+    if (!rows.length) { body.innerHTML = hint + '<div style="color:var(--text-secondary)">暂无数据</div>'; return; }
     const cols = Object.keys(rows[0]).slice(0, 7);
-    body.innerHTML = `<table><thead><tr>${cols.map(c => `<th>${escHtml(c)}</th>`).join("")}</tr></thead>
+    body.innerHTML = hint + `<table><thead><tr>${cols.map(c => `<th>${escHtml(c)}</th>`).join("")}</tr></thead>
       <tbody>${rows.map(r => `<tr>${cols.map(c => {
         const v = r[c];
+        if (typeof v === "string" && v.startsWith("http")) {
+          return `<td><a href="${escHtml(v)}" target="_blank" rel="noopener noreferrer" style="color:var(--btn-active)">查看</a></td>`;
+        }
         const cls = typeof v === "number" ? (v >= 0 ? "pos" : "neg") : "";
         return `<td class="${cls}">${typeof v === "number" ? v.toFixed(2) : escHtml(v)}</td>`;
       }).join("")}</tr>`).join("")}</tbody></table>`;
-  }).catch(e => { body.innerHTML = `<div style="color:var(--down-text)">加载失败</div>`; });
+  }).catch(e => { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(e.message || e)}</div>`; });
 }
 
 // ── 价格预警管理 ──
