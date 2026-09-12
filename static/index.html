@@ -3074,17 +3074,20 @@ function updateChart(reTheme) {
   const graphics = [];
   // 面板标签: 抽象文本规格, 由画线 overlay canvas (paintLabels) 绘制
   panels.forEach((p, i) => {
-    const gridTop = parseFloat(grids[indicatorStartGi + i].top) / 100 * ch;
+    const g = grids[indicatorStartGi + i];
+    const gridTop = parseFloat(g.top) / 100 * ch;
+    const gridLeft = parseFloat(g.left) / 100 * cw;
     graphics.push({
-      text: PANEL_LABELS[p] || p.toUpperCase(), x: 10, y: gridTop + 12,
+      text: PANEL_LABELS[p] || p.toUpperCase(), x: gridLeft + 6, y: gridTop + 15,
       fill: LABEL_COLORS[p] || C().text, font: 'bold 11px monospace',
     });
   });
   // 成交量面板也加标签
   if (hasVolume) {
-    const volGridTop = parseFloat(grids[1].top) / 100 * ch;
+    const vg = grids[1];
+    const volGridTop = parseFloat(vg.top) / 100 * ch;
     graphics.push({
-      text: 'VOL', x: 10, y: volGridTop + 12,
+      text: 'VOL', x: parseFloat(vg.left) / 100 * cw + 6, y: volGridTop + 15,
       fill: C().macdDif, font: 'bold 11px monospace',
     });
   }
@@ -3411,20 +3414,39 @@ function paintLegend(c2, dctx) {
   const startGi = hasVolume ? 2 : 1;
   if (!STATE._gridRects || STATE._gridRects.length <= startGi) return;
 
-  c2.font = '10px monospace';
-  c2.globalAlpha = 0.92;
+  // 面板内绘制: 文本放网格左上角内侧, 加半透明底衬; 超宽按词截断
+  const put = (gi, text, fill, yOff) => {
+    const rect = STATE._gridRects[gi];
+    if (!rect) return;
+    const x = rect.left + 6;
+    const y = rect.top + (yOff || 17);
+    const maxW = rect.right - rect.left - 14;
+    let t = text;
+    if (c2.measureText(t).width > maxW) {
+      const words = t.split('  ');
+      while (words.length > 1 && c2.measureText(words.join('  ') + ' …').width > maxW) words.pop();
+      t = words.join('  ');
+      while (t.length > 4 && c2.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+      if (t !== text) t += '…';
+    }
+    const w = Math.min(c2.measureText(t).width + 10, maxW + 10);
+    c2.fillStyle = C().bg;
+    c2.globalAlpha = 0.65;
+    c2.fillRect(x - 4, y - 12, w, 16);
+    c2.globalAlpha = 1;
+    c2.fillStyle = fill;
+    c2.fillText(t, x, y);
+  };
+
+  c2.font = '11px monospace';
   // 主图: MA + BOLL
   const eff = effectiveMaBoll(klines);
-  const maTxt = STATE.maPeriods.map((p, i) => `MA${p} ${fmt3(eff.ma[i][endIdx])}`).join('  ');
-  const parts = [maTxt];
+  const parts = STATE.maPeriods.map((p, i) => `MA${p} ${fmt3(eff.ma[i][endIdx])}`);
   if (document.getElementById('chk-boll').checked) {
-    parts.push(`BOLL(${STATE.bollParams.n},${STATE.bollParams.k}) `
-      + `${fmt3(eff.boll.up[endIdx])}/${fmt3(eff.boll.mid[endIdx])}/${fmt3(eff.boll.low[endIdx])}`);
+    parts.push(`BOLL ${fmt3(eff.boll.up[endIdx])}/${fmt3(eff.boll.mid[endIdx])}/${fmt3(eff.boll.low[endIdx])}`);
   }
-  c2.fillStyle = C().text;
-  c2.fillText(parts.join('   '), 12, STATE._gridRects[0].top + 26);
+  put(0, parts.join('  '), C().text, 31);
 
-  // 各指标面板
   const valText = {
     macd: () => `DIF ${fmt3(k.macd_dif)}  DEA ${fmt3(k.macd_dea)}  柱 ${fmt3(k.macd_hist)}`,
     kdj: () => `K ${fmt3(k.kdj_k)}  D ${fmt3(k.kdj_d)}  J ${fmt3(k.kdj_j)}`,
@@ -3438,12 +3460,9 @@ function paintLegend(c2, dctx) {
     dmi: () => `+DI ${fmt3(k.dmi_pdi, 1)}  -DI ${fmt3(k.dmi_mdi, 1)}  ADX ${fmt3(k.dmi_adx, 1)}`,
   };
   panels.forEach((p, i) => {
-    const rect = STATE._gridRects[startGi + i];
-    if (!rect || !valText[p]) return;
-    c2.fillStyle = C().text;
-    c2.fillText(valText[p](), 12, rect.top + 26);
+    if (!valText[p]) return;
+    put(startGi + i, valText[p](), C().text, 31);
   });
-  c2.globalAlpha = 1;
   c2.font = '12px monospace';
 }
 
@@ -3792,12 +3811,15 @@ function _renderDrawingsNow() {
   if (!dctx || !STATE.draw.visible) { positionDrawMenu(); return; }
   const P = drawMapper();
   if (STATE.draw.autoLines) refreshAutoLines(dctx);
+  // 面板名/图例是图表固有元素, 不随 👁 画线显隐开关消失
   paintLabels(c2, STATE.draw._labels);
   paintLegend(c2, dctx);
-  if (STATE.draw.autoLines) paintAutoLines(c2, P, dctx);
-  STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id));
-  if (STATE.draw.suggest) paintSuggest(c2, P, dctx);
-  if (STATE.draw.draft) paintDraft(c2, P, dctx);
+  if (STATE.draw.autoLines && STATE.draw.visible) paintAutoLines(c2, P, dctx);
+  if (STATE.draw.visible) {
+    STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id));
+    if (STATE.draw.suggest) paintSuggest(c2, P, dctx);
+    if (STATE.draw.draft) paintDraft(c2, P, dctx);
+  }
   positionDrawMenu();
 }
 
