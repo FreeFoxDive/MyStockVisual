@@ -149,6 +149,21 @@ def main():
     else:
         print("       探测期内 timestamp 未前进 (盘后/延迟/分钟级刷新?)", flush=True)
 
+    print("=== 5b. 港/美股 quotes + klines ===", flush=True)
+    try:
+        hk_df = af.quotes.get(symbols=PROBE_HKUS_SYMBOLS, to_dataframe=True)
+        print(hk_df, flush=True)
+        for sym in PROBE_HKUS_SYMBOLS:
+            try:
+                dfs = af.klines.batch([sym], period="1d", count=30, adjust="qfq", to_dataframe=True)
+                d = (dfs or {}).get(sym)
+                print(sym, "日K:", ("OK rows=" + str(len(d))) if d is not None and len(d) else "空 (AF 不支持该代码/市场?)", flush=True)
+            except Exception as e:
+                print(sym, "日K失败:", e, flush=True)
+        print("限频口径: 若 429, 记录 retry_after; 令牌桶预设 8/min (HKUS_AF_QUOTE_PER_MIN 可调)", flush=True)
+    except Exception as e:
+        print("港/美股探测失败 (AF 不支持或额度不足):", e, flush=True)
+
     print("=== 6. WebSocket (可选, 无权限则 FAIL) ===", flush=True)
     try:
         import websocket  # noqa: F401

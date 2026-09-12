@@ -154,3 +154,10 @@
 - 测试：`visual/test/test_kline_source.py`
   - `TestDefaultRouting.test_stock_weekly_defaults_to_alphafeed`
   - 原 `_fetch_af_daily_kline` mock/断言同步更新为 `_fetch_af_kline(symbol, period, ...)`
+
+
+## L2 数据（十档/逐笔）获取方式调研
+
+- 结论：**网页版扫码登录方案不可行**。扫码只能获得网页会话，L2 十档/逐笔走的是各平台（东财/同花顺/富途）非公开 WebSocket 协议且绑定付费会员账号——需要逆向私有协议、维持易失效会话，稳定性差且有合规风险。
+- 替代建议：接正规付费 L2 数据源（东财全行通、捷利交易宝、券商 Level-2 API），或在 AlphaFeed 升级套餐开放 L2 后经 `feed.py` 扩展。
+- 状态：暂不实现（2026-09-12）。
