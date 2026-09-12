@@ -3466,6 +3466,12 @@ function paintLegend(c2, dctx) {
   c2.font = '12px monospace';
 }
 
+/** JSON 请求助手 (市场数据抽屉/预警弹窗用; 401 由全局 fetch 包装器跳登录) */
+async function api(path, options = {}) {
+  const resp = await fetch(path, options);
+  try { return await resp.json(); } catch (e) { return { error: "HTTP " + resp.status }; }
+}
+
 // ── A股市场数据抽屉 ──
 let _cnTab = "fund-flow";
 function toggleCnDrawer() {
@@ -3520,6 +3526,7 @@ async function refreshAlerts() {
   try {
     const data = await api("/api/alerts");
     const box = document.getElementById("alerts-list");
+    if (!data || !data.alerts) return;
     if (!data.alerts.length) { box.innerHTML = '<div class="dim" style="text-align:center;color:var(--text-secondary);padding:10px 0">暂无预警</div>'; return; }
     box.innerHTML = data.alerts.map(a => `
       <div style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border);font-size:13px">
