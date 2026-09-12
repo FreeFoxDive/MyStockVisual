@@ -3489,7 +3489,7 @@ function showCnTab(tab) {
   const body = document.getElementById("cn-body");
   body.innerHTML = '<div style="color:var(--text-secondary)">加载中…</div>';
   const symbol = STATE.symbol;
-  const url = tab === "lhb" || tab === "north"
+  const url = tab === "north"
     ? `/api/cn/${tab}` : `/api/cn/${tab}?symbol=${encodeURIComponent(symbol)}`;
   api(url).then(data => {
     if (data.error) { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(data.error)}</div>`; return; }

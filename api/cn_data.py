@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -16,6 +17,8 @@ import market_hours
 from api import api_bp
 from api.common import _error, _json, _require_user
 from logger import redact_message
+
+log = logging.getLogger("api")
 
 CACHE_TTL = 900  # 15 分钟
 _cache = {}
@@ -45,6 +48,7 @@ def _cached(key, fetcher, ttl=CACHE_TTL):
             _cache[key] = (time.time(), data)
         return data
     except Exception as e:
+        log.warning(f"cn 数据拉取失败 {key}: {redact_message(str(e))}")
         if hit:
             return hit[1]  # 过期回退
         return {"error": "数据源暂时不可用, 请稍后重试"}
@@ -66,8 +70,11 @@ def _clean_cell(v):
     return v
 
 
-def _rows_pick(df, colmap, limit=12):
-    """按 colmap (raw列名子串 → 中文输出名) 选列; 候选均未命中时回退前几列原样输出。"""
+def _rows_pick(df, colmap, limit=12, date_key=None):
+    """按 colmap (raw列名子串 → 中文输出名) 选列; 取最新 limit 条, 按日期倒序 (新→旧)。
+
+    date_key: 输出列里含日期的键名, 用于倒序排序; 候选均未命中时回退前几列原样输出。
+    """
     if df is None or len(df) == 0:
         return []
     cols = list(df.columns)
@@ -79,12 +86,17 @@ def _rows_pick(df, colmap, limit=12):
     if not picked:  # 列名全不认识: 回退前 4 列
         picked = [(c, str(c)) for c in cols[:4]]
     out = []
-    for _, r in df.head(limit).iterrows():
+    for _, r in df.tail(limit).iterrows():  # tail = 最新记录 (akshare 历史为升序)
         row = {}
         for match, dst in picked:
             row[dst] = _clean_cell(r[match])
         if any(v is not None for v in row.values()):
             out.append(row)
+    if date_key:
+        try:
+            out.sort(key=lambda r: str(r.get(date_key) or ""), reverse=True)
+        except Exception:
+            pass
     return out
 
 
@@ -116,7 +128,7 @@ def cn_fund_flow():
             ("日期", "日期"), ("收盘价", "收盘"), ("涨跌幅", "涨跌幅"),
             ("主力净流入-净额", "主力净额(万)"), ("主力净流入-净占比", "主力占比%"),
             ("超大单净流入-净额", "超大单净额(万)"),
-        ], limit=10)}
+        ], limit=10, date_key="日期")}
 
     return _json(_cached(f"ff:{symbol}", fetch))
 
@@ -147,7 +159,7 @@ def cn_lhb():
         return {"rows": _rows_pick(df, [
             ("上榜日", "上榜日"), ("解读", "解读"), ("收盘价", "收盘"),
             ("涨跌幅", "涨跌幅"), ("龙虎榜净买额", "净买额(万)"),
-        ], limit=15), "hint": "" if len(df) else "近 7 日该股无龙虎榜记录"}
+        ], limit=15, date_key="上榜日"), "hint": "" if len(df) else "近 7 日该股无龙虎榜记录"}
 
     return _json(_cached(f"lhb:{symbol}", fetch, ttl=1800))
 
@@ -172,7 +184,7 @@ def cn_dividends():
             ("公告日期", "公告日期"), ("报告期", "报告期"),
             ("送转股份-送转总股本比例", "送转比例"), ("现金分红-现金分红比例", "现金分红"),
             ("除权除息日", "除权除息日"),
-        ], limit=12)}
+        ], limit=12, date_key="公告日期")}
 
     return _json(_cached(f"div:{symbol}", fetch, ttl=3600))
 
@@ -199,7 +211,7 @@ def cn_announcements():
             symbol=code, market="沪深京", start_date=start, end_date=end)
         return {"rows": _rows_pick(df, [
             ("公告日期", "日期"), ("公告标题", "标题"), ("公告链接", "链接"),
-        ], limit=15)}
+        ], limit=15, date_key="日期")}
 
     return _json(_cached(f"ann:{symbol}", fetch, ttl=1800))
 
@@ -218,6 +230,6 @@ def cn_north():
         return {"rows": _rows_pick(df, [
             ("日期", "日期"), ("当日成交净买额", "净买额(亿)"),
             ("当日成交净买额-净占比", "净占比%"),
-        ], limit=10)}
+        ], limit=10, date_key="日期")}
 
     return _json(_cached("north", fetch, ttl=1800))
