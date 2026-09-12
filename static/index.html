@@ -7,6 +7,16 @@
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <link rel="stylesheet" href="/css/theme.css">
 <script src="/js/theme.js"></script>
+<script>
+/* 主题预置: 首帧渲染前应用已存/系统主题, 消除暗色用户刷新闪白 (后续 loadConfig 再对齐自动模式) */
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
 <script src="/js/api.js"></script>
 <script src="/js/indicators.js"></script>
 <script src="/js/gaps.js"></script>
@@ -97,9 +107,9 @@ body {
 
 #toolbar button {
   padding: 6px 12px;
-  border: 1px solid var(--input-border);
-  border-radius: 4px;
-  background: var(--btn-bg);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text);
   font-size: 13px;
   cursor: pointer;
@@ -115,6 +125,28 @@ body {
 #toolbar #trades-entry {
   padding: 6px 9px;
   font-size: 12px;
+}
+
+/* 周期切换: TradingView 式分段控件 (1 个控件替代 9 个描边按钮) */
+#toolbar .period-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+#toolbar .period-group button {
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+}
+#toolbar .period-group button:hover { background: var(--btn-hover); }
+#toolbar .period-group button.active {
+  background: var(--btn-active);
+  color: var(--btn-active-text);
 }
 
 #toolbar .separator {
@@ -152,6 +184,7 @@ body {
   font-size: 13px;
   white-space: nowrap;
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums; /* 等宽数字: 行情刷新不跳动 */
 }
 #toolbar .toolbar-right {
   display: flex;
@@ -164,10 +197,10 @@ body {
 .info-group .name { color: var(--text); font-weight: 600; }
 #info-code { color: var(--text-secondary); font-weight: 600; }
 #info-time { color: var(--text-secondary); font-size: 11px; }
-.info-group .price { font-size: 16px; font-weight: 700; }
+.info-group .price { font-size: 17px; font-weight: 700; }
 .info-group .change { font-size: 13px; font-weight: 600; }
-.info-group .up { color: var(--up-color); }
-.info-group .down { color: var(--down-color); }
+.info-group .up { color: var(--up-text); }
+.info-group .down { color: var(--down-text); }
 .info-group .oh { font-size: 13px; font-weight: 500; white-space: nowrap; }
 #info-guba {
   font-size: 12px;
@@ -206,6 +239,7 @@ body {
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.15s;
+  font-variant-numeric: tabular-nums;
 }
 .history-tag:hover {
   background: var(--btn-active);
@@ -230,15 +264,30 @@ body {
 }
 
 #indicator-bar label {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
   cursor: pointer;
-  color: var(--text);
-  font-size: 13px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+#indicator-bar label:hover { border-color: var(--btn-active); color: var(--text); }
+/* 选中态: 浅蓝药丸 (富途式 chip; :has 不支持时优雅降级为普通外观) */
+#indicator-bar label:has(input:checked) {
+  background: rgba(var(--btn-active-rgb), 0.10);
+  border-color: rgba(var(--btn-active-rgb), 0.35);
+  color: var(--btn-active);
+  font-weight: 600;
 }
 #indicator-bar label.dim { color: var(--text-secondary); }
-#indicator-bar input[type="checkbox"] { accent-color: var(--btn-active); }
+#indicator-bar input[type="checkbox"] { accent-color: var(--btn-active); width: 13px; height: 13px; margin: 0; }
+#indicator-bar label:has(input:focus-visible) { outline: 2px solid var(--btn-active); outline-offset: 1px; }
 
 /* ═══════════════ Chart ═══════════ */
 #chart-wrap {
@@ -294,6 +343,96 @@ body {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+/* ═══════════════ Toast 通知 (替代阻塞式 alert) ═══════════════ */
+#toast-box {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  min-width: 200px;
+  max-width: 340px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--btn-active);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+  font-size: 13px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: toast-in 0.2s ease;
+}
+.toast.err { border-left-color: var(--up-text); }
+.toast .toast-btn { margin-left: auto; padding: 2px 10px; font-size: 12px; flex-shrink: 0; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 刷新按钮加载态: 图标旋转 + 防连点 */
+@keyframes spin-ico { to { transform: rotate(360deg); } }
+#btn-refresh.loading { pointer-events: none; opacity: 0.65; }
+#btn-refresh.loading .ico { display: inline-block; animation: spin-ico 0.9s linear infinite; }
+
+/* ═══════════════ 响应式 (平板/手机) ═══════════════ */
+@media (max-width: 900px) {
+  #toolbar { row-gap: 4px; }
+  /* 信息组允许换行收缩: 防止 nowrap 溢出视口被 body overflow:hidden 裁切 */
+  #toolbar .info-group { flex-wrap: wrap; white-space: normal; flex-shrink: 1; min-width: 0; row-gap: 2px; }
+  #toolbar .toolbar-right { margin-left: 0; justify-content: flex-start; min-width: 0; }
+  /* 周期按钮独立成行横向滚动, 避免折成多行挤压图表 */
+  #toolbar .period-group {
+    flex: 1 1 100%;
+    order: 10;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 2px;
+  }
+  #toolbar .period-group::-webkit-scrollbar { display: none; }
+  #toolbar .period-group button { flex-shrink: 0; }
+}
+@media (max-width: 768px) {
+  /* 次要行情信息收进图表 tooltip, 信息行只留核心字段 */
+  #toolbar .oh, #toolbar #info-time, #toolbar #info-guba { display: none; }
+}
+@media (max-width: 640px) {
+  #toolbar { padding: 6px 10px; }
+  #toolbar input[type="text"] { width: 120px; }
+  #history-bar { padding: 4px 10px; }
+  /* 指标配置栏改横向滚动, 不再占多行; label 保持单行 */
+  #indicator-bar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  #indicator-bar label { white-space: nowrap; flex-shrink: 0; }
+  #indicator-bar > span { flex-shrink: 0; }
+  #indicator-bar::-webkit-scrollbar { display: none; }
+  #indicator-bar .separator { display: none; }
+  #depth-panel { width: 150px; font-size: 13px; }
+  #depth-panel .dp-row { line-height: 22px; }
+}
+@media (max-width: 480px) {
+  #toolbar #info-code, #toolbar #info-turnover, #toolbar #info-premium,
+  #toolbar #info-pledge, #toolbar #info-shares, #toolbar #info-amount { display: none; }
+}
+
+/* 触控设备: 加大触控目标; 输入框 16px 防 iOS Safari 聚焦自动放大 */
+@media (pointer: coarse) {
+  #toolbar button, #toolbar select { min-height: 38px; padding: 8px 14px; }
+  #toolbar input[type="text"] { min-height: 38px; font-size: 16px; }
+  .history-tag { padding: 6px 10px; font-size: 13px; }
+  #indicator-bar label { padding: 4px 12px; }
+  #indicator-bar input[type="checkbox"] { width: 14px; height: 14px; }
+}
 </style>
 </head>
 <body>
@@ -328,30 +467,33 @@ body {
              autocomplete="off">
       <div class="search-dropdown" id="search-dropdown"></div>
     </span>
-    <button id="btn-1d" class="active" onclick="switchPeriod('1d')">日K</button>
-    <button id="btn-1w" onclick="switchPeriod('1w')">周K</button>
-    <button id="btn-1M" onclick="switchPeriod('1M')">月K</button>
-    <button id="btn-intraday" onclick="switchPeriod('intraday')">分时</button>
-    <button id="btn-1m" onclick="switchPeriod('1m')">1分</button>
-    <button id="btn-5m" onclick="switchPeriod('5m')">5分</button>
-    <button id="btn-15m" onclick="switchPeriod('15m')">15分</button>
-    <button id="btn-30m" onclick="switchPeriod('30m')">30分</button>
-    <button id="btn-60m" onclick="switchPeriod('60m')">60分</button>
+    <span class="period-group">
+      <button id="btn-1d" class="active" onclick="switchPeriod('1d')" title="日K (快捷键 1)">日K</button>
+      <button id="btn-1w" onclick="switchPeriod('1w')" title="周K (快捷键 2)">周K</button>
+      <button id="btn-1M" onclick="switchPeriod('1M')" title="月K (快捷键 3)">月K</button>
+      <button id="btn-intraday" onclick="switchPeriod('intraday')" title="分时 (快捷键 4)">分时</button>
+      <button id="btn-1m" onclick="switchPeriod('1m')" title="1分 (快捷键 5)">1分</button>
+      <button id="btn-5m" onclick="switchPeriod('5m')" title="5分 (快捷键 6)">5分</button>
+      <button id="btn-15m" onclick="switchPeriod('15m')" title="15分 (快捷键 7)">15分</button>
+      <button id="btn-30m" onclick="switchPeriod('30m')" title="30分 (快捷键 8)">30分</button>
+      <button id="btn-60m" onclick="switchPeriod('60m')" title="60分 (快捷键 9)">60分</button>
+    </span>
     <span class="separator"></span>
-    <button id="btn-refresh" onclick="refresh()" title="手动刷新数据">🔄 刷新</button>
+    <button id="btn-refresh" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><span class="ico">🔄</span> 刷新</button>
+    <button id="btn-shot" onclick="saveChartImage()" title="保存图表为图片">📷</button>
     <button id="btn-theme" onclick="toggleTheme()" title="切换暗色/亮色主题">🌙</button>
   </div>
 </div>
 
 <!-- ═══════════════ Search History Bar ═══════════ -->
 <div id="history-bar" style="display:none">
-  <span style="color:var(--text-secondary);font-size:12px;flex-shrink:0">🕐 最近:</span>
+  <span style="color:var(--text-secondary);font-size:12px;flex-shrink:0">最近:</span>
   <div id="history-tags"></div>
 </div>
 
 <!-- ═══════════════ Indicator Config Bar ═══════════ -->
 <div id="indicator-bar">
-  <span>📐 面板:</span>
+  <span>面板:</span>
   <label><input type="checkbox" id="chk-volume" checked onchange="onConfigChange()">成交量</label>
   <label><input type="checkbox" id="chk-macd" checked onchange="onConfigChange()">MACD</label>
   <label><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
@@ -362,13 +504,13 @@ body {
   <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
   <label id="lbl-depth" style="display:none"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
-  <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">📏 MA=SMA</span>
+  <span title="MA5/10/20 = SMA 简单移动平均, 对标东方财富">MA=SMA</span>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
   <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
   <label id="lbl-gap"><input type="checkbox" id="chk-gap" checked onchange="onConfigChange()">缺口</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
-  <span>🔧 提示框:</span>
+  <span>提示框:</span>
   <label><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
   <label><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
   <label><input type="checkbox" id="tip-atr" checked onchange="onConfigChange()">ATR</label>
@@ -382,6 +524,9 @@ body {
     <div class="dp-body" id="depth-body"></div>
   </div>
 </div>
+
+<!-- Toast 通知 (非阻塞) -->
+<div id="toast-box"></div>
 
 <script>
 // ═══════════════════════════════════════════════════════════════
@@ -421,6 +566,44 @@ function escHtml(str) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// TOAST — 非阻塞通知 (替代 alert, 不卡 JS 线程)
+// ═══════════════════════════════════════════════════════════════
+/** showToast(msg, {type:'err'|'info', actionLabel, onAction, duration}) */
+function showToast(msg, opts) {
+  opts = opts || {};
+  const box = document.getElementById('toast-box');
+  if (!box) return;
+  const el = document.createElement('div');
+  el.className = 'toast' + (opts.type === 'err' ? ' err' : '');
+  const span = document.createElement('span');
+  span.textContent = msg;
+  el.appendChild(span);
+  if (opts.actionLabel) {
+    const b = document.createElement('button');
+    b.className = 'toast-btn';
+    b.textContent = opts.actionLabel;
+    b.onclick = () => { el.remove(); if (opts.onAction) opts.onAction(); };
+    el.appendChild(b);
+  }
+  box.appendChild(el);
+  setTimeout(() => el.remove(), opts.duration || 5000);
+}
+
+/** 保存当前图表为 PNG (TradingView 相机按钮对标) */
+function saveChartImage() {
+  if (!STATE.chart) { showToast('图表未就绪'); return; }
+  try {
+    const a = document.createElement('a');
+    a.href = STATE.chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: C().bg });
+    a.download = `${STATE.symbol}_${STATE.period}_${new Date().toISOString().slice(0, 10)}.png`;
+    a.click();
+    showToast('图表图片已保存');
+  } catch (e) {
+    showToast('保存失败: ' + e.message, { type: 'err' });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════════════════════
 const STATE = {
@@ -454,64 +637,39 @@ const LAST_BAR_PATCH_MS = 3000;  // 日K末根图表增量绘制节流
 // ═══════════════════════════════════════════════════════════════
 // COLORS
 // ═══════════════════════════════════════════════════════════════
-// ═══════════════ 东财对标配色 (series-grouped) ═══════════
-// 白色系(MA5/DIF/K/RSI1) → 黄色系(MA10/DEA/D/RSI2) → 玫红系(MA20/J/RSI3)
-const COLORS = {
-  light: {
-    bg: '#ffffff',
-    text: '#6c757d',
-    gridLine: '#eeeeee',
-    crossLine: '#cccccc',
-    up: '#ef232a', down: '#14b143',
-    halt: '#999999',  // 停牌/无量: 同花顺浅色灰K
-    gapFill: 'rgba(158,158,158,0.28)',
-    gapBorder: 'rgba(120,120,120,0.45)',
-    // ── 白/黑系: MA5 / DIF / K / RSI1 ──
-    ma5: '#1a1a1a', macdDif: '#1a1a1a', kdjK: '#1a1a1a', rsi6: '#1a1a1a',
-    // ── 黄色系: MA10 / DEA / D / RSI2 ──
-    ma10: '#d4a017', macdDea: '#d4a017', kdjD: '#d4a017', rsi12: '#d4a017',
-    // ── 玫红系: MA20 / J / RSI3 ──
-    ma20: '#c2185b', kdjJ: '#c2185b', rsi24: '#c2185b',
-    // ── OBV 白/黑系 + MAOBV 黄色系 ──
-    obv: '#1a1a1a', maobv: '#d4a017',
-    atr: '#888888',
-    overbought: '#ef5350', oversold: '#26a69a',
-    impulse_neutral: '#5b8ff9',  // Elder impulse neutral blue
-    ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
-    // ── 筹码分布 ──
-    chipProfit: '#ef232a', chipTrapped: '#14b143', chipAvg: '#d4a017',
-    chipMedian: '#7e57c2',
-    zeroLine: '#cccccc',
-  },
-  dark: {
-    bg: '#0f1117',
-    text: '#787b86',
-    gridLine: '#1e2130',
-    crossLine: '#363a45',
-    up: '#ef5350', down: '#26a69a',
-    halt: '#7a7e88',  // 停牌/无量: 暗色中性灰
-    gapFill: 'rgba(120,120,120,0.32)',
-    gapBorder: 'rgba(160,160,160,0.40)',
-    // ── 白色系: MA5 / DIF / K / RSI1 ──
-    ma5: '#eeeeee', macdDif: '#eeeeee', kdjK: '#eeeeee', rsi6: '#eeeeee',
-    // ── 黄色系: MA10 / DEA / D / RSI2 ──
-    ma10: '#f5c542', macdDea: '#f5c542', kdjD: '#f5c542', rsi12: '#f5c542',
-    // ── 玫红系: MA20 / J / RSI3 ──
-    ma20: '#e84698', kdjJ: '#e84698', rsi24: '#e84698',
-    // ── OBV 白/黑系 + MAOBV 黄色系 ──
-    obv: '#eeeeee', maobv: '#f5c542',
-    atr: '#5a5a5a',
-    overbought: '#ef5350', oversold: '#26a69a',
-    impulse_neutral: '#5b8ff9',  // Elder impulse neutral blue
-    ch_1atr: '#90a4ae', ch_2atr: '#78909c', ch_3atr: '#546e7a',  // ATR channel bands
-    // ── 筹码分布 ──
-    chipProfit: '#ef5350', chipTrapped: '#26a69a', chipAvg: '#f5c542',
-    chipMedian: '#b39ddb',
-    zeroLine: '#363a45',
-  }
+// ═══════════════ 颜色唯一来源是 theme.css (JS 读取计算值) ═══════════════
+// ECharts canvas 无法解析 CSS var(), 这里按映射从 <html> 计算样式取值,
+// 亮/暗两套数值只维护在 theme.css 的 --chart-* / --up-color 等变量里。
+// 三色系对标东财: ink(MA5/DIF/K/RSI1/OBV) → amber(MA10/DEA/D/RSI2/MAOBV/筹码均价) → rose(MA20/J/RSI3)
+const CHART_VAR_MAP = {
+  bg: '--chart-bg', text: '--chart-text', gridLine: '--chart-grid', crossLine: '--chart-cross',
+  border: '--border',
+  up: '--up-color', down: '--down-color', halt: '--chart-halt',
+  gapFill: '--chart-gap-fill', gapBorder: '--chart-gap-border',
+  ma5: '--chart-ink', macdDif: '--chart-ink', kdjK: '--chart-ink', rsi6: '--chart-ink', obv: '--chart-ink',
+  ma10: '--chart-amber', macdDea: '--chart-amber', kdjD: '--chart-amber', rsi12: '--chart-amber',
+  maobv: '--chart-amber', chipAvg: '--chart-amber',
+  ma20: '--chart-rose', kdjJ: '--chart-rose', rsi24: '--chart-rose',
+  atr: '--chart-atr',
+  overbought: '--chart-overbought', oversold: '--chart-oversold',
+  impulse_neutral: '--chart-impulse',
+  ch_1atr: '--chart-ch1', ch_2atr: '--chart-ch2', ch_3atr: '--chart-ch3',
+  chipProfit: '--up-color', chipTrapped: '--down-color', chipMedian: '--chart-chip-median',
+  zeroLine: '--chart-cross',
+  tipBg: '--chart-tip-bg', tipBorder: '--chart-tip-border', tipText: '--text',
 };
+let _chartColorsCache = { theme: null, colors: null };
 
-function C() { return COLORS[STATE.theme]; }
+function C() {
+  // 以 data-theme 实际属性为缓存键, 与 applyTheme 的赋值顺序解耦
+  const t = document.documentElement.getAttribute('data-theme') || 'light';
+  if (_chartColorsCache.theme === t && _chartColorsCache.colors) return _chartColorsCache.colors;
+  const s = getComputedStyle(document.documentElement);
+  const out = {};
+  for (const key in CHART_VAR_MAP) out[key] = s.getPropertyValue(CHART_VAR_MAP[key]).trim();
+  _chartColorsCache = { theme: t, colors: out };
+  return out;
+}
 
 function isHaltBar(bar) {
   if (!bar) return false;
@@ -547,6 +705,27 @@ function haltLabel(bar) {
   const daily = STATE.period === '1d' || STATE.period === '1w' || STATE.period === '1M';
   const text = daily ? '停牌' : '无量';
   return ` <span style="color:${C().halt};font-weight:700">${text}</span>`;
+}
+
+/** TradingView 式最新价虚线: 末端虚线 + 轴端色块价格签, 涨红/跌绿随主题 */
+function buildLastPriceLine(bars) {
+  if (!bars || !bars.length) return undefined;
+  const price = bars[bars.length - 1].close;
+  if (price == null) return undefined;
+  const prev = bars.length > 1 ? bars[bars.length - 2] : null;
+  const rising = !prev || prev.close == null || price >= prev.close;
+  const clr = rising ? C().up : C().down;
+  return {
+    silent: true, symbol: 'none', animation: false,
+    lineStyle: { color: clr, type: 'dashed', width: 1, opacity: 0.9 },
+    label: {
+      show: true, position: 'insideEndTop',
+      formatter: fmtPrice3(price),
+      fontSize: 10, fontFamily: 'monospace', color: '#fff',
+      backgroundColor: clr, padding: [2, 4], borderRadius: 2,
+    },
+    data: [{ yAxis: price }],
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -620,7 +799,8 @@ async function fetchData(opts) {
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
   if (!silent && !cacheHit && !sameView) {
-    STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
+    document.getElementById('btn-refresh')?.classList.add('loading');
+    if (STATE.chart) STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
   }
   try {
     const resp = await fetch(url);
@@ -666,10 +846,11 @@ async function fetchData(opts) {
     updateChart(false);
   } catch (e) {
     console.error('获取数据失败:', e);
-    if (!silent) alert('❌ 获取数据失败: ' + e.message);
+    if (!silent) showToast('行情数据加载失败: ' + e.message, { type: 'err', actionLabel: '重试', onAction: () => loadCurrent() });
   } finally {
     if (!silent) {
-      STATE.chart.hideLoading();
+      document.getElementById('btn-refresh')?.classList.remove('loading');
+      if (STATE.chart) STATE.chart.hideLoading();
     }
   }
 }
@@ -1010,6 +1191,7 @@ function patchLastBarOnChart() {
     const klinePatch = { name: 'K线', data: klines.map((kk) => buildOhlcPoint(kk, impulseOn)) };
     const gapMark = buildGapMarkArea(klines, dates);
     klinePatch.markArea = gapMark || { data: [] };
+    klinePatch.markLine = buildLastPriceLine(klines);
     const seriesPatch = [
       klinePatch,
       { name: 'MA5', data: klines.map((kk) => kk.ma5) },
@@ -1150,8 +1332,7 @@ function updateInfo(data) {
     if (q.change_pct != null) {
       const pct = q.change_pct;
       const cls = pct >= 0 ? 'up' : 'down';
-      document.getElementById('info-change').textContent =
-        (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+      document.getElementById('info-change').textContent = pctLabel(pct);
       document.getElementById('info-change').className = 'change ' + cls;
       document.getElementById('info-price').className = 'price ' + cls;
     }
@@ -1162,7 +1343,7 @@ function updateInfo(data) {
       const prev = data.klines[data.klines.length - 2];
       const chg = ((last.close - prev.close) / prev.close * 100);
       const cls = chg >= 0 ? 'up' : 'down';
-      document.getElementById('info-change').textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+      document.getElementById('info-change').textContent = pctLabel(chg);
       document.getElementById('info-change').className = 'change ' + cls;
     }
   }
@@ -1341,8 +1522,7 @@ function renderHistoryTags() {
 }
 
 function switchToHistory(symbol) {
-  document.getElementById('symbol-input').value = symbol;
-  STATE.symbol = symbol;
+  switchSymbol(symbol);
   if (STATE.period === 'intraday') {
     STATE.intradayData = null;
     fetchIntraday();
@@ -1379,6 +1559,27 @@ function saveConfig() {
 }
 
 function loadConfig() {
+  // 主题优先于面板配置应用: 即使本页尚无 visual-config (首次访问),
+  // 也要读取共享键 visual-theme (与交易记录页同步), 避免被 auto 默认值覆盖
+  try {
+    const shared = VisualTheme.load();
+    const hasShared = localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY);
+    const cfgRaw = localStorage.getItem(CFG_KEY);
+    if (hasShared) {
+      STATE._themeAuto = shared.auto === true;
+      if (!STATE._themeAuto) applyTheme(shared.theme);
+    } else {
+      const cfgLegacy = cfgRaw ? JSON.parse(cfgRaw) : null;
+      if (cfgLegacy && cfgLegacy.theme) {
+        // themeAuto=true → 自动; 否则 → 锁定 (旧配置无themeAuto视为手动)
+        STATE._themeAuto = cfgLegacy.themeAuto === true;
+        if (!STATE._themeAuto) applyTheme(cfgLegacy.theme);
+      } else {
+        // 无任何配置时默认自动主题
+        STATE._themeAuto = true;
+      }
+    }
+  } catch(e) {}
   try {
     const cfg = JSON.parse(localStorage.getItem(CFG_KEY));
     if (!cfg) return;
@@ -1403,21 +1604,6 @@ function loadConfig() {
     // 缺省开启；仅当配置显式 false 时关闭
     chkGap.checked = cfg.gap !== false;
     STATE.gapEnabled = cfg.gap !== false;
-    // 主题: 优先共享键 visual-theme (与交易记录页同步), 回退到本页配置
-    const shared = VisualTheme.load();
-    if (shared.theme && (localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY))) {
-      STATE._themeAuto = shared.auto === true;
-      if (!STATE._themeAuto) applyTheme(shared.theme);
-    } else if (cfg.theme) {
-      // themeAuto=true → 自动; 否则 → 锁定 (旧配置无themeAuto视为手动)
-      STATE._themeAuto = cfg.themeAuto === true;
-      if (!STATE._themeAuto) {
-        applyTheme(cfg.theme);
-      }
-    } else {
-      // 无配置时默认自动主题
-      STATE._themeAuto = true;
-    }
   } catch(e) {}
 }
 
@@ -1449,7 +1635,7 @@ async function fetchIntraday() {
   }
 
   const loading = !cacheHit && !STATE.intradayData;
-  if (loading) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
+  if (loading && STATE.chart) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
     const [idResp, qResp] = await Promise.all([
       fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
@@ -1458,7 +1644,7 @@ async function fetchIntraday() {
     const id = await idResp.json();
     const quote = await qResp.json();
     if (STATE._intraFetchTs !== fetchTs) return;
-    if (!id.bars || id.bars.length === 0) { if (loading) alert('无分时数据'); return; }
+    if (!id.bars || id.bars.length === 0) { if (loading) showToast('暂无分时数据'); return; }
     id.prev_close = quote.prev_close;
     STATE.intradayData = id;
     updateQuoteDisplay(quote);
@@ -1469,8 +1655,8 @@ async function fetchIntraday() {
       localStorage.setItem(_cacheKey, JSON.stringify({ ts: Date.now(), data: id }));
       _cleanLocalStorage();
     } catch(e) { /* ignore */ }
-  } catch(e) { if (loading) alert('分时数据获取失败: ' + e.message); }
-  finally { if (loading) STATE.chart.hideLoading(); }
+  } catch(e) { if (loading) showToast('分时数据获取失败: ' + e.message, { type: 'err', actionLabel: '重试', onAction: () => fetchIntraday() }); }
+  finally { if (loading && STATE.chart) STATE.chart.hideLoading(); }
 }
 
 function renderIntraday(data) {
@@ -1478,6 +1664,7 @@ function renderIntraday(data) {
   // 五档面板 (左侧): 显隐 + 用当前缓存渲染
   showDepthPanel(depthPanelOn());
   if (STATE.depth) renderDepth(STATE.depth);
+  if (!chart) return; // echarts 兜底: 图表不可用时仍保证五档面板可用
   const gridLeft = depthPanelOn() ? 220 : '8%'; // 左侧给五档面板(180) + 价格标签留位
   const bars = data.bars;
   const times = bars.map(b => b.time);
@@ -1504,7 +1691,8 @@ function renderIntraday(data) {
   const yAxes = [{ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } }];
   const series = [
     { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
-      itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down } },
+      itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
+      markLine: buildLastPriceLine(bars) },
   ];
   const zoomIndices = [0];
   let gi = 1;
@@ -1580,19 +1768,20 @@ function renderIntraday(data) {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
-      backgroundColor: 'rgba(0,0,0,0.85)',
-      textStyle: { color: '#eee', fontSize: 12, fontFamily: 'monospace' },
+      backgroundColor: C().tipBg,
+      borderColor: C().tipBorder,
+      textStyle: { color: C().tipText, fontSize: 12, fontFamily: 'monospace' },
       formatter: function(ps) {
         const idx = ps[0] && ps[0].dataIndex;
         const b = data.bars[idx];
         if (!b) return '';
         const prevBar = idx > 0 ? data.bars[idx - 1] : null;
         const pc = prevBar ? prevBar.close : b.open;
-        const cFn = v => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'}">${fmtPrice3(v)}</span>`;
+        const cFn = v => v == null ? '—' : `<span style="color:${v>pc?C().up:v<pc?C().down:C().tipText}">${fmtPrice3(v)}</span>`;
         let h = `<div><b>${b.time}</b>${haltLabel(b)}</div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
-        const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
-        const cRsiV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr}">${v.toFixed(1)}</span>`;
+        const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?C().overbought:v<20?C().oversold:clr}">${v.toFixed(2)}</span>`;
+        const cRsiV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?C().overbought:v<30?C().oversold:clr}">${v.toFixed(1)}</span>`;
         if (document.getElementById('tip-kdj').checked && b.kdj_k != null) h += `<div><span style="color:${C().kdjK}">K</span> ${cKdjV(b.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cKdjV(b.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cKdjV(b.kdj_j,C().kdjJ)}</div>`;
         if (document.getElementById('tip-rsi').checked && b.rsi6 != null) h += `<div><span style="color:${C().rsi6}">RSI1</span> ${cRsiV(b.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cRsiV(b.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cRsiV(b.rsi24,C().rsi24)}</div>`;
         if (document.getElementById('tip-atr').checked && b.atr14 != null) h += `<div><span style="color:${C().atr}">ATR</span> ${b.atr14.toFixed(3)}</div>`;
@@ -1672,6 +1861,11 @@ function buildGapMarkArea(klines, dates) {
 // ═══════════════════════════════════════════════════════════════
 // SHARED QUOTE DISPLAY
 // ═══════════════════════════════════════════════════════════════
+/** 涨跌幅文本: 颜色之外附加 ▲/▼ 形状冗余 (色盲友好) */
+function pctLabel(v) {
+  return (v >= 0 ? '▲ +' : '▼ ') + v.toFixed(2) + '%';
+}
+
 function updateQuoteDisplay(quote) {
   if (!quote || !quote.last_price) return;
   const p = quote.last_price, pc = quote.prev_close || p;
@@ -1683,7 +1877,7 @@ function updateQuoteDisplay(quote) {
   document.getElementById('info-name').textContent = quote.name || '';
   document.getElementById('info-price').textContent = pf(p);
   document.getElementById('info-price').className = 'price ' + colorCls;
-  document.getElementById('info-change').textContent = (chgPct >= 0 ? '+' : '') + chgPct.toFixed(2) + '%';
+  document.getElementById('info-change').textContent = pctLabel(chgPct);
   document.getElementById('info-change').className = 'change ' + colorCls;
   if (quote.open != null) {
     const oCls = quote.open > pc ? 'up' : (quote.open < pc ? 'down' : '');
@@ -1705,6 +1899,13 @@ function updateQuoteDisplay(quote) {
 // ═══════════════════════════════════════════════════════════════
 function initChart() {
   const dom = document.getElementById('chart-container');
+  // CDN 兜底: ECharts 加载失败时给出提示, 工具栏/行情/五档等 DOM 功能不受影响
+  if (typeof echarts === 'undefined') {
+    dom.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;'
+      + 'color:var(--text-secondary);font-size:13px;text-align:center;padding:0 16px;line-height:1.8">'
+      + '图表库 (ECharts CDN) 加载失败，K线图暂不可用。<br>工具栏与行情信息不受影响，请检查网络后刷新重试。</div>';
+    return;
+  }
   STATE.chart = echarts.init(dom, null, { renderer: 'canvas' });
   // resize 时重渲染 (解决全屏/窗口变化后日期被截断)
   let resizeTimer;
@@ -1744,6 +1945,10 @@ function initChart() {
   STATE.chart.getZr().on('globalout', function() {
     STATE.hoveredGrid = -1;
     STATE._pointerPrice = null;
+  });
+  // 双击复位缩放 (TradingView 惯例): 回到全景
+  STATE.chart.getZr().on('dblclick', function() {
+    try { STATE.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); } catch (e) { /* ignore */ }
   });
   // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样)
   STATE.chart.on('dataZoom', function() {
@@ -1891,6 +2096,7 @@ function fmtVolume(v) {
 function updateChart(reTheme) {
   const data = STATE.klineData;
   if (!data || !data.klines || data.klines.length === 0) return;
+  if (!STATE.chart) return; // echarts 兜底
 
   const chart = STATE.chart;
   const klines = data.klines;
@@ -1922,6 +2128,7 @@ function updateChart(reTheme) {
   };
   const gapMark = buildGapMarkArea(klines, dates);
   klineSeries.markArea = gapMark || { data: [] };
+  klineSeries.markLine = buildLastPriceLine(klines);
   if (!gapMark) STATE._gaps = [];
 
   series.push(
@@ -2094,9 +2301,9 @@ function updateChart(reTheme) {
       crossStyle: { color: C().crossLine },
       label: { backgroundColor: C().bg, color: C().text, borderColor: C().border }
     },
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    borderColor: 'transparent',
-    textStyle: { color: '#eee', fontSize: 12, fontFamily: 'monospace' },
+    backgroundColor: C().tipBg,
+    borderColor: C().tipBorder,
+    textStyle: { color: C().tipText, fontSize: 12, fontFamily: 'monospace' },
     formatter: function(ps) {
       if (!ps || ps.length === 0) return '';
       const idx = ps[0].dataIndex;
@@ -2110,13 +2317,13 @@ function updateChart(reTheme) {
       // ── Helper ──
       const pc = prev ? prev.close : k.close; // 前一根收盘价
       const hdr = `<div style="font-weight:700;margin-bottom:4px">📅 ${escHtml(k.date)}${haltLabel(k)}</div>`;
-      const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?'#ef5350':v<pc?'#26a69a':'#eee'};font-weight:700">${pf(v)}</span>`;
+      const cfn = (v) => v == null ? '—' : `<span style="color:${v>pc?C().up:v<pc?C().down:C().tipText};font-weight:700">${pf(v)}</span>`;
 
       // Grid 0: K-line — full detail
       if (g === 0) {
         let html = hdr;
         html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)} 低 ${cfn(k.low)} 收 ${cfn(k.close)}`;
-        if (chgPct != null) html += ` <span style="color:${chgPct>=0?'#ef5350':'#26a69a'}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
+        if (chgPct != null) html += ` <span style="color:${chgPct>=0?C().up:C().down}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
         html += `</div><div>MA5 <span style="color:${C().ma5}">${pf(k.ma5)}</span> MA10 <span style="color:${C().ma10}">${pf(k.ma10)}</span> MA20 <span style="color:${C().ma20}">${pf(k.ma20)}</span></div>`;
         html += `<div>量 ${fmtVolume(k.volume)} 额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
         if (document.getElementById('chk-macd').checked) {
@@ -2124,23 +2331,23 @@ function updateChart(reTheme) {
         }
         let extras = [];
         if (document.getElementById('tip-rsi').checked) {
-          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr}">${v.toFixed(1)}</span>`;
+          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?C().overbought:v<30?C().oversold:clr}">${v.toFixed(1)}</span>`;
           extras.push(`<span style="color:${C().rsi6}">RSI1</span> ${cV(k.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cV(k.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cV(k.rsi24,C().rsi24)}`);
         }
         if (document.getElementById('tip-kdj').checked) {
-          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr}">${v.toFixed(2)}</span>`;
+          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?C().overbought:v<20?C().oversold:clr}">${v.toFixed(2)}</span>`;
           extras.push(`<span style="color:${C().kdjK}">K</span> ${cV(k.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cV(k.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cV(k.kdj_j,C().kdjJ)}`);
         }
         if (document.getElementById('tip-atr').checked) {
           extras.push(`<span style="color:${C().atr}">ATR</span> ${k.atr14?.toFixed(3)||'—'}`);
         }
         if (extras.length > 0) html += `<div>${extras.join(' | ')}</div>`;
-        if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?'#ef5350':'#26a69a'}">${k.premium>=0?'+':''}${k.premium.toFixed(2)}%</span></div>`;
+        if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?C().up:C().down}">${k.premium>=0?'+':''}${k.premium.toFixed(2)}%</span></div>`;
         // 十字线落在未回补缺口灰区内时追加缺口信息（markArea 与 axis tooltip 冲突，走此注入）
         if (typeof GapScanner !== 'undefined' && STATE._gaps && STATE._gaps.length) {
           const hit = GapScanner.findGapAt(STATE._gaps, idx, STATE._pointerPrice);
           if (hit) {
-            html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.15)">${GapScanner.gapTooltipHtml(hit)}</div>`;
+            html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid ${C().tipBorder}">${GapScanner.gapTooltipHtml(hit)}</div>`;
           }
         }
         return html;
@@ -2159,11 +2366,11 @@ function updateChart(reTheme) {
         return hdr + `<div>DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
       }
       if (panel === 'kdj') {
-        const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?'#ef5350':v<20?'#26a69a':clr};font-weight:700">${v.toFixed(2)}</span>`;
+        const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?C().overbought:v<20?C().oversold:clr};font-weight:700">${v.toFixed(2)}</span>`;
         return hdr + `<div><span style="color:${C().kdjK}">K</span> ${cV(k.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cV(k.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cV(k.kdj_j,C().kdjJ)}</div>`;
       }
       if (panel === 'rsi') {
-        const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?'#ef5350':v<30?'#26a69a':clr};font-weight:700">${v.toFixed(1)}</span>`;
+        const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?C().overbought:v<30?C().oversold:clr};font-weight:700">${v.toFixed(1)}</span>`;
         return hdr + `<div><span style="color:${C().rsi6}">RSI1</span> ${cV(k.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cV(k.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cV(k.rsi24,C().rsi24)}</div>`;
       }
       if (panel === 'atr') {
@@ -2174,7 +2381,7 @@ function updateChart(reTheme) {
           + `<div><span style="color:${C().obv}">OBV</span> ${fmtVolume(k.obv)} <span style="color:${C().maobv}">MAOBV</span> ${fmtVolume(k.maobv)}</div>`;
       }
       if (panel === 'premium') {
-        return hdr + `<div>溢价率 <span style="color:${(k.premium||0)>=0?'#ef5350':'#26a69a'}">${k.premium!=null?(k.premium>=0?'+':'')+k.premium.toFixed(2)+'%':'—'}</span></div>`;
+        return hdr + `<div>溢价率 <span style="color:${(k.premium||0)>=0?C().up:C().down}">${k.premium!=null?(k.premium>=0?'+':'')+k.premium.toFixed(2)+'%':'—'}</span></div>`;
       }
 
       // fallback
@@ -2327,7 +2534,7 @@ function switchPeriod(period) {
   if (isIntra) {
     STATE.intradayData = null; // 清缓存，强制重新加载
     STATE.depth = null;
-    STATE.chart.clear();
+    if (STATE.chart) STATE.chart.clear();
     fetchIntraday();
   } else {
     refresh();
@@ -2347,6 +2554,23 @@ function onIndicatorChange() {
   }
 }
 
+/** 用户切换符号统一入口: 同步输入框与 STATE, 符号变化时 pushState (返回键可回到上一只股票) */
+function switchSymbol(symbol) {
+  symbol = (symbol || '').trim();
+  if (!symbol) return false;
+  document.getElementById('symbol-input').value = symbol;
+  if (symbol === STATE.symbol) return false;
+  STATE.symbol = symbol;
+  try { history.pushState({ symbol }, '', '/?symbol=' + encodeURIComponent(symbol)); } catch (e) { /* ignore */ }
+  return true;
+}
+
+/** 规范化当前 URL 为 /?symbol= (入口加载用 replaceState, 不产生新历史) */
+function syncSymbolUrl(replace) {
+  if (!replace) return;
+  try { history.replaceState({ symbol: STATE.symbol }, '', '/?symbol=' + encodeURIComponent(STATE.symbol)); } catch (e) { /* ignore */ }
+}
+
 function loadCurrent() {
   if (STATE.period === 'intraday') {
     STATE.intradayData = null; // 清缓存，强制重新加载分时
@@ -2358,7 +2582,7 @@ function loadCurrent() {
 
 function refresh() {
   const input = document.getElementById('symbol-input').value.trim();
-  if (!input) { STATE.symbol = '000001.SH'; loadCurrent(); return; }
+  if (!input) { switchSymbol('000001.SH'); loadCurrent(); return; }
   // 如果输入包含非数字/字母字符（如中文名），触发搜索而不是直接请求
   if (/[^\w.]/.test(input)) {
     fetch(`/api/search?q=${encodeURIComponent(input)}`)
@@ -2367,15 +2591,14 @@ function refresh() {
         const results = data.results || [];
         if (results.length > 0) {
           const r = results[0];
-          document.getElementById('symbol-input').value = r.symbol;
-          STATE.symbol = r.symbol;
+          switchSymbol(r.symbol);
           loadCurrent();
         }
       })
       .catch(() => {});
     return;
   }
-  STATE.symbol = input;
+  switchSymbol(input);
   loadCurrent();
 }
 
@@ -2452,9 +2675,8 @@ document.addEventListener('DOMContentLoaded', () => {
   function selectResult(idx) {
     if (idx < 0 || idx >= searchResults.length) return;
     const r = searchResults[idx];
-    symInput.value = r.code;
-    STATE.symbol = r.symbol;
     closeDropdown();
+    switchSymbol(r.symbol);
     if (STATE.period === 'intraday') {
       STATE.intradayData = null;
       fetchIntraday();
@@ -2496,6 +2718,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // ── 全局快捷键 (输入时失效): / 或 Ctrl+K 聚焦搜索, 1-9 切周期, Esc 关弹层 ──
+  const PERIOD_KEYS = { '1': '1d', '2': '1w', '3': '1M', '4': 'intraday', '5': '1m', '6': '5m', '7': '15m', '8': '30m', '9': '60m' };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeDropdown(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      symInput.focus();
+      symInput.select();
+      return;
+    }
+    const tag = (e.target.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === '/') {
+      e.preventDefault();
+      symInput.focus();
+      symInput.select();
+    } else if (PERIOD_KEYS[e.key]) {
+      switchPeriod(PERIOD_KEYS[e.key]);
+    }
+  });
+
   // Restore last search from history (本地) + 与账号同步
   renderHistoryTags();
   const hist = loadHistory();
@@ -2511,6 +2755,27 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('symbol-input').value = jumpSymbol;
     STATE.symbol = jumpSymbol;
   }
+  syncSymbolUrl(true); // 规范化入口 URL, 浏览器返回键可回溯历史股票
+
+  // 浏览器返回/前进: 回到上一只/下一只股票 (对标 TradingView)
+  window.addEventListener('popstate', () => {
+    const s = new URLSearchParams(location.search).get('symbol');
+    if (!s || s === STATE.symbol) return;
+    STATE.symbol = s;
+    document.getElementById('symbol-input').value = s;
+    loadCurrent();
+  });
+
+  // 点击代码复制 (便捷性: 分享/输入时一键取码)
+  const codeEl = document.getElementById('info-code');
+  codeEl.style.cursor = 'pointer';
+  codeEl.title = '点击复制代码';
+  codeEl.addEventListener('click', () => {
+    if (!STATE.symbol) return;
+    navigator.clipboard?.writeText(STATE.symbol)
+      .then(() => showToast('已复制 ' + STATE.symbol))
+      .catch(() => {});
+  });
 
   // First load: 本地无历史时先等服务端同步，再拉 K 线（解决清站点数据后记录丢失）
   const container = document.getElementById('chart-container');
@@ -2530,6 +2795,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (synced.length > 0) {
         document.getElementById('symbol-input').value = synced[0].symbol;
         STATE.symbol = synced[0].symbol;
+        syncSymbolUrl(true);
       }
       scheduleInit();
     }).catch(scheduleInit);
@@ -2563,6 +2829,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function canAutoRefresh() {
+    if (document.hidden) return false; // 后台标签页暂停轮询 (省电省流量), 切回自动恢复
     if (!inAshareSession()) return false;
     if (STATE._serverTradingDay === false) return false;
     return true;

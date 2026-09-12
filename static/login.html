@@ -25,7 +25,7 @@
 #login-view .field { margin-bottom: 14px; }
 #login-view label { display: block; font-size: 13px; margin-bottom: 4px; color: var(--text-secondary); }
 #login-view .row { display: flex; gap: 10px; margin-top: 18px; }
-#login-view .err { color: var(--up-color); font-size: 13px; margin-top: 12px; min-height: 18px; }
+#login-view .err { color: var(--up-text); font-size: 13px; margin-top: 12px; min-height: 18px; }
 
 #login-view input { width: 100%; }
 button.primary { flex: 1; }
@@ -36,6 +36,16 @@ button.primary { flex: 1; }
 }
 </style>
 <script src="/js/theme.js"></script>
+<script>
+/* 主题预置: 首帧渲染前应用已存/系统主题, 消除暗色用户刷新闪白 */
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
 <script src="/js/api.js"></script>
 </head>
 <body>

@@ -2,6 +2,7 @@
  * Pages set data-theme="dark"|"light" on <html>; toggle via /static/js/theme.js
  */
 :root {
+  color-scheme: light;
   --bg: #ffffff;
   --bg-panel: #f8f9fa;
   --bg-card: #ffffff;
@@ -14,11 +15,20 @@
   --input-border: #dee2e6;
   --btn-bg: #ffffff;
   --btn-hover: #e9ecef;
-  --btn-active: #007bff;
+  /* 强调蓝统一为 TradingView 同款 #2962ff: 白底对比度 4.6:1 (旧 #007bff 仅 3.7:1) */
+  --btn-active: #2962ff;
   --btn-active-text: #ffffff;
+  /* 涨跌双色: --up/-down 供图表色块与实底按钮, --up-text/-down-text 供文字(白底达 WCAG AA);
+     --up-rgb/-down-rgb 供 rgba() 半透明底色拼装 */
   --up-color: #ef232a;
   --down-color: #14b143;
+  --up-text: #d3202a;
+  --down-text: #0c7a30;
+  --up-rgb: 239,35,42;
+  --down-rgb: 20,177,67;
+  --btn-active-rgb: 41,98,255;
   --warn-color: #d4a017;
+  --warn-text: #8a6d1a;
   --scrollbar-thumb: #c1c1c1;
   --model-c0: #2563eb;
   --model-c1: #059669;
@@ -29,25 +39,58 @@
   --model-c6: #ea580c;
   --model-c7: #4f46e5;
   --model-c-none: #64748b;
+  /* K线图表专用 (ECharts canvas 无法解析 var(), 由页面 JS 读取计算值):
+     ink/amber/rose 三色系对标东财: MA5/DIF/K/RSI1, MA10/DEA/D/RSI2, MA20/J/RSI3 */
+  --chart-bg: #ffffff;
+  --chart-text: #6c757d;
+  --chart-grid: #eeeeee;
+  --chart-cross: #cccccc;
+  --chart-ink: #1a1a1a;
+  --chart-amber: #d4a017;
+  --chart-rose: #c2185b;
+  --chart-atr: #888888;
+  --chart-halt: #999999;
+  --chart-overbought: #ef5350;
+  --chart-oversold: #26a69a;
+  --chart-impulse: #5b8ff9;
+  --chart-ch1: #90a4ae;
+  --chart-ch2: #78909c;
+  --chart-ch3: #546e7a;
+  --chart-chip-median: #7e57c2;
+  --chart-gap-fill: rgba(158,158,158,0.28);
+  --chart-gap-border: rgba(120,120,120,0.45);
+  --chart-tip-bg: rgba(255,255,255,0.96);
+  --chart-tip-border: #dee2e6;
+  /* 分类饼图 12 色板 (主题中性, JS split(',') 使用) */
+  --pie-colors: #5470c6,#91cc75,#fac858,#ee6666,#73c0de,#3ba272,#fc8452,#9a60b4,#ea7ccc,#48b8d0,#ff9f7f,#8d98b3;
 }
 
 [data-theme="dark"] {
-  --bg: #0f1117;
-  --bg-panel: #14171f;
-  --bg-card: #1a1d26;
+  color-scheme: dark;
+  --bg: #10131c;
+  --bg-panel: #171c28;
+  --bg-card: #1d2432;
   --text: #d1d4dc;
   --text-secondary: #787b86;
-  --border: #2a2e39;
+  --border: #2d3442;
   --shadow: 0 1px 3px rgba(0,0,0,0.3);
-  --toolbar-bg: #1a1d26;
-  --input-bg: #2a2e39;
+  --toolbar-bg: #1d2432;
+  --input-bg: #2a3140;
   --input-border: #363a45;
-  --btn-bg: #2a2e39;
-  --btn-hover: #363a45;
+  --btn-bg: #2a3140;
+  --btn-hover: #384152;
   --btn-active: #2962ff;
   --btn-active-text: #ffffff;
+  --up-color: #ef5350;
+  --down-color: #26a69a;
+  --up-text: #ef5350;
+  --down-text: #26a69a;
+  --up-rgb: 239,83,80;
+  --down-rgb: 38,166,154;
+  --btn-active-rgb: 41,98,255;
   --warn-color: #f5c542;
-  --scrollbar-thumb: #363a45;
+  --warn-text: #f5c542;
+  --scrollbar-thumb: #3a4356;
   --model-c0: #60a5fa;
   --model-c1: #34d399;
   --model-c2: #fbbf24;
@@ -57,6 +100,26 @@
   --model-c6: #fb923c;
   --model-c7: #818cf8;
   --model-c-none: #94a3b8;
+  --chart-bg: #10131c;
+  --chart-text: #787b86;
+  --chart-grid: #1f2432;
+  --chart-cross: #3a4356;
+  --chart-ink: #eeeeee;
+  --chart-amber: #f5c542;
+  --chart-rose: #e84698;
+  --chart-atr: #5a5a5a;
+  --chart-halt: #7a7e88;
+  --chart-overbought: #ef5350;
+  --chart-oversold: #26a69a;
+  --chart-impulse: #5b8ff9;
+  --chart-ch1: #90a4ae;
+  --chart-ch2: #78909c;
+  --chart-ch3: #546e7a;
+  --chart-chip-median: #b39ddb;
+  --chart-gap-fill: rgba(120,120,120,0.32);
+  --chart-gap-border: rgba(160,160,160,0.40);
+  --chart-tip-bg: rgba(20,23,31,0.92);
+  --chart-tip-border: #3a4356;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -68,6 +131,41 @@ body {
   min-height: 100vh;
   transition: background 0.3s, color 0.3s;
 }
+
+/* 主题切换过渡: 主要容器随 body 一起淡入, 避免只有 body 单独渐变的割裂感 */
+#toolbar, #history-bar, #indicator-bar, #depth-panel, .card, .chart-box, .table-wrap,
+.modal, .search-dropdown, .user-menu, .autocomplete .dropdown, #pnl-tip {
+  transition: background-color 0.3s, border-color 0.3s;
+}
+
+/* 键盘可达性: 焦点统一可见 (输入框另有边框变色指示) */
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--btn-active);
+  outline-offset: 1px;
+}
+
+/* 工具栏按钮 ghost 化: 去边框降噪, 悬停才显形 (index 页有同名覆盖, 以页面级为准) */
+#toolbar button {
+  background: transparent;
+  border-color: transparent;
+}
+#toolbar button:hover { background: var(--btn-hover); }
+
+/* 主题切换按钮 (SVG 图标 + auto 角标) */
+#btn-theme, #theme-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  line-height: 1;
+}
+#btn-theme .theme-auto, #theme-btn .theme-auto {
+  font-size: 10px;
+  opacity: 0.75;
+  letter-spacing: 0.5px;
+}
+#btn-theme svg, #theme-btn svg { display: block; }
 
 #toolbar {
   display: flex;
@@ -87,7 +185,7 @@ body {
 button {
   padding: 6px 12px;
   border: 1px solid var(--input-border);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--btn-bg);
   color: var(--text);
   font-size: 13px;
@@ -97,7 +195,7 @@ button {
 }
 button:hover { background: var(--btn-hover); }
 button.primary { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
-button.danger { color: var(--up-color); }
+button.danger { color: var(--up-text); }
 button.active { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.ghost { background: transparent; border-color: transparent; }
@@ -105,7 +203,7 @@ button.ghost { background: transparent; border-color: transparent; }
 input, select, textarea {
   padding: 6px 10px;
   border: 1px solid var(--input-border);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--input-bg);
   color: var(--text);
   font-size: 13px;
@@ -129,7 +227,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
 .modal {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   width: 100%;
   max-width: 560px;
   padding: 20px 24px;
@@ -141,7 +239,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
 .modal textarea { resize: vertical; min-height: 50px; }
 .modal .field { margin-bottom: 14px; }
 .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
-.modal .err { color: var(--up-color); font-size: 13px; margin-top: 10px; }
+.modal .err { color: var(--up-text); font-size: 13px; margin-top: 10px; }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

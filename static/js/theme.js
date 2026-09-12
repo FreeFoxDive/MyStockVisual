@@ -51,17 +51,17 @@
     return theme;
   }
 
+  var ICON_SUN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>';
+  var ICON_MOON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
   function syncButton(buttonId, auto) {
     var btn = typeof buttonId === 'string' ? document.getElementById(buttonId) : buttonId;
     if (!btn) return;
     var dark = current() === 'dark';
-    if (auto) {
-      btn.textContent = dark ? '🌙 auto' : '☀️ auto';
-      btn.title = '自动模式(点击锁定)';
-    } else {
-      btn.textContent = dark ? '☀️' : '🌙';
-      btn.title = '切换主题';
-    }
+    // 图标展示"点击后将切换到"的主题 (与旧 emoji 语义一致): 暗色显示太阳, 亮色显示月亮
+    btn.innerHTML = (dark ? ICON_SUN : ICON_MOON)
+      + (auto ? '<span class="theme-auto">auto</span>' : '');
+    btn.title = auto ? '自动模式(点击锁定)' : '切换主题';
   }
 
   function toggle(opts) {

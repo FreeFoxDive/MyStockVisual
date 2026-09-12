@@ -19,12 +19,22 @@ th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--btn-hover); }
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
-.badge.open { background: rgba(239,35,42,0.12); color: var(--up-color); }
-.badge.closed { background: rgba(20,177,67,0.12); color: var(--down-color); }
+.badge.open { background: rgba(var(--up-rgb), 0.12); color: var(--up-text); }
+.badge.closed { background: rgba(var(--down-rgb), 0.12); color: var(--down-text); }
 .reason-cell { max-width: 260px; white-space: normal; font-size: 12px; color: var(--text-secondary); }
 .empty { text-align: center; color: var(--text-secondary); padding: 30px 0; }
 </style>
 <script src="/js/theme.js"></script>
+<script>
+/* 主题预置: 首帧渲染前应用已存/系统主题, 消除暗色用户刷新闪白 */
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
 <script src="/js/api.js"></script>
 </head>
 <body>
@@ -200,6 +210,7 @@ function openAddUserModal() {
   document.getElementById('au-password').value = '';
   document.getElementById('admin-modal-err').textContent = '';
   document.getElementById('admin-modal-mask').classList.add('show');
+  focusFirstInput('admin-modal-mask');
 }
 
 function openResetModal(id) {
@@ -213,6 +224,7 @@ function openResetModal(id) {
   document.getElementById('au-reset-password').value = '';
   document.getElementById('admin-modal-err').textContent = '';
   document.getElementById('admin-modal-mask').classList.add('show');
+  focusFirstInput('admin-modal-mask');
 }
 
 function closeAdminModal() {
@@ -297,6 +309,7 @@ function openModelModal(id) {
   document.getElementById('m-description').value = m ? (m.description || '') : '';
   document.getElementById('model-modal-err').textContent = '';
   document.getElementById('model-modal-mask').classList.add('show');
+  focusFirstInput('model-modal-mask');
 }
 
 function closeModelModal() {
@@ -354,6 +367,19 @@ bindEnter('m-name', saveModel);
 function bindEnter(id, fn) {
   document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
 }
+
+// ── 键盘可达性: Esc 关闭已打开的模态框; 打开模态自动聚焦首输入框 ──
+function focusFirstInput(maskId) {
+  setTimeout(() => {
+    const m = document.getElementById(maskId);
+    const f = m && m.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+    if (f) f.focus();
+  }, 50);
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  document.querySelectorAll('.modal-mask.show').forEach(m => m.classList.remove('show'));
+});
 
 // 初始化主题 (与其它页共享 visual-theme)
 VisualTheme.init({ buttonId: 'btn-theme' });

@@ -42,23 +42,23 @@ input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
 .section-title .bar { width: 4px; height: 16px; background: var(--btn-active); border-radius: 2px; }
 
 /* 概览卡片 */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .card {
   background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 8px; padding: 10px 12px; box-shadow: var(--shadow);
+  border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow);
 }
 .card .label { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px; white-space: nowrap; }
 .card .value { font-size: 18px; font-weight: 700; }
-.card .value.pos { color: var(--up-color); }
-.card .value.neg { color: var(--down-color); }
+.card .value.pos { color: var(--up-text); }
+.card .value.neg { color: var(--down-text); }
 .card .value.accent { color: var(--btn-active); }
 .card .sub { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
-.card .sub.pos { color: var(--up-color); }
-.card .sub.neg { color: var(--down-color); }
+.card .sub.pos { color: var(--up-text); }
+.card .sub.neg { color: var(--down-text); }
 
 /* 图表面板 */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.chart-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.chart-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
 .chart-box--hold { overflow: visible; }
 .chart-box .chart-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-secondary); }
 .chart { width: 100%; height: 280px; }
@@ -130,11 +130,11 @@ td.sym .code { color: var(--text-secondary); font-size: 12px; }
 td.sym a.sym-link { color: inherit; text-decoration: none; display: block; cursor: pointer; }
 td.sym a.sym-link:hover, td.sym a.sym-link:hover .code { text-decoration: underline; color: var(--btn-active); }
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
-.badge.open { background: rgba(239,35,42,0.12); color: var(--up-color); }
-.badge.closed { background: rgba(20,177,67,0.12); color: var(--down-color); }
+.badge.open { background: rgba(var(--up-rgb), 0.12); color: var(--up-text); }
+.badge.closed { background: rgba(var(--down-rgb), 0.12); color: var(--down-text); }
 .status-badges { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 3px; }
-td.pos { color: var(--up-color); font-weight: 600; }
-td.neg { color: var(--down-color); font-weight: 600; }
+td.pos { color: var(--up-text); font-weight: 600; }
+td.neg { color: var(--down-text); font-weight: 600; }
 .reason-cell { max-width: 220px; white-space: normal; font-size: 12px; color: var(--text-secondary); }
 .empty { text-align: center; color: var(--text-secondary); padding: 30px 0; }
 
@@ -160,8 +160,8 @@ td.neg { color: var(--down-color); font-weight: 600; }
 #pnl-tip .tip-row { display: flex; justify-content: space-between; gap: 20px; }
 #pnl-tip .tip-k { color: var(--text-secondary); }
 #pnl-tip .tip-v { font-variant-numeric: tabular-nums; }
-#pnl-tip .tip-v.pos { color: var(--up-color); font-weight: 600; }
-#pnl-tip .tip-v.neg { color: var(--down-color); font-weight: 600; }
+#pnl-tip .tip-v.pos { color: var(--up-text); font-weight: 600; }
+#pnl-tip .tip-v.neg { color: var(--down-text); font-weight: 600; }
 #pnl-tip .tip-sep { border-top: 1px solid var(--border); margin: 6px 0; }
 
 .pagination { display: flex; align-items: center; gap: 10px; margin-top: 12px; justify-content: flex-end; }
@@ -190,7 +190,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .modal input, .modal select, .modal textarea { width: 100%; }
 .modal textarea { resize: vertical; min-height: 50px; }
 .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
-.modal .err { color: var(--up-color); font-size: 13px; margin-top: 10px; }
+.modal .err { color: var(--up-text); font-size: 13px; margin-top: 10px; }
 .modal .trade-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
 .modal .trade-panels.single { grid-template-columns: 1fr; }
 .modal .panel { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 0; min-width: 0; }
@@ -198,9 +198,9 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .modal .risk-panel { margin-top: 12px; }
 .risk-mini { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
 .risk-mini .k { margin-right: 4px; }
-.risk-mini.warn { color: var(--warn-color); }
-.risk-mini .gap.pos { color: var(--up-color); font-weight: 600; }
-.risk-mini .gap.neg { color: var(--down-color); font-weight: 600; }
+.risk-mini.warn { color: var(--warn-text); }
+.risk-mini .gap.pos { color: var(--up-text); font-weight: 600; }
+.risk-mini .gap.neg { color: var(--down-text); font-weight: 600; }
 .risk-mini .gap.flat { color: var(--text-secondary); }
 .monitor-bell { font-size: 13px; font-weight: 500; color: var(--text-secondary); }
 
@@ -215,7 +215,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .leg-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--bg-panel); }
 .leg-row .leg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .leg-row .leg-head .leg-no { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.leg-row .leg-head .leg-del { padding: 2px 8px; font-size: 12px; color: var(--up-color); border: none; background: transparent; cursor: pointer; }
+.leg-row .leg-head .leg-del { padding: 2px 8px; font-size: 12px; color: var(--up-text); border: none; background: transparent; cursor: pointer; }
 .leg-row .leg-head .leg-del:hover { text-decoration: underline; }
 .leg-row .leg-fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .leg-row .leg-fields > div { min-width: 0; }
@@ -225,11 +225,11 @@ td.neg { color: var(--down-color); font-weight: 600; }
 .leg-row .leg-fields input, .leg-row .leg-fields select { width: 100%; padding: 5px 8px; }
 .leg-side-btns { display: inline-flex; border: 1px solid var(--input-border); border-radius: 4px; overflow: hidden; }
 .leg-side-btns button { border: none; border-radius: 0; padding: 5px 12px; }
-.leg-side-btns button.active.buy { background: var(--up-color); color: #fff; }
-.leg-side-btns button.active.sell { background: var(--down-color); color: #fff; }
+.leg-side-btns button.active.buy { background: var(--up-text); color: #fff; }
+.leg-side-btns button.active.sell { background: var(--down-text); color: #fff; }
 
 /* 批次标签 */
-.badge.batch { background: rgba(41,98,255,0.12); color: var(--btn-active); margin-left: 4px; }
+.badge.batch { background: rgba(var(--btn-active-rgb), 0.12); color: var(--btn-active); margin-left: 4px; }
 
 /* 搜索补全 */
 .autocomplete { position: relative; }
@@ -289,6 +289,16 @@ td.neg { color: var(--down-color); font-weight: 600; }
 }
 </style>
 <script src="/js/theme.js"></script>
+<script>
+/* 主题预置: 首帧渲染前应用已存/系统主题, 消除暗色用户刷新闪白 */
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
 <script src="/js/api.js"></script>
 </head>
 <body>
@@ -420,7 +430,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
     <h2 id="modal-title">新增交易记录</h2>
     <div class="grid">
       <div class="full autocomplete">
-        <label>股票代码 / 名称 <span style="color:var(--up-color)">*</span></label>
+        <label>股票代码 / 名称 <span style="color:var(--up-text)">*</span></label>
         <input type="text" id="t-symbol-input" placeholder="输入代码或名称搜索..." autocomplete="off">
         <div class="dropdown" id="t-symbol-dropdown"></div>
       </div>
@@ -444,7 +454,7 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <select id="t-model"><option value="">无</option></select>
       </div>
       <div id="t-quantity-wrap">
-        <label>数量 (股) <span style="color:var(--up-color)">*</span></label>
+        <label>数量 (股) <span style="color:var(--up-text)">*</span></label>
         <input type="number" id="t-quantity" min="1" step="1" placeholder="如 100">
       </div>
     </div>
@@ -453,15 +463,15 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <legend>买入</legend>
         <div class="grid">
           <div>
-            <label>买入价 <span style="color:var(--up-color)">*</span></label>
+            <label>买入价 <span style="color:var(--up-text)">*</span></label>
             <input type="number" id="t-entry-price" min="0" step="0.01" placeholder="如 10.50">
           </div>
           <div>
-            <label>买入日期 <span style="color:var(--up-color)">*</span></label>
+            <label>买入日期 <span style="color:var(--up-text)">*</span></label>
             <input type="date" id="t-entry-date">
           </div>
           <div class="full">
-            <label>买入理由 <span style="color:var(--up-color)">*</span></label>
+            <label>买入理由 <span style="color:var(--up-text)">*</span></label>
             <select id="t-entry-reason"></select>
           </div>
           <div class="full">
@@ -474,15 +484,15 @@ td.neg { color: var(--down-color); font-weight: 600; }
         <legend>卖出</legend>
         <div class="grid">
           <div>
-            <label>退出价 <span style="color:var(--up-color)">*</span></label>
+            <label>退出价 <span style="color:var(--up-text)">*</span></label>
             <input type="number" id="t-exit-price" min="0" step="0.01" placeholder="如 12.00">
           </div>
           <div>
-            <label>卖出日期 <span style="color:var(--up-color)">*</span></label>
+            <label>卖出日期 <span style="color:var(--up-text)">*</span></label>
             <input type="date" id="t-exit-date">
           </div>
           <div class="full">
-            <label>卖出理由 <span style="color:var(--up-color)" id="exit-reason-star">*</span></label>
+            <label>卖出理由 <span style="color:var(--up-text)" id="exit-reason-star">*</span></label>
             <select id="t-exit-reason"></select>
           </div>
           <div class="full">
@@ -522,23 +532,23 @@ td.neg { color: var(--down-color); font-weight: 600; }
       <legend>国债逆回购（出借资金，到期自动结算收益）</legend>
       <div class="grid">
         <div class="full">
-          <label>代码 <span style="color:var(--up-color)">*</span></label>
+          <label>代码 <span style="color:var(--up-text)">*</span></label>
           <select id="t-repo-code" onchange="onRepoCodeChange()"></select>
         </div>
         <div>
-          <label>成交利率 (%) <span style="color:var(--up-color)">*</span></label>
+          <label>成交利率 (%) <span style="color:var(--up-text)">*</span></label>
           <input type="number" id="t-repo-rate" min="0" step="0.001" placeholder="如 2.50" oninput="repoPreview()">
         </div>
         <div>
-          <label>本金 (元) <span style="color:var(--up-color)">*</span></label>
+          <label>本金 (元) <span style="color:var(--up-text)">*</span></label>
           <input type="number" id="t-repo-principal" min="1000" step="1000" placeholder="如 100000" oninput="repoPreview()">
         </div>
         <div>
-          <label>买入日期 <span style="color:var(--up-color)">*</span></label>
+          <label>买入日期 <span style="color:var(--up-text)">*</span></label>
           <input type="date" id="t-repo-date" onchange="repoPreview()">
         </div>
         <div>
-          <label>计息天数 <span style="color:var(--up-color)">*</span></label>
+          <label>计息天数 <span style="color:var(--up-text)">*</span></label>
           <input type="number" id="t-repo-days" min="1" step="1" placeholder="默认=期限，可改" oninput="repoPreview()">
         </div>
         <div class="full">
@@ -835,6 +845,7 @@ function openFeesModal() {
   renderFeesForm(state.fees || DEFAULT_FEES_UI);
   document.getElementById('fee-err').textContent = '';
   document.getElementById('fee-modal-mask').classList.add('show');
+  focusFirstInput('fee-modal-mask');
 }
 
 function closeFeesModal() {
@@ -891,6 +902,19 @@ async function resetFees() {
 
 document.getElementById('fee-modal-mask').addEventListener('click', function (e) {
   if (e.target === this) closeFeesModal();
+});
+
+// ── 键盘可达性: Esc 关闭已打开的模态框; 打开模态自动聚焦首输入框 ──
+function focusFirstInput(maskId) {
+  setTimeout(() => {
+    const m = document.getElementById(maskId);
+    const f = m && m.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+    if (f) f.focus();
+  }, 50);
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  document.querySelectorAll('.modal-mask.show').forEach(m => m.classList.remove('show'));
 });
 
 // ═══════════════ 理由与统计 ═══════════════
@@ -1243,8 +1267,8 @@ function renderStatCards(s) {
 }
 
 function chartTheme() {
-  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-  return dark ? '#787b86' : '#6c757d';
+  // 图表轴文字色跟随主题 (ECharts canvas 读不到 var(), 取计算值)
+  return getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#6c757d';
 }
 
 // ECharts canvas 无法解析 CSS var()，须读取计算后的实际色值
@@ -1336,11 +1360,12 @@ function renderModelChart() {
   });
 }
 
-const PIE_COLORS = [
-  '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
-  '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b8d0',
-  '#ff9f7f', '#8d98b3',
-];
+// 分类色板唯一来源: theme.css 的 --pie-colors (逗号分隔)
+function pieColors() {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--pie-colors').trim();
+  const list = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  return list.length ? list : ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272'];
+}
 
 function modelColors() {
   const s = getComputedStyle(document.documentElement);
@@ -1535,7 +1560,8 @@ function holdPieSectorLabelLine() {
 }
 
 function holdPieDataItem(row, i) {
-  const color = PIE_COLORS[i % PIE_COLORS.length];
+  const palette = pieColors();
+  const color = palette[i % palette.length];
   const line = { show: true, length: 12, length2: 10, lineStyle: { color, width: 1 } };
   const lbl = { show: true, color, fontSize: 14, fontWeight: 'bold' };
   return {
@@ -1559,7 +1585,8 @@ function renderHoldLegend(rows, total) {
   el.style.display = '';
   el.innerHTML = rows.map((r, i) => {
     const pct = total ? (r.mv / total * 100) : 0;
-    const color = PIE_COLORS[i % PIE_COLORS.length];
+    const palette = pieColors();
+    const color = palette[i % palette.length];
     const modelTip = r.models ? ` · 模型: ${r.models.replace(/\|/g, ', ')}` : '';
     return `<li class="hold-legend-item" data-symbol="${escHtml(r.symbol)}" title="${escHtml(r.name + modelTip)}">`
       + `<span class="hold-legend-dot" style="background:${color}"></span>`
@@ -1674,7 +1701,7 @@ function renderHoldChart() {
 
   state.holdChart.setOption({
     backgroundColor: 'transparent',
-    color: PIE_COLORS,
+    color: pieColors(),
     tooltip: {
       trigger: 'item',
       formatter: p => {
@@ -2013,6 +2040,7 @@ function openModal(id) {
   const mask = document.getElementById('modal-mask');
   mask.classList.add('show');
   mask.scrollTop = 0;
+  focusFirstInput('modal-mask');
   hideSymbolDropdown();
 }
 
@@ -2131,7 +2159,7 @@ function repoPreview() {
   const comm = principal * (REPO_FEE[tenor] || 0);
   const net = interest - comm;
   el.innerHTML = `期限 <b>${tenor}</b> 天 · 计息 <b>${days}</b> 天 · 到期(约) <b id="repo-maturity">${repoMaturityPreview(date, tenor)}</b><br>` +
-    `利息 <b style="color:var(--up-color)">+${interest.toFixed(2)}</b> 元 · 佣金 <b>${comm.toFixed(2)}</b> 元 · 净收益 <b style="color:var(--up-color)">+${net.toFixed(2)}</b> 元`;
+    `利息 <b style="color:var(--up-text)">+${interest.toFixed(2)}</b> 元 · 佣金 <b>${comm.toFixed(2)}</b> 元 · 净收益 <b style="color:var(--up-text)">+${net.toFixed(2)}</b> 元`;
   updateRepoMaturity(date, tenor);
 }
 
@@ -2188,7 +2216,7 @@ function updateLegsSummary() {
     net += l.side === 'buy' ? q : -q;
   }
   el.textContent = '当前剩余 ' + net + ' 股';
-  el.style.color = net < 0 ? 'var(--up-color)' : (net === 0 ? 'var(--text-secondary)' : 'inherit');
+  el.style.color = net < 0 ? 'var(--up-text)' : (net === 0 ? 'var(--text-secondary)' : 'inherit');
 }
 
 function addLeg(side) {
@@ -2226,15 +2254,15 @@ function legRowHtml(leg, idx) {
         </div>
       </div>
       <div>
-        <label>价格 <span style="color:var(--up-color)">*</span></label>
+        <label>价格 <span style="color:var(--up-text)">*</span></label>
         <input type="number" min="0" step="0.01" data-leg-field="price" value="${leg.price}" placeholder="如 10.50" oninput="setLegField(${idx},'price',this.value)">
       </div>
       <div>
-        <label>数量 <span style="color:var(--up-color)">*</span></label>
+        <label>数量 <span style="color:var(--up-text)">*</span></label>
         <input type="number" min="1" step="1" data-leg-field="quantity" value="${leg.quantity}" placeholder="如 100" oninput="setLegField(${idx},'quantity',this.value)">
       </div>
       <div class="col-2">
-        <label>日期 <span style="color:var(--up-color)">*</span></label>
+        <label>日期 <span style="color:var(--up-text)">*</span></label>
         <input type="date" data-leg-field="date" value="${leg.date}" max="${todayISO()}" oninput="setLegField(${idx},'date',this.value)">
       </div>
       <div>
