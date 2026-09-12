@@ -315,6 +315,17 @@ body {
 #toolbar .period-group .extra-period { display: none; }
 #toolbar .period-group.expanded .extra-period { display: inline-block; }
 #toolbar .period-group .more-btn { padding: 5px 7px; font-size: 12px; color: var(--text-secondary); }
+/* 选股后台扫描: 主页入口脉冲动画 + 进度文字 */
+@keyframes scanning-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+#screener-entry.scanning { animation: scanning-pulse 1.2s ease-in-out infinite; color: var(--btn-active); font-variant-numeric: tabular-nums; }
+/* 周期组展开: 挤压信息区/搜索框保持单行 */
+#toolbar.periods-expanded .info-group { flex-shrink: 1; min-width: 0; overflow: hidden; }
+#toolbar.periods-expanded .info-group .oh,
+#toolbar.periods-expanded .info-group #info-time,
+#toolbar.periods-expanded .info-group #info-amount,
+#toolbar.periods-expanded .info-guba { display: none !important; }
+#toolbar.periods-expanded #symbol-input { width: 130px; }
+#toolbar .period-group .more-btn.expanded::before { content: "▴ "; }
 #toolbar .period-group.expanded .more-btn { color: var(--btn-active); }
 #indicator-bar .extra-ind { display: none; }
 #indicator-bar.show-extra .extra-ind { display: inline-flex; }
@@ -1957,7 +1968,11 @@ function loadConfig() {
       STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
     }
     // 折叠状态恢复
-    if (cfg.periodMore === true) { STATE._periodMore = true; document.querySelector('.period-group').classList.add('expanded'); }
+    if (cfg.periodMore === true) {
+      STATE._periodMore = true;
+      document.querySelector('.period-group').classList.add('expanded');
+      document.getElementById('toolbar').classList.add('periods-expanded');
+    }
     if (cfg.indMore === true) {
       STATE._indMore = true;
       document.getElementById('indicator-bar').classList.add('show-extra');
@@ -2216,7 +2231,9 @@ function onConfigChange() {
 function togglePeriodMore() {
   const pg = document.querySelector('.period-group');
   pg.classList.toggle('expanded');
-  STATE._periodMore = pg.classList.contains('expanded');
+  const expanded = pg.classList.contains('expanded');
+  document.getElementById('toolbar').classList.toggle('periods-expanded', expanded);
+  STATE._periodMore = expanded;
   saveConfig();
 }
 
@@ -4610,6 +4627,31 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   syncSessionFlag();
   setInterval(syncSessionFlag, 60e3);
+
+  // 选股后台扫描状态: 每 10s 轻量轮询, 运行中入口脉冲 + 进度
+  async function refreshScreenerBadge() {
+    if (document.hidden) return;
+    try {
+      const s = await api("/api/screener/status");
+      const btn = document.getElementById("screener-entry");
+      if (!btn) return;
+      if (s.running) {
+        const pct = s.total ? Math.round((s.progress || 0) / s.total * 100) : 0;
+        btn.classList.add("scanning");
+        btn.innerHTML = `🎯 ${pct}%`;
+        btn.title = `选股扫描中 ${s.progress || 0}/${s.total} (后台运行, 关页不中断)`;
+        STATE._scanWasRunning = true;
+      } else if (STATE._scanWasRunning) {
+        STATE._scanWasRunning = false;
+        btn.classList.remove("scanning");
+        btn.innerHTML = "🎯 选股";
+        btn.title = "条件选股: MACD金叉/MA20/筹码获利等";
+        showToast(`选股扫描完成: 命中 ${(s.results || []).length} 只`);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  refreshScreenerBadge();
+  setInterval(refreshScreenerBadge, 10e3);
 
   setInterval(() => {
     if (!canAutoRefresh()) return;
