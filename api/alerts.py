@@ -65,3 +65,20 @@ def trendline_monitors_list():
     if not user:
         return _error("未登录", 401)
     return _json({"monitors": trades.list_trendline_monitors(user["id"])})
+
+
+@api_bp.route("/api/trendline-monitors/<drawing_id>", methods=["PUT"])
+def trendline_monitor_update(drawing_id):
+    """启停某条画线的趋势线监控 (配置存 chart_drawings JSON, 只改 enabled 标志)。"""
+    user = _require_user()
+    if not user:
+        return _error("未登录", 401)
+    body = _read_json_body()
+    if body is None:
+        return _error("请求体无效 JSON", 400)
+    enabled = body.get("enabled")
+    if enabled not in (True, False):
+        return _error("enabled 必须为布尔值")
+    ok, symbol, period = trades.set_trendline_monitor_enabled(
+        user["id"], drawing_id, enabled)
+    return _json({"ok": bool(ok), "symbol": symbol, "period": period})

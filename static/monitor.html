@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🛡 持仓监控 — Visual</title>
+<title>🛡 监控中心 — Visual</title>
 <link rel="stylesheet" href="/css/theme.css">
 <script src="/js/theme.js"></script>
 <script>
@@ -100,6 +100,20 @@ td.sym a:hover { color: var(--btn-active); }
 .legend-bar { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 10px 2px 0; font-size: 12px; color: var(--text-secondary); }
 .legend-bar b { color: var(--text); font-weight: 600; }
 
+/* 价格监控子区块 */
+.sub-title { font-size: 13px; font-weight: 700; margin: 16px 0 8px; display: flex; align-items: center; gap: 8px; }
+.sub-title .dim { font-weight: 400; font-size: 11px; }
+#price-section table { min-width: 760px; }
+.mini-btn {
+  display: inline-block; padding: 2px 10px; margin: 0 4px 2px 0;
+  border: 1px solid var(--input-border); border-radius: 6px;
+  background: transparent; color: var(--text); font-size: 12px;
+  cursor: pointer; text-decoration: none; white-space: nowrap;
+}
+.mini-btn:hover { background: var(--btn-hover); }
+.mini-btn.danger { color: var(--down-text); border-color: rgba(var(--down-rgb), 0.45); }
+.mini-btn:disabled { opacity: 0.5; cursor: default; }
+
 .empty { text-align: center; color: var(--text-secondary); padding: 40px 0; line-height: 2; }
 .empty .btn-row { margin-top: 10px; display: flex; gap: 10px; justify-content: center; }
 .empty button {
@@ -119,7 +133,7 @@ td.sym a:hover { color: var(--btn-active); }
 </head>
 <body>
 <div id="toolbar">
-  <span class="title">🛡 持仓监控</span>
+  <span class="title">🛡 监控中心</span>
   <span class="status-badge off" id="svc-badge"><span class="dot"></span><span id="svc-text">检查中…</span></span>
   <button onclick="location.href='/'" title="返回K线主页">← 主页</button>
   <span class="spacer"></span>
@@ -140,7 +154,19 @@ td.sym a:hover { color: var(--btn-active); }
     <div class="card"><div class="label">监控标的数</div><div class="value" id="st-n">—</div><div class="sub" id="st-last">最近轮询 —</div></div>
     <div class="card"><div class="label">生效风控持仓</div><div class="value" id="st-risk">—</div><div class="sub">已填止盈/保本/止损</div></div>
     <div class="card"><div class="label">到期提醒持仓</div><div class="value" id="st-hold">—</div><div class="sub">关联模型推荐周期</div></div>
+    <div class="card"><div class="label">趋势线监控</div><div class="value" id="st-tl">—</div><div class="sub">跌破线值即推送</div></div>
+    <div class="card"><div class="label">条件预警</div><div class="value" id="st-pa">—</div><div class="sub">启用中 / 现价·涨跌幅</div></div>
     <div class="card"><div class="label">近 20 条告警</div><div class="value" id="st-alerts">—</div><div class="sub" id="st-backend">推送后端 —</div></div>
+  </div>
+
+  <div class="empty" id="empty-box" style="display:none">
+    <div>当前没有纳入监控的持仓</div>
+    <div>在交易记录中为持仓填入 止盈 / 保本 / 止损 任一风控价即可自动纳入；<br>
+         关联量化模型并填写推荐持有天数可获得到期提醒。</div>
+    <div class="btn-row">
+      <button onclick="location.href='/trades.html'">📒 去交易记录</button>
+      <button class="ghost" onclick="location.href='/'">← 返回主面板</button>
+    </div>
   </div>
 
   <div id="pos-section">
@@ -167,22 +193,41 @@ td.sym a:hover { color: var(--btn-active); }
     </div>
   </div>
 
+  <div class="section-title"><span class="bar"></span>价格监控</div>
+  <div id="price-section">
+    <div class="sub-title">趋势线跌破监控 <span class="dim" id="tl-count"></span></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>标的</th><th>监控名称</th><th>类型</th><th>周期</th>
+            <th>跌破幅度</th><th>复权</th><th>最近触发</th><th style="min-width:170px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="tl-tbody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="sub-title">条件价格预警 <span class="dim" id="pa-count"></span></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>标的</th><th style="min-width:200px">条件 (AND)</th><th>备注</th>
+            <th>状态</th><th>最近触发</th><th style="min-width:130px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="pa-tbody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="section-title"><span class="bar"></span>最近告警</div>
   <div class="table-wrap">
     <table>
       <thead><tr><th>时间</th><th>类型</th><th>标的</th><th>价格</th><th>详情</th></tr></thead>
       <tbody id="alert-tbody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
     </table>
-  </div>
-
-  <div class="empty" id="empty-box" style="display:none">
-    <div>当前没有纳入监控的持仓</div>
-    <div>在交易记录中为持仓填入 止盈 / 保本 / 止损 任一风控价即可自动纳入；<br>
-         关联量化模型并填写推荐持有天数可获得到期提醒。</div>
-    <div class="btn-row">
-      <button onclick="location.href='/trades.html'">📒 去交易记录</button>
-      <button class="ghost" onclick="location.href='/'">← 返回主面板</button>
-    </div>
   </div>
 </div>
 
@@ -192,7 +237,19 @@ const ALERT_LABELS = {
   sl_breached: "止损触发", tp_reached: "止盈达成", breakeven_hit: "保本命中",
   be_broken: "保本跌破", limit_up_sealed: "涨停封板", accel_down: "加速下跌",
   accel_up: "加速上涨", hold_expire: "到期提醒",
+  hold_exit_am: "到期平仓(上午)", hold_exit_pm: "到期平仓(下午)",
+  trendline_break: "趋势线跌破", price_alert: "价格预警",
 };
+const TL_TYPE_NAMES = { trend: "趋势线", ray: "射线", hline: "水平线" };
+const ADJUST_LABELS = { forward: "前复权", hfq: "后复权", none: "不复权" };
+const METRIC_LABELS = { price: "现价", change_pct: "涨跌幅%" };
+
+/** 条件预警规则 → 可读文案, 如「现价 ≥ 10.5 且 涨跌幅% ≤ -3」。 */
+function condText(rule) {
+  return (rule || []).map(c =>
+    `${METRIC_LABELS[c.metric] || c.metric} ${c.op === ">=" ? "≥" : "≤"} ${c.value}`
+  ).join(" 且 ");
+}
 
 function api(path, options = {}) {
   return VisualApi.api(path, options, {
@@ -242,6 +299,9 @@ function render(data) {
   document.getElementById("st-risk").textContent = positions.filter(p => p.has_risk_prices).length;
   document.getElementById("st-hold").textContent = positions.filter(p => p.has_hold_expire).length;
   document.getElementById("st-alerts").textContent = (data.alerts || []).length;
+  document.getElementById("st-tl").textContent = (data.trendline_monitors || []).length;
+  document.getElementById("st-pa").textContent =
+    (data.price_alerts || []).filter(a => a.enabled).length;
 
   // 我的监控开关
   const wrap = document.getElementById("mon-switch-wrap");
@@ -256,6 +316,8 @@ function render(data) {
 
   renderPositions(positions);
   renderAlerts(data.alerts || []);
+  renderTrendlineMonitors(data.trendline_monitors || []);
+  renderPriceAlerts(data.price_alerts || []);
   const empty = document.getElementById("empty-box");
   const posSection = document.getElementById("pos-section");
   if (!positions.length) {
@@ -346,13 +408,120 @@ function renderAlerts(alerts) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无告警记录</td></tr>';
     return;
   }
+  // 告警流水只存 symbol (无 name); 持仓里能查到名称就补上, 查不到回落代码
+  const nameOf = {};
+  ((STATE.overview && STATE.overview.positions) || []).forEach(p => { nameOf[p.symbol] = p.name; });
   tbody.innerHTML = alerts.map(a => `<tr>
     <td class="dim">${(a.fired_at || "").replace("T", " ").slice(0, 16)}</td>
     <td>${ALERT_LABELS[a.alert_type] || escHtml(a.alert_type)}</td>
-    <td class="sym"><b>${escHtml(a.name || "")}</b> <span class="code">${escHtml(a.symbol || "")}</span></td>
+    <td class="sym"><b>${escHtml(nameOf[a.symbol] || a.symbol || "")}</b> <span class="code">${escHtml(a.symbol || "")}</span></td>
     <td class="num">${fmt(a.price)}</td>
     <td class="dim" style="white-space:normal">${escHtml(a.detail || "")}</td>
   </tr>`).join("");
+}
+
+function fmtTs(v) {
+  return v ? escHtml(String(v).replace("T", " ").slice(0, 16)) : "未触发";
+}
+
+function renderTrendlineMonitors(list) {
+  const tbody = document.getElementById("tl-tbody");
+  const cnt = document.getElementById("tl-count");
+  if (cnt) cnt.textContent = list.length ? `共 ${list.length} 条` : "";
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无趋势线监控 — 图表画线后选中趋势线, 点「🔔监控」开启</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(m => `<tr>
+    <td class="sym"><a href="/?symbol=${encodeURIComponent(m.symbol)}&period=${encodeURIComponent(m.period || "1d")}"><b>${escHtml(m.symbol)}</b></a></td>
+    <td>🔔 ${escHtml(m.name || "(未命名)")}</td>
+    <td>${escHtml(TL_TYPE_NAMES[m.line_type] || m.line_type || "—")}</td>
+    <td>${escHtml(m.period || "—")}</td>
+    <td class="num">${m.pct != null ? m.pct + "%" : "—"}</td>
+    <td class="dim">${escHtml(ADJUST_LABELS[m.adjust] || m.adjust || "前复权")}</td>
+    <td class="dim">${fmtTs(m.last_fired_at)}</td>
+    <td>
+      <a class="mini-btn" href="/?symbol=${encodeURIComponent(m.symbol)}&period=${encodeURIComponent(m.period || "1d")}">去图表</a>
+      <button class="mini-btn danger" data-did="${escAttr(m.drawing_id)}" onclick="stopTrendlineMonitor(this)">停止监控</button>
+    </td>
+  </tr>`).join("");
+}
+
+function renderPriceAlerts(list) {
+  const tbody = document.getElementById("pa-tbody");
+  const cnt = document.getElementById("pa-count");
+  if (cnt) {
+    const on = list.filter(a => a.enabled).length;
+    cnt.textContent = list.length ? `${on} 条启用 / 共 ${list.length} 条` : "";
+  }
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无条件预警 — 在主页点 🔔 新建 (现价/涨跌幅 AND 组合)</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(a => `<tr class="${a.enabled ? "" : "dim"}">
+    <td class="sym"><a href="/?symbol=${encodeURIComponent(a.symbol)}"><b>${escHtml(a.name || a.symbol)}</b> <span class="code">${escHtml(a.symbol)}</span></a></td>
+    <td>${escHtml(condText(a.rule))}</td>
+    <td class="dim">${escHtml(a.note || "—")}</td>
+    <td>${a.enabled ? '<span class="badge on">启用</span>' : '<span class="badge">停用</span>'}</td>
+    <td class="dim">${fmtTs(a.last_fired_at)}</td>
+    <td>
+      <button class="mini-btn" data-aid="${a.id}" data-en="${a.enabled ? "1" : "0"}" onclick="togglePriceAlert(this)">${a.enabled ? "停用" : "启用"}</button>
+      <button class="mini-btn danger" data-aid="${a.id}" onclick="deletePriceAlert(this)">删除</button>
+    </td>
+  </tr>`).join("");
+}
+
+async function stopTrendlineMonitor(btn) {
+  const id = btn.dataset.did;
+  if (!id || !confirm("停止该趋势线监控? 之后可在图表画线菜单重新开启。")) return;
+  btn.disabled = true;
+  try {
+    const r = await api("/api/trendline-monitors/" + encodeURIComponent(id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    if (r && r.ok === false) { showToast("停止失败: 未找到该监控线"); btn.disabled = false; return; }
+    showToast("已停止趋势线监控");
+    await loadOverview();
+  } catch (e) {
+    btn.disabled = false;
+    showToast("停止失败: " + (e.message || e));
+  }
+}
+
+async function togglePriceAlert(btn) {
+  const id = btn.dataset.aid;
+  const enabled = btn.dataset.en !== "1";
+  btn.disabled = true;
+  try {
+    const r = await api("/api/alerts/" + encodeURIComponent(id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (r && r.ok === false) { showToast("更新失败"); btn.disabled = false; return; }
+    showToast(enabled ? "已启用预警" : "已停用预警");
+    await loadOverview();
+  } catch (e) {
+    btn.disabled = false;
+    showToast("更新失败: " + (e.message || e));
+  }
+}
+
+async function deletePriceAlert(btn) {
+  const id = btn.dataset.aid;
+  if (!id || !confirm("删除这条条件预警?")) return;
+  btn.disabled = true;
+  try {
+    const r = await api("/api/alerts/" + encodeURIComponent(id), { method: "DELETE" });
+    if (r && r.ok === false) { showToast("删除失败"); btn.disabled = false; return; }
+    showToast("已删除预警");
+    await loadOverview();
+  } catch (e) {
+    btn.disabled = false;
+    showToast("删除失败: " + (e.message || e));
+  }
 }
 
 async function loadQuotes(positions) {

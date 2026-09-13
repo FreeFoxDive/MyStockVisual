@@ -173,6 +173,50 @@ class LineMonitorEvalTest(unittest.TestCase):
         # 同 updated_at 下缓存命中 (即使底层数据被篡改也不重读)
         self.assertEqual(len(self.mon._load_line_monitors()), 1)
 
+    def test_disable_preserves_fields_and_invalidates_cache(self):
+        self._save([_drawing("d1", name="支撑线", pct=3, adjust="none")])
+        # 预热缓存 (模拟监控循环已读过该线)
+        self.assertEqual([m["drawing_id"] for m in self.mon._load_line_monitors()], ["d1"])
+        ok, symbol, period = trades.set_trendline_monitor_enabled(self.uid, "d1", False)
+        self.assertTrue(ok)
+        self.assertEqual((symbol, period), (self.SYM, "1d"))
+        self.assertEqual(self.mon._load_line_monitors(), [],
+                         "同秒停用也必须让监控缓存失效")
+        saved = trades.get_chart_drawings(self.uid, self.SYM, "1d")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["name"], "支撑线", "只翻转 enabled, 其余字段保留")
+        self.assertEqual(saved[0]["monitor"]["pct"], 3)
+        self.assertEqual(saved[0]["monitor"]["adjust"], "none")
+        self.assertFalse(saved[0]["monitor"]["enabled"])
+
+    def test_disable_missing_drawing(self):
+        self._save([_drawing("d1")])
+        self.assertEqual(trades.set_trendline_monitor_enabled(self.uid, "nope", False),
+                         (False, None, None))
+        # 有 id 但没有 monitor 配置的画线同样不可停用
+        self._save([{"id": "d2", "type": "trend", "points": []}], symbol="000001.SZ")
+        self.assertEqual(trades.set_trendline_monitor_enabled(self.uid, "d2", False),
+                         (False, None, None))
+
+    def test_disable_same_second_still_bumps_updated_at(self):
+        # 同秒写入 (_now_iso 精度到秒) 必须仍推进 updated_at, 否则缓存不失效
+        self._save([_drawing("d1")])
+        self.assertEqual([m["drawing_id"] for m in self.mon._load_line_monitors()], ["d1"])
+        stored = trades.list_chart_drawing_rows()[0]["updated_at"]
+        with mock.patch.object(trades, "_now_iso", return_value=stored):
+            ok, _, _ = trades.set_trendline_monitor_enabled(self.uid, "d1", False)
+        self.assertTrue(ok)
+        after = trades.list_chart_drawing_rows()[0]["updated_at"]
+        self.assertGreater(after, stored, "updated_at 必须严格递增")
+        self.assertEqual(self.mon._load_line_monitors(), [])
+
+    def test_disable_isolated_per_user(self):
+        self._save([_drawing("d1")])
+        other = trades.create_user("line_mon_u2", "password123")
+        self.assertEqual(trades.set_trendline_monitor_enabled(other, "d1", False),
+                         (False, None, None), "不能停用他人画线上的监控")
+        self.assertEqual([m["drawing_id"] for m in self.mon._load_line_monitors()], ["d1"])
+
     def test_load_defaults_adjust_forward(self):
         self._save([_drawing("d1"), _drawing("d2", adjust="none")])
         mons = {m["drawing_id"]: m for m in self.mon._load_line_monitors()}

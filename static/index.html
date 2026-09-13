@@ -637,7 +637,7 @@ body {
     <span id="info-time"></span>
   </div>
   <div class="toolbar-right">
-    <button id="monitor-entry" onclick="location.href='/monitor.html'" title="持仓监控: 监控股票/条件/告警一览">🛡 监控</button>
+    <button id="monitor-entry" onclick="location.href='/monitor.html'" title="监控中心: 持仓风控/趋势线跌破/条件预警/告警一览">🛡 监控中心</button>
     <button id="screener-entry" onclick="location.href='/screener.html'" title="条件选股: MACD金叉/MA20/筹码获利等">🎯 选股</button>
     <button id="trades-entry" title="交易记录统计" onclick="location.href='/trades.html'">📒 交易记录</button>
     <span class="search-wrap">
@@ -1111,8 +1111,8 @@ function onSystemThemeChange() {
 async function fetchData(opts) {
   const silent = !!(opts && opts.silent);
   const symbol = STATE.symbol;
-  // 分时下请求K线 (如切换复权) → 统一收口到日K, 同步按钮/面板
-  if (STATE.period === 'intraday') applyPeriodUI('1d');
+  // 分时下请求K线 (如切换复权) → 统一收口到日K, 同步按钮/面板/URL
+  if (STATE.period === 'intraday') { applyPeriodUI('1d'); syncSymbolUrl(true); }
   const period = STATE.period;
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
   STATE._lastBarAt = fetchTs;
@@ -3563,6 +3563,7 @@ function applyPeriodUI(period) {
 
 function switchPeriod(period) {
   applyPeriodUI(period);
+  syncSymbolUrl(true); // 周期写入 URL: 刷新/分享/从监控中心跳转保持一致
   if (period === 'intraday') {
     STATE.intradayData = null; // 清缓存，强制重新加载
     if (STATE.chart) STATE.chart.clear();
@@ -3592,6 +3593,13 @@ function onIndicatorChange() {
   }
 }
 
+/** 图表规范 URL: /?symbol=X[&period=P]; 日K 省略 period (与旧链接兼容) */
+function chartUrl(symbol, period) {
+  let url = '/?symbol=' + encodeURIComponent(symbol || '');
+  if (period && period !== '1d') url += '&period=' + encodeURIComponent(period);
+  return url;
+}
+
 /** 用户切换符号统一入口: 同步输入框与 STATE, 符号变化时 pushState (返回键可回到上一只股票) */
 function switchSymbol(symbol) {
   symbol = (symbol || '').trim();
@@ -3599,14 +3607,14 @@ function switchSymbol(symbol) {
   document.getElementById('symbol-input').value = symbol;
   if (symbol === STATE.symbol) return false;
   STATE.symbol = symbol;
-  try { history.pushState({ symbol }, '', '/?symbol=' + encodeURIComponent(symbol)); } catch (e) { /* ignore */ }
+  try { history.pushState({ symbol }, '', chartUrl(symbol, STATE.period)); } catch (e) { /* ignore */ }
   return true;
 }
 
-/** 规范化当前 URL 为 /?symbol= (入口加载用 replaceState, 不产生新历史) */
+/** 规范化当前 URL 为 /?symbol=[&period=] (入口加载/周期切换用 replaceState, 不产生新历史) */
 function syncSymbolUrl(replace) {
   if (!replace) return;
-  try { history.replaceState({ symbol: STATE.symbol }, '', '/?symbol=' + encodeURIComponent(STATE.symbol)); } catch (e) { /* ignore */ }
+  try { history.replaceState({ symbol: STATE.symbol }, '', chartUrl(STATE.symbol, STATE.period)); } catch (e) { /* ignore */ }
 }
 
 /** 换股: 丢弃上只股票的面板快照, 并解除节流让信息/五档立即重取 */
@@ -5166,21 +5174,35 @@ document.addEventListener('DOMContentLoaded', () => {
     STATE.symbol = last.symbol;
   }
 
-  // 支持从交易记录等页面跳转 ?symbol=000001.SZ 自动加载 (URL 参数优先于历史恢复)
-  const jumpSymbol = new URLSearchParams(location.search).get('symbol');
+  // 支持从交易记录/监控中心跳转 ?symbol=000001.SZ 自动加载 (URL 参数优先于历史恢复);
+  // 趋势线监控还带 ?period=1w|1M, 定位到被监控的那个周期 (画线按 代码+周期 分库)
+  const bootParams = new URLSearchParams(location.search);
+  const jumpSymbol = bootParams.get('symbol');
   if (jumpSymbol) {
     document.getElementById('symbol-input').value = jumpSymbol;
     STATE.symbol = jumpSymbol;
   }
+  const jumpPeriod = bootParams.get('period');
+  if (jumpPeriod && ALL_PERIODS.includes(jumpPeriod)) applyPeriodUI(jumpPeriod);
   syncSymbolUrl(true); // 规范化入口 URL, 浏览器返回键可回溯历史股票
 
-  // 浏览器返回/前进: 回到上一只/下一只股票 (对标 TradingView)
+  // 浏览器返回/前进: 回到上一只/下一只股票 (对标 TradingView), 周期同样跟随
   window.addEventListener('popstate', () => {
-    const s = new URLSearchParams(location.search).get('symbol');
-    if (!s || s === STATE.symbol) return;
-    STATE.symbol = s;
-    document.getElementById('symbol-input').value = s;
-    loadCurrent();
+    const params = new URLSearchParams(location.search);
+    const s = params.get('symbol');
+    const per = params.get('period');
+    const nextPeriod = (per && ALL_PERIODS.includes(per)) ? per : '1d';
+    const symbolChanged = !!s && s !== STATE.symbol;
+    const periodChanged = nextPeriod !== STATE.period;
+    if (!symbolChanged && !periodChanged) return;
+    if (symbolChanged) {
+      STATE.symbol = s;
+      document.getElementById('symbol-input').value = s;
+      applyPeriodUI(nextPeriod);
+      loadCurrent();
+    } else {
+      switchPeriod(nextPeriod);
+    }
   });
 
   // 点击代码复制 (便捷性: 分享/输入时一键取码)

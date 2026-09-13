@@ -192,6 +192,87 @@ class MonitorApiTest(unittest.TestCase):
                    content_type="application/json", headers=_csrf(c))
         self.assertEqual(r.status_code, 400)
 
+    # ── 价格监控 (趋势线跌破 + 条件预警) 在监控页的暴露 ──
+    TL_SYM = "600036.SH"
+    PA_SYM = "601988.SH"
+
+    @staticmethod
+    def _trendline_drawing(did="dtl1"):
+        return {
+            "id": did, "type": "trend", "name": "上升支撑线",
+            "points": [{"t": "2026-01-05", "p": 12.0, "off": 0},
+                       {"t": "2026-02-05", "p": 14.0, "off": 0}],
+            "style": {"color": "#e6a23c", "width": 1, "dash": False},
+            "monitor": {"enabled": True, "pct": 2.0, "adjust": "forward"},
+        }
+
+    def test_overview_includes_price_monitoring(self):
+        c = self._client("alice")
+        trades.save_chart_drawings(self.alice_id, self.TL_SYM, "1d",
+                                   [self._trendline_drawing()])
+        aid = trades.create_price_alert(
+            self.alice_id, self.PA_SYM, "低价提醒",
+            [{"metric": "price", "op": "<=", "value": 9.5}], note="观察")
+        try:
+            data = c.get("/api/monitor/overview").get_json()
+            tls = {m["drawing_id"]: m for m in data["trendline_monitors"]}
+            self.assertIn("dtl1", tls)
+            self.assertEqual(tls["dtl1"]["symbol"], self.TL_SYM)
+            self.assertEqual(tls["dtl1"]["pct"], 2.0)
+            self.assertEqual(tls["dtl1"]["adjust"], "forward")
+            pas = {a["id"]: a for a in data["price_alerts"]}
+            self.assertIn(aid, pas)
+            self.assertEqual(pas[aid]["rule"],
+                             [{"metric": "price", "op": "<=", "value": 9.5}])
+            self.assertTrue(pas[aid]["enabled"])
+            # 用户隔离: bob 看不到 alice 的价格监控配置
+            bob = self._client("bob").get("/api/monitor/overview").get_json()
+            self.assertEqual(bob["trendline_monitors"], [])
+            self.assertEqual(bob["price_alerts"], [])
+        finally:
+            trades.delete_chart_drawings(self.alice_id, self.TL_SYM, "1d")
+            trades.delete_price_alert(self.alice_id, aid)
+
+    def test_trendline_disable_endpoint(self):
+        c = self._client("alice")
+        trades.save_chart_drawings(self.alice_id, self.TL_SYM, "1d",
+                                   [self._trendline_drawing("dtl2")])
+        try:
+            anon = self.app.test_client()
+            self.assertEqual(anon.put(
+                "/api/trendline-monitors/dtl2",
+                data=json.dumps({"enabled": False}),
+                content_type="application/json").status_code, 401)
+
+            r = c.put("/api/trendline-monitors/dtl2",
+                      data=json.dumps({"enabled": "no"}),
+                      content_type="application/json", headers=_csrf(c))
+            self.assertEqual(r.status_code, 400)
+
+            bob = self._client("bob")
+            r = bob.put("/api/trendline-monitors/dtl2",
+                        data=json.dumps({"enabled": False}),
+                        content_type="application/json", headers=_csrf(bob))
+            self.assertFalse(r.get_json()["ok"], "不能停用他人监控线")
+            self.assertIn("dtl2", [m["drawing_id"] for m in
+                                   trades.list_trendline_monitors(self.alice_id)])
+
+            r = c.put("/api/trendline-monitors/dtl2",
+                      data=json.dumps({"enabled": False}),
+                      content_type="application/json", headers=_csrf(c))
+            body = r.get_json()
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["symbol"], self.TL_SYM)
+            self.assertEqual(body["period"], "1d")
+            self.assertEqual([m["drawing_id"] for m in
+                              trades.list_trendline_monitors(self.alice_id)], [])
+            saved = trades.get_chart_drawings(self.alice_id, self.TL_SYM, "1d")
+            self.assertEqual(saved[0]["name"], "上升支撑线", "画线本身保留")
+            self.assertEqual(saved[0]["monitor"]["pct"], 2.0)
+            self.assertFalse(saved[0]["monitor"]["enabled"])
+        finally:
+            trades.delete_chart_drawings(self.alice_id, self.TL_SYM, "1d")
+
 
 if __name__ == "__main__":
     unittest.main()

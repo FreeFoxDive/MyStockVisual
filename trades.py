@@ -2564,6 +2564,59 @@ def list_trendline_monitors(user_id):
     return out
 
 
+def set_trendline_monitor_enabled(user_id, drawing_id, enabled):
+    """翻转该用户某条画线的 monitor.enabled, 返回 (ok, symbol, period)。
+
+    只扫描 user_id 自己的画线行, 因此天然按用户隔离; 找不到目标画线 (或该画线没有
+    monitor 配置) 返回 (False, None, None)。
+    """
+    drawing_id = str(drawing_id or "")
+    if not drawing_id:
+        return False, None, None
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT symbol, period, drawings, updated_at FROM chart_drawings WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                data = json.loads(row["drawings"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, list):
+                continue
+            target = None
+            for d in data:
+                if (isinstance(d, dict) and str(d.get("id") or "") == drawing_id
+                        and isinstance(d.get("monitor"), dict)):
+                    target = d
+                    break
+            if target is None:
+                continue
+            target["monitor"]["enabled"] = bool(enabled)
+            # monitor._load_line_monitors 以 (user, symbol, period)+updated_at 做缓存,
+            # _now_iso() 精度只到秒, 同秒写入不会失效; 这里保证 updated_at 严格递增。
+            updated_at = _now_iso()
+            if updated_at <= str(row["updated_at"] or ""):
+                try:
+                    prev = datetime.fromisoformat(str(row["updated_at"]))
+                    updated_at = (prev + timedelta(seconds=1)).isoformat(timespec="seconds")
+                except (TypeError, ValueError):
+                    updated_at = _now_iso()
+            conn.execute(
+                "UPDATE chart_drawings SET drawings=?, updated_at=? "
+                "WHERE user_id=? AND symbol=? AND period=?",
+                (json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                 updated_at, user_id, row["symbol"], row["period"]),
+            )
+            conn.commit()
+            return True, row["symbol"], row["period"]
+        return False, None, None
+    finally:
+        conn.close()
+
+
 def get_trendline_fired(user_id, drawing_id):
     """该监控线最近一次触发时间 (isoformat 字符串) 或 None。"""
     conn = get_conn()

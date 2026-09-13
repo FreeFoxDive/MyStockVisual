@@ -95,6 +95,9 @@ def monitor_overview():
         "monitor_enabled": bool(user.get("is_admin") or user.get("monitor_enabled")),
         "status": st,
         "alerts": trades.list_monitor_alerts(user["id"], limit=20),
+        # 价格监控: 趋势线跌破 (配置挂在画线上) 与任意条件预警, 均限当前用户
+        "trendline_monitors": trades.list_trendline_monitors(user["id"]),
+        "price_alerts": trades.list_price_alerts(user["id"]),
     })
 
 
