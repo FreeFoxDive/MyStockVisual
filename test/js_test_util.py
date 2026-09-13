@@ -30,6 +30,11 @@ INDICATOR_KEYS = [
     "macd_dif", "macd_dea", "macd_hist",
     "ema13", "kdj_k", "kdj_d", "kdj_j",
     "rsi6", "rsi12", "rsi24", "atr14",
+    # 主图叠加 + 扩展面板 (曾漏在 recalcTailIndicators 之外, 导致追加当日 bar 后末根为 —)
+    "boll_mid", "boll_up", "boll_low",
+    "wr14", "cci14",
+    "bias6", "bias12", "bias24",
+    "dmi_pdi", "dmi_mdi", "dmi_adx",
 ]
 
 NODE_AVAILABLE = shutil.which("node") is not None

@@ -635,7 +635,7 @@ def delete_session(token):
 
 
 # ── 搜索/浏览历史 (跟账号持久化) ──
-SEARCH_HISTORY_MAX = 15
+SEARCH_HISTORY_MAX = 20
 
 
 def _normalize_search_history(raw):

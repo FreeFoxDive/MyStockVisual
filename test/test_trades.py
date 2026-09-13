@@ -1456,8 +1456,9 @@ class TestSearchHistory(TradesTestCase):
 
     def test_truncate_keeps_timestamped_first(self):
         uid = self._make_user()
+        # 无 ts 条数跟随上限, 保证总数超过 SEARCH_HISTORY_MAX 而必须发生截断
         raw = (
-            [{"symbol": f"L{i}.SZ", "name": f"旧{i}"} for i in range(10)]
+            [{"symbol": f"L{i}.SZ", "name": f"旧{i}"} for i in range(trades.SEARCH_HISTORY_MAX + 5)]
             + [{"symbol": f"T{i}.SZ", "name": f"新{i}", "ts": 100 + i} for i in range(8)]
         )
         saved = trades.set_search_history(uid, raw)

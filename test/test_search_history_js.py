@@ -42,7 +42,7 @@ function sortHistory(list) {
   }
   withTs.sort((a, b) => b.ts - a.ts);
   withoutTs.sort((a, b) => a._i - b._i);
-  return withTs.concat(withoutTs).slice(0, 15).map(e => {
+  return withTs.concat(withoutTs).slice(0, 20).map(e => {
     const row = { symbol: e.symbol, name: e.name };
     if (e.ts != null) row.ts = e.ts;
     return row;
@@ -87,6 +87,15 @@ class TestSearchHistoryJsMirror(unittest.TestCase):
             {"symbol": "NEW.SZ", "name": "new", "ts": 900},
         ])
         self.assertEqual([x["symbol"] for x in out], ["NEW.SZ", "MID.SZ", "OLD.SZ"])
+
+    def test_cap_20(self):
+        # 前端 HIST_MAX=20：25 条不同标的只保留最新的 20 条
+        out = self._sort([
+            {"symbol": f"S{i}.SZ", "name": f"s{i}", "ts": i} for i in range(25)
+        ])
+        self.assertEqual(len(out), 20)
+        self.assertEqual(out[0]["symbol"], "S24.SZ")
+        self.assertEqual(out[-1]["symbol"], "S5.SZ")
 
 
 if __name__ == "__main__":

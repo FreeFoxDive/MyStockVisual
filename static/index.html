@@ -69,8 +69,8 @@ body {
   display: none;
   position: absolute;
   top: 100%; left: 0;
-  min-width: 260px;
-  max-height: 260px;
+  min-width: 300px;
+  max-height: min(70vh, 560px);
   overflow-y: auto;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -602,7 +602,7 @@ body {
     <button id="btn-refresh" class="icon-text-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
     <button id="btn-draw" class="icon-btn" onclick="toggleDrawMode()" title="画线模式: 趋势线/水平线/斐波那契/回归通道等"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
     <button id="btn-alerts" class="icon-btn" onclick="openAlertsModal()" title="价格预警 (现价/涨跌幅条件)">🔔</button>
-    <button id="btn-cndata" class="icon-btn" onclick="toggleCnDrawer()" title="市场数据: 资金流/龙虎榜/分红/公告/北向">📊</button>
+    <button id="btn-cndata" class="icon-btn" onclick="toggleCnDrawer()" title="市场数据: 资金流/龙虎榜/分红/公告">📊</button>
     <button id="btn-shot" class="icon-btn" onclick="saveChartImage()" title="保存图表为图片"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
     <button id="btn-theme" class="icon-btn" onclick="toggleTheme()" title="切换暗色/亮色主题"></button>
   </div>
@@ -618,11 +618,11 @@ body {
 <div id="indicator-bar">
   <span>面板:</span>
   <label><input type="checkbox" id="chk-volume" checked onchange="onConfigChange()">成交量</label>
-  <label><input type="checkbox" id="chk-macd" checked onchange="onConfigChange()">MACD</label>
-  <label><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
-  <label><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
-  <label><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
-  <label title="OBV 从图表加载的首根K线起算(累计量); MAOBV=MA(OBV,30)。绝对数值随加载窗口变化, 跨平台/跨加载根数不可直接比较, 比较请看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
+  <label title="MACD 平滑异同均线 (DIF/DEA + 柱状图)"><input type="checkbox" id="chk-macd" checked onchange="onConfigChange()">MACD</label>
+  <label title="KDJ 随机指标 (超买超卖)"><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
+  <label title="RSI 相对强弱指标"><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
+  <label title="ATR 平均真实波幅"><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
+  <label title="OBV 能量潮 (成交量累计); 数值随加载窗口变化, 比较看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
   <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
   <label id="lbl-depth" style="display:none"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
@@ -634,12 +634,12 @@ body {
   </select>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <button class="cfg-mini" id="cfg-ma" onclick="openParamEditor('ma')" title="均线参数 (SMA 简单移动平均, 对标东财)">MA⚙</button>
-  <label><input type="checkbox" id="chk-boll" onchange="onConfigChange()">BOLL</label>
+  <label title="BOLL 布林带 (MA20 ± 2 倍标准差)"><input type="checkbox" id="chk-boll" onchange="onConfigChange()">BOLL</label>
   <button class="cfg-mini" id="cfg-boll" onclick="openParamEditor('boll')" title="编辑布林带参数 (N,K)">⚙</button>
-  <label class="extra-ind"><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
-  <label class="extra-ind"><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
-  <label class="extra-ind"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
-  <label class="extra-ind"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
+  <label class="extra-ind" title="WR 威廉指标 (超买超卖)"><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
+  <label class="extra-ind" title="CCI 顺势指标"><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
+  <label class="extra-ind" title="BIAS 乖离率 (价格偏离均线)"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
+  <label class="extra-ind" title="DMI 趋向指标 (ADX 多空趋势)"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
   <label title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" onchange="onConfigChange()">金叉死叉</label>
   <label title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" checked onchange="onConfigChange()">K线形态</label>
   <label class="extra-ind" title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
@@ -650,9 +650,9 @@ body {
   <label id="lbl-gap"><input type="checkbox" id="chk-gap" checked onchange="onConfigChange()">缺口</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>提示框:</span>
-  <label><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
-  <label><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
-  <label><input type="checkbox" id="tip-atr" checked onchange="onConfigChange()">ATR</label>
+  <label title="在提示框中显示 RSI 数值"><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
+  <label title="在提示框中显示 KDJ 数值"><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
+  <label title="在提示框中显示 ATR 数值"><input type="checkbox" id="tip-atr" checked onchange="onConfigChange()">ATR</label>
 </div>
 
 <!-- ═══════════════ Chart ═══════════ -->
@@ -680,8 +680,8 @@ body {
 </div>
 
 <!-- A股市场数据抽屉 -->
-<div id="cn-drawer" style="display:none;position:absolute;top:0;right:0;bottom:0;width:400px;max-width:90vw;z-index:40;
-     background:var(--bg-card);border-left:1px solid var(--border);box-shadow:-4px 0 16px rgba(0,0,0,0.15);overflow-y:auto">
+<div id="cn-drawer" style="display:none;position:absolute;top:0;right:0;bottom:0;width:clamp(440px,46vw,780px);max-width:92vw;z-index:40;
+     background:var(--bg-card);border-left:1px solid var(--border);box-shadow:-4px 0 16px rgba(0,0,0,0.15);overflow:auto">
   <div style="display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-card)">
     <b style="font-size:14px">📊 市场数据</b>
     <span id="cn-tabs" style="display:flex;gap:4px;margin-left:8px;flex-wrap:wrap">
@@ -689,7 +689,6 @@ body {
       <button onclick="showCnTab('lhb')" class="cn-tab">龙虎榜</button>
       <button onclick="showCnTab('dividends')" class="cn-tab">分红</button>
       <button onclick="showCnTab('announcements')" class="cn-tab">公告</button>
-      <button onclick="showCnTab('north')" class="cn-tab">北向</button>
     </span>
     <span style="flex:1"></span>
     <button onclick="toggleCnDrawer()" style="border:none;background:none;color:var(--text-secondary);cursor:pointer;font-size:15px">✕</button>
@@ -896,6 +895,7 @@ const CHART_VAR_MAP = {
   maobv: '--chart-amber', chipAvg: '--chart-amber',
   ma20: '--chart-rose', kdjJ: '--chart-rose', rsi24: '--chart-rose',
   atr: '--chart-atr',
+  boll: '--chart-boll',
   overbought: '--chart-overbought', oversold: '--chart-oversold',
   impulse_neutral: '--chart-impulse',
   ch_1atr: '--chart-ch1', ch_2atr: '--chart-ch2', ch_3atr: '--chart-ch3',
@@ -1342,7 +1342,7 @@ function buildMacdHistPoint(k) {
 }
 
 function appendChannelSeriesPatches(seriesPatch, klines) {
-  if (!STATE.channelEnabled || STATE.period !== '1d') return;
+  if (!STATE.channelEnabled || !isElderPeriod(STATE.period)) return;
   const ema13Arr = klines.map((k) => k.ema13);
   const atrArr = klines.map((k) => k.atr14);
   [1, 2, 3].forEach((mult) => {
@@ -1449,11 +1449,16 @@ function patchIndicatorLastPoints(seriesPatch, k, lastIdx, seriesByName, klines)
     copyLast('ADX', k.dmi_adx);
   }
 
-  if (STATE.channelEnabled && STATE.period === '1d' && k.ema13 != null && k.atr14 != null) {
+  if (STATE.channelEnabled && isElderPeriod(STATE.period) && k.ema13 != null && k.atr14 != null) {
     [1, 2, 3].forEach((mult) => {
       copyLast(`+${mult}ATR`, k.ema13 + mult * k.atr14);
       copyLast(`-${mult}ATR`, k.ema13 - mult * k.atr14);
     });
+  }
+  if (document.getElementById('chk-boll').checked) {
+    copyLast('BOLL中轨', k.boll_mid);
+    copyLast('BOLL上轨', k.boll_up);
+    copyLast('BOLL下轨', k.boll_low);
   }
 }
 
@@ -1505,7 +1510,7 @@ function patchLastBarOnChart() {
   const klines = data.klines;
   const lastIdx = klines.length - 1;
   const k = klines[lastIdx];
-  const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
+  const impulseOn = STATE.impulseEnabled && isElderPeriod(STATE.period);
   const opt = chart.getOption();
   if (!opt || !opt.series) return false;
 
@@ -1533,6 +1538,10 @@ function patchLastBarOnChart() {
       ...eff.ma.map((arr, i) => ({ name: `MA${STATE.maPeriods[i]}`, data: arr })),
     ];
     appendChannelSeriesPatches(seriesPatch, klines);
+    if (document.getElementById('chk-boll').checked) {
+      [['BOLL中轨', eff.boll.mid], ['BOLL上轨', eff.boll.up], ['BOLL下轨', eff.boll.low]]
+        .forEach(([name, arr]) => { if (seriesByName[name]) seriesPatch.push({ name, data: arr }); });
+    }
     if (seriesByName['成交量']) {
       seriesPatch.push({ name: '成交量', data: klines.map((kk) => buildVolPoint(kk)) });
       seriesPatch.push({ name: 'VOL MA5', data: klines.map((kk) => kk.vol_ma5) });
@@ -1714,7 +1723,7 @@ function updateInfo(data) {
 // SEARCH HISTORY (localStorage + 服务端跟账号同步)
 // ═══════════════════════════════════════════════════════════════
 const HIST_KEY = 'visual_search_history';
-const HIST_MAX = 15;
+const HIST_MAX = 20;
 const LS_CACHE_BUDGET = 2 * 1024 * 1024; // vk_/vi_ 缓存上限 2MB，保留历史/配置键
 const LS_KEEP_KEYS = new Set([HIST_KEY, 'visual_chart_config', 'visual-theme', 'trades-theme']);
 
@@ -2421,7 +2430,7 @@ function initChart() {
 function klineVisibleYRange(klines, startPct, endPct) {
   const r = ChipChart.visibleRange(klines, startPct, endPct);
   if (!r) return null;
-  if (STATE.channelEnabled && STATE.period === '1d') {
+  if (STATE.channelEnabled && isElderPeriod(STATE.period)) {
     const n = klines.length;
     let i0 = Math.floor(n * (startPct == null ? 0 : startPct) / 100);
     let i1 = Math.ceil(n * (endPct == null ? 100 : endPct) / 100) - 1;
@@ -2632,7 +2641,7 @@ function updateChart(reTheme) {
   const startPct = Math.max(0, Math.min(100, (1 - (visibleBars + futureBars) / totalSlots) * 100));
 
   // ── Readonly series data ──
-  const impulseOn = STATE.impulseEnabled && STATE.period === '1d';
+  const impulseOn = STATE.impulseEnabled && isElderPeriod(STATE.period);
   const ohlc = klines.map((k) => buildOhlcPoint(k, impulseOn));
   const vols = klines.map((k) => buildVolPoint(k));
   const eff = effectiveMaBoll(klines);
@@ -2700,14 +2709,14 @@ function updateChart(reTheme) {
       series.push({
         name: bNames[i], type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: arr,
         symbol: 'none', smooth: true,
-        lineStyle: { color: C().ma10, width: 1, type: i === 0 ? 'solid' : 'dashed', opacity: 0.9 },
-        itemStyle: { color: C().ma10 }, silent: true,
+        lineStyle: { color: C().boll, width: 1, type: i === 0 ? 'solid' : 'dashed', opacity: 0.9 },
+        itemStyle: { color: C().boll }, silent: true,
       });
     });
   }
 
-  // ── ATR Channel (Elder, daily only) ──
-  if (STATE.channelEnabled && STATE.period === '1d') {
+  // ── ATR Channel (Elder, 日/周/月K) ──
+  if (STATE.channelEnabled && isElderPeriod(STATE.period)) {
     const ema13Arr = klines.map(k => k.ema13);
     const atrArr = klines.map(k => k.atr14);
     const bands = [
@@ -3183,11 +3192,11 @@ function switchPeriod(period) {
     if (btn) btn.classList.toggle('active', p === period);
   });
   const isIntra = period === 'intraday';
-  // Show/hide impulse & channel checkboxes (daily only)
+  // Show/hide impulse & channel checkboxes (日/周/月K)
   const lblImpulse = document.getElementById('lbl-impulse');
-  if (lblImpulse) lblImpulse.style.display = period === '1d' ? '' : 'none';
+  if (lblImpulse) lblImpulse.style.display = isElderPeriod(period) ? '' : 'none';
   const lblChannel = document.getElementById('lbl-channel');
-  if (lblChannel) lblChannel.style.display = period === '1d' ? '' : 'none';
+  if (lblChannel) lblChannel.style.display = isElderPeriod(period) ? '' : 'none';
   const lblGap = document.getElementById('lbl-gap');
   if (lblGap) {
     const showGap = typeof GapScanner !== 'undefined' && GapScanner.isGapPeriod(period);
@@ -3214,6 +3223,11 @@ function switchPeriod(period) {
 /** 筹码仅日K (日线筹码分布, 周/月K不显示) */
 function isChipPeriod(p) {
   return p === '1d';
+}
+
+/** Elder 通道 (EMA13±ATR) 与动力系统 (EMA13+MACD柱): 日/周/月K 适用 */
+function isElderPeriod(p) {
+  return p === '1d' || p === '1w' || p === '1M';
 }
 
 function onIndicatorChange() {
@@ -3543,6 +3557,17 @@ function toggleCnDrawer() {
   d.style.display = show ? "block" : "none";
   if (show) showCnTab(_cnTab);
 }
+/** 抽屉宽度按表格内容自适应 (下限 440, 上限 92vw); 无表格时回落到 CSS clamp */
+function fitCnDrawer() {
+  const drawer = document.getElementById('cn-drawer');
+  if (!drawer) return;
+  const table = document.querySelector('#cn-body table');
+  if (!table) { drawer.style.width = ''; return; }
+  const maxW = Math.round(window.innerWidth * 0.92);
+  const need = Math.ceil(table.scrollWidth) + 26;   // 左右 padding + 边框
+  drawer.style.width = Math.min(Math.max(need, 440), maxW) + 'px';
+}
+
 function showCnTab(tab) {
   _cnTab = tab;
   document.querySelectorAll(".cn-tab").forEach(b => b.classList.remove("active"));
@@ -3552,8 +3577,7 @@ function showCnTab(tab) {
   const body = document.getElementById("cn-body");
   body.innerHTML = '<div style="color:var(--text-secondary)">加载中…</div>';
   const symbol = STATE.symbol;
-  const url = tab === "north"
-    ? `/api/cn/${tab}` : `/api/cn/${tab}?symbol=${encodeURIComponent(symbol)}`;
+  const url = `/api/cn/${tab}?symbol=${encodeURIComponent(symbol)}`;
   api(url).then(data => {
     if (data.error) { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(data.error)}</div>`; return; }
     const rows = data.rows || [];
@@ -3569,8 +3593,11 @@ function showCnTab(tab) {
         const cls = typeof v === "number" ? (v >= 0 ? "pos" : "neg") : "";
         return `<td class="${cls}">${typeof v === "number" ? v.toFixed(2) : escHtml(v)}</td>`;
       }).join("")}</tr>`).join("")}</tbody></table>`;
-  }).catch(e => { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(e.message || e)}</div>`; });
+  }).catch(e => { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(e.message || e)}</div>`; })
+    .finally(() => fitCnDrawer());   // 表格已入 DOM, 按内容宽度适配抽屉
 }
+
+window.addEventListener('resize', fitCnDrawer);
 
 // ── 价格预警管理 ──
 async function openAlertsModal() {
@@ -4473,6 +4500,15 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function updateActive() {
+    // 就地切换选中项 (不重建 DOM), 并滚动到可视区 —— 长列表按 ↑↓ 不丢滚动位置
+    dropdown.querySelectorAll('.item').forEach((el, i) => {
+      el.classList.toggle('active', i === activeIdx);
+    });
+    const cur = dropdown.querySelector('.item.active');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
   function closeDropdown() {
     dropdown.classList.remove('show');
     searchResults = [];
@@ -4502,11 +4538,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       activeIdx = Math.min(activeIdx + 1, searchResults.length - 1);
-      renderDropdown();
+      updateActive();
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       activeIdx = Math.max(activeIdx - 1, 0);
-      renderDropdown();
+      updateActive();
     } else if (e.key === 'Enter') {
       if (activeIdx >= 0 && searchResults.length > 0) {
         e.preventDefault();

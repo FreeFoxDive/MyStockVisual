@@ -29,8 +29,8 @@ venv/Scripts/python.exe -u visual/server.py
 | 筹码分布 | 日 K 股票，东财原版 CYQ 算法（210 根日线窗口，前复权），右侧叠加、与主图价格轴联动；含获利比例/平均成本/90·70成本区间 |
 | 五档盘口 | 仅分时视图：**左侧**面板显示买1-5/卖1-5，盘中约 3s 刷新（令牌桶 2/3×30/min），可开关 |
 | 换手/流值/份额/成交额 | 顶部信息栏：股票显示换手率与流通市值；ETF 显示份额；均显示当日成交额 |
-| 动力系统 | Elder Impulse System — EMA13方向 + MACD柱方向决定蜡烛颜色(红多/绿空/蓝中性)，仅日K |
-| ATR 通道 | EMA13 ± 1/2/3 ATR 共6条虚线，仅日K，默认关闭 |
+| 动力系统 | Elder Impulse System — EMA13方向 + MACD柱方向决定蜡烛颜色(红多/绿空/蓝中性)，日/周/月K |
+| ATR 通道 | EMA13 ± 1/2/3 ATR 共6条虚线，日/周/月K，默认关闭 |
 | 跳空缺口 | 60m/日/周/月：前端扫描未回补缺口（最近 2 个），主图灰色 markArea；十字线落在灰区时提示价差；部分回补收缩；日K 随快照重算；默认开启 |
 | 自适应提示框 | 鼠标在不同面板显示对应数据；MACD跟随面板开关，RSI/KDJ/ATR 独立提示框开关 |
 | 股票搜索 | 模糊匹配代码/名称，实时下拉 + 键盘↑↓导航 |
@@ -50,10 +50,10 @@ venv/Scripts/python.exe -u visual/server.py
 | 复权切换 | 前/后/不复权三档，缓存按复权隔离（分钟周期固定前复权） |
 | 快照 SSE 推送 | `/api/stream/quotes` 长连接推送（间隔 `QUOTE_SSE_INTERVAL` 默认 10s，上游 ≤ 快照限额 4/5）；断线/超限自动回退轮询 |
 | 港股/美股 | AlphaFeed 源 日/周/月K + 快照；专用令牌桶 8/min（额度 10/min 的 4/5，env 可调）；v1 不含分时 |
-| 搜索增强 | 覆盖 A股/ETF/指数/港股/美股，结果带类型徽标（指数/ETF/港/美），指数匹配排名靠前 |
+| 搜索增强 | 覆盖 A股/ETF/指数/港股/美股，结果带类型徽标（指数/ETF/港/美）；排序 股票(含港/美) > ETF > 指数，下拉最多 50 条 |
 | 价格预警 | 自定义条件（现价/涨跌幅 ≥/≤ 数值，AND 组合），监控循环盘中评估，30 分钟冷却，钉钉/ntfy 推送；工具栏 🔔 管理 |
 | 条件选股 | `/screener.html`：MACD金叉 / 站上MA20 / 筹码获利盘 / RSI / 5日涨幅 条件组合后台扫描（`SCREENER_MAX_SYMBOLS` 控制范围） |
-| 市场数据抽屉 | 主面板 📊：个股资金流向、龙虎榜、分红送配、公告、北向资金（akshare 源 + 缓存） |
+| 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存） |
 
 ## 文件结构
 
@@ -124,7 +124,7 @@ visual/
 | `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数） |
 | `GET /api/chips?symbol=600519.SH` | 筹码分布（仅股票；210 根窗口，返回直方图+汇总+`source`）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
 | `GET /api/depth?symbol=600519.SH` | 五档盘口（分时用；独立令牌桶 2/3×30/min，失败返回 `depth=null`） |
-| `GET /api/search?q=茅台` | 模糊搜索 (全量A股+ETF，内存+磁盘双层缓存，24h刷新) |
+| `GET /api/search?q=茅台` | 模糊搜索 (全量A股+ETF，内存+磁盘双层缓存，24h刷新；最多返回 50 条，排序 股票>ETF>指数) |
 | `GET /api/ping` | 健康检查 |
 | `POST /api/auth/login` | 登录，返回 `Set-Cookie: session` |
 | `POST /api/auth/logout` | 登出（需登录） |

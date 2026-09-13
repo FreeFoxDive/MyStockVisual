@@ -66,6 +66,56 @@ def _load_last_job():
         pass
 
 
+def _compute_feats(df, conditions, chip_profit=None):
+    """从日K DataFrame 提取条件所需特征 (纯函数; chip_profit 由调用方取好传入)。
+
+    change_pct 为近 5 日涨幅; macd_cross_up 仅在条件需要时计算 (末根 DIF 上穿 DEA);
+    rsi6 同理只在需要时算; above_ma20 恒定计算。
+    """
+    closes = df["close"]
+    feats = {"change_pct": None}
+    if len(closes) >= 6:
+        feats["change_pct"] = (closes.iloc[-1] - closes.iloc[-6]) / closes.iloc[-6] * 100
+    if any(c["metric"] == "macd_cross_up" for c in conditions):
+        dif, dea, _h = macd(df["close"], 12, 26, 9)
+        d0, d1 = dif.iloc[-2], dif.iloc[-1]
+        e0, e1 = dea.iloc[-2], dea.iloc[-1]
+        feats["macd_cross_up"] = bool(
+            d0 == d0 and d1 == d1 and e0 == e0 and e1 == e1  # NaN 检查
+            and d0 <= e0 and d1 > e1)
+    feats["above_ma20"] = bool(
+        len(closes) >= 20 and closes.iloc[-1] > sma(closes, 20).iloc[-1])
+    feats["rsi6"] = None
+    if any(c["metric"] == "rsi6_lt" for c in conditions):
+        r = rsi(df["close"], 6)
+        feats["rsi6"] = float(r.iloc[-1]) if r.iloc[-1] == r.iloc[-1] else None
+    if any(c["metric"] == "chip_profit_gt" for c in conditions):
+        feats["chip_profit"] = chip_profit
+    return feats
+
+
+def _match_conditions(feats, conditions):
+    """条件 AND 组合判定 (纯函数)。特征缺失或未知指标一律不通过。"""
+    for c in conditions:
+        m, vf = c["metric"], c.get("value")
+        vf = float(vf) if vf is not None else None
+        if m == "macd_cross_up":
+            ok = bool(feats.get("macd_cross_up"))
+        elif m == "above_ma20":
+            ok = bool(feats.get("above_ma20"))
+        elif m == "rsi6_lt":
+            ok = feats.get("rsi6") is not None and feats["rsi6"] < vf
+        elif m == "change_pct_gt":
+            ok = feats.get("change_pct") is not None and feats["change_pct"] > vf
+        elif m == "chip_profit_gt":
+            ok = feats.get("chip_profit") is not None and feats["chip_profit"] > vf
+        else:
+            ok = False
+        if not ok:
+            return False
+    return True
+
+
 def _scan_worker(conditions, count):
     try:
         cap = int(os.environ.get("SCREENER_MAX_SYMBOLS", "300"))
@@ -101,50 +151,19 @@ def _scan_worker(conditions, count):
                 df, name, _src = market.fetch_kline_ex(sym, "1d", count, adjust="forward")
                 if df is None or len(df) < 35:
                     continue
-                closes = df["close"]
-                feats = {"change_pct": None}
-                if len(closes) >= 6:
-                    feats["change_pct"] = (closes.iloc[-1] - closes.iloc[-6]) / closes.iloc[-6] * 100
-                if any(c["metric"] == "macd_cross_up" for c in conditions):
-                    dif, dea, _h = macd(df["close"], 12, 26, 9)
-                    d0, d1 = dif.iloc[-2], dif.iloc[-1]
-                    e0, e1 = dea.iloc[-2], dea.iloc[-1]
-                    feats["macd_cross_up"] = bool(
-                        d0 == d0 and d1 == d1 and e0 == e0 and e1 == e1  # NaN 检查
-                        and d0 <= e0 and d1 > e1)
-                feats["above_ma20"] = bool(
-                    len(closes) >= 20 and closes.iloc[-1] > sma(closes, 20).iloc[-1])
-                feats["rsi6"] = None
-                if any(c["metric"] == "rsi6_lt" for c in conditions):
-                    r = rsi(df["close"], 6)
-                    feats["rsi6"] = float(r.iloc[-1]) if r.iloc[-1] == r.iloc[-1] else None
+                chip_profit = None
                 if wants_chips:
                     try:
                         from chips import get_chips
                         ch = get_chips(sym)
-                        feats["chip_profit"] = float(ch["profit_ratio"] * 100) if ch and ch.get("profit_ratio") is not None else None
+                        chip_profit = float(ch["profit_ratio"] * 100) if ch and ch.get("profit_ratio") is not None else None
                     except Exception:
-                        feats["chip_profit"] = None
+                        chip_profit = None
 
-                ok = True
-                for c in conditions:
-                    m, vf = c["metric"], c.get("value")
-                    vf = float(vf) if vf is not None else None
-                    if m == "macd_cross_up":
-                        ok = ok and feats.get("macd_cross_up")
-                    elif m == "above_ma20":
-                        ok = ok and feats.get("above_ma20")
-                    elif m == "rsi6_lt":
-                        ok = ok and feats.get("rsi6") is not None and feats["rsi6"] < vf
-                    elif m == "change_pct_gt":
-                        ok = ok and feats.get("change_pct") is not None and feats["change_pct"] > vf
-                    elif m == "chip_profit_gt":
-                        ok = ok and feats.get("chip_profit") is not None and feats["chip_profit"] > vf
-                    if not ok:
-                        break
-                if ok:
+                feats = _compute_feats(df, conditions, chip_profit)
+                if _match_conditions(feats, conditions):
                     results.append({"symbol": sym, "name": row["name"],
-                                    "close": float(closes.iloc[-1]),
+                                    "close": float(df["close"].iloc[-1]),
                                     "change_pct": feats.get("change_pct"),
                                     "chip_profit": feats.get("chip_profit")})
             except Exception:

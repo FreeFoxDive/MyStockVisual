@@ -91,6 +91,23 @@ class TestRecalcTailIndicators(unittest.TestCase):
         })
         assert_js_py_parity(self, klines, period="1d", places=4)
 
+    def test_appended_bar_gets_all_indicator_fields(self):
+        """回归: 快照追加的当日 bar 只有 OHLCV, recalc 后必须补齐 BOLL/WR/CCI/BIAS/DMI。
+
+        否则图例 paintLegend 读到 undefined → 显示 —/—/— (BOLL 开关切换触发重绘时暴露)。
+        """
+        require_node()
+        klines = make_kline_fixture(80, seed=13)
+        klines.append({
+            "date": "2026-12-31",
+            "open": 105.0, "high": 106.0, "low": 104.0, "close": 105.5,
+            "volume": 2_000_000, "amount": 2_000_000 * 105.5,
+        })
+        js = recalc_tail_js(copy.deepcopy(klines), "1d")
+        for key in ("boll_mid", "boll_up", "boll_low", "wr14", "cci14",
+                    "bias6", "bias12", "bias24", "dmi_pdi", "dmi_mdi", "dmi_adx"):
+            self.assertIsNotNone(js.get(key), msg=f"追加 bar 后 {key} 为空 (图例会显示 —)")
+
 
 if __name__ == "__main__":
     unittest.main()

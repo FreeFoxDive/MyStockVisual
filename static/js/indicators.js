@@ -163,6 +163,139 @@
 
   const TAIL_WINDOW = 60;
 
+  /** 布林带 BOLL(N,K): MID=SMA(C,N), STD=样本标准差(ddof=1), UP/LOW=MID±K*STD */
+  function boll(close, n, k) {
+    n = n || 20;
+    k = k == null ? 2 : k;
+    const mid = sma(close, n);
+    const up = new Array(close.length).fill(null);
+    const low = new Array(close.length).fill(null);
+    for (let i = n - 1; i < close.length; i++) {
+      let acc = 0;
+      for (let j = i - n + 1; j <= i; j++) {
+        const d = close[j] - mid[i];
+        acc += d * d;
+      }
+      const std = Math.sqrt(acc / (n - 1));
+      up[i] = mid[i] + k * std;
+      low[i] = mid[i] - k * std;
+    }
+    return { mid, up, low };
+  }
+
+  /** 威廉指标 WR(N): 100*(HHV(H,N)-C)/(HHV-LLV); 区间为 0 → null (与后端同口径) */
+  function wr(high, low, close, n) {
+    n = n || 14;
+    const out = new Array(close.length).fill(null);
+    for (let i = n - 1; i < close.length; i++) {
+      let hhv = -Infinity;
+      let llv = Infinity;
+      for (let j = i - n + 1; j <= i; j++) {
+        if (high[j] > hhv) hhv = high[j];
+        if (low[j] < llv) llv = low[j];
+      }
+      const rng = hhv - llv;
+      out[i] = rng > 0 ? 100 * (hhv - close[i]) / rng : null;
+    }
+    return out;
+  }
+
+  /** 顺势指标 CCI(N): (TP-MA(TP))/(0.015*MD), MD=N期内 |TP_i-MA_i| 均值; MD=0 → null */
+  function cci(high, low, close, n) {
+    n = n || 14;
+    const len = close.length;
+    const tp = new Array(len);
+    for (let i = 0; i < len; i++) tp[i] = (high[i] + low[i] + close[i]) / 3;
+    const maTp = sma(tp, n);
+    // 与 pandas rolling(n, min_periods=n).mean() 一致: 窗口内每根都要有 MA(TP) → i >= 2n-2
+    const md = new Array(len).fill(null);
+    for (let i = 2 * n - 2; i < len; i++) {
+      let s = 0;
+      for (let j = i - n + 1; j <= i; j++) s += Math.abs(tp[j] - maTp[j]);
+      md[i] = s / n;
+    }
+    const out = new Array(len).fill(null);
+    for (let i = n - 1; i < len; i++) {
+      if (md[i] == null || md[i] === 0) continue;
+      out[i] = (tp[i] - maTp[i]) / (0.015 * md[i]);
+    }
+    return out;
+  }
+
+  /** 乖离率 BIAS(N): (C-MA(C,N))/MA(C,N)*100; 返回 {biasN: 数组} */
+  function bias(close, periods) {
+    periods = periods || [6, 12, 24];
+    const out = {};
+    periods.forEach((n) => {
+      const ma = sma(close, n);
+      const arr = new Array(close.length).fill(null);
+      for (let i = n - 1; i < close.length; i++) {
+        if (ma[i] == null) continue;
+        arr[i] = (close[i] - ma[i]) / ma[i] * 100;
+      }
+      out['bias' + n] = arr;
+    });
+    return out;
+  }
+
+  /** 动向指标 DMI(N,M) (SUM 平滑口径): +DI/-DI/ADX; 返回 {pdi, mdi, adx} */
+  function dmi(high, low, close, n, m) {
+    n = n || 14;
+    m = m || 6;
+    const len = close.length;
+    const tr = new Array(len);
+    const pdm = new Array(len).fill(0);
+    const mdm = new Array(len).fill(0);
+    for (let i = 0; i < len; i++) {
+      if (i === 0) {
+        tr[i] = high[i] - low[i];   // 首根无前收, ~ pandas max 跳过 NaN
+        continue;
+      }
+      tr[i] = Math.max(
+        high[i] - low[i],
+        Math.abs(high[i] - close[i - 1]),
+        Math.abs(low[i] - close[i - 1]),
+      );
+      const hd = high[i] - high[i - 1];
+      const ld = low[i - 1] - low[i];
+      pdm[i] = (hd > 0 && hd > ld) ? hd : 0;
+      mdm[i] = (ld > 0 && ld > hd) ? ld : 0;
+    }
+    const rollingSum = (arr) => {
+      const out = new Array(len).fill(null);
+      for (let i = n - 1; i < len; i++) {
+        let s = 0;
+        for (let j = i - n + 1; j <= i; j++) s += arr[j];
+        out[i] = s;
+      }
+      return out;
+    };
+    const trN = rollingSum(tr);
+    const pdmN = rollingSum(pdm);
+    const mdmN = rollingSum(mdm);
+    const pdi = new Array(len).fill(null);
+    const mdi = new Array(len).fill(null);
+    const dx = new Array(len).fill(null);
+    for (let i = 0; i < len; i++) {
+      if (trN[i] == null || trN[i] === 0) continue;
+      pdi[i] = pdmN[i] / trN[i] * 100;
+      mdi[i] = mdmN[i] / trN[i] * 100;
+      const denom = pdi[i] + mdi[i];
+      dx[i] = denom > 0 ? Math.abs(pdi[i] - mdi[i]) / denom * 100 : null;
+    }
+    const adx = new Array(len).fill(null);
+    for (let i = m - 1; i < len; i++) {
+      let s = 0;
+      let bad = false;
+      for (let j = i - m + 1; j <= i; j++) {
+        if (dx[j] == null) { bad = true; break; }
+        s += dx[j];
+      }
+      if (!bad) adx[i] = s / m;
+    }
+    return { pdi, mdi, adx };
+  }
+
   function recalcTailIndicators(klines, period) {
     if (!klines || !klines.length) return;
     const start = Math.max(0, klines.length - TAIL_WINDOW);
@@ -192,6 +325,11 @@
     const rsi12 = rsi(c, 12);
     const rsi24 = rsi(c, 24);
     const atr14 = atr(h, l, c, 14);
+    const bollVals = boll(c, 20, 2);
+    const wr14 = wr(h, l, c, 14);
+    const cci14 = cci(h, l, c, 14);
+    const biasMap = bias(c, [6, 12, 24]);
+    const dmiVals = dmi(h, l, c, 14, 6);
 
     const i = slice.length - 1;
     const last = klines[klines.length - 1];
@@ -214,6 +352,18 @@
     last.vol_ma20 = volMa20[i];
     last.obv = obvFull[obvFull.length - 1];
     last.maobv = maobvTail[maobvTail.length - 1];
+    // 主图叠加与扩展面板: 追加/快照更新末根后一并补齐, 否则图例/面板末点显示 "—"
+    last.boll_mid = bollVals.mid[i];
+    last.boll_up = bollVals.up[i];
+    last.boll_low = bollVals.low[i];
+    last.wr14 = wr14[i];
+    last.cci14 = cci14[i];
+    last.bias6 = biasMap.bias6[i];
+    last.bias12 = biasMap.bias12[i];
+    last.bias24 = biasMap.bias24[i];
+    last.dmi_pdi = dmiVals.pdi[i];
+    last.dmi_mdi = dmiVals.mdi[i];
+    last.dmi_adx = dmiVals.adx[i];
   }
 
   return {
@@ -225,6 +375,11 @@
     rsi,
     atr,
     obv,
+    boll,
+    wr,
+    cci,
+    bias,
+    dmi,
     recalcTailIndicators,
   };
 });

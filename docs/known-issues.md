@@ -156,6 +156,51 @@
   - 原 `_fetch_af_daily_kline` mock/断言同步更新为 `_fetch_af_kline(symbol, period, ...)`
 
 
+## 4. 东财 push2his（个股资金流历史）在部分网络整段不可达
+
+**状态**：已修复（应用侧改走可达主机回退）。
+
+### 现象
+
+「市场数据 → 资金流」恒显示 `加载失败: 数据源暂时不可用, 请稍后重试`，与标的无关。
+
+### 根因
+
+数据源 `akshare.stock_individual_fund_flow` 硬编码 `push2his.eastmoney.com`。实测本网络该主机
+连续 6/6 全部 `ConnectionError: RemoteDisconnected`（对端直接断开连接，无响应）：
+
+| 主机 | IP | 结果 |
+|---|---|---|
+| push2his.eastmoney.com | 103.220.167.80 | 0/6 |
+| push2.eastmoney.com | 61.129.129.196 | 0/6 |
+| 1.push2his.eastmoney.com | 101.42.128.173 | 失败 |
+| 82.push2.eastmoney.com | 47.112.165.11 | 失败 |
+| **push2delay.eastmoney.com** | 101.226.30.136 | **6/6 可用** |
+| datacenter-web.eastmoney.com | 202.168.181.147 | 6/6 可用 |
+
+无代理配置（`requests.getproxies()` 为空），故非代理问题，而是 push2his/push2 这批边缘 IP 被网络阻断。
+`api/cn_data._retry` 重试 3 次后仍失败 → 返回笼统的「数据源暂时不可用」，前端只看到这一句。
+
+### 修复（应用侧规避）
+
+`api/cn_data._fetch_fund_flow` 不再走 akshare，改为自己请求东财，按 `push2his → push2delay` 顺序尝试：
+
+- `push2delay` 与 akshare 的行格式完全一致（15 字段/行），但**无论 `lmt` 传多少只返回最新一个交易日**，
+  因此仅作降级源；命中降级时响应带 `hint`：「历史接口 (push2his) 当前不可达, 仅显示最新一个交易日」。
+- 东财净额字段单位是「元」，界面列名标的是「万」，先前未换算（差 10⁴）；现在统一换算为万元。
+- `_cached` 的失败文案改为附带脱敏截断后的真实原因：`数据源暂时不可用 (<原因>)`。
+
+- 代码：`visual/api/cn_data.py`（`_fetch_fund_flow`、`cn_fund_flow`、`_cached`）
+- 测试：`visual/test/test_cn_data_api.py`
+  - `test_fund_flow_falls_back_to_delay_host`（回退 + 元→万元 + 主机顺序）
+  - `test_fund_flow_both_hosts_fail_returns_error`（文案带真实原因）
+  - `test_fund_flow_maps_and_caches`（映射/缓存/参数）
+
+### 运维提示
+
+若所在网络放行 push2his，则自动恢复全量历史，无需改配置；降级提示只在回退时出现。
+
+
 ## L2 数据（十档/逐笔）获取方式调研
 
 - 结论：**网页版扫码登录方案不可行**。扫码只能获得网页会话，L2 十档/逐笔走的是各平台（东财/同花顺/富途）非公开 WebSocket 协议且绑定付费会员账号——需要逆向私有协议、维持易失效会话，稳定性差且有合规风险。

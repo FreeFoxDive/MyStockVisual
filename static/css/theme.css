@@ -49,6 +49,7 @@
   --chart-amber: #d4a017;
   --chart-rose: #c2185b;
   --chart-atr: #888888;
+  --chart-boll: #00838f;
   --chart-halt: #999999;
   --chart-overbought: #ef5350;
   --chart-oversold: #26a69a;
@@ -108,6 +109,7 @@
   --chart-amber: #f5c542;
   --chart-rose: #e84698;
   --chart-atr: #5a5a5a;
+  --chart-boll: #4dd0e1;
   --chart-halt: #7a7e88;
   --chart-overbought: #ef5350;
   --chart-oversold: #26a69a;

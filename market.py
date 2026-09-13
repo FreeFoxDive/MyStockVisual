@@ -1441,11 +1441,17 @@ def _refresh_hkus_lists_async():
     threading.Thread(target=worker, daemon=True).start()
 
 
+SEARCH_MAX_RESULTS = 50           # 下拉返回上限 (前端一屏约 18 条, 可滚动)
+# 结果分组顺序: 股票(含港/美) > ETF > 指数; 组内再按匹配分, 同分 A股 > 港 > 美
+_SEARCH_TYPE_RANK = {"etf": 1, "fund": 1, "index": 2}
+_SEARCH_MARKET_RANK = {"cn": 0, "hk": 1, "us": 2}
+
+
 def _search_stocks(query):
     """模糊搜索: 名称/代码精确 > 名称前缀 > 代码前缀 > 名称包含 > 代码包含。
 
     覆盖 A股/基金/指数/港股/美股; 结果带 type (stock/etf/index/hk/us)。
-    指数命中加权 +60 —— 用户输入代码/名称匹配指数时排在同分股票前面。
+    排序为 股票(含港/美) > ETF > 指数, 组内按匹配分, 同分 A股 > 港 > 美。
     """
     stocks = _load_stock_list()
     universe = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
@@ -1478,12 +1484,12 @@ def _search_stocks(query):
         elif q in code:
             score = 30    # 代码包含
         if score > 0:
-            if s.get("type") == "index":
-                score += 60  # 指数匹配靠前
             results.append({**s, "score": score})
-    results.sort(key=lambda x: -x["score"])
+    results.sort(key=lambda x: (_SEARCH_TYPE_RANK.get(x.get("type"), 0),
+                                -x["score"],
+                                _SEARCH_MARKET_RANK.get(_symbol_market(x["symbol"]), 0)))
     return [{"symbol": r["symbol"], "name": r["name"], "code": r["code"], "type": r.get("type", "stock")}
-            for r in results[:30]]
+            for r in results[:SEARCH_MAX_RESULTS]]
 
 
 # ── JSON 编码 ──
