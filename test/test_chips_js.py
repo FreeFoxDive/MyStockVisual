@@ -109,6 +109,39 @@ class TestChipsResample(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("node"), "需要 node")
+class TestChipsSummaryFormat(unittest.TestCase):
+    """摘要数字格式 + 两列结构化行。"""
+
+    def test_fmt_num_caps_three_decimals_and_strips_zeros(self):
+        out = json.loads(run_chips_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "process.stdout.write(JSON.stringify(p.map(v => ChipChart.fmtNum(v))));",
+            json.dumps([4.690, 3.4000, 2.0, 12345.6789, 1328.64, 0.5, None]),
+        ))
+        self.assertEqual(out, ["4.69", "3.4", "2", "12345.679", "1328.64", "0.5", "—"])
+
+    def test_summary_rows_two_columns(self):
+        chip = {"buckets": [], "avgCost": 4.69, "medianCost": 3.4,
+                "profitRatio": 0.5, "pct90": [3.31, 3.63], "pct70": [3.34, 3.5],
+                "source": "af", "period": "1w"}
+        out = json.loads(run_chips_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "process.stdout.write(JSON.stringify(ChipChart.summaryRows(p)));",
+            json.dumps(chip),
+        ))
+        self.assertTrue(out[0]["title"])
+        self.assertIn("周窗口", out[0]["label"])
+        rows = {r["label"]: r for r in out[1:]}
+        self.assertEqual(rows["获利"]["value"], "50.0%")
+        self.assertEqual(rows["获利"]["color"], "chipProfit")
+        self.assertEqual(rows["均本"]["value"], "4.69")
+        self.assertEqual(rows["均本"]["color"], "chipAvg")
+        self.assertEqual(rows["中位价"]["value"], "3.4")
+        self.assertEqual(rows["90%"]["value"], "3.31~3.63")
+        self.assertEqual(rows["70%"]["value"], "3.34~3.5")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node")
 class TestChipsOverlay(unittest.TestCase):
     BUCKETS = TestChipsResample.BUCKETS
     COLORS = {

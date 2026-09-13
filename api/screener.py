@@ -116,6 +116,17 @@ def _match_conditions(feats, conditions):
     return True
 
 
+def _chip_profit_pct(chip):
+    """get_chips 结果 → 获利盘百分比; 无数据返回 None。
+
+    注意字段名是 chips.compute_chips 的 `profitRatio` (camelCase), 不是 profit_ratio。
+    """
+    if not chip:
+        return None
+    v = chip.get("profitRatio")
+    return float(v) * 100 if v is not None else None
+
+
 def _scan_worker(conditions, count):
     try:
         cap = int(os.environ.get("SCREENER_MAX_SYMBOLS", "300"))
@@ -155,8 +166,7 @@ def _scan_worker(conditions, count):
                 if wants_chips:
                     try:
                         from chips import get_chips
-                        ch = get_chips(sym)
-                        chip_profit = float(ch["profit_ratio"] * 100) if ch and ch.get("profit_ratio") is not None else None
+                        chip_profit = _chip_profit_pct(get_chips(sym))
                     except Exception:
                         chip_profit = None
 

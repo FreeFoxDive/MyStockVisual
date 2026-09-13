@@ -253,15 +253,22 @@ def kline():
 
 @api_bp.route("/api/chips", methods=["GET"])
 def chips():
-    """东财筹码分布 (仅股票); ETF/指数或无数据返回 chips=null。"""
+    """筹码分布 (股票/ETF); 指数或无数据返回 chips=null。
+
+    period 1d/1w/1M 只决定日线回看窗口 (210/600/1500 根), 算法与粒度不变。
+    指数无份额与换手率, 筹码无意义, 故仍拦截。
+    """
     symbol_raw = request.args.get("symbol")
     if not symbol_raw:
         return _error("缺少 symbol 参数")
     symbol = normalize_symbol(symbol_raw)
-    if _is_etf(symbol) or _is_index_symbol(symbol):
+    period = request.args.get("period") or "1d"
+    if period not in ("1d", "1w", "1M"):
+        period = "1d"
+    if _is_index_symbol(symbol):
         return _json({"symbol": symbol, "chips": None})
     try:
-        data = get_chips(symbol)
+        data = get_chips(symbol, period)
     except Exception as e:
         log.warning("获取筹码分布异常 %s: %s", symbol, _sanitize_error(e))
         return _error("获取筹码分布失败", 500)

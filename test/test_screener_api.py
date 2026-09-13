@@ -130,6 +130,25 @@ class ComputeFeatsTest(unittest.TestCase):
         self.assertIsNone(none_chip["chip_profit"])
 
 
+class ChipProfitPctTest(unittest.TestCase):
+    """_chip_profit_pct: 读 chips.compute_chips 的 `profitRatio` (camelCase)。
+
+    回归点: 曾误用 `profit_ratio`, 导致 `chip_profit_gt` 条件永远取到 None 而不匹配。
+    """
+
+    def setUp(self):
+        from api import screener
+        self.f = screener._chip_profit_pct
+
+    def test_percent_conversion(self):
+        self.assertAlmostEqual(self.f({"profitRatio": 0.8}), 80.0)
+        self.assertAlmostEqual(self.f({"profitRatio": 0.0}), 0.0)
+
+    def test_none_when_missing(self):
+        for v in (None, {}, {"profitRatio": None}):
+            self.assertIsNone(self.f(v))
+
+
 class ScreenerRouteTest(unittest.TestCase):
     """路由 + 落盘: patch _scan_worker, 绝不真跑全量扫描。"""
 

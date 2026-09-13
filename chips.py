@@ -4,8 +4,20 @@
 算法: 东财官网 CYQCalculator (factor=150 价格分桶 + 按日换手率衰减 + 三角分布),
       一字板按矩形面积=三角形2倍特例处理。
 
+粒度始终为日线 (分辨率最高); 周/月K 只是把回看窗口加长 (见 WINDOW_BY_PERIOD),
+不换成周/月 bar 重算 —— 周期 bar 会把区间成交摊在一根 H-L 上, 反而失真。
+
+汇总指标 (profitRatio/pct90/pct70/medianCost) 在桶内做线性插值, 不按整桶取价:
+否则窗口一变 → 价格轴下界变 → 分桶粗细变 → 指标凭空摆动数个百分点 (实测 ~8pp),
+而这些摆动并不代表筹码分布真的变化。
+
+价格字段 (min/max/avgCost/medianCost/pct90/pct70/桶价) 输出 PRICE_DP=3 位小数:
+低位 ETF (0.5 元级) 的第 3 位小数有意义; 曾统一取整到 2 位, 前端"最多 3 位"实际永远
+显示不出来。前端再按需去掉尾随 0。
+
 用前复权价使筹码价格轴与图表价格轴对齐; 换手率与复权无关。
-仅用于股票; ETF/指数由调用方拦截。
+支持股票与 ETF; 指数无份额/换手率, 由调用方拦截 (筹码对其无意义)。
+ETF 的换手率分母用份额回算 (份额随申赎变动, 属近似口径)。
 
 数据源由环境变量 CHIPS_SOURCE 控制:
     af   (默认) AlphaFeed 前复权日K + 当前流通股本回算换手率 (近似, 无需东财);
@@ -29,7 +41,11 @@ from logger import redact_message
 log = logging.getLogger("chips")
 
 FACTOR = 150          # 东财价格分桶数
-WINDOW = 210          # 东财滚动窗口 (根)
+PRICE_DP = 3          # 价格字段输出小数位; 前端最多显示 3 位并去掉尾随 0
+WINDOW = 210          # 日K滚动窗口 (根, 东财口径)
+# 各周期回看窗口 (日线根数): 覆盖该周期默认可视区间 (前端 visibleBars=80)。
+# 1w: 80周≈400交易日 → 600 (1.5× 余量); 1M: 80月≈1600交易日 → 1500 (封顶)。
+WINDOW_BY_PERIOD = {"1d": 210, "1w": 600, "1M": 1500}
 CACHE_TTL = 300.0     # 成功结果内存缓存 (秒)
 CACHE_TTL_FAIL = 30.0 # 失败缓存 (秒, 尽快重试)
 FETCH_RETRIES = 3     # 每个 URL 尝试次数
@@ -50,7 +66,7 @@ _HEADERS = {
     "Referer": "https://quote.eastmoney.com/",
 }
 
-_cache = {}           # symbol -> (ts, data|None)
+_cache = {}           # (symbol, period) -> (ts, data|None)
 _lock = threading.Lock()
 
 
@@ -216,7 +232,7 @@ def compute_chips(bars, factor=FACTOR):
         return None
 
     accuracy = max(0.01, (maxprice - minprice) / (factor - 1))
-    yrange = [round(minprice + accuracy * i, 2) for i in range(factor)]
+    yrange = [round(minprice + accuracy * i, PRICE_DP) for i in range(factor)]
     xdata = [0.0] * factor
 
     for b in bars:
@@ -262,11 +278,18 @@ def compute_chips(bars, factor=FACTOR):
         return None
 
     def cost_by_chip(chip):
+        """累计筹码达 chip 时的价格。
+
+        桶内按均匀分布线性插值, 使结果连续、不随分桶粗细 (窗口长短) 跳变;
+        按整桶取价会让 pct90/medianCost 在换窗口时凭空漂移半个桶。
+        """
         s = 0.0
         for i in range(factor):
-            if s + xdata[i] > chip:
-                return minprice + i * accuracy
-            s += xdata[i]
+            w = xdata[i]
+            if s + w > chip:
+                frac = 0.0 if w <= 0 else (chip - s) / w
+                return minprice + (i - 0.5 + frac) * accuracy
+            s += w
         return minprice + (factor - 1) * accuracy
 
     def percent_chips(pct):
@@ -274,13 +297,22 @@ def compute_chips(bars, factor=FACTOR):
         lo = cost_by_chip(total * ps[0])
         hi = cost_by_chip(total * ps[1])
         con = 0.0 if (lo + hi) == 0 else (hi - lo) / (lo + hi)
-        return [round(lo, 2), round(hi, 2)], con
+        return [round(lo, PRICE_DP), round(hi, PRICE_DP)], con
 
+    # 获利盘 = 价格 <= 现价的筹码占比。同样桶内插值: 按整桶判定会让落在现价上的
+    # 那个桶整体划入获利或套牢, 窗口一变 (桶变粗) profitRatio 就摆动数个百分点。
     current = bars[-1]["close"]
+    half = accuracy / 2.0
     below = 0.0
     for i in range(factor):
-        if current >= minprice + i * accuracy:
+        p = minprice + i * accuracy
+        if current >= p + half:
             below += xdata[i]
+        elif current > p - half:
+            below += xdata[i] * (current - (p - half)) / accuracy
+            break
+        else:
+            break
 
     p90, c90 = percent_chips(0.9)
     p70, c70 = percent_chips(0.7)
@@ -292,15 +324,15 @@ def compute_chips(bars, factor=FACTOR):
     median_cost = cost_by_chip(total * 0.5)
 
     return {
-        "min": round(minprice, 2),
-        "max": round(maxprice, 2),
+        "min": round(minprice, PRICE_DP),
+        "max": round(maxprice, PRICE_DP),
         "factor": factor,
         "buckets": [
             {"price": yrange[i], "weight": xdata[i] / total}
             for i in range(factor)
         ],
-        "avgCost": round(weighted_cost, 2),
-        "medianCost": round(median_cost, 2),
+        "avgCost": round(weighted_cost, PRICE_DP),
+        "medianCost": round(median_cost, PRICE_DP),
         "profitRatio": below / total,
         "pct90": p90,
         "pct70": p70,
@@ -316,37 +348,57 @@ def _chips_source():
     return os.environ.get("CHIPS_SOURCE", "af").strip().lower() or "af"
 
 
-def _load_bars(symbol):
-    """按 CHIPS_SOURCE 取 bar; 返回 (bars|None, source)。"""
+def window_for_period(period="1d"):
+    """该周期的日线回看根数; 未知周期回落日K窗口。"""
+    return WINDOW_BY_PERIOD.get(period, WINDOW)
+
+
+def _has_turnover(bars):
+    """是否至少有一根带正换手率; 全 0 说明源未返回换手率 (如东财对部分基金)。"""
+    return bool(bars) and any((b.get("hsl") or 0.0) > 0 for b in bars)
+
+
+def _load_bars(symbol, count=WINDOW):
+    """按 CHIPS_SOURCE 取 bar; 返回 (bars|None, source)。
+
+    全 0 换手的 bars 视为无数据 (衰减失效会算出一条无意义的平坦分布):
+    em 模式直接放弃, auto 模式回退 AF。
+    """
     mode = _chips_source()
     if mode == "em":
-        return fetch_chip_bars(symbol), "em"
+        bars = fetch_chip_bars(symbol, count)
+        return (bars, "em") if _has_turnover(bars) else (None, "em")
     if mode == "auto":
-        bars = fetch_chip_bars(symbol)          # 东财精确优先
-        if bars:
+        bars = fetch_chip_bars(symbol, count)     # 东财精确优先
+        if _has_turnover(bars):
             return bars, "em"
-        return fetch_af_chip_bars(symbol), "af"  # 东财失败再 AF
-    return fetch_af_chip_bars(symbol), "af"      # 默认 AF 近似
+        return fetch_af_chip_bars(symbol, count), "af"  # 东财失败再 AF
+    return fetch_af_chip_bars(symbol, count), "af"     # 默认 AF 近似
 
 
-def get_chips(symbol):
+def get_chips(symbol, period="1d"):
     """取筹码分布 (内存 TTL 缓存); 失败/无数据返回 None。
 
+    period 只影响日线回看窗口 (1d/1w/1M), 算法与粒度不变。
     成功缓存 CACHE_TTL, 失败仅缓存 CACHE_TTL_FAIL (抖动后尽快重试)。
-    结果含 "source": af(AlphaFeed 近似) / em(东财精确)。
+    结果含 "source": af(AlphaFeed 近似) / em(东财精确) 与 "period"。
     同时返回 avgCost(加权平均) 与 medianCost(50% 分位中位价)。
     """
+    if period not in WINDOW_BY_PERIOD:
+        period = "1d"
+    key = (symbol, period)
     now = time.time()
     with _lock:
-        ent = _cache.get(symbol)
+        ent = _cache.get(key)
         if ent:
             ttl = CACHE_TTL if ent[1] else CACHE_TTL_FAIL
             if now - ent[0] < ttl:
                 return ent[1]
-    bars, source = _load_bars(symbol)
+    bars, source = _load_bars(symbol, window_for_period(period))
     result = compute_chips(bars) if bars else None
     if result:
         result["source"] = source
+        result["period"] = period
     with _lock:
-        _cache[symbol] = (time.time(), result)
+        _cache[key] = (time.time(), result)
     return result

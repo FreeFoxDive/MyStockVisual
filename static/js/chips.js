@@ -12,6 +12,8 @@
   'use strict';
 
   const TARGET_PX = 1.5;   // 每根筹码柱目标像素高度 (按面板高度自适应分桶)
+  // 周/月K 用更长的日线回看窗口, 数值与日K不同 → 摘要标题标注, 避免误以为算错
+  const PERIOD_LABEL = { '1w': '周窗口', '1M': '月窗口' };
 
   function colorFor(price, lastClose, colors) {
     if (lastClose == null || price == null) return colors.chipTrapped;
@@ -22,24 +24,43 @@
     return v == null ? '—' : (v * 100).toFixed(1) + '%';
   }
 
+  /** 价格: 最多 3 位小数, 去掉尾随 0 (4.690→4.69, 3.4000→3.4, 2.000→2) */
   function fmtNum(v) {
-    return v == null ? '—' : Number(v).toFixed(2);
+    if (v == null || !Number.isFinite(Number(v))) return '—';
+    return Number(v).toFixed(3).replace(/\.?0+$/, '');
   }
 
-  /** 纯文本多行摘要 (ECharts graphic text 用) */
-  function summaryLines(chip) {
+  function rangeText(r) {
+    if (!r) return '—';
+    return fmtNum(r[0]) + '~' + fmtNum(r[1]);
+  }
+
+  /**
+   * 结构化摘要行: {label, value, color, title}。
+   * color 为主题色键 (获利/均本/中位价), 供画布按语义取色; title 行为标题。
+   * 两列渲染: label 左对齐、value 右对齐到筹码带右缘, 数值成列便于扫读。
+   */
+  function summaryRows(chip) {
     if (!chip) return [];
-    const lines = [
-      chip.source === 'af' ? '筹码分布·近似' : '筹码分布',
-      '获利 ' + fmtPct(chip.profitRatio),
-      '均本 ' + fmtNum(chip.avgCost),
-    ];
-    if (chip.medianCost != null) lines.push('中位价 ' + fmtNum(chip.medianCost));
-    lines.push(
-      '90% ' + fmtNum(chip.pct90 && chip.pct90[0]) + '~' + fmtNum(chip.pct90 && chip.pct90[1]),
-      '70% ' + fmtNum(chip.pct70 && chip.pct70[0]) + '~' + fmtNum(chip.pct70 && chip.pct70[1]),
-    );
-    return lines;
+    let title = chip.source === 'af' ? '筹码分布·近似' : '筹码分布';
+    const pl = PERIOD_LABEL[chip.period];
+    if (pl) title += '·' + pl;
+    const rows = [{ label: title, value: '', title: true }];
+    rows.push({ label: '获利', value: fmtPct(chip.profitRatio), color: 'chipProfit' });
+    rows.push({ label: '均本', value: fmtNum(chip.avgCost), color: 'chipAvg' });
+    if (chip.medianCost != null) {
+      rows.push({ label: '中位价', value: fmtNum(chip.medianCost), color: 'chipMedian' });
+    }
+    rows.push({ label: '90%', value: rangeText(chip.pct90) });
+    rows.push({ label: '70%', value: rangeText(chip.pct70) });
+    return rows;
+  }
+
+  /** 纯文本多行摘要 (兼容旧调用/测试) */
+  function summaryLines(chip) {
+    return summaryRows(chip).map(function (r) {
+      return r.value ? (r.label + ' ' + r.value) : r.label;
+    });
   }
 
   /** HTML 摘要 (tooltip / 状态栏用) */
@@ -178,7 +199,7 @@
       lineStyle: { color: colors.chipAvg, type: 'dashed', width: 1 },
       endLabel: {
         show: true,
-        formatter: function () { return Number(chip.avgCost).toFixed(2); },
+        formatter: function () { return fmtNum(chip.avgCost); },
         color: colors.chipAvg,
         fontSize: 11,
         fontWeight: 'bold',
@@ -200,8 +221,8 @@
         lineStyle: { color: colors.chipMedian, type: 'dotted', width: 1 },
         endLabel: {
           show: true,
-          formatter: function () { return Number(chip.medianCost).toFixed(2); },
-          color: colors.chipMedian,
+        formatter: function () { return fmtNum(chip.medianCost); },
+        color: colors.chipMedian,
           fontSize: 11,
           fontWeight: 'bold',
           offset: [2, 0],
@@ -257,7 +278,9 @@
   return {
     colorFor: colorFor,
     summaryLines: summaryLines,
+    summaryRows: summaryRows,
     summaryHtml: summaryHtml,
+    fmtNum: fmtNum,
     lineColor: lineColor,
     buildOverlay: buildOverlay,
     visibleRange: visibleRange,

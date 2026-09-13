@@ -1127,12 +1127,13 @@ async function loadTrades(symbol, fetchTs) {
   }
 }
 
-// ── 筹码分布: 仅日K股票; 服务端东财算法, 本地 5 分钟缓存 ──
+// ── 筹码分布: 日/周/月K 股票; 服务端东财算法 (日线口径, 窗口随周期加长), 本地 5 分钟缓存 ──
 async function fetchChips(symbol) {
   if (!isChipPeriod(STATE.period)) return;
   if (!document.getElementById('chk-chip').checked) return;
   symbol = symbol || STATE.symbol;
-  const key = `vc_${symbol}`;
+  const period = STATE.period;
+  const key = `vc_${symbol}_${period}`;
   let hasLocal = false;
   try {
     const raw = localStorage.getItem(key);
@@ -1141,21 +1142,21 @@ async function fetchChips(symbol) {
       if (Date.now() - cached.ts < 300000 && cached.data) {
         STATE.chips = cached.data.chips || null;
         hasLocal = true;
-        if (STATE.symbol === symbol) updateChart(false);
+        if (STATE.symbol === symbol && STATE.period === period) updateChart(false);
       }
     }
   } catch (e) { /* ignore */ }
   try {
-    const resp = await fetch(`/api/chips?symbol=${encodeURIComponent(symbol)}`);
+    const resp = await fetch(`/api/chips?symbol=${encodeURIComponent(symbol)}&period=${period}`);
     if (!resp.ok) return;
     const data = await resp.json();
-    if (STATE.symbol !== symbol || !isChipPeriod(STATE.period)) return; // 已切走
+    if (STATE.symbol !== symbol || STATE.period !== period) return; // 已切股/切周期
     STATE.chips = data.chips || null;
     try {
       localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
       _cleanLocalStorage();
     } catch (e) { /* quota */ }
-    if (STATE.symbol === symbol) updateChart(false);
+    if (STATE.symbol === symbol && STATE.period === period) updateChart(false);
   } catch (e) {
     if (!hasLocal) STATE.chips = null; // 网络失败且无缓存: 不显示筹码
   }
@@ -2505,7 +2506,7 @@ function getIndicatorPanels() {
 
 function calcGridLayout(panels, chipOn) {
   const showVolume = document.getElementById('chk-volume').checked;
-  const rightPct = chipOn ? '14%' : '2%'; // 筹码面板占用右侧空间 (含均本价格标签)
+  const rightPct = chipOn ? '17%' : '2%'; // 筹码面板占用右侧空间 (含摘要两列文本)
   const topGap = 2, bottomGap = 8, mGap = 2, volPct = showVolume ? 10 : 0;
   const nPanels = panels.length, totalGaps = (showVolume ? 1 : 0) + nPanels;
   const gapTotal = mGap * totalGaps;
@@ -2887,7 +2888,7 @@ function updateChart(reTheme) {
     const chipPxH = parseFloat(grids[0].height) / 100 * chart.getHeight();
     const overlay = ChipChart.buildOverlay(STATE.chips, {
       gi: chipGi,
-      left: '86%', right: '3%',
+      left: '83%', right: '3%',
       top: grids[0].top, height: grids[0].height,
       colors: C(),
       lastClose: klines[klines.length - 1].close,
@@ -3163,16 +3164,43 @@ function updateChart(reTheme) {
       fill: C().macdDif, font: 'bold 11px monospace',
     });
   }
-  // 筹码分布摘要 (筹码条正下方右侧空白窄带, 左对齐; 不压筹码/成交量)
+  // 筹码分布摘要 (筹码条正下方右侧空白窄带): 两列, 标签左对齐 + 数值右对齐成列。
+  // 字号自适应 13→10: 基准 13px, 窄窗/矮带逐级减小以免超宽或超出画布。
   if (chipOn) {
-    const klineBottom = (parseFloat(grids[0].top) + parseFloat(grids[0].height)) / 100 * ch;
     const chipColors = C();
-    ChipChart.summaryLines(STATE.chips).forEach(function (line, i) {
-      graphics.push({
-        text: line, x: cw * 0.86, y: klineBottom + 14 + i * 17,
-        fill: ChipChart.lineColor(line, chipColors) || chipColors.text,
-        font: '14px monospace',
-      });
+    const rows = ChipChart.summaryRows(STATE.chips);
+    const body = rows.filter(r => !r.title);
+    const colLeft = cw * 0.835, colRight = cw * 0.968;
+    const bandW = colRight - colLeft;
+    const klineBottom = (parseFloat(grids[0].top) + parseFloat(grids[0].height)) / 100 * ch;
+    const bandH = ch - klineBottom - 6;
+    const estW = (s, f) => {   // monospace 估算 (略偏保守): CJK≈1.02×字号, ASCII≈0.62×字号
+      let w = 0;
+      for (const cc of String(s)) w += (cc.charCodeAt(0) > 0x2e80 ? 1.02 : 0.62) * f;
+      return w;
+    };
+    let fs = 13;
+    while (fs > 10) {
+      const needW = body.reduce((m, r) => Math.max(m, estW(r.label, fs) + 10 + estW(r.value, fs)), 0);
+      const needH = (fs + 3) * body.length + fs + 1;
+      if (needW <= bandW && needH <= bandH) break;
+      fs -= 1;
+    }
+    const titleFs = Math.max(10, fs - 2);
+    let sy = klineBottom + fs + 3;
+    rows.forEach(function (row) {
+      if (row.title) {
+        graphics.push({ text: row.label, x: colLeft, y: sy, fill: chipColors.text,
+                        font: titleFs + 'px monospace' });
+        sy += titleFs + 3;
+        return;
+      }
+      graphics.push({ text: row.label, x: colLeft, y: sy, fill: chipColors.text,
+                      font: fs + 'px monospace' });
+      graphics.push({ text: row.value, x: colRight, y: sy,
+                      fill: chipColors[row.color] || chipColors.text,
+                      align: 'right', font: 'bold ' + fs + 'px monospace' });
+      sy += fs + 3;
     });
   }
   loadDrawings();            // 画线: 切代码/周期后从服务器同步 (_loadedKey 防重复拉取)
@@ -3220,9 +3248,9 @@ function switchPeriod(period) {
   }
 }
 
-/** 筹码仅日K (日线筹码分布, 周/月K不显示) */
+/** 筹码分布: 日/周/月K (分时不适用); 服务端始终按日线粒度算, 周/月K 窗口更长 */
 function isChipPeriod(p) {
-  return p === '1d';
+  return p === '1d' || p === '1w' || p === '1M';
 }
 
 /** Elder 通道 (EMA13±ATR) 与动力系统 (EMA13+MACD柱): 日/周/月K 适用 */
@@ -3468,8 +3496,10 @@ function paintLabels(c2, labels) {
   (labels || []).forEach(l => {
     c2.font = l.font || 'bold 11px monospace';
     c2.fillStyle = l.fill;
+    c2.textAlign = l.align || 'left';   // 支持右对齐列 (筹码摘要数值列)
     c2.fillText(l.text, l.x, l.y);
   });
+  c2.textAlign = 'left';
   c2.font = '12px monospace';
 }
 

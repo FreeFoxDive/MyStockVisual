@@ -142,11 +142,38 @@ class KlineCacheTest(unittest.TestCase):
         self.assertEqual(r.get_json()["chips"]["avgCost"], 10.0)
         gc.assert_called_once()
 
-    def test_chips_endpoint_etf_returns_null(self):
-        with mock.patch.object(self.api, "_is_etf", return_value=True):
+    def test_chips_endpoint_etf_returns_data(self):
+        """ETF 走与股票相同的路径 (不再拦截); 指数才拦截。"""
+        payload = {"buckets": [{"price": 4.0, "weight": 1.0}], "avgCost": 4.0}
+        with mock.patch.object(self.api, "_is_etf", return_value=True), \
+             mock.patch.object(self.api, "_is_index_symbol", return_value=False), \
+             mock.patch.object(self.api, "get_chips", return_value=payload) as gc:
+            r = self.client.get(f"/api/chips?symbol={self.SYMBOL}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["chips"]["avgCost"], 4.0)
+        gc.assert_called_once_with(self.SYMBOL, "1d")
+
+    def test_chips_endpoint_index_returns_null(self):
+        with mock.patch.object(self.api, "_is_index_symbol", return_value=True), \
+             mock.patch.object(self.api, "get_chips") as gc:
             r = self.client.get(f"/api/chips?symbol={self.SYMBOL}")
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(r.get_json()["chips"])
+        gc.assert_not_called()
+
+    def test_chips_endpoint_forwards_period(self):
+        """period 透传给 get_chips (周/月K 用更长日线窗口)。"""
+        with mock.patch.object(self.api, "get_chips", return_value=None) as gc, \
+             mock.patch.object(self.api, "_is_etf", return_value=False):
+            r = self.client.get(f"/api/chips?symbol={self.SYMBOL}&period=1w")
+        self.assertEqual(r.status_code, 200)
+        gc.assert_called_once_with(self.SYMBOL, "1w")
+
+    def test_chips_endpoint_invalid_period_falls_back_daily(self):
+        with mock.patch.object(self.api, "get_chips", return_value=None) as gc, \
+             mock.patch.object(self.api, "_is_etf", return_value=False):
+            self.client.get(f"/api/chips?symbol={self.SYMBOL}&period=5m")
+        gc.assert_called_once_with(self.SYMBOL, "1d")
 
     def test_depth_endpoint(self):
         from api import market as market_api

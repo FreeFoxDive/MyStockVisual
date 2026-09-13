@@ -107,6 +107,47 @@ class TestComputeChips(unittest.TestCase):
         self.assertEqual(chips._market_code("000001.SZ"), 0)
         self.assertEqual(chips._market_code("430047.BJ"), 0)
 
+    def test_summary_metrics_resolution_independent(self):
+        """价格轴下界 (即分桶粗细) 不应显著改变汇总指标。
+
+        回归点: 按整桶计数时, 拉长窗口把下界压低→桶变粗, profitRatio 会凭空
+        摆动数个百分点 (实测最多 ~8pp), 而筹码分布其实没有增加任何信息。
+        """
+        bars = [_bar(i) for i in range(40)]
+        base = chips.compute_chips(bars)
+        # 零权重 ghost bar: 只把价格下界压低, 不引入有效筹码
+        ghost = dict(bars[0])
+        ghost.update(open=5.0, close=5.0, high=5.0, low=5.0, hsl=1e-9)
+        wide = chips.compute_chips([ghost] + bars)
+        self.assertAlmostEqual(base["profitRatio"], wide["profitRatio"], delta=0.03)
+        self.assertAlmostEqual(base["medianCost"], wide["medianCost"], delta=0.05)
+        for key in ("pct90", "pct70"):
+            self.assertAlmostEqual(base[key][0], wide[key][0], delta=0.05)
+            self.assertAlmostEqual(base[key][1], wide[key][1], delta=0.05)
+
+    def test_price_fields_keep_three_decimals(self):
+        """价格字段输出 3 位小数 (前端再按需去尾 0)。
+
+        回归点: 服务端曾统一 round(...,2), 前端"最多 3 位小数"实际永远显示不出来。
+        用低位窄幅数据 (0.5 元级) 保证第 3 位小数非零。
+        """
+        bars = [{
+            "date": "2024-01-%02d" % (i + 1),
+            "open": 0.5000 + i * 0.0007,
+            "close": 0.5007 + i * 0.0007,
+            "high": 0.5011 + i * 0.0007,
+            "low": 0.4991 + i * 0.0007,
+            "volume": 1e6, "amount": 1e7, "hsl": 2.0,
+        } for i in range(30)]
+        ch = chips.compute_chips(bars)
+        self.assertIsNotNone(ch)
+        vals = [ch["avgCost"], ch["medianCost"], ch["pct90"][0], ch["pct90"][1],
+                ch["pct70"][0], ch["pct70"][1]]
+        self.assertTrue(
+            any(abs(round(v, 2) - v) > 1e-9 for v in vals),
+            "价格被取整到 2 位小数, 第 3 位丢失: %r" % (vals,),
+        )
+
 
 class TestFetchRowsFallback(unittest.TestCase):
     """URL 回退链 + 瞬时 503 重试 (不触网)。"""
@@ -192,6 +233,29 @@ class TestFetchAfChipBars(unittest.TestCase):
             self.assertIsNone(chips.fetch_af_chip_bars("600000.SH"))
 
 
+class TestWindowByPeriod(unittest.TestCase):
+    """周期只改变日线回看窗口, 不改变算法粒度。"""
+
+    def test_known_periods(self):
+        self.assertEqual(chips.window_for_period("1d"), 210)
+        self.assertEqual(chips.window_for_period("1w"), 600)
+        self.assertEqual(chips.window_for_period("1M"), 1500)
+
+    def test_unknown_period_falls_back_to_daily(self):
+        for p in ("5m", "intraday", "", None):
+            self.assertEqual(chips.window_for_period(p), chips.WINDOW)
+
+
+class TestHasTurnover(unittest.TestCase):
+    """全 0 换手视为无数据 (衰减失效会产出无意义的平坦分布)。"""
+
+    def test_detects_positive(self):
+        self.assertTrue(chips._has_turnover([{"hsl": 0.0}, {"hsl": 1.0}]))
+        self.assertFalse(chips._has_turnover([{"hsl": 0.0}, {"hsl": None}, {}]))
+        self.assertFalse(chips._has_turnover(None))
+        self.assertFalse(chips._has_turnover([]))
+
+
 class TestGetChipsSource(unittest.TestCase):
     BARS = [{"date": "2024-01-01", "open": 10.0, "close": 10.1,
              "high": 10.2, "low": 9.9, "volume": 1e6, "amount": 1e7,
@@ -224,6 +288,42 @@ class TestGetChipsSource(unittest.TestCase):
             res = chips.get_chips("600000.SH")
         self.assertEqual(res["source"], "af")
         em.assert_called_once()
+        af.assert_called_once()
+
+    def test_period_passes_window_count_and_echoes_period(self):
+        with mock.patch.object(chips, "fetch_af_chip_bars", return_value=self.BARS) as af:
+            res = chips.get_chips("600000.SH", "1w")
+        self.assertEqual(res["period"], "1w")
+        self.assertEqual(af.call_args[0][1], 600)
+
+    def test_invalid_period_uses_daily_window(self):
+        with mock.patch.object(chips, "fetch_af_chip_bars", return_value=self.BARS) as af:
+            res = chips.get_chips("600000.SH", "5m")
+        self.assertEqual(res["period"], "1d")
+        self.assertEqual(af.call_args[0][1], chips.WINDOW)
+
+    def test_cache_isolated_by_period(self):
+        with mock.patch.object(chips, "fetch_af_chip_bars", return_value=self.BARS) as af:
+            chips.get_chips("600000.SH", "1d")
+            chips.get_chips("600000.SH", "1w")
+            chips.get_chips("600000.SH", "1d")  # 命中 1d 缓存, 不再取数
+        self.assertEqual(af.call_count, 2)
+        self.assertEqual([c[0][1] for c in af.call_args_list], [210, 600])
+
+    def test_zero_turnover_is_no_data_in_em_mode(self):
+        zero = [{**b, "hsl": 0.0} for b in self.BARS]
+        with mock.patch.dict(os.environ, {"CHIPS_SOURCE": "em"}), \
+             mock.patch.object(chips, "fetch_chip_bars", return_value=zero), \
+             mock.patch.object(chips, "fetch_af_chip_bars", return_value=self.BARS):
+            self.assertIsNone(chips.get_chips("600000.SH"))
+
+    def test_zero_turnover_falls_back_to_af_in_auto_mode(self):
+        zero = [{**b, "hsl": 0.0} for b in self.BARS]
+        with mock.patch.dict(os.environ, {"CHIPS_SOURCE": "auto"}), \
+             mock.patch.object(chips, "fetch_chip_bars", return_value=zero), \
+             mock.patch.object(chips, "fetch_af_chip_bars", return_value=self.BARS) as af:
+            res = chips.get_chips("600000.SH")
+        self.assertEqual(res["source"], "af")
         af.assert_called_once()
 
 
