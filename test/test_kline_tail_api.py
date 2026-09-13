@@ -128,15 +128,16 @@ class KlineTailRouteTest(unittest.TestCase):
                          "tail 与 /api/kline 的末根必须逐字段一致")
 
     def test_short_ttl_merges_repeated_calls(self):
-        m1, m2, m3 = self._mock_upstream()
+        df = _kline_df()
         calls = []
-        original = self.kline_mod.fetch_kline_ex
 
-        def _count(*a, **kw):
+        def _counting(*a, **kw):
             calls.append(1)
-            return original(*a, **kw)
+            return (df, "双环传动", "alphafeed")
 
-        with mock.patch.object(self.kline_mod, "fetch_kline_ex", side_effect=_count), m2, m3:
+        with mock.patch.object(self.kline_mod, "fetch_kline_ex", side_effect=_counting), \
+                mock.patch.object(self.kline_mod, "fetch_quote", return_value=None), \
+                mock.patch.object(self.kline_mod, "_fetch_instrument_meta", return_value=None):
             self.client.get(f"/api/kline/tail?symbol={SYM}&n=1")
             self.client.get(f"/api/kline/tail?symbol={SYM}&n=1")
         self.assertEqual(len(calls), 1, "TTL 内重复请求应命中短缓存, 只取数一次")
