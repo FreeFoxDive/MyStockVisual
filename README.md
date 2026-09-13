@@ -35,7 +35,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 自适应提示框 | 鼠标在不同面板显示对应数据；MACD跟随面板开关，RSI/KDJ/ATR 独立提示框开关 |
 | 股票搜索 | 模糊匹配代码/名称，实时下拉 + 键盘↑↓导航 |
 | 搜索历史 | 跟账号持久化（兼浏览器本地），刷新不丢失 |
-| 配置持久化 | 主题/面板开关/提示框选项自动保存 |
+| 配置持久化 | 面板开关/指标参数/提示框选项跟账号服务器同步（`users.panel_config`），主题走本地共享键 |
 | 主题 | 共享 `visual-theme`（`/css/theme.css` + `/js/theme.js`），亮/暗同步各页 |
 | 实时刷新 | 交易时段每30秒自动拉取快照 |
 | 数据缩放 | 鼠标滚轮 + 滑块，底部可拖动 |
@@ -45,7 +45,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 持仓监控 | 授权用户填齐止盈/保本/止损（止盈>保本>止损）后盘中监控，钉钉 + ntfy 推送；关联模型的持仓在推荐周期到期日 10:00/14:00 提醒平仓 |
 | 监控页面 | `/monitor.html`（工具栏「🛡 监控」进入）：监控股票一览、现价距风控价距离、生效条件徽标（止损/保本/止盈/加速/涨停/到期）、最近告警、非管理员自服务监控开关 |
 | 图表画线 | 主面板 14 种工具（趋势线/射线/水平线/垂直线/折线/矩形/平行通道/斐波那契/回归通道/箭头/文本/多空仓位盒/测量尺）；磁吸、自动支撑压力线、画线修正建议、未来 8 根预测延伸；悬停显示线上相交价与相对 close 的 ±%；按 账户+代码+周期 服务器同步（详见 [docs/drawing-mode.md](docs/drawing-mode.md)） |
-| 指标扩展 | BOLL(20,2) 主图叠加、WR/CCI/BIAS/DMI 独立面板（通达信口径）；面板图例常显最近 bar 数值；MA 与 BOLL 参数可视化编辑（客户端重算）；对数坐标轴开关 |
+| 指标扩展 | BOLL(20,2) 主图叠加、WR/CCI/BIAS/DMI 独立面板（通达信口径）；面板图例常显最近 bar 数值；MA 与 BOLL 参数可视化编辑（客户端重算）；对数坐标轴开关；面板栏「信息/五档/MA设置/金叉死叉」收进「▾ 更多」默认收起，「动力系统/通道/缺口」排在筹码之后，金叉死叉默认开启 |
 | 信号与形态 | MACD 金叉死叉 + MA5/20 交叉标记；K线形态识别（锤头/上吊/吞没/十字星/曙光初现/乌云盖顶/红三兵/三只乌鸦，`patterns.js`） |
 | 复权切换 | 前/后/不复权三档，缓存按复权隔离（分钟周期固定前复权） |
 | 快照 SSE 推送 | `/api/stream/quotes` 长连接推送（间隔 `QUOTE_SSE_INTERVAL` 默认 10s，上游 ≤ 快照限额 4/5）；断线/超限自动回退轮询 |
@@ -71,7 +71,7 @@ visual/
 │   ├── trades.py      # /api/trades*|fees|trade-reasons|repo-maturity
 │   ├── models.py      # /api/models*
 │   ├── admin.py       # /api/admin/users*
-│   ├── me.py          # /api/me/search-history、/api/monitor/status
+│   ├── me.py          # /api/me/search-history、/api/me/panel-config、/api/monitor/status
 │   └── drawings.py    # /api/drawings 画线同步 (用户+代码+周期)
 ├── security.py        # CSP / 限流 / 登录锁定 / 会话 Cookie / CSRF
 ├── market.py          # 行情代理、缓存、质押等数据层
@@ -243,7 +243,8 @@ KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复�
 - 磁盘缓存按**数据源链隔离**（key 含 `kline_source.chain_tag`）：改 `KLINE_SOURCE_*` 后旧源缓存自动失效，不会串源；改配置仍需重启生效（`.env` 仅启动时加载）
 
 ### 配置持久化
-- `localStorage` key: `visual_chart_config` — 主题/面板
+- 面板设置（面板开关/指标参数/提示框/复权/折叠状态）：服务端跟账号存（`users.panel_config`，`/api/me/panel-config`），默认开启、跨设备恢复；`localStorage` key `visual_chart_config` 为本地镜像与离线兜底
+- 主题：本地共享键 `visual-theme`（`/js/theme.js`），亮/暗跨页同步，不做账号同步
 - 搜索历史：服务端跟账号存（`users.search_history`），前端可与本地合并同步
 
 ## 依赖

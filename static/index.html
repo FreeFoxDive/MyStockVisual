@@ -311,7 +311,7 @@ body {
   font-weight: 600;
 }
 #indicator-bar label.dim { color: var(--text-secondary); }
-/* 低频项折叠: 周期组 1/5/15/30/60 分与指标栏 WR/CCI/BIAS/DMI/对数轴, ▾ 展开 (状态持久化) */
+/* 低频项折叠: 周期组 1/5/15/30/60 分与指标栏 信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴, ▾ 展开 (状态持久化) */
 #toolbar .period-group .extra-period { display: none; }
 #toolbar .period-group.expanded .extra-period { display: inline-block; }
 #toolbar .period-group .more-btn { padding: 5px 7px; font-size: 12px; color: var(--text-secondary); }
@@ -418,7 +418,7 @@ body {
 #side-panel .dp-head {
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border);
-  margin-bottom: 3px; padding-bottom: 2px; font-size: 11px;
+  margin-bottom: 3px; padding-bottom: 2px;
 }
 #side-panel .dp-empty { color: var(--text-secondary); text-align: center; padding-top: 8px; }
 /* 侧栏展开时右移画线工具面板, 避免被遮挡 */
@@ -676,10 +676,13 @@ body {
 <!-- ═══════════════ Indicator Config Bar ═══════════ -->
 <div id="indicator-bar">
   <span>面板:</span>
-  <label id="lbl-info" title="左侧基本信息面板 (行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态)"><input type="checkbox" id="chk-info" checked onchange="onConfigChange()">信息</label>
-  <label id="lbl-depth" title="五档盘口 (所有周期可用)"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <label><input type="checkbox" id="chk-volume" checked onchange="onConfigChange()">成交量</label>
   <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
+  <span class="separator" style="height:18px;background:var(--border)"></span>
+  <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
+  <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
+  <label id="lbl-gap"><input type="checkbox" id="chk-gap" checked onchange="onConfigChange()">缺口</label>
+  <span class="separator" style="height:18px;background:var(--border)"></span>
   <label title="MACD 平滑异同均线 (DIF/DEA + 柱状图)"><input type="checkbox" id="chk-macd" checked onchange="onConfigChange()">MACD</label>
   <label title="KDJ 随机指标 (超买超卖)"><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
   <label title="RSI 相对强弱指标"><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
@@ -693,21 +696,19 @@ body {
     <option value="none">不复权</option>
   </select>
   <span class="separator" style="height:18px;background:var(--border)"></span>
-  <button class="cfg-mini" id="cfg-ma" onclick="openParamEditor('ma')" title="均线参数 (SMA 简单移动平均, 对标东财)">MA⚙</button>
   <label title="BOLL 布林带 (MA20 ± 2 倍标准差)"><input type="checkbox" id="chk-boll" onchange="onConfigChange()">BOLL</label>
   <button class="cfg-mini" id="cfg-boll" onclick="openParamEditor('boll')" title="编辑布林带参数 (N,K)">⚙</button>
+  <label class="extra-ind" id="lbl-info" title="左侧基本信息面板 (行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态)"><input type="checkbox" id="chk-info" checked onchange="onConfigChange()">信息</label>
+  <label class="extra-ind" id="lbl-depth" title="五档盘口 (所有周期可用)"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
+  <button class="cfg-mini extra-ind" id="cfg-ma" onclick="openParamEditor('ma')" title="均线参数 (SMA 简单移动平均, 对标东财)">MA⚙</button>
+  <label class="extra-ind" title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" checked onchange="onConfigChange()">金叉死叉</label>
   <label class="extra-ind" title="WR 威廉指标 (超买超卖)"><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
   <label class="extra-ind" title="CCI 顺势指标"><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
   <label class="extra-ind" title="BIAS 乖离率 (价格偏离均线)"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
   <label class="extra-ind" title="DMI 趋向指标 (ADX 多空趋势)"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
-  <label title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" onchange="onConfigChange()">金叉死叉</label>
   <label title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" checked onchange="onConfigChange()">K线形态</label>
   <label class="extra-ind" title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
-  <button class="cfg-mini more-btn" id="btn-ind-more" onclick="toggleIndMore()" title="展开/收起更多指标">▾ 更多</button>
-  <span class="separator" style="height:18px;background:var(--border)"></span>
-  <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
-  <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
-  <label id="lbl-gap"><input type="checkbox" id="chk-gap" checked onchange="onConfigChange()">缺口</label>
+  <button class="cfg-mini more-btn" id="btn-ind-more" onclick="toggleIndMore()" title="展开/收起更多面板设置">▾ 更多</button>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <span>提示框:</span>
   <label title="在提示框中显示 RSI 数值"><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
@@ -2123,8 +2124,8 @@ function switchToHistory(symbol) {
 // ═══════════════════════════════════════════════════════════════
 const CFG_KEY = 'visual_chart_config';
 
-function saveConfig() {
-  const cfg = {
+function buildConfig() {
+  return {
     volume: document.getElementById('chk-volume').checked,
     macd: document.getElementById('chk-macd').checked,
     kdj: document.getElementById('chk-kdj').checked,
@@ -2156,7 +2157,12 @@ function saveConfig() {
     periodMore: STATE._periodMore === true,
     indMore: STATE._indMore === true,
   };
+}
+
+function saveConfig() {
+  const cfg = buildConfig();
   try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch(e) {}
+  scheduleSavePanelConfig();
 }
 
 function loadConfig() {
@@ -2183,60 +2189,120 @@ function loadConfig() {
   } catch(e) {}
   try {
     const cfg = JSON.parse(localStorage.getItem(CFG_KEY));
-    if (!cfg) return;
-    document.getElementById('chk-volume').checked = cfg.volume !== false;
-    document.getElementById('chk-macd').checked = cfg.macd !== false;
-    document.getElementById('chk-kdj').checked = !!cfg.kdj;
-    document.getElementById('chk-rsi').checked = !!cfg.rsi;
-    document.getElementById('chk-atr').checked = !!cfg.atr;
-    document.getElementById('chk-obv').checked = !!cfg.obv;
-    document.getElementById('chk-chip').checked = cfg.chip !== false;
-    document.getElementById('chk-info').checked = cfg.info !== false;
-    document.getElementById('chk-depth').checked = cfg.depth !== false;
-    document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
-    document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
-    document.getElementById('tip-atr').checked = cfg.tipAtr !== false;
-    const chkImpulse = document.getElementById('chk-impulse');
-    chkImpulse.checked = !!cfg.impulse;
-    STATE.impulseEnabled = !!cfg.impulse;
-    const chkChannel = document.getElementById('chk-channel');
-    chkChannel.checked = !!cfg.channel;
-    STATE.channelEnabled = !!cfg.channel;
-    const chkGap = document.getElementById('chk-gap');
-    // 缺省开启；仅当配置显式 false 时关闭
-    chkGap.checked = cfg.gap !== false;
-    STATE.gapEnabled = cfg.gap !== false;
-    // 新指标面板 / 复权 / 对数轴 / 参数
-    document.getElementById('chk-boll').checked = !!cfg.boll;
-    document.getElementById('chk-wr').checked = !!cfg.wr;
-    document.getElementById('chk-cci').checked = !!cfg.cci;
-    document.getElementById('chk-bias').checked = !!cfg.bias;
-    document.getElementById('chk-dmi').checked = !!cfg.dmi;
-    document.getElementById('chk-cross').checked = !!cfg.cross;
-    document.getElementById('chk-patterns').checked = cfg.patterns !== false; // 默认开启
-    document.getElementById('chk-log').checked = !!cfg.logScale;
-    STATE.logScale = !!cfg.logScale;
-    STATE.adjust = ['forward', 'hfq', 'none'].includes(cfg.adjust) ? cfg.adjust : 'forward';
-    document.getElementById('adj-select').value = STATE.adjust;
-    if (Array.isArray(cfg.maPeriods) && cfg.maPeriods.length === 3
-        && cfg.maPeriods.every(n => Number.isInteger(n) && n > 0 && n <= 250)) {
-      STATE.maPeriods = cfg.maPeriods.slice();
-    }
-    if (cfg.bollParams && Number.isInteger(cfg.bollParams.n) && cfg.bollParams.n > 1
-        && Number.isFinite(cfg.bollParams.k) && cfg.bollParams.k > 0) {
-      STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
-    }
-    // 折叠状态恢复
-    if (cfg.periodMore === true) {
-      STATE._periodMore = true;
-      document.querySelector('.period-group').classList.add('expanded');
-      document.getElementById('toolbar').classList.add('periods-expanded');
-    }
-    if (cfg.indMore === true) {
-      STATE._indMore = true;
-      document.getElementById('indicator-bar').classList.add('show-extra');
-    }
+    if (cfg) applyConfig(cfg);
   } catch(e) {}
+}
+
+/** 把一份面板配置应用到 DOM/STATE (本地配置与服务器配置共用) */
+function applyConfig(cfg) {
+  if (!cfg) return;
+  document.getElementById('chk-volume').checked = cfg.volume !== false;
+  document.getElementById('chk-macd').checked = cfg.macd !== false;
+  document.getElementById('chk-kdj').checked = !!cfg.kdj;
+  document.getElementById('chk-rsi').checked = !!cfg.rsi;
+  document.getElementById('chk-atr').checked = !!cfg.atr;
+  document.getElementById('chk-obv').checked = !!cfg.obv;
+  document.getElementById('chk-chip').checked = cfg.chip !== false;
+  document.getElementById('chk-info').checked = cfg.info !== false;
+  document.getElementById('chk-depth').checked = cfg.depth !== false;
+  document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
+  document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
+  document.getElementById('tip-atr').checked = cfg.tipAtr !== false;
+  const chkImpulse = document.getElementById('chk-impulse');
+  chkImpulse.checked = !!cfg.impulse;
+  STATE.impulseEnabled = !!cfg.impulse;
+  const chkChannel = document.getElementById('chk-channel');
+  chkChannel.checked = !!cfg.channel;
+  STATE.channelEnabled = !!cfg.channel;
+  const chkGap = document.getElementById('chk-gap');
+  // 缺省开启；仅当配置显式 false 时关闭
+  chkGap.checked = cfg.gap !== false;
+  STATE.gapEnabled = cfg.gap !== false;
+  // 新指标面板 / 复权 / 对数轴 / 参数
+  document.getElementById('chk-boll').checked = !!cfg.boll;
+  document.getElementById('chk-wr').checked = !!cfg.wr;
+  document.getElementById('chk-cci').checked = !!cfg.cci;
+  document.getElementById('chk-bias').checked = !!cfg.bias;
+  document.getElementById('chk-dmi').checked = !!cfg.dmi;
+  document.getElementById('chk-cross').checked = cfg.cross !== false; // 默认开启
+  document.getElementById('chk-patterns').checked = cfg.patterns !== false; // 默认开启
+  document.getElementById('chk-log').checked = !!cfg.logScale;
+  STATE.logScale = !!cfg.logScale;
+  STATE.adjust = ['forward', 'hfq', 'none'].includes(cfg.adjust) ? cfg.adjust : 'forward';
+  document.getElementById('adj-select').value = STATE.adjust;
+  if (Array.isArray(cfg.maPeriods) && cfg.maPeriods.length === 3
+      && cfg.maPeriods.every(n => Number.isInteger(n) && n > 0 && n <= 250)) {
+    STATE.maPeriods = cfg.maPeriods.slice();
+  }
+  if (cfg.bollParams && Number.isInteger(cfg.bollParams.n) && cfg.bollParams.n > 1
+      && Number.isFinite(cfg.bollParams.k) && cfg.bollParams.k > 0) {
+    STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
+  }
+  // 折叠状态恢复
+  if (cfg.periodMore === true) {
+    STATE._periodMore = true;
+    document.querySelector('.period-group').classList.add('expanded');
+    document.getElementById('toolbar').classList.add('periods-expanded');
+  }
+  if (cfg.indMore === true) {
+    STATE._indMore = true;
+    document.getElementById('indicator-bar').classList.add('show-extra');
+  }
+}
+
+// ── 面板设置服务器同步 (跟账号; 默认开启) ──
+const PANEL_CFG_PUSH_DELAY = 1000;
+let _panelCfgTimer = null;
+let _panelCfgSuppress = false;  // 应用服务端配置期间抑制回推, 防回声
+
+/** 上传载荷: 剔除主题 (主题走共享本地键 visual-theme, 不做账号同步) */
+function panelCfgPayload(cfg) {
+  const out = Object.assign({}, cfg);
+  delete out.theme;
+  delete out.themeAuto;
+  return out;
+}
+
+function scheduleSavePanelConfig() {
+  if (_panelCfgSuppress) return;
+  clearTimeout(_panelCfgTimer);
+  _panelCfgTimer = setTimeout(pushPanelConfig, PANEL_CFG_PUSH_DELAY);
+}
+
+async function pushPanelConfig() {
+  if (_panelCfgSuppress) return;
+  try {
+    await fetch('/api/me/panel-config', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: panelCfgPayload(buildConfig()) }),
+    });
+  } catch (e) { /* 未登录/离线: 静默, 下次改动再同步 */ }
+}
+
+/** 启动对齐: 服务端有配置 → 合并覆盖本地; 服务端为空 → 用本地(或默认)初始化账号配置 */
+async function syncPanelConfigWithServer() {
+  try {
+    const resp = await fetch('/api/me/panel-config', { credentials: 'same-origin' });
+    if (!resp.ok) return false;
+    const server = (await resp.json()).config || {};
+    if (!Object.keys(server).length) {
+      pushPanelConfig();
+      return false;
+    }
+    let local = {};
+    try { local = JSON.parse(localStorage.getItem(CFG_KEY)) || {}; } catch (_) {}
+    const merged = Object.assign({}, local, server);
+    _panelCfgSuppress = true;
+    try {
+      applyConfig(merged);
+      try { localStorage.setItem(CFG_KEY, JSON.stringify(merged)); } catch (_) {}
+    } finally {
+      _panelCfgSuppress = false;
+    }
+    return true;
+  } catch (e) { return false; }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2499,7 +2565,7 @@ function togglePeriodMore() {
   saveConfig();
 }
 
-/** 指标栏低频项折叠切换 (WR/CCI/BIAS/DMI/对数轴) */
+/** 指标栏低频项折叠切换 (信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴) */
 function toggleIndMore() {
   const bar = document.getElementById('indicator-bar');
   bar.classList.toggle('show-extra');
@@ -5128,7 +5194,8 @@ document.addEventListener('DOMContentLoaded', () => {
       .catch(() => {});
   });
 
-  // First load: 本地无历史时先等服务端同步，再拉 K 线（解决清站点数据后记录丢失）
+  // First load: 面板设置 + 搜索历史并行与服务端对齐, 再拉 K 线 (清站点数据/换设备可恢复);
+  // 3s 超时兜底, 服务端慢时不阻塞首屏
   const container = document.getElementById('chart-container');
   let initDone = false;
   const initRender = () => { if (!initDone) { initDone = true; refresh(); } };
@@ -5140,8 +5207,16 @@ document.addEventListener('DOMContentLoaded', () => {
       ro.observe(container);
     }
   };
+  let panelCfgApplied = false;
+  const bootSync = Promise.all([
+    syncHistoryWithServer(),
+    syncPanelConfigWithServer().then(applied => { panelCfgApplied = applied; }),
+  ]);
+  const bootReady = () => Promise.race([bootSync, new Promise(r => setTimeout(r, 3000))]);
+  // 超时兜底: 首屏已渲染后服务端配置才到达 → 重绘一次应用新配置
+  bootSync.then(() => { if (panelCfgApplied && initDone) onIndicatorChange(); });
   if (!hist.length && !jumpSymbol) {
-    syncHistoryWithServer().then(() => {
+    bootReady().then(() => {
       const synced = loadHistory();
       if (synced.length > 0) {
         document.getElementById('symbol-input').value = synced[0].symbol;
@@ -5151,8 +5226,7 @@ document.addEventListener('DOMContentLoaded', () => {
       scheduleInit();
     }).catch(scheduleInit);
   } else {
-    syncHistoryWithServer();
-    scheduleInit();
+    bootReady().then(scheduleInit, scheduleInit);
   }
 
 

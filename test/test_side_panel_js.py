@@ -67,6 +67,10 @@ class SidePanelStaticTest(unittest.TestCase):
         for col in ('档位', '价格', '量'):
             self.assertIn(col, seg, col)
         self.assertIn('#side-panel .dp-head', self.src)
+        # 字号随信息面板 (#side-panel 基准 12px), 不单独设 font-size
+        css = self.src[self.src.index('#side-panel .dp-head'):]
+        css = css[:css.index('}')]
+        self.assertNotIn('font-size', css, "五档表头不应单独设字号 (须与信息一致)")
 
     def test_history_and_search_switch_refresh_panels(self):
         # 历史标签/搜索下拉换股必须与回车一致地刷新 基本信息 + 五档
@@ -113,20 +117,31 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertIn("AXIS_LABEL_RESERVE", body)
         self.assertIn("offsetWidth", body)
 
-    def test_info_checkbox_first_in_panel_bar(self):
-        bar = self.src[self.src.index('id="indicator-bar"'):self.src.index("<span>复权:</span>")]
-        self.assertLess(bar.index('id="lbl-info"'), bar.index('id="chk-volume"'),
-                        "信息 应排在其他面板勾选框之前")
-        self.assertLess(bar.index('id="lbl-depth"'), bar.index('id="chk-volume"'),
-                        "五档 与 信息 同组靠前")
+    def test_info_and_depth_folded_into_more_group(self):
+        # 信息/五档 收进「更多」折叠组 (默认收起), 不再常显在面板栏最前
+        for anchor in ('id="lbl-info"', 'id="lbl-depth"'):
+            tag_start = self.src.rindex('<label', 0, self.src.index(anchor))
+            tag = self.src[tag_start:self.src.index('>', self.src.index(anchor))]
+            self.assertIn('extra-ind', tag, f'{anchor} 应带 extra-ind 折叠类')
+        more_group = self.src[self.src.index('id="indicator-bar"'):self.src.index('id="btn-ind-more"')]
+        for anchor in ('id="lbl-info"', 'id="lbl-depth"', 'id="cfg-ma"', 'id="chk-cross"'):
+            self.assertIn(anchor, more_group, f'{anchor} 应在「更多」按钮之前')
 
-    def test_chip_checkbox_right_after_volume(self):
-        # 筹码紧跟在成交量之后 (同属量能类), 排在 MACD 等振荡指标之前
-        bar = self.src[self.src.index('id="indicator-bar"'):self.src.index("<span>复权:</span>")]
-        self.assertLess(bar.index('id="chk-volume"'), bar.index('id="lbl-chip"'),
-                        "筹码 应排在成交量之后")
-        self.assertLess(bar.index('id="lbl-chip"'), bar.index('id="chk-macd"'),
-                        "筹码 应排在 MACD 之前")
+    def test_cross_default_on(self):
+        anchor = self.src.index('id="chk-cross"')
+        tag = self.src[self.src.rindex('<input', 0, anchor):self.src.index('>', anchor)]
+        self.assertIn('checked', tag, '金叉死叉默认开启')
+        self.assertIn("cfg.cross !== false", _extract_fn(self.src, 'applyConfig'))
+
+    def test_impulse_channel_gap_after_chip(self):
+        # 动力系统/通道/缺口 移到筹码之后, 排在 MACD 之前
+        bar = self.src[self.src.index('id="indicator-bar"'):self.src.index('id="btn-ind-more"')]
+        chip = bar.index('id="lbl-chip"')
+        self.assertLess(bar.index('id="chk-volume"'), chip, "筹码 应排在成交量之后")
+        for anchor in ('id="lbl-impulse"', 'id="lbl-channel"', 'id="lbl-gap"'):
+            self.assertGreater(bar.index(anchor), chip, f'{anchor} 应排在筹码之后')
+        self.assertLess(bar.index('id="lbl-gap"'), bar.index('id="chk-macd"'),
+                        "缺口 应排在 MACD 之前")
 
     def test_depth_nested_in_info_box(self):
         # 五档不再是独立的 sp-sec 块, 也不是独立带标题的框; 并入信息框内且无 label

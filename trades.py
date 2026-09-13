@@ -291,6 +291,9 @@ def init_db(db_path=None):
         # 迁移: 搜索/浏览历史 (JSON 数组, 跟账号走, 不依赖浏览器 localStorage)
         if "search_history" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN search_history TEXT")
+        # 迁移: 图表面板设置 (JSON 对象, 跟账号同步, 跨设备/换浏览器恢复)
+        if "panel_config" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN panel_config TEXT")
         # 迁移: 旧库 trades 表补风控价格列 (可空, 老数据零改动)
         for col in ("take_profit", "stop_loss", "breakeven"):
             if col not in tcols:
@@ -730,6 +733,77 @@ def set_search_history(user_id, history, *, allow_clear=True):
     try:
         conn.execute(
             "UPDATE users SET search_history=? WHERE id=?",
+            (json.dumps(cleaned, ensure_ascii=False), user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cleaned
+
+
+# ── 图表面板设置 (跟账号同步) ──
+# 白名单与前端 saveConfig() 对齐; 未知键一律丢弃, 避免把任意 JSON 存进账号。
+PANEL_CONFIG_BOOL_KEYS = (
+    "volume", "macd", "kdj", "rsi", "atr", "obv", "chip", "info", "depth",
+    "tipRsi", "tipKdj", "tipAtr", "impulse", "channel", "gap", "boll",
+    "wr", "cci", "bias", "dmi", "cross", "patterns", "logScale",
+    "periodMore", "indMore",
+)
+PANEL_CONFIG_ADJUSTS = ("forward", "hfq", "none")
+
+
+def _normalize_panel_config(raw):
+    """校验面板设置为 {key: value}，仅保留白名单键与合法取值。"""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key in PANEL_CONFIG_BOOL_KEYS:
+        if key in raw:
+            out[key] = bool(raw[key])
+    adjust = raw.get("adjust")
+    if adjust in PANEL_CONFIG_ADJUSTS:
+        out["adjust"] = adjust
+    ma = raw.get("maPeriods")
+    if (isinstance(ma, list) and len(ma) == 3
+            and all(isinstance(n, int) and not isinstance(n, bool) and 0 < n <= 250 for n in ma)):
+        out["maPeriods"] = list(ma)
+    boll = raw.get("bollParams")
+    if isinstance(boll, dict):
+        n, k = boll.get("n"), boll.get("k")
+        if (isinstance(n, int) and not isinstance(n, bool) and n > 1
+                and isinstance(k, (int, float)) and not isinstance(k, bool) and k > 0):
+            out["bollParams"] = {"n": n, "k": float(k)}
+    return out
+
+
+def get_panel_config(user_id):
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT panel_config FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["panel_config"]:
+        return {}
+    try:
+        raw = json.loads(row["panel_config"])
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return _normalize_panel_config(raw)
+
+
+def set_panel_config(user_id, config, *, allow_clear=False):
+    """写入面板设置。allow_clear=False 时, 空对象不覆盖已有配置 (防客户端首次加载误清空)。"""
+    cleaned = _normalize_panel_config(config)
+    if not cleaned and not allow_clear:
+        existing = get_panel_config(user_id)
+        if existing:
+            return existing
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET panel_config=? WHERE id=?",
             (json.dumps(cleaned, ensure_ascii=False), user_id),
         )
         conn.commit()

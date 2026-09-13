@@ -28,6 +28,28 @@ def search_history_put():
     return _json({"ok": True, "history": history})
 
 
+@api_bp.route("/api/me/panel-config", methods=["GET"])
+def panel_config_get():
+    user = _require_user()
+    if not user:
+        return _error("未登录", 401)
+    return _json({"config": trades.get_panel_config(user["id"])})
+
+
+@api_bp.route("/api/me/panel-config", methods=["PUT"])
+def panel_config_put():
+    user = _require_user()
+    if not user:
+        return _error("未登录", 401)
+    body = _read_json_body()
+    if body is None:
+        return _error("请求体无效 JSON", 400)
+    config = trades.set_panel_config(
+        user["id"], body.get("config") or {}, allow_clear=False,
+    )
+    return _json({"ok": True, "config": config})
+
+
 @api_bp.route("/api/monitor/status", methods=["GET"])
 def monitor_status():
     user = _require_user()
