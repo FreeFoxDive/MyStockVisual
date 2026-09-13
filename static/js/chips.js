@@ -12,6 +12,9 @@
   'use strict';
 
   const TARGET_PX = 1.5;   // 每根筹码柱目标像素高度 (按面板高度自适应分桶)
+  const LABEL_FS = 11;              // 均本/中位价标签字号
+  const LABEL_MIN_GAP_PX = 14;      // 两标签中心最小垂直间距, 小于则上下错开
+  const LABEL_BASE_OFFSET = [2, 0];
   // 周/月K 用更长的日线回看窗口, 数值与日K不同 → 摘要标题标注, 避免误以为算错
   const PERIOD_LABEL = { '1w': '周窗口', '1M': '月窗口' };
 
@@ -33,6 +36,38 @@
   function rangeText(r) {
     if (!r) return '—';
     return fmtNum(r[0]) + '~' + fmtNum(r[1]);
+  }
+
+  /**
+   * 均本/中位价两个 endLabel 的像素偏移 [x, y]。
+   * 两线在同一 x 收尾, 价格在屏幕上接近时 11px 标签会叠字 →
+   * 按价格高低上下对称错开; 价高者画面上方 (y 更小), 故其 y 为负。
+   * 价格够远/无中位价/区间非法时保持原偏移。
+   */
+  function endLabelOffsets(avgCost, medianCost, min, max, pxHeight) {
+    const out = { avg: LABEL_BASE_OFFSET.slice(), median: LABEL_BASE_OFFSET.slice() };
+    if (avgCost == null || medianCost == null) return out;
+    const span = max - min;
+    if (!(span > 0) || !(pxHeight > 0)) return out;
+    const gapPx = Math.abs(avgCost - medianCost) * pxHeight / span;
+    if (gapPx >= LABEL_MIN_GAP_PX) return out;
+    const push = Math.ceil((LABEL_MIN_GAP_PX - gapPx) / 2);
+    const avgAbove = avgCost >= medianCost;
+    out.avg[1] = avgAbove ? -push : push;
+    out.median[1] = avgAbove ? push : -push;
+    return out;
+  }
+
+  /** 成本线末端价格标签 (颜色/字号/加粗与线一致, 偏移由 endLabelOffsets 给出) */
+  function costEndLabel(color, value, offset) {
+    return {
+      show: true,
+      formatter: function () { return fmtNum(value); },
+      color: color,
+      fontSize: LABEL_FS,
+      fontWeight: 'bold',
+      offset: offset || LABEL_BASE_OFFSET,
+    };
   }
 
   /**
@@ -147,6 +182,7 @@
     const data = resample(chip, min, max, n);
     const maxW = chip.buckets.reduce((m, b) => Math.max(m, b.weight), 0) || 1;
     const xMax = maxW * 1.08;
+    const labelOff = endLabelOffsets(chip.avgCost, chip.medianCost, min, max, pxHeight);
 
     const barSeries = {
       name: '筹码',
@@ -197,14 +233,7 @@
       data: [[0, chip.avgCost], [xMax, chip.avgCost]],
       encode: { x: 0, y: 1 },
       lineStyle: { color: colors.chipAvg, type: 'dashed', width: 1 },
-      endLabel: {
-        show: true,
-        formatter: function () { return fmtNum(chip.avgCost); },
-        color: colors.chipAvg,
-        fontSize: 11,
-        fontWeight: 'bold',
-        offset: [2, 0],
-      },
+      endLabel: costEndLabel(colors.chipAvg, chip.avgCost, labelOff.avg),
     };
 
     const lines = [barSeries, avgLine];
@@ -219,14 +248,7 @@
         data: [[0, chip.medianCost], [xMax, chip.medianCost]],
         encode: { x: 0, y: 1 },
         lineStyle: { color: colors.chipMedian, type: 'dotted', width: 1 },
-        endLabel: {
-          show: true,
-        formatter: function () { return fmtNum(chip.medianCost); },
-        color: colors.chipMedian,
-          fontSize: 11,
-          fontWeight: 'bold',
-          offset: [2, 0],
-        },
+        endLabel: costEndLabel(colors.chipMedian, chip.medianCost, labelOff.median),
       });
     }
 
@@ -282,6 +304,8 @@
     summaryHtml: summaryHtml,
     fmtNum: fmtNum,
     lineColor: lineColor,
+    endLabelOffsets: endLabelOffsets,
+    costEndLabel: costEndLabel,
     buildOverlay: buildOverlay,
     visibleRange: visibleRange,
     weightAt: weightAt,

@@ -142,6 +142,61 @@ class TestChipsSummaryFormat(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("node"), "需要 node")
+class TestChipsLabelOffsets(unittest.TestCase):
+    """均本/中位价 endLabel 避让偏移 (价格接近时上下错开)。"""
+
+    def _offsets(self, avg, median, lo, hi, px):
+        return json.loads(run_chips_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "process.stdout.write(JSON.stringify("
+            "ChipChart.endLabelOffsets(p.a, p.m, p.lo, p.hi, p.px)));",
+            json.dumps({"a": avg, "m": median, "lo": lo, "hi": hi, "px": px}),
+        ))
+
+    def test_equal_prices_spread_symmetrically(self):
+        out = self._offsets(11.0, 11.0, 10.0, 12.0, 600)
+        self.assertEqual(out["avg"], [2, -7])      # 每侧最大位移
+        self.assertEqual(out["median"], [2, 7])
+
+    def test_null_median_keeps_base_offset(self):
+        out = self._offsets(11.0, None, 10.0, 12.0, 600)
+        self.assertEqual(out["avg"], [2, 0])
+        self.assertEqual(out["median"], [2, 0])
+
+    def test_invalid_range_keeps_base_offset(self):
+        out = self._offsets(11.0, 11.0, 12.0, 10.0, 600)   # 区间反向
+        self.assertEqual(out["avg"], [2, 0])
+        out = self._offsets(11.0, 11.0, 10.0, 12.0, 0)     # 高度为 0
+        self.assertEqual(out["median"], [2, 0])
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node")
+class TestChipsCostEndLabel(unittest.TestCase):
+    """成本线末端标签构造。"""
+
+    def test_color_weight_and_offset(self):
+        out = json.loads(run_chips_js(
+            "const l = ChipChart.costEndLabel('#123456', 4.69, [2, -3]);"
+            "process.stdout.write(JSON.stringify({"
+            "color: l.color, fs: l.fontSize, fw: l.fontWeight,"
+            "offset: l.offset, text: l.formatter()"
+            "}));"
+        ))
+        self.assertEqual(out["color"], "#123456")
+        self.assertEqual(out["fs"], 11)
+        self.assertEqual(out["fw"], "bold")
+        self.assertEqual(out["offset"], [2, -3])
+        self.assertEqual(out["text"], "4.69")
+
+    def test_offset_defaults_to_base(self):
+        out = json.loads(run_chips_js(
+            "process.stdout.write(JSON.stringify("
+            "ChipChart.costEndLabel('#111111', 1.0).offset));"
+        ))
+        self.assertEqual(out, [2, 0])
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node")
 class TestChipsOverlay(unittest.TestCase):
     BUCKETS = TestChipsResample.BUCKETS
     COLORS = {
@@ -163,7 +218,9 @@ class TestChipsOverlay(unittest.TestCase):
             "names: out.series.map(function(s){return s.name;}),"
             "avgLabel: (pick('筹码均本').endLabel||{}).color,"
             "medianLabel: (pick('筹码中位价').endLabel||{}).color,"
-            "medianLine: (pick('筹码中位价').lineStyle||{}).color"
+            "medianLine: (pick('筹码中位价').lineStyle||{}).color,"
+            "avgOffset: (pick('筹码均本').endLabel||{}).offset,"
+            "medianOffset: (pick('筹码中位价').endLabel||{}).offset"
             "}));",
             json.dumps({"chip": chip, "cfg": cfg}),
         ))
@@ -184,6 +241,32 @@ class TestChipsOverlay(unittest.TestCase):
         self.assertIn("筹码均本", out["names"])
         self.assertNotIn("筹码中位价", out["names"])
         self.assertEqual(out["avgLabel"], self.COLORS["chipAvg"])
+        self.assertEqual(out["avgOffset"], [2, 0])   # 无中位价 → 不避让
+
+    def test_end_labels_spread_when_prices_close(self):
+        # 11.0 vs 10.97, 区间 10~12 高 600px → 像素间距 9px < 14px → 上下错开
+        chip = {"buckets": self.BUCKETS, "avgCost": 11.0, "medianCost": 10.97, "profitRatio": 0.5}
+        out = self._overlay(chip)
+        self.assertLess(out["avgOffset"][1], 0)      # 高价(均本)在上
+        self.assertGreater(out["medianOffset"][1], 0)
+        self.assertEqual(out["avgOffset"][0], 2)     # x 偏移不变
+        # 原有 9px 间距 + 两侧位移 → 标签中心间距 ≥ 阈值 14px
+        gap_px = abs(11.0 - 10.97) * 600 / (12.0 - 10.0)
+        self.assertGreaterEqual(gap_px + out["medianOffset"][1] - out["avgOffset"][1], 14)
+
+    def test_end_labels_direction_follows_price(self):
+        # 均本低于中位价 → 均本下移、中位价上移
+        chip = {"buckets": self.BUCKETS, "avgCost": 10.9, "medianCost": 10.93, "profitRatio": 0.5}
+        out = self._overlay(chip)
+        self.assertGreater(out["avgOffset"][1], 0)
+        self.assertLess(out["medianOffset"][1], 0)
+
+    def test_end_labels_flat_when_prices_far(self):
+        # 11.0 vs 10.8 → 像素间距 60px, 无需错开
+        chip = {"buckets": self.BUCKETS, "avgCost": 11.0, "medianCost": 10.8, "profitRatio": 0.5}
+        out = self._overlay(chip)
+        self.assertEqual(out["avgOffset"], [2, 0])
+        self.assertEqual(out["medianOffset"], [2, 0])
 
     def test_line_color_matches_cost_lines(self):
         out = json.loads(run_chips_js(

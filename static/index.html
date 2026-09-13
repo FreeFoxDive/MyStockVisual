@@ -2764,9 +2764,22 @@ function syncChipAxis() {
   if (STATE.chips && chip.n) {
     const bars = ChipChart.resample(STATE.chips, range.min, range.max, chip.n);
     const seriesPatch = [{ name: '筹码', data: bars }];
+    // 价格区间变了, 标签像素间距也变 → 重算避让偏移, 否则缩放后可能重新叠字
+    const off = ChipChart.endLabelOffsets(
+      STATE.chips.avgCost, STATE.chips.medianCost, range.min, range.max, chip.pxHeight);
+    const costColors = C();
     ['筹码均本', '筹码中位价'].forEach(function (nm) {
       const s = (opt.series || []).find(x => x.name === nm);
-      if (s) seriesPatch.push({ name: nm, data: s.data });
+      if (!s) return;
+      const isAvg = nm === '筹码均本';
+      seriesPatch.push({
+        name: nm,
+        data: s.data,
+        endLabel: ChipChart.costEndLabel(
+          isAvg ? costColors.chipAvg : costColors.chipMedian,
+          isAvg ? STATE.chips.avgCost : STATE.chips.medianCost,
+          isAvg ? off.avg : off.median),
+      });
     });
     patch.series = seriesPatch;
   }
@@ -3485,9 +3498,12 @@ function updateChart(reTheme) {
   }
   // 筹码分布摘要 (筹码条正下方右侧空白窄带): 两列, 标签左对齐 + 数值右对齐成列。
   // 字号自适应 13→10: 基准 13px, 窄窗/矮带逐级减小以免超宽或超出画布。
+  // 标题行比明细大 2px 且加粗, 单独占一行。
   if (chipOn) {
     const chipColors = C();
     const rows = ChipChart.summaryRows(STATE.chips);
+    const titleRow = rows.find(r => r.title);
+    const titleText = titleRow ? titleRow.label : '';
     const body = rows.filter(r => !r.title);
     const colLeft = cw * 0.835, colRight = cw * 0.968;
     const bandW = colRight - colLeft;
@@ -3498,19 +3514,21 @@ function updateChart(reTheme) {
       for (const cc of String(s)) w += (cc.charCodeAt(0) > 0x2e80 ? 1.02 : 0.62) * f;
       return w;
     };
-    let fs = 13;
+    let fs = 13, titleFs = fs + 2;
     while (fs > 10) {
-      const needW = body.reduce((m, r) => Math.max(m, estW(r.label, fs) + 10 + estW(r.value, fs)), 0);
-      const needH = (fs + 3) * body.length + fs + 1;
+      titleFs = fs + 2;
+      const bodyW = body.reduce((m, r) => Math.max(m, estW(r.label, fs) + 10 + estW(r.value, fs)), 0);
+      const needW = Math.max(bodyW, estW(titleText, titleFs));
+      const needH = (titleFs + 3) + (fs + 3) * body.length;
       if (needW <= bandW && needH <= bandH) break;
       fs -= 1;
     }
-    const titleFs = Math.max(10, fs - 2);
-    let sy = klineBottom + fs + 3;
+    titleFs = fs + 2;
+    let sy = klineBottom + titleFs + 3;
     rows.forEach(function (row) {
       if (row.title) {
         graphics.push({ text: row.label, x: colLeft, y: sy, fill: chipColors.text,
-                        font: titleFs + 'px monospace' });
+                        font: 'bold ' + titleFs + 'px monospace' });
         sy += titleFs + 3;
         return;
       }
