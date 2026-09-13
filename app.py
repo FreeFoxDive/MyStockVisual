@@ -33,12 +33,14 @@ def _load_dotenv():
 _load_dotenv()
 
 from flask import Flask, Response, g, redirect, request, send_from_directory  # noqa: E402
+from werkzeug.exceptions import HTTPException  # noqa: E402
 
 from security import (  # noqa: E402
     CSP_HEADER,
     CSRF_COOKIE,
     PUBLIC_API_GET,
     PUBLIC_API_POST,
+    RATE_LIMIT_EXEMPT,
     apply_csrf_cookie,
     check_rate_limit,
     current_user_from_request,
@@ -63,6 +65,11 @@ def create_app():
     from logger import configure as _log_configure
     _log_configure()
 
+    # 未预期异常交回 Flask 原生处理(HTML 500 + 自动 traceback 日志);
+    # 由日志观察者异步取告警, 不注册 errorhandler(Exception) 以免禁用框架自动日志。
+    from error_notify import install_log_handler
+    install_log_handler()
+
     app = Flask(
         __name__,
         static_folder=None,  # 自管静态路径 (URL 无 /static 前缀)
@@ -77,6 +84,26 @@ def create_app():
     app.register_blueprint(auth_bp)
     app.register_blueprint(api_bp)
 
+    @app.errorhandler(HTTPException)
+    def _http_error(e):
+        """/api/ 下把 HTTP 错误序列化为统一 JSON; 其他路径保持原生行为。
+
+        用 e.get_response() 只替换 body, 保留 Allow / WWW-Authenticate /
+        Retry-After 等框架生成的响应头。
+        5xx 直接放行: 未预期异常经 InternalServerError 进入此处, 保持 Flask
+        原生 HTML 500(日志仍由框架自动记录), 只由日志观察者取告警。
+        """
+        if not request.path.startswith("/api/"):
+            return e
+        if e.code is not None and e.code >= 500:
+            return e
+        import json
+        resp = e.get_response()
+        resp.data = json.dumps({"error": e.name}, ensure_ascii=False)
+        resp.content_type = "application/json"
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
     @app.before_request
     def _before():
         g.user = current_user_from_request()
@@ -85,7 +112,7 @@ def create_app():
         if not request.path.startswith("/api/"):
             return None
 
-        if not check_rate_limit():
+        if request.path not in RATE_LIMIT_EXEMPT and not check_rate_limit():
             return _api_json_error("请求过于频繁，请稍后重试", 429)
 
         method = request.method.upper()
@@ -178,6 +205,10 @@ def create_app():
 
     @app.route("/<path:filename>")
     def pages_or_spa(filename):
+        if filename.startswith("api/"):
+            # 未知 /api/* 不落到 SPA, 交给 HTTPException handler 统一返回 JSON 404
+            from werkzeug.exceptions import NotFound
+            raise NotFound()
         if filename.endswith((".js", ".css")):
             return _send_static(filename)
         if filename.endswith(".html"):
@@ -246,3 +277,10 @@ def start_background_jobs():
         log.info("持仓监控线程已启动")
     except Exception as e:
         log.warning(f"持仓监控启动失败: {e}")
+
+    try:
+        import watchdog as _wd
+        _wd.start_background(market.get_af, fallback_quotes=market.fetch_quotes)
+        log.info("看门狗线程已启动")
+    except Exception as e:
+        log.warning(f"看门狗启动失败: {e}")

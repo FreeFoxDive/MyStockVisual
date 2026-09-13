@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from flask import request
 
@@ -33,6 +34,87 @@ def ping():
         "in_session": market_hours.in_session(now),
         "is_trading_day": market_hours.is_trading_day(now),
     })
+
+
+# ── 深度健康检查 (/api/health) ──
+_HEALTH_DB_TTL = 10.0
+_health_db_cache = {"ts": 0.0, "ok": True}
+_LOOPBACK = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
+
+
+def _is_loopback_request():
+    addr = (request.remote_addr or "").strip().lower()
+    return addr in _LOOPBACK
+
+
+def _db_ok_cached():
+    """轻量 DB 探活 + 短缓存(豁免限流后避免被未授权请求放大成 DB 压力)。"""
+    now = time.time()
+    if now - _health_db_cache["ts"] < _HEALTH_DB_TTL:
+        return _health_db_cache["ok"]
+    ok = True
+    try:
+        import trades
+        trades.count_admins()
+    except Exception:
+        ok = False
+    _health_db_cache.update(ts=now, ok=ok)
+    return ok
+
+
+def _monitor_health():
+    import monitor
+    st = monitor.get_status() or {}
+    age = None
+    if st.get("last_poll_ts"):
+        age = round(time.time() - float(st["last_poll_ts"]), 1)
+    return {
+        "running": bool(st.get("running")),
+        "backend": st.get("backend"),
+        "last_poll_age_sec": age,
+        "in_backoff": bool(st.get("in_backoff")),
+        "last_error": _sanitize_error(st["last_error"]) if st.get("last_error") else None,
+    }
+
+
+def _monitor_stalled(mon, now):
+    if not market_hours.in_session(now):
+        return False
+    if mon.get("in_backoff"):
+        return False
+    try:
+        import watchdog
+        stall_sec = watchdog.STALL_SEC
+    except Exception:
+        stall_sec = 600.0
+    age = mon.get("last_poll_age_sec")
+    return age is not None and age > stall_sec
+
+
+@api_bp.route("/api/health", methods=["GET"])
+def health():
+    """容器 HEALTHCHECK / 运维探针: 正常 200, 异常 503。
+
+    仅 loopback 返回明细; 其余来源只给 {ok}(避免暴露内部状态给未认证用户)。
+    """
+    now = market_hours.now()
+    db_ok = _db_ok_cached()
+    mon = _monitor_health()
+    ok = bool(db_ok and mon.get("running") and not _monitor_stalled(mon, now))
+    payload = {"ok": ok, "time": str(now)}
+    if _is_loopback_request():
+        import watchdog
+        wd = watchdog.get_state()
+        payload["checks"] = {
+            "monitor": mon,
+            "watchdog": {
+                "last_check": wd.get("last_check"),
+                "breaker": bool(wd.get("breaker")),
+                "running": watchdog.is_running(),
+            },
+            "db": {"ok": db_ok},
+        }
+    return _json(payload, 200 if ok else 503)
 
 
 @api_bp.route("/api/search", methods=["GET"])

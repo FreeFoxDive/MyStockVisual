@@ -49,9 +49,11 @@ class QuoteSseTest(unittest.TestCase):
         self._orig_slots = stream._sse_slots
         self._orig_interval = stream.QUOTE_SSE_INTERVAL
         self._orig_tick = stream.QUOTE_SSE_TICK
+        self._orig_lifetime = stream.QUOTE_SSE_MAX_LIFETIME
         stream._sse_slots = threading.BoundedSemaphore(stream.QUOTE_SSE_MAX_CLIENTS)
         stream.QUOTE_SSE_INTERVAL = 0.0
         stream.QUOTE_SSE_TICK = 0.0  # 测试内不真实等待, 断连后立即归还槽位
+        stream.QUOTE_SSE_MAX_LIFETIME = 3600.0  # 默认不在用例内到期
         self.addCleanup(self._restore)
         self.client = self.app.test_client()
         token, _ = trades.create_session(self.uid)
@@ -61,6 +63,7 @@ class QuoteSseTest(unittest.TestCase):
         self.stream._sse_slots = self._orig_slots
         self.stream.QUOTE_SSE_INTERVAL = self._orig_interval
         self.stream.QUOTE_SSE_TICK = self._orig_tick
+        self.stream.QUOTE_SSE_MAX_LIFETIME = self._orig_lifetime
 
     def _frames(self, url, n=2):
         """读前 n 帧后立即关闭 (不触发无限循环)。"""
@@ -150,6 +153,56 @@ class QuoteSseTest(unittest.TestCase):
             for _ in range(got):
                 self.stream._sse_slots.release()
         self.assertEqual(got, self.stream.QUOTE_SSE_MAX_CLIENTS, "断开后槽位应全部归还")
+
+    def _drain(self, url):
+        """读到生成器自然结束, 返回全部帧。"""
+        resp = self.client.get(url, buffered=False)
+        self.assertEqual(resp.status_code, 200)
+        frames = []
+        try:
+            for chunk in resp.iter_encoded():
+                frames.append(chunk.decode("utf-8"))
+        finally:
+            resp.close()
+        return frames
+
+    def _count_free_slots(self):
+        got = 0
+        try:
+            while self.stream._sse_slots.acquire(blocking=False):
+                got += 1
+        finally:
+            for _ in range(got):
+                self.stream._sse_slots.release()
+        return got
+
+    def test_max_lifetime_ends_stream_normally_and_releases_slot(self):
+        self.stream.QUOTE_SSE_MAX_LIFETIME = 0.25
+        self.stream.QUOTE_SSE_TICK = 0.05
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
+            frames = self._drain(f"/api/stream/quotes?symbols={SYM}")
+        self.assertTrue(frames)
+        self.assertEqual(frames[0], "retry: 5000\n\n")
+        self.assertEqual(frames[-1], ": rotate\n\n", "到期应以注释帧正常结束(供浏览器重连)")
+        self.assertEqual(self._count_free_slots(), self.stream.QUOTE_SSE_MAX_CLIENTS,
+                         "到期结束后必须归还全部槽位")
+
+    def test_max_lifetime_does_not_truncate_normal_push(self):
+        self.stream.QUOTE_SSE_MAX_LIFETIME = 3600.0
+        quotes = {SYM: {"last_price": 10.0}}
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value=quotes):
+            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=2)
+        self.assertEqual(frames[0], "retry: 5000\n\n")
+        self.assertTrue(frames[1].startswith("data: "))
+
+    def test_slots_recover_after_all_expire(self):
+        self.stream.QUOTE_SSE_MAX_LIFETIME = 0.2
+        self.stream.QUOTE_SSE_TICK = 0.05
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
+            for _ in range(self.stream.QUOTE_SSE_MAX_CLIENTS):
+                self._drain(f"/api/stream/quotes?symbols={SYM}")
+        self.assertEqual(self._count_free_slots(), self.stream.QUOTE_SSE_MAX_CLIENTS,
+                         "到期后新连接应可立即建立")
 
 
 if __name__ == "__main__":

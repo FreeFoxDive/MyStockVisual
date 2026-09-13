@@ -28,3 +28,4 @@ from api import trades  # noqa: E402,F401
 from api.auth import auth_bp  # noqa: E402,F401
 
 __all__ = ["api_bp", "auth_bp"]
+

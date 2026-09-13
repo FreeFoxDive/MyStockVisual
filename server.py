@@ -35,6 +35,28 @@ from security import RATE_LIMIT_PER_MIN  # noqa: E402
 log = logging.getLogger("server")
 
 
+def _install_thread_excepthook():
+    """线程未捕获异常不走 logging(默认只写 stderr), 这里记录到日志。
+
+    以 ERROR + exc_info 记录, 由 error_notify 的日志观察者异步取告警并节流,
+    因此无需在此重复推送。钩子整体 try/except, 绝不影响主流程。
+    """
+    import threading
+
+    def _hook(args):
+        try:
+            thread = getattr(args, "thread", None)
+            name = getattr(thread, "name", None) or "?"
+            exc = getattr(args, "exc_value", None)
+            if exc is None:
+                exc = getattr(args, "exc_type", Exception)("unhandled thread error")
+            log.error(f"线程 {name} 未捕获异常: {exc}", exc_info=exc)
+        except Exception:
+            pass
+
+    threading.excepthook = _hook
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visual K线图 HTTP 服务器")
     parser.add_argument("--port", type=int, default=8888, help="监听端口 (default: 8888)")
@@ -43,6 +65,7 @@ def main():
 
     app = create_app()
     bootstrap_admin()
+    _install_thread_excepthook()
     start_background_jobs()
 
     import kline_source

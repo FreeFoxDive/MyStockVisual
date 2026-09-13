@@ -25,6 +25,9 @@ QUOTE_SSE_MAX_CLIENTS = max(1, int(os.environ.get("QUOTE_SSE_MAX_CLIENTS", "3"))
 # 保活/断线探测间隔: 客户端断开后最多 ~1s 归还并发槽, 避免连续换股叠满 3 槽返回 429
 QUOTE_SSE_TICK = max(0.05, float(os.environ.get("QUOTE_SSE_TICK", "1")))
 QUOTE_SSE_MAX_SYMBOLS = 50
+# 单连接最长寿命: 到期正常结束流(非异常), 浏览器按 retry 自动重连,
+# 避免半死连接(客户端消失但 TCP 未报错)无限占用 waitress 线程。
+QUOTE_SSE_MAX_LIFETIME = max(1.0, float(os.environ.get("QUOTE_SSE_MAX_LIFETIME", "1800")))
 
 _sse_slots = threading.BoundedSemaphore(QUOTE_SSE_MAX_CLIENTS)
 
@@ -49,9 +52,14 @@ def stream_quotes():
             yield "retry: 5000\n\n"
             # 按 TICK 小步唤醒: 未到推送点发注释帧保活, 一旦客户端断开, 下一次
             # 写入即失败并触发 finally 归还槽位 (而非等满 INTERVAL 才醒)。
-            last_push = time.monotonic() - QUOTE_SSE_INTERVAL  # 首帧立即推送
+            start = time.monotonic()
+            last_push = start - QUOTE_SSE_INTERVAL  # 首帧立即推送
             while True:
                 now = time.monotonic()
+                if now - start >= QUOTE_SSE_MAX_LIFETIME:
+                    # 到期正常结束(返回而非抛异常/非 200), 浏览器会按 retry 重连
+                    yield ": rotate\n\n"
+                    return
                 if now - last_push >= QUOTE_SSE_INTERVAL:
                     last_push = now
                     try:

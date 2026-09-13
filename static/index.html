@@ -970,6 +970,10 @@ const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3
 const INTRADAY_REFRESH_MS = 60e3;
 const QUOTE_REFRESH_MS = 10e3;
 const LAST_BAR_PATCH_MS = 3000;  // 日K末根图表增量绘制节流
+// SSE 正常 OPEN 时不再轮询快照; 仅"OPEN 但久无数据"(僵尸连接)用宽阈值兜底
+const SSE_STALE_FALLBACK_MS = 30e3;
+// SSE 被拒(429 → CLOSED, 浏览器不再自动重连)后的重建退避间隔
+const SSE_RETRY_MS = 60e3;
 
 // ═══════════════════════════════════════════════════════════════
 // COLORS
@@ -1505,6 +1509,27 @@ function applyQuoteData(q) {
   if (patchTodayBarFromQuote(q)) requestBarPatchDraw();
 }
 
+/** 快照轮询判定: SSE 正常 OPEN 时不轮询; 僵尸连接(久无数据)兜底一次并重建。
+ *  返回 'poll'(普通轮询) | 'poll_rotate'(兜底一次并断开重建) | null(不轮询)。 */
+function quotePollDecision(now, lastQuoteAt, sseOpen) {
+  const age = now - (lastQuoteAt || 0);
+  if (sseOpen) return age >= SSE_STALE_FALLBACK_MS ? 'poll_rotate' : null;
+  return age >= QUOTE_REFRESH_MS ? 'poll' : null;
+}
+
+/** SSE 重建判定: 仅在无 EventSource 对象(CLOSED 后置空)、可自动刷新且过退避期时重建。 */
+function quoteStreamRetryDue(now, esPresent, retryAt, retryMs, canRefresh) {
+  if (!canRefresh) return false;
+  if (esPresent) return false;
+  return now - (retryAt || 0) >= (retryMs || SSE_RETRY_MS);
+}
+
+/** 当前 SSE 是否处于 OPEN(老浏览器无 EventSource 时恒 false)。 */
+function quoteSseOpen() {
+  return !!(window.EventSource && STATE._quoteEs
+            && STATE._quoteEs.readyState === EventSource.OPEN);
+}
+
 /** 快照 SSE 推送: 一条长连接替代 10s 轮询 (断线/超限自动回退轮询) */
 function startQuoteStream() {
   if (!window.EventSource) return; // 老浏览器回退轮询
@@ -1527,6 +1552,11 @@ function startQuoteStream() {
       if (es.readyState === EventSource.CLOSED && STATE._quoteEs === es) {
         STATE._quoteEs = null;
       }
+    };
+    es.onopen = () => {
+      // 连接成功: 复位重建退避, 便于后续被拒时及时重试
+      STATE._quoteEsRetryAt = 0;
+      STATE._quoteEsRetryMs = 0;
     };
     STATE._quoteEs = es;
   } catch (e) { /* 回退轮询 */ }
@@ -5277,6 +5307,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 盘中自动刷新: 快照 / 分时 / 分钟K 分开间隔; 午休、周末、节假日不拉
   STATE._lastQuoteAt = 0;
+  STATE._quoteEsRetryAt = 0;   // SSE 重建退避时间戳
+  STATE._quoteEsRetryMs = 0;   // SSE 重建退避间隔(含抖动)
   STATE._lastBarAt = 0;
   STATE._lastBarPatchDrawAt = 0;
   STATE._pendingBarPatch = false;
@@ -5340,9 +5372,23 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(() => {
     if (!canAutoRefresh()) return;
     const now = Date.now();
-    if (now - (STATE._lastQuoteAt || 0) >= QUOTE_REFRESH_MS) {
+    // 快照轮询: SSE OPEN 时不轮询; 僵尸连接(OPEN 久无数据)兜底一次并断开重建
+    const decision = quotePollDecision(now, STATE._lastQuoteAt, quoteSseOpen());
+    if (decision) {
       STATE._lastQuoteAt = now;
       fetchQuote();
+      if (decision === 'poll_rotate') {
+        try { if (STATE._quoteEs) STATE._quoteEs.close(); } catch (e) { /* ignore */ }
+        STATE._quoteEs = null;
+        STATE._quoteEsRetryAt = 0;
+      }
+    }
+    // SSE 被拒(CLOSED 置空)后按退避重建, 避免永久降级为轮询
+    if (quoteStreamRetryDue(now, !!STATE._quoteEs, STATE._quoteEsRetryAt,
+                            STATE._quoteEsRetryMs, canAutoRefresh())) {
+      STATE._quoteEsRetryAt = now;
+      STATE._quoteEsRetryMs = SSE_RETRY_MS + Math.floor(Math.random() * 15000);
+      scheduleQuoteStream();
     }
     if (STATE.period === 'intraday') {
       if (now - (STATE._lastBarAt || 0) >= INTRADAY_REFRESH_MS) fetchIntraday();

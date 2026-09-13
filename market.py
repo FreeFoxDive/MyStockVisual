@@ -32,6 +32,11 @@ if not AF_API_KEY:
 else:
     log.info("AF_API_KEY 已加载")
 
+# SDK 超时显式化(默认值与各 SDK 默认一致, 零行为变更; 可用环境变量收紧)。
+# alphafeed 默认 30s; mairui 默认 (connect 5s, read 60s)。
+AF_TIMEOUT_SEC = float(os.environ.get("AF_TIMEOUT_SEC", "30"))
+MAIRUI_TIMEOUT = (5.0, float(os.environ.get("MAIRUI_READ_TIMEOUT_SEC", "60")))
+
 _af = None
 _af_lock = threading.Lock()
 
@@ -42,7 +47,7 @@ def get_af():
         with _af_lock:
             if _af is None:
                 from alphafeed import AlphaFeed
-                _af = AlphaFeed(api_key=AF_API_KEY)
+                _af = AlphaFeed(api_key=AF_API_KEY, timeout=AF_TIMEOUT_SEC)
     return _af
 
 
@@ -66,7 +71,7 @@ def get_mr():
         with _mr_lock:
             if _mr is None:
                 from mairui import Client
-                _mr = Client(licence=MAIRUI_API_KEY)
+                _mr = Client(licence=MAIRUI_API_KEY, timeout=MAIRUI_TIMEOUT)
     return _mr
 
 

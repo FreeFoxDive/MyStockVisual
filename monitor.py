@@ -23,6 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import dingtalk  # noqa: E402
 import ntfy  # noqa: E402
+import error_notify  # noqa: E402
 import feed as feed_mod  # noqa: E402
 import market_hours  # noqa: E402
 import trades  # noqa: E402
@@ -71,8 +72,10 @@ _status = {
     "running": False,
     "backend": "rest",
     "last_poll": None,
+    "last_poll_ts": None,
     "n_symbols": 0,
     "last_error": None,
+    "in_backoff": False,
 }
 _feed = None
 _thread = None
@@ -103,6 +106,11 @@ def _load_env():
 def get_status():
     with _lock:
         return dict(_status)
+
+
+def is_thread_alive():
+    """监控线程是否存活(供 watchdog 自愈判断)。"""
+    return _thread is not None and _thread.is_alive()
 
 
 def _set_status(**kwargs):
@@ -819,7 +827,8 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     line_symbols = {m["symbol"] for m in line_monitors}
     symbols = list(dict.fromkeys(
         [p["symbol"] for p in positions] + sorted(alert_symbols | line_symbols)))
-    _set_status(n_symbols=len(symbols), last_poll=now_dt.isoformat(timespec="seconds"))
+    _set_status(n_symbols=len(symbols), last_poll=now_dt.isoformat(timespec="seconds"),
+                last_poll_ts=time.time())
     if not symbols:
         return []
 
@@ -948,7 +957,9 @@ def _loop(get_af, fallback_quotes):
             positions = trades.list_monitored_positions()
             n = len({p["symbol"] for p in positions})
             interval = _feed.poll_interval(n)
-            if _feed.in_backoff():
+            in_backoff = _feed.in_backoff()
+            _set_status(in_backoff=in_backoff)
+            if in_backoff:
                 time.sleep(5)
                 continue
             _poll_once(_feed, now_dt=now)
@@ -956,6 +967,7 @@ def _loop(get_af, fallback_quotes):
         except Exception as e:
             _set_status(last_error=str(e))
             log.warning(f"循环异常: {e}")
+            error_notify.notify_exception("monitor-loop", e)
             time.sleep(30)
 
 
@@ -1030,7 +1042,7 @@ def replay(spec_list, persist_fixture=True, position_overrides=None):
     if key:
         try:
             from alphafeed import AlphaFeed
-            af = AlphaFeed(api_key=key)
+            af = AlphaFeed(api_key=key, timeout=float(os.environ.get("AF_TIMEOUT_SEC", "30")))
         except Exception as e:
             log.warning(f"AlphaFeed 不可用: {e}")
 
@@ -1129,7 +1141,7 @@ def main():
         key = os.environ.get("AF_API_KEY", "")
         if not key:
             raise RuntimeError("未设置 AF_API_KEY")
-        return AlphaFeed(api_key=key)
+        return AlphaFeed(api_key=key, timeout=float(os.environ.get("AF_TIMEOUT_SEC", "30")))
 
     if args.once:
         f = feed_mod.RestFeed(_get_af)

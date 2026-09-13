@@ -16,8 +16,10 @@ SESSION_COOKIE = "session"
 SESSION_MAX_AGE = trades.SESSION_TTL_DAYS * 24 * 3600
 CSRF_COOKIE = "csrf_token"
 
-PUBLIC_API_GET = {"/api/ping"}
+PUBLIC_API_GET = {"/api/ping", "/api/health"}
 PUBLIC_API_POST = {"/api/auth/login", "/api/auth/logout"}
+# 健康探针豁免全局令牌桶(否则流量饱和时会误判 unhealthy); DB 检查有短缓存兜底
+RATE_LIMIT_EXEMPT = {"/api/health"}
 
 # CSP: 'unsafe-inline' 必需 (页面内联 script/style)
 CSP_HEADER = (
