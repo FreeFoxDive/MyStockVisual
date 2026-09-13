@@ -1292,19 +1292,16 @@ _hk_list_failed_at, _us_list_failed_at = 0.0, 0.0
 _hkus_refreshing = False
 _hkus_list_lock = threading.Lock()
 _HKUS_RETRY_DELAY = 60.0                 # 失败后 60s 才允许再次后台尝试
+# AF universes 文档确认仅 4 池: CN_Stock / US_Stock / HK_Stock / CN_ETF (无指数池)
 AF_UNIVERSE_HK = os.environ.get("AF_UNIVERSE_HK", "HK_Stock")
 AF_UNIVERSE_US = os.environ.get("AF_UNIVERSE_US", "US_Stock")
-AF_UNIVERSE_HK_INDEX = os.environ.get("AF_UNIVERSE_HK_INDEX", "HK_Index")
-AF_UNIVERSE_US_INDEX = os.environ.get("AF_UNIVERSE_US_INDEX", "US_Index")
 
 
 def _fetch_hk_list():
-    """港股列表: 股票池 + 指数池 (AlphaFeed universes), 回退 akshare 东财 (仅股票)。"""
+    """港股列表: AlphaFeed 股票池 (一次调用全市场), 回退 akshare 东财。"""
     rows = _fetch_universe_rows(AF_UNIVERSE_HK, "hk", "stock")
-    idx = _fetch_universe_rows(AF_UNIVERSE_HK_INDEX, "hk", "index")
-    merged = rows + [r for r in idx if r["symbol"] not in {x["symbol"] for x in rows}]
-    if merged:
-        return merged
+    if rows:
+        return rows
     import akshare as ak
     df = ak.stock_hk_spot_em()
     out = []
@@ -1317,12 +1314,10 @@ def _fetch_hk_list():
 
 
 def _fetch_us_list():
-    """美股列表: 股票池 + 指数池 (AlphaFeed universes), 回退 akshare 东财 (仅股票)。"""
+    """美股列表: AlphaFeed 股票池 (一次调用全市场), 回退 akshare 东财。"""
     rows = _fetch_universe_rows(AF_UNIVERSE_US, "us", "stock")
-    idx = _fetch_universe_rows(AF_UNIVERSE_US_INDEX, "us", "index")
-    merged = rows + [r for r in idx if r["symbol"] not in {x["symbol"] for x in rows}]
-    if merged:
-        return merged
+    if rows:
+        return rows
     import akshare as ak
     df = ak.stock_us_spot_em()
     out = []
