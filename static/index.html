@@ -3509,8 +3509,8 @@ function updateChart(reTheme) {
   // 面板标签: 抽象文本规格, 由画线 overlay canvas (paintLabels) 绘制
   panels.forEach((p, i) => {
     const g = grids[indicatorStartGi + i];
-    const gridTop = parseFloat(g.top) / 100 * ch;
-    const gridLeft = parseFloat(g.left) / 100 * cw;
+    const gridTop = spanPx(g.top, ch, false);
+    const gridLeft = spanPx(g.left, cw, false);
     graphics.push({
       text: PANEL_LABELS[p] || p.toUpperCase(), x: gridLeft + 6, y: gridTop + 15,
       fill: LABEL_COLORS[p] || C().text, font: 'bold 11px monospace',
@@ -3519,9 +3519,9 @@ function updateChart(reTheme) {
   // 成交量面板也加标签
   if (hasVolume) {
     const vg = grids[1];
-    const volGridTop = parseFloat(vg.top) / 100 * ch;
+    const volGridTop = spanPx(vg.top, ch, false);
     graphics.push({
-      text: 'VOL', x: parseFloat(vg.left) / 100 * cw + 6, y: volGridTop + 15,
+      text: 'VOL', x: spanPx(vg.left, cw, false) + 6, y: volGridTop + 15,
       fill: C().macdDif, font: 'bold 11px monospace',
     });
   }
@@ -4432,18 +4432,17 @@ function _renderDrawingsNow() {
   const c2 = drawOverlayCtx();
   if (!c2) return;
   const dctx = drawCtx();
-  if (!dctx || !STATE.draw.visible) { positionDrawMenu(); return; }
-  const P = drawMapper();
-  if (STATE.draw.autoLines) refreshAutoLines(dctx);
+  if (!dctx) { positionDrawMenu(); return; }
   // 面板名/图例是图表固有元素, 不随 👁 画线显隐开关消失
   paintLabels(c2, STATE.draw._labels);
   paintLegend(c2, dctx);
-  if (STATE.draw.autoLines && STATE.draw.visible) paintAutoLines(c2, P, dctx);
-  if (STATE.draw.visible) {
-    STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id));
-    if (STATE.draw.suggest) paintSuggest(c2, P, dctx);
-    if (STATE.draw.draft) paintDraft(c2, P, dctx);
-  }
+  if (!STATE.draw.visible) { positionDrawMenu(); return; }
+  const P = drawMapper();
+  if (STATE.draw.autoLines) refreshAutoLines(dctx);
+  if (STATE.draw.autoLines) paintAutoLines(c2, P, dctx);
+  STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id));
+  if (STATE.draw.suggest) paintSuggest(c2, P, dctx);
+  if (STATE.draw.draft) paintDraft(c2, P, dctx);
   positionDrawMenu();
 }
 

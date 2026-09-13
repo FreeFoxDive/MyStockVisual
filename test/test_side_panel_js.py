@@ -183,6 +183,22 @@ class SidePanelStaticTest(unittest.TestCase):
         calc = _extract_fn(self.src, "calcGridLayout")
         self.assertIn("gLeft", calc, "calcGridLayout 应使用 panelGridLeft 计算左边距")
 
+    def test_panel_labels_use_unit_aware_grid_left(self):
+        # 回归: 侧栏展开时 grid.left 是 "288px", 面板名标签若按 parseFloat(left)/100 算
+        # 会被画到画布外 (≈2.88×宽度), VOL/MACD 等标签整片消失。
+        body = _extract_fn(self.src, "updateChart")
+        self.assertIn("spanPx(g.left", body, "指标面板名标签 x 须按单位换算")
+        self.assertNotIn("parseFloat(g.left)", body, "不得再把 grid.left 当百分比")
+        self.assertIn("spanPx(vg.left", body, "VOL 标签 x 须按单位换算")
+        self.assertNotIn("parseFloat(vg.left)", body, "不得再把 VOL grid.left 当百分比")
+
+    def test_panel_labels_survive_draw_visibility_toggle(self):
+        # 回归: 👁 隐藏画线只该隐藏画线, 面板名标签/指标数值图例应常显
+        body = _extract_fn(self.src, "_renderDrawingsNow")
+        gate = body.index("!STATE.draw.visible")
+        self.assertLess(body.index("paintLabels"), gate, "paintLabels 应先于可见性早退")
+        self.assertLess(body.index("paintLegend"), gate, "paintLegend 应先于可见性早退")
+
     def test_fetchdata_period_coercion_routed_through_apply(self):
         fetch = _extract_fn(self.src, "fetchData")
         self.assertNotIn("STATE.period = '1d'", fetch, "分时切换复权不得静默改写周期")
