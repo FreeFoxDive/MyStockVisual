@@ -1428,10 +1428,17 @@ function matchBarIndex(dates, d) {
   return -1;
 }
 
+// K线 markPoint 共用提示框: 交易点带 name+value, 形态/金叉死叉点只有 name;
+// 缺项必须跳过, 否则 ECharts 会把缺失的 value 渲染成字面量 "undefined"。
+const KLINE_MARKPOINT_TOOLTIP = {
+  trigger: 'item',
+  formatter: (p) => [p.name, p.value].filter(Boolean).join('<br/>'),
+};
+
 // 依据交易记录构建 ECharts markPoint (同花顺样式: 红底白B挂柱体下/绿底白S挂柱体上, 不遮实体)
 function buildTradeMarkers(klines, dates) {
   const trades = STATE.trades;
-  if (!trades || !trades.length) return { symbol: 'none' };
+  if (!trades || !trades.length) return { symbol: 'none', tooltip: KLINE_MARKPOINT_TOOLTIP };
 
   const points = [];
   const push = (side, date, price, qty) => {
@@ -1470,14 +1477,8 @@ function buildTradeMarkers(klines, dates) {
     }
   }
 
-  if (!points.length) return { symbol: 'none' };
-  return {
-    tooltip: {
-      trigger: 'item',
-      formatter: (p) => p.name + '<br/>' + p.value,
-    },
-    data: points,
-  };
+  if (!points.length) return { symbol: 'none', tooltip: KLINE_MARKPOINT_TOOLTIP };
+  return { tooltip: KLINE_MARKPOINT_TOOLTIP, data: points };
 }
 
 /** 服务端实际生效的复权回填选项 (hfq 无数据回退 forward 时保持一致) */
@@ -2999,11 +3000,11 @@ function updateChart(reTheme) {
       if (a[i] == null || a[i - 1] == null || c20[i] == null || c20[i - 1] == null) continue;
       if (a[i - 1] <= c20[i - 1] && a[i] > c20[i]) {
         extraMarks.push({ coord: [i, klines[i].low], symbol: 'triangle', symbolSize: 8,
-          symbolRotate: 0, itemStyle: { color: C().up },
+          symbolRotate: 0, itemStyle: { color: C().up }, name: '金叉',
           label: { show: true, position: 'bottom', formatter: '金叉', fontSize: 9, color: C().up } });
       } else if (a[i - 1] >= c20[i - 1] && a[i] < c20[i]) {
         extraMarks.push({ coord: [i, klines[i].high], symbol: 'triangle', symbolSize: 8,
-          symbolRotate: 180, itemStyle: { color: C().down },
+          symbolRotate: 180, itemStyle: { color: C().down }, name: '死叉',
           label: { show: true, position: 'top', formatter: '死叉', fontSize: 9, color: C().down } });
       }
     }
@@ -3015,6 +3016,8 @@ function updateChart(reTheme) {
         symbol: pt.dir > 0 ? 'triangle' : 'triangle', symbolSize: 7,
         symbolRotate: pt.dir > 0 ? 0 : 180,
         itemStyle: { color: pt.dir > 0 ? C().up : C().down, opacity: 0.85 },
+        name: pt.name, value: pt.note,
+        label: { show: false },   // 形态只在悬浮提示里说明, 不往图上写字
       });
     });
   }

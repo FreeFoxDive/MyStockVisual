@@ -213,5 +213,45 @@ class FutureZoneWiringTest(unittest.TestCase):
         self.assertEqual(band[1]["xAxis"], 507.5)
 
 
+class MarkPointTooltipTest(unittest.TestCase):
+    """K线 markPoint 提示框: 形态/金叉死叉点只有 name 没有 value, 缺项必须跳过。
+
+    回归: 形态倒三角悬浮显示 "943 undefined" —— 943 是 coord 横坐标(该 bar 下标),
+    undefined 是缺失的 value, 由 buildTradeMarkers 里无条件拼接的 formatter 渲染出来。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = INDEX_HTML.read_text(encoding="utf-8")
+
+    def _marks_block(self):
+        """updateChart 里构建 金叉死叉/形态 extraMarks 的那段真实源码。"""
+        start = self.src.index("金叉死叉 + K线形态 markPoint")
+        end = self.src.index("const klineMarkPoint", start)
+        return self.src[start:end]
+
+    def test_formatter_skips_missing_fields(self):
+        self.assertIn("[p.name, p.value].filter(Boolean).join('<br/>')", self.src)
+        self.assertNotIn("p.name + '<br/>' + p.value", self.src,
+                         "无条件拼接会把缺失的 value 渲染成 undefined")
+
+    def test_tooltip_attached_even_without_trades(self):
+        # 否则没有交易记录的标的, 形态三角悬浮完全无反应
+        self.assertIn("return { symbol: 'none', tooltip: KLINE_MARKPOINT_TOOLTIP }", self.src)
+        self.assertIn("return { tooltip: KLINE_MARKPOINT_TOOLTIP, data: points }", self.src)
+
+    def test_pattern_items_carry_name_value_and_hide_label(self):
+        block = self._marks_block()
+        self.assertIn("name: pt.name", block, "形态标记缺 name, 提示框会渲染 undefined")
+        self.assertIn("value: pt.note", block)
+        self.assertIn("label: { show: false }", block,
+                      "形态标记不配 label 时, ECharts 默认标签会把坐标/undefined 画到图上")
+
+    def test_cross_items_carry_name(self):
+        block = self._marks_block()
+        self.assertIn("name: '金叉'", block)
+        self.assertIn("name: '死叉'", block)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
