@@ -67,7 +67,7 @@ visual/
 │   ├── common.py      # 共用: JSON 响应 / 登录态助手
 │   ├── auth.py        # /api/auth/*
 │   ├── market.py      # /api/ping|search|quote|quotes|depth|pledge|quota
-│   ├── kline.py       # /api/kline|chips|intraday
+│   ├── kline.py       # /api/kline|kline/tail|chips|intraday
 │   ├── trades.py      # /api/trades*|fees|trade-reasons|repo-maturity
 │   ├── models.py      # /api/models*
 │   ├── admin.py       # /api/admin/users*
@@ -99,7 +99,6 @@ visual/
 │   ├── css/theme.css  # 共享亮暗主题变量
 │   ├── js/theme.js    # 主题读写 (visual-theme)
 │   ├── js/api.js      # fetch + CSRF 头
-│   ├── js/indicators.js # 指标末根重算 (与后端口径对齐)
 │   ├── js/gaps.js     # 缺口扫描
 │   ├── js/chips.js    # 筹码分布叠加渲染
 │   ├── js/drawings.js # 画线模式纯逻辑 (坐标/命中/磁吸/ZigZag/评分/回归)
@@ -122,7 +121,8 @@ visual/
 |------|------|
 | `GET /` | 提供 index.html |
 | `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（含 OBV/MAOBV/量均线）+ 流通股本元数据（日K默认 1006≈3年可见+RSI250 warmup） |
-| `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数） |
+| `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 8s）。前端据此更新末根，不再自行拼 bar |
+| `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数；附 `is_trading_day`） |
 | `GET /api/chips?symbol=600519.SH&period=1w` | 筹码分布（股票/ETF；`period` 1d/1w/1M 决定日线回看窗口 210/600/1500 根，返回直方图+汇总+`source`/`period`；指数返回 null）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
 | `GET /api/depth?symbol=600519.SH` | 五档盘口（所有周期可用；独立令牌桶 2/3×30/min，失败返回 `depth=null`） |
 | `GET /api/stock-info?symbol=600519.SH` | 侧栏基本信息（行业/总手/成交额/换手/量比/涨停跌停/N日涨幅/PE/PB/交易状态；麦蕊 + 日K，整包 60s 缓存，港/美股降级为 None） |
@@ -178,7 +178,7 @@ visual/
 - 成交量均线: VOL MA5/MA10/MA20（东财/通达信默认）
 - Elder 动力系统: EMA13 方向 + MACD 柱方向 → 蜡烛颜色（红=多/绿=空/蓝=中性）
 - Elder ATR 通道: EMA13 ± 1×/2×/3× ATR，虚线叠加在 K线主图
-- 浏览器端纯展示，仅末根随快照重算（`indicators.js`，与后端口径对齐）
+- 当日 bar 与其全部指标**只由后端产出**：前端只按 `date` 合并 `/api/kline/tail` 下发的权威末根（`applyServerBars`），不再从快照拼 bar、不再本地重算指标
 - 换手率/振幅由 AlphaFeed `ext`（小数）统一 ×100 为百分数；流通/总股本取 `instruments.ext`（24h 缓存）
 
 ### 筹码分布 (CYQ)
@@ -288,7 +288,7 @@ venv/Scripts/python.exe -u visual/monitor.py --replay 603698.SH:2026-08-19 60311
 venv/Scripts/python.exe -m unittest discover -s visual/test
 ```
 
-`discover` 会跑指标/patch 的 **Node 镜像测试**（`test_recalc_tail_ma.py`、`test_indicators_js_unit.py`、`test_patch_today_bar_js.py`、`test_chart_patch_js.py`），需本机安装 **Node.js**；无 Node 时这些用例 skip，其余 Python mock 测试仍可通过。
+`discover` 会跑前端逻辑的 **Node 镜像测试**（`test_daily_tail_js.py`、`test_chart_patch_js.py`、`test_quote_poll_js.py`、`test_gaps_js.py`、`test_chips_js.py`、`test_patterns_js.py`、`test_drawings_js.py`），需本机安装 **Node.js**；无 Node 时这些用例 skip，其余 Python mock 测试仍可通过。
 
 钉钉 / ntfy 真连通（会发一条测试消息，平时不要跑）：
 

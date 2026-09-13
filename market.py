@@ -1042,6 +1042,7 @@ def _mr_quote_to_std(q, symbol):
         "change_pct": _safe_float(q.get("pc")),    # 麦蕊实时 pc = 涨跌幅%
         "amplitude": _safe_float(q.get("zf")),     # zf = 振幅%
         "turnover_rate": _safe_float(q.get("tr")),  # tr = 换手率% (ETF/指数无此字段)
+        "timestamp": _safe_epoch(q.get("t")),  # 快照更新时间 (epoch 秒, 无则 None)
         "name": _lookup_name(symbol),
     }
 
@@ -1078,6 +1079,7 @@ def _af_quote_to_std(q, symbol):
         "change_pct": _safe_float(q.get("change_pct")),
         "amplitude": _af_pct(q.get("amplitude")),        # 小数 → %
         "turnover_rate": _af_pct(q.get("turnover_rate")),  # 小数 → %
+        "timestamp": _safe_epoch(q.get("timestamp")),  # epoch 秒 (交易所时间)
         "name": q.get("name") or _lookup_name(symbol),
     }
 
@@ -1579,6 +1581,22 @@ def _safe_int(v):
         return None
 
 
+def _safe_epoch(v):
+    """快照时间戳规整为 epoch 秒; 毫秒自动降级, 无法解析/不在合理区间返回 None。
+
+    防住 14 位紧凑日期串 (如 20260911150000) 被误当毫秒: 归一后若不在
+    [2001, 2096] 的 epoch 区间则视为无效, 避免误判快照日期。
+    """
+    f = _safe_float(v)
+    if f is None or f <= 0:
+        return None
+    if f > 1e12:            # 毫秒
+        f /= 1000.0
+    if not (1e9 <= f <= 4e9):
+        return None
+    return f
+
+
 # ── 股票代码标准化 ──
 def _symbol_market(symbol):
     """市场归类: cn (A股/ETF/指数, 默认) / hk (港股, 5位数字代码) / us (美股字母代码)。"""
@@ -1672,11 +1690,9 @@ def _strip_today_bar_df(df):
     today = market_hours.now().date()
     last = _last_bar_date(df)
     if last is not None and last == today:
-        # 盘中今日 bar 不完整不缓存；收盘后视为终值可落盘
-        if (
-            market_hours.is_trading_day(today.strftime("%Y-%m-%d"))
-            and not market_hours.in_session()
-        ):
+        # 仅收盘后视为终值可落盘; 盘中/午休(BAR_READY 但非 closed)都剥掉,
+        # 避免把不完整的当日 bar 当终值写进磁盘缓存 (午休 in_session=False 曾是陷阱)
+        if market_hours.session_phase() == "closed":
             return df
         return df.iloc[:-1].copy()
     return df
@@ -1721,6 +1737,9 @@ def _maybe_append_today_bar(symbol, df):
     today = market_hours.now().date()
     if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
         return df
+    if market_hours.session_phase() == "pre":
+        # 盘前快照是上一交易日残留 (volume 可能 >0), 拼出来会凭空多一根"今日"bar
+        return df
     last_date = _last_bar_date(df)
     if last_date is None:
         return df
@@ -1741,9 +1760,23 @@ def _daily_bar_from_quote(symbol, target):
         return None
     if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
         return None
+    if market_hours.session_phase() == "pre":
+        # 盘前不拼当日 bar (快照为上一交易日残留)
+        return None
     q = fetch_quotes([symbol], fresh=True).get(normalize_symbol(symbol))
     if not q:
         return None
+    # 快照自带交易所时间戳时校验日期: 挡住盘前/停牌等陈旧快照被当今日
+    ts = q.get("timestamp")
+    if ts is not None:
+        try:
+            ts_date = dt_mod.datetime.fromtimestamp(
+                float(ts), dt_mod.timezone(dt_mod.timedelta(hours=8))
+            ).date()
+        except (TypeError, ValueError, OSError, OverflowError):
+            ts_date = None
+        if ts_date is not None and ts_date != today:
+            return None
     high = _safe_float(q.get("high"))
     low = _safe_float(q.get("low"))
     if high is None or low is None:

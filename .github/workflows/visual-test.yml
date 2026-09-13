@@ -29,8 +29,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      # JS 单测 (test_*_js.py / test_recalc_tail_ma.py) 依赖 node 执行,
-      # 不装则这些用例自动 skip
+      # JS 单测 (test_*_js.py) 依赖 node 执行, 不装则这些用例自动 skip
       - uses: actions/setup-node@v5
         with:
           node-version: "22"

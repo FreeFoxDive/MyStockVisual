@@ -1,6 +1,7 @@
 """日K 快照补 bar 逻辑单测。"""
 from __future__ import annotations
 
+import datetime as dt
 import os
 import sys
 import unittest
@@ -14,6 +15,8 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import market as market_mod
+
+_CST = dt.timezone(dt.timedelta(hours=8))
 
 
 def _df_with_dates(dates, close=10.0):
@@ -31,6 +34,10 @@ def _df_with_dates(dates, close=10.0):
     )
 
 
+def _phase(value):
+    return mock.patch("market_hours.session_phase", return_value=value)
+
+
 class TestStripTodayBarDf(unittest.TestCase):
     def test_strip_when_last_is_today_in_session(self):
         today = date.today()
@@ -38,9 +45,20 @@ class TestStripTodayBarDf(unittest.TestCase):
         df = _df_with_dates([yesterday.isoformat(), today.isoformat()], close=10.0)
         with mock.patch("market_hours.now") as mn:
             mn.return_value = pd.Timestamp(today)
-            with mock.patch("market_hours.is_trading_day", return_value=True):
-                with mock.patch("market_hours.in_session", return_value=True):
-                    out = market_mod._strip_today_bar_df(df)
+            with _phase("trading"):
+                out = market_mod._strip_today_bar_df(df)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(market_mod._last_bar_date(out), yesterday)
+
+    def test_strip_when_last_is_today_at_lunch_break(self):
+        """午休 phase=break (in_session=False) 不得把不完整当日 bar 当终值落盘。"""
+        today = date.today()
+        yesterday = (pd.Timestamp(today) - pd.Timedelta(days=1)).date()
+        df = _df_with_dates([yesterday.isoformat(), today.isoformat()], close=10.0)
+        with mock.patch("market_hours.now") as mn:
+            mn.return_value = pd.Timestamp(today)
+            with _phase("break"):
+                out = market_mod._strip_today_bar_df(df)
         self.assertEqual(len(out), 1)
         self.assertEqual(market_mod._last_bar_date(out), yesterday)
 
@@ -50,9 +68,8 @@ class TestStripTodayBarDf(unittest.TestCase):
         df = _df_with_dates([yesterday.isoformat(), today.isoformat()], close=10.0)
         with mock.patch("market_hours.now") as mn:
             mn.return_value = pd.Timestamp(today)
-            with mock.patch("market_hours.is_trading_day", return_value=True):
-                with mock.patch("market_hours.in_session", return_value=False):
-                    out = market_mod._strip_today_bar_df(df)
+            with _phase("closed"):
+                out = market_mod._strip_today_bar_df(df)
         self.assertEqual(len(out), 2)
         self.assertEqual(market_mod._last_bar_date(out), today)
 
@@ -81,7 +98,7 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
         }
         with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote):
             with mock.patch("market_hours.is_trading_day", return_value=True):
-                with mock.patch("market_hours.in_session", return_value=True):
+                with _phase("trading"):
                     out = market_mod._maybe_append_today_bar("000001.SH", df)
         self.assertEqual(len(out), 2)
         self.assertEqual(out.iloc[-1]["close"], 11.5)
@@ -102,7 +119,7 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
         }
         with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote):
             with mock.patch("market_hours.is_trading_day", return_value=True):
-                with mock.patch("market_hours.in_session", return_value=False):
+                with _phase("closed"):
                     out = market_mod._maybe_append_today_bar("000001.SH", df)
         self.assertEqual(len(out), 1)
         self.assertEqual(out.iloc[-1]["close"], 9.6)
@@ -115,7 +132,7 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
         df = _df_with_dates([today.isoformat()], close=9.0)
         with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=None):
             with mock.patch("market_hours.is_trading_day", return_value=True):
-                with mock.patch("market_hours.in_session", return_value=False):
+                with _phase("closed"):
                     out = market_mod._maybe_append_today_bar("000001.SH", df)
         self.assertEqual(len(out), 1)
         self.assertEqual(out.iloc[-1]["close"], 9.0)
@@ -131,6 +148,19 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out.iloc[-1]["close"], 9.0)
 
+    def test_no_append_before_open(self):
+        """交易日盘前: 快照是上一交易日残留, 不得拼出"今日"bar。"""
+        today = date.today()
+        yesterday = (pd.Timestamp(today) - pd.Timedelta(days=1)).date()
+        df = _df_with_dates([yesterday.isoformat()])
+        with mock.patch.object(market_mod, "_daily_bar_from_quote") as fq:
+            with mock.patch("market_hours.is_trading_day", return_value=True):
+                with _phase("pre"):
+                    out = market_mod._maybe_append_today_bar("000001.SH", df)
+        fq.assert_not_called()
+        self.assertEqual(len(out), 1)
+        self.assertEqual(market_mod._last_bar_date(out), yesterday)
+
     def test_refresh_last_bar_when_in_session(self):
         today = date.today()
         df = _df_with_dates([today.isoformat()], close=9.0)
@@ -144,7 +174,7 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
         }
         with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote):
             with mock.patch("market_hours.is_trading_day", return_value=True):
-                with mock.patch("market_hours.in_session", return_value=True):
+                with _phase("trading"):
                     out = market_mod._maybe_append_today_bar("510300.SH", df)
         self.assertEqual(len(out), 1)
         self.assertEqual(out.iloc[-1]["close"], 9.6)
@@ -159,6 +189,53 @@ class TestMaybeAppendTodayBar(unittest.TestCase):
                 out = market_mod._maybe_append_today_bar("000001.SH", df)
         fq.assert_not_called()
         self.assertEqual(len(out), 1)
+
+
+class TestDailyBarFromQuoteFreshness(unittest.TestCase):
+    """快照时间戳校验: 陈旧 (非今日) 快照不得拼成"今日"bar。"""
+
+    SYM = "000001.SZ"
+
+    def _quote(self, ts):
+        return {
+            "last_price": 10.5,
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.8,
+            "volume": 5000,
+            "amount": 52500.0,
+            "timestamp": ts,
+        }
+
+    def test_reject_stale_quote_timestamp(self):
+        today = date.today()
+        ts_yday = dt.datetime(today.year, today.month, today.day, 12, tzinfo=_CST).timestamp() - 86400
+        with mock.patch("market_hours.is_trading_day", return_value=True):
+            with _phase("trading"):
+                with mock.patch.object(market_mod, "fetch_quotes",
+                                       return_value={self.SYM: self._quote(ts_yday)}):
+                    out = market_mod._daily_bar_from_quote(self.SYM, today)
+        self.assertIsNone(out)
+
+    def test_accept_today_quote_timestamp(self):
+        today = date.today()
+        ts_today = dt.datetime(today.year, today.month, today.day, 12, tzinfo=_CST).timestamp()
+        with mock.patch("market_hours.is_trading_day", return_value=True):
+            with _phase("trading"):
+                with mock.patch.object(market_mod, "fetch_quotes",
+                                       return_value={self.SYM: self._quote(ts_today)}):
+                    out = market_mod._daily_bar_from_quote(self.SYM, today)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["close"], 10.5)
+
+    def test_no_quote_fetch_before_open(self):
+        today = date.today()
+        with mock.patch("market_hours.is_trading_day", return_value=True):
+            with _phase("pre"):
+                with mock.patch.object(market_mod, "fetch_quotes") as fq:
+                    out = market_mod._daily_bar_from_quote(self.SYM, today)
+        fq.assert_not_called()
+        self.assertIsNone(out)
 
 
 class TestDailyDiskCacheRoundtrip(unittest.TestCase):
@@ -182,7 +259,7 @@ class TestDailyDiskCacheRoundtrip(unittest.TestCase):
         }
         with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote):
             with mock.patch("market_hours.is_trading_day", return_value=True):
-                with mock.patch("market_hours.in_session", return_value=True):
+                with _phase("trading"):
                     merged = market_mod._maybe_append_today_bar("000975.SZ", df)
         out = merged.reset_index()
         if out.columns[0] != "trade_date":
@@ -208,7 +285,7 @@ class TestDailyDiskCacheRoundtrip(unittest.TestCase):
         with mock.patch.object(market_mod, "fetch_kline") as fk:
             with mock.patch.object(market_mod, "_daily_bar_from_quote", return_value=quote_today):
                 with mock.patch("market_hours.is_trading_day", return_value=True):
-                    with mock.patch("market_hours.in_session", return_value=True):
+                    with _phase("trading"):
                         merged = market_mod._maybe_append_today_bar("000975.SZ", hist.copy())
                         fk.return_value = (merged, "山金国际")
                         bar_today = market_mod.get_daily_bar("000975.SZ", today.isoformat())

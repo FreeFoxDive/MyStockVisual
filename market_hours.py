@@ -94,6 +94,31 @@ def in_session(now: datetime | None = None) -> bool:
     return am or pm
 
 
+def session_phase(now: datetime | None = None) -> str:
+    """当前时段: non_trading | pre | trading | break | closed。
+
+    唯一时段口径, 供接口透传与"当日 bar 是否可用/是否终值"判定, 避免各处
+    自行拼 is_trading_day + in_session 组合 (午休曾是 in_session=False 的陷阱)。
+    """
+    now = now or _now()
+    if not is_trading_day(now):
+        return "non_trading"
+    t = _mins(now.hour, now.minute)
+    if t < _mins(*_AM_START):
+        return "pre"
+    if in_session(now):
+        return "trading"
+    if t < _mins(*_PM_START):
+        return "break"
+    if t <= _mins(*_PM_END):
+        return "trading"
+    return "closed"
+
+
+# 当日 bar 已成型(开盘后)的时段: 盘前/非交易日的快照是上一交易日残留, 不可拼当日 bar。
+BAR_READY_PHASES = ("trading", "break", "closed")
+
+
 def session_elapsed_minutes(now: datetime | None = None) -> float:
     """当日已过交易分钟数 (0~240)。午休冻结在 120。非交易日/未开盘返回 0。"""
     now = now or _now()

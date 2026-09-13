@@ -74,9 +74,45 @@
   - `test_refresh_when_history_has_today_after_close`
   - `test_no_override_when_snapshot_unavailable`
   - `test_no_override_on_non_trading_day`
+  - `test_reject_stale_quote_timestamp` / `test_no_append_before_open`
 
-**残留（未处理）**：盘前（09:30 前）若某源快照仍带昨日 volume>0，可能被拼成“今日”bar。
-实际盘前快照 volume 通常为 0（安全）；如需彻底杜绝，可给快照透传 `timestamp` 并校验日期。
+**盘前残留（已修复，2026-09-13）**：此前若某源快照盘前仍带昨日 `volume>0`，可能被拼成
+“今日”bar。现由两道守卫堵住：
+
+- 时段：`market_hours.session_phase()` 统一判定，`pre`（未开盘）直接早退，不拼当日 bar。
+- 时间戳：`market._daily_bar_from_quote` 校验快照 `timestamp` 的交易所日期是否为今天
+  （AlphaFeed 原始快照自带 epoch 秒；麦蕊无则退化为时段守卫）。
+
+同日另修：`_strip_today_bar_df` 原用 `not in_session()` 判“收盘终值”，午休时
+`in_session()=False` 会把不完整的当日 bar 当终值写进磁盘缓存；改用
+`session_phase() == "closed"`。
+
+---
+
+## 1b. 契约：当日 bar 只由后端产出，前端不得合成
+
+**状态**：已确立（2026-09-13）。
+
+**背景**：主页图表曾在 `static/index.html` 的 `patchTodayBarFromQuote` 里按实时快照
+自己拼/改当日 bar（`volume>0` + 日期更晚即追加），与后端 `_maybe_append_today_bar`
+是两套口径。非交易日快照仍是上一交易日残留（`volume>0`），前端据此凭空多出一根
+“今日”bar（如周六出现周六的 K 线）。
+
+**契约**：
+
+- 当日 bar 的 OHLCV **与全部指标**只由后端产出；前端不再派生 K 线数据、不再本地
+  重算指标（`static/js/indicators.js` 已删除）。
+- 前端通过 `GET /api/kline/tail?symbol=&period=1d&count=<与图表同>&n=2` 取权威末
+  N 根（与 `/api/kline` 同一 `fetch_kline_ex` + `compute_all_indicators` 口径），
+  按 `date` 合并/追加（`applyServerBars`）；非交易日/盘前后端本就不含“今日”bar，
+  合并即 no-op。
+- `count` 必须与图表一致，否则 OBV 等全序列指标会漂移。
+- 交易日/时段判定只保留 `market_hours.session_phase()` 一处；接口 meta 透传
+  `is_trading_day` / `session_phase`。
+
+**护栏测试**：`visual/test/test_kline_tail_api.py`
+`test_tail_last_bar_matches_kline_last_bar`（末根与 `/api/kline` 逐字段一致）；
+`visual/test/test_daily_tail_js.py`（前端只应用服务端 bar，非交易日不新增）。
 
 ---
 

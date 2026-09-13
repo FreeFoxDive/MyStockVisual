@@ -135,7 +135,12 @@ def quote():
         q = fetch_quote(symbol)
         if q is None:
             return _error(f"无法获取 {symbol} 的快照", 404)
-        return _json(q)
+        # fetch_quote 返回 quote_cache 共享条目, 复制后再挂标志避免污染缓存;
+        # 前端据此拦截非交易日用残留快照补当日 bar。
+        now = market_hours.now()
+        resp = dict(q)
+        resp["is_trading_day"] = market_hours.is_trading_day(now)
+        return _json(resp)
     except Exception as e:
         log.warning("获取快照失败 %s: %s", symbol, _sanitize_error(e))
         return _error("获取快照失败，请稍后重试", 500)
@@ -149,7 +154,10 @@ def quotes():
         return _error("缺少 symbols 参数")
     fresh = (request.args.get("fresh") or "0").lower() in ("1", "true", "yes")
     try:
-        return _json(fetch_quotes(symbols, fresh=fresh))
+        quotes = fetch_quotes(symbols, fresh=fresh)
+        # 与 /api/quote、SSE 口径一致: 每条快照带交易日标志 (不改写共享缓存条目)
+        td = market_hours.is_trading_day(market_hours.now())
+        return _json({s: {**q, "is_trading_day": td} for s, q in quotes.items()})
     except Exception as e:
         log.warning("批量快照失败: %s", _sanitize_error(e))
         return _error("获取快照失败，请稍后重试", 500)

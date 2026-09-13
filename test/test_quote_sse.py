@@ -106,6 +106,17 @@ class QuoteSseTest(unittest.TestCase):
         self.assertEqual(resp.headers["Cache-Control"], "no-cache")
         self.assertEqual(resp.headers["X-Accel-Buffering"], "no")
 
+    def test_frame_carries_is_trading_day_flag(self):
+        # 非交易日标志必须随快照下发, 前端据此拦截 "残留快照补当日 bar"
+        quotes = {SYM: {"last_price": 10.5, "volume": 100}}
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value=quotes), \
+                mock.patch.object(self.stream.market_hours, "is_trading_day", return_value=False):
+            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}")
+        payload = json.loads(frames[1][len("data: "):])
+        self.assertIs(payload[SYM]["is_trading_day"], False)
+        self.assertEqual(payload[SYM]["last_price"], 10.5, "注入标志不得丢失原字段")
+        self.assertNotIn("is_trading_day", quotes[SYM], "不得原地改写 fetch_quotes 的返回条目")
+
     def test_symbols_truncated_to_max(self):
         fetch = mock.Mock(return_value={})
         syms = ",".join(f"60000{i}.SH" for i in range(self.stream.QUOTE_SSE_MAX_SYMBOLS + 10))

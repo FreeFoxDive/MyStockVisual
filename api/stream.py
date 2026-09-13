@@ -17,6 +17,7 @@ import time
 from flask import Response, request
 
 import market
+import market_hours
 from api import api_bp
 from api.common import _error, _require_user
 
@@ -64,7 +65,12 @@ def stream_quotes():
                     last_push = now
                     try:
                         quotes = market.fetch_quotes(symbols)
-                        payload = json.dumps(quotes, ensure_ascii=False, cls=market.NumpyEncoder)
+                        # 每条快照附交易日标志: 前端据此拦截非交易日用残留快照补当日 bar
+                        td = market_hours.is_trading_day()
+                        payload = json.dumps(
+                            {s: {**q, "is_trading_day": td} for s, q in quotes.items()},
+                            ensure_ascii=False, cls=market.NumpyEncoder,
+                        )
                         yield f"data: {payload}\n\n"
                     except Exception:
                         # 单次快照失败: 发注释帧保活, 下轮重试

@@ -160,6 +160,32 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
             out2 = market_mod._af_quote_to_std(raw2, "600519.SH")
         self.assertEqual(out2["name"], "备用名")
 
+    def test_af_quote_to_std_carries_epoch_timestamp(self):
+        raw = _af_row("600519.SH", timestamp=1789056000)
+        with mock.patch.object(market_mod, "_lookup_name", return_value="x"):
+            out = market_mod._af_quote_to_std(raw, "600519.SH")
+        self.assertEqual(out["timestamp"], 1789056000.0)
+        # 毫秒自动降级为秒
+        raw_ms = _af_row("600519.SH", timestamp=1789056000000)
+        with mock.patch.object(market_mod, "_lookup_name", return_value="x"):
+            out_ms = market_mod._af_quote_to_std(raw_ms, "600519.SH")
+        self.assertEqual(out_ms["timestamp"], 1789056000.0)
+
+    def test_mr_quote_to_std_timestamp_none_when_unparseable(self):
+        raw = _mr_row(t="2026-09-11 15:00:00")
+        out = market_mod._mr_quote_to_std(raw, "000001.SZ")
+        self.assertIsNone(out["timestamp"])
+
+    def test_safe_epoch(self):
+        self.assertEqual(market_mod._safe_epoch(1789056000), 1789056000.0)
+        self.assertEqual(market_mod._safe_epoch(1789056000000), 1789056000.0)
+        self.assertIsNone(market_mod._safe_epoch(None))
+        self.assertIsNone(market_mod._safe_epoch("2026-09-11"))
+        self.assertIsNone(market_mod._safe_epoch(0))
+        # 14 位紧凑日期串 (YYYYMMDDHHMMSS) 不得被当毫秒/epoch
+        self.assertIsNone(market_mod._safe_epoch("20260911150000"))
+        self.assertIsNone(market_mod._safe_epoch(20260911150000))
+
     def test_fetch_af_quotes_batch_and_valid(self):
         import pandas as pd
         af = mock.Mock()
