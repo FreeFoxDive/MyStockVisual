@@ -19,7 +19,7 @@ PROJECT_DIR = SCRIPT_DIR.parent
 
 log = logging.getLogger("market")
 
-from logger import sanitize_error as _sanitize_error  # noqa: E402
+from logger import redact_message, sanitize_error as _sanitize_error  # noqa: E402
 import datetime as dt_mod
 import decimal as dec_mod
 import feed
@@ -1330,14 +1330,29 @@ def _fetch_us_list():
     return out
 
 
+_hkus_universe_perm_denied = False  # AF 套餐无 universe 查询权限时置位, 进程内不再尝试
+
+
 def _fetch_universe_rows(universe, market_tag, default_type):
     """AF quotes.get(universes=...) 拉一个池的全市场快照 (代码/名称/类型)。
 
     行类型优先取 AF 的 ext.type (stock/etf/index...), 缺失用 default_type。
-    返回 [] 表示该池不可用 (ID 不对/额度不足), 由调用方回退。
+    返回 [] 表示该池不可用 (无权限/ID 不对/额度不足), 由调用方回退。
     """
+    global _hkus_universe_perm_denied
+    if _hkus_universe_perm_denied:
+        return []  # 套餐无 universe 权限 (403 永久性), 本进程内不再尝试
     af = get_af()
-    df = af.quotes.get(universes=[universe], to_dataframe=True)
+    try:
+        df = af.quotes.get(universes=[universe], to_dataframe=True)
+    except Exception as e:
+        msg = str(e)
+        if "not available" in msg or "403" in msg or "Permission" in type(e).__name__:
+            _hkus_universe_perm_denied = True
+            log.warning("AF 套餐无 universe 查询权限, 港/美股列表改用 akshare (本进程内不再尝试 AF)")
+        else:
+            log.warning(f"AF universe {universe} 拉取失败: {_sanitize_error(e)}")
+        return []
     if df is None or len(df) == 0:
         log.warning(f"AF universe {universe} 返回空")
         return []
