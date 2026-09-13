@@ -1880,7 +1880,7 @@ function renderHistoryTags() {
   bar.style.display = 'flex';
   tags.innerHTML = list.map(h =>
     `<span class="history-tag" onclick="switchToHistory('${esc(h.symbol)}')" title="${esc(h.symbol)}">
-      ${typeBadge(h.type)}${esc(h.name)}<span class="sym">${esc(h.symbol.replace(/\.(SH|SZ|BJ|HK)$/,''))}</span>
+      ${typeBadge(h.type)}${esc(h.name)}
     </span>`
   ).join('');
 }
