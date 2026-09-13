@@ -964,7 +964,7 @@ function buildLastPriceLine(bars) {
     silent: true, symbol: 'none', animation: false,
     lineStyle: { color: clr, type: 'dashed', width: 1, opacity: 0.9 },
     label: {
-      show: true, position: 'insideEndTop',
+      show: true, position: 'insideStartTop',  // 左端: 避免盖住最右侧的最新K线
       formatter: fmtPrice3(price),
       fontSize: 10, fontFamily: 'monospace', color: '#fff',
       backgroundColor: clr, padding: [2, 4], borderRadius: 2,
