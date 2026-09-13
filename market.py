@@ -1287,58 +1287,20 @@ def _load_stock_list():
 
 _HK_LIST_FILE = SCRIPT_DIR / ".cache" / "hk_list.json"
 _US_LIST_FILE = SCRIPT_DIR / ".cache" / "us_list.json"
-_hk_list, _us_list = None, None
+_hk_list, _us_list = None, None          # None=尚未加载成功; []=尝试过但无数据
+_hk_list_failed_at, _us_list_failed_at = 0.0, 0.0
+_hkus_refreshing = False
 _hkus_list_lock = threading.Lock()
-
-
-def _load_universe_file(path, fetcher, cache_attr):
-    """通用列表加载: 内存 → 磁盘(24h, 支持过期回退) → akshare 现拉。"""
-    global _hk_list, _us_list
-    mem = _hk_list if cache_attr == "hk" else _us_list
-    if mem is not None:
-        return mem
-    fetcher_map = {"hk": _fetch_hk_list, "us": _fetch_us_list}
-    with _hkus_list_lock:
-        mem = _hk_list if cache_attr == "hk" else _us_list
-        if mem is not None:
-            return mem
-        rows = None
-        try:
-            if path.exists():
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict) and raw.get("rows"):
-                    age = time.time() - float(raw.get("ts") or 0)
-                    if age < STOCK_LIST_TTL:
-                        mem = raw["rows"]
-                    elif raw["rows"]:
-                        rows = raw["rows"]  # 过期: 先回退, 拉取成功再覆盖
-        except Exception as e:
-            log.warning(f"读取列表缓存失败 {path.name}: {e}")
-        if mem is None:
-            try:
-                fresh = fetcher_map[cache_attr]()
-                if fresh:
-                    mem = fresh
-                    try:
-                        path.write_text(json.dumps(
-                            {"ts": time.time(), "rows": mem}, ensure_ascii=False),
-                            encoding="utf-8")
-                    except Exception:
-                        pass
-                elif rows is not None:
-                    mem = rows  # 现拉失败回退过期数据
-            except Exception as e:
-                log.warning(f"拉取列表失败 {path.name}: {e}")
-                mem = rows or []
-        if cache_attr == "hk":
-            _hk_list = mem or []
-            return _hk_list
-        _us_list = mem or []
-        return _us_list
+_HKUS_RETRY_DELAY = 60.0                 # 失败后 60s 才允许再次后台尝试
+AF_UNIVERSE_HK = os.environ.get("AF_UNIVERSE_HK", "HK_Stock")
+AF_UNIVERSE_US = os.environ.get("AF_UNIVERSE_US", "US_Stock")
 
 
 def _fetch_hk_list():
-    """港股列表 (东财): 代码 5 位数字 → symbol 00700.HK"""
+    """港股列表: AlphaFeed universes 快照优先 (一次调用全市场), 回退 akshare 东财。"""
+    rows = _fetch_universe_rows(AF_UNIVERSE_HK, "hk")
+    if rows:
+        return rows
     import akshare as ak
     df = ak.stock_hk_spot_em()
     out = []
@@ -1351,7 +1313,10 @@ def _fetch_hk_list():
 
 
 def _fetch_us_list():
-    """美股列表 (东财): 代码形如 105.MSFT → symbol MSFT"""
+    """美股列表: AlphaFeed universes 快照优先, 回退 akshare 东财。"""
+    rows = _fetch_universe_rows(AF_UNIVERSE_US, "us")
+    if rows:
+        return rows
     import akshare as ak
     df = ak.stock_us_spot_em()
     out = []
@@ -1364,12 +1329,98 @@ def _fetch_us_list():
     return out
 
 
-def _load_hk_list():
-    return _load_universe_file(_HK_LIST_FILE, _fetch_hk_list, "hk")
+def _fetch_universe_rows(universe, market_tag):
+    """AF quotes.get(universes=...) 一次拉全市场快照, 取 代码/名称 构建列表。
+
+    返回 [] 表示该池不可用 (ID 不对/额度不足), 由调用方回退 akshare。
+    """
+    af = get_af()
+    df = af.quotes.get(universes=[universe], to_dataframe=True)
+    if df is None or len(df) == 0:
+        log.warning(f"AF universe {universe} 返回空, 回退 akshare")
+        return []
+    out = []
+    name_col = "name" if "name" in df.columns else None
+    for sym, row in df.iterrows():
+        s = str(sym).strip().upper()
+        name = str(row.get(name_col) or "").strip() if name_col else ""
+        if not s or not name:
+            continue
+        code = s.split(".")[0]
+        out.append({"symbol": s, "name": name, "code": code})
+    log.info(f"AF universe {universe} 列表加载成功: {len(out)} 只")
+    return out
 
 
-def _load_us_list():
-    return _load_universe_file(_US_LIST_FILE, _fetch_us_list, "us")
+def _load_universe_mem(path, attr):
+    """只读内存/磁盘缓存 (24h TTL, 过期仍回退), 绝不发网络请求 —— 搜索路径零阻塞。"""
+    global _hk_list, _us_list
+    mem = _hk_list if attr == "hk" else _us_list
+    if mem is not None:
+        return mem
+    path = _HK_LIST_FILE if attr == "hk" else _US_LIST_FILE
+    try:
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            rows = raw.get("rows") if isinstance(raw, dict) else None
+            if rows:
+                if attr == "hk":
+                    _hk_list = rows
+                else:
+                    _us_list = rows
+                return rows
+    except Exception as e:
+        log.warning(f"读取列表缓存失败 {path.name}: {e}")
+    return None
+
+
+def _refresh_hkus_lists_async():
+    """后台拉取港/美股列表 (搜索请求绝不阻塞); 失败 60s 后才再次尝试。"""
+    global _hkus_refreshing
+    now = time.time()
+    need = []
+    with _hkus_list_lock:
+        if _hkus_refreshing:
+            return
+        if _hk_list is None and now - _hk_list_failed_at > _HKUS_RETRY_DELAY:
+            need.append("hk")
+        if _us_list is None and now - _us_list_failed_at > _HKUS_RETRY_DELAY:
+            need.append("us")
+        if not need:
+            return
+        _hkus_refreshing = True
+
+    def worker():
+        global _hk_list, _us_list, _hkus_refreshing
+        try:
+            for attr in need:
+                try:
+                    rows = _fetch_hk_list() if attr == "hk" else _fetch_us_list()
+                    if rows:
+                        path = _HK_LIST_FILE if attr == "hk" else _US_LIST_FILE
+                        try:
+                            path.write_text(json.dumps(
+                                {"ts": time.time(), "rows": rows}, ensure_ascii=False),
+                                encoding="utf-8")
+                        except Exception:
+                            pass
+                        with _hkus_list_lock:
+                            if attr == "hk":
+                                _hk_list = rows
+                            else:
+                                _us_list = rows
+                except Exception as e:
+                    log.warning(f"拉取列表失败 {attr}: {redact_message(str(e))}")
+                finally:
+                    if attr == "hk":
+                        globals()["_hk_list_failed_at"] = time.time()
+                    else:
+                        globals()["_us_list_failed_at"] = time.time()
+        finally:
+            with _hkus_list_lock:
+                _hkus_refreshing = False
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def _search_stocks(query):
@@ -1386,8 +1437,11 @@ def _search_stocks(query):
         for sym, name in _index_names.items():
             universe.append({"symbol": sym, "name": name,
                              "code": sym.split(".")[0], "type": "index"})
-    universe.extend(_load_hk_list() or [])
-    universe.extend(_load_us_list() or [])
+    hk_rows = _load_universe_mem(_HK_LIST_FILE, "hk") or []
+    us_rows = _load_universe_mem(_US_LIST_FILE, "us") or []
+    universe.extend(hk_rows)
+    universe.extend(us_rows)
+    _refresh_hkus_lists_async()  # 空/过期 → 后台预热 (AF 优先), 搜索请求不阻塞
 
     q = query.strip().lower()
     results = []
