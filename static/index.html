@@ -318,12 +318,11 @@ body {
 /* 选股后台扫描: 主页入口脉冲动画 + 进度文字 */
 @keyframes scanning-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 #screener-entry.scanning { animation: scanning-pulse 1.2s ease-in-out infinite; color: var(--btn-active); font-variant-numeric: tabular-nums; }
-/* 周期组展开: 挤压信息区/搜索框保持单行 */
-#toolbar.periods-expanded .info-group { flex-shrink: 1; min-width: 0; overflow: hidden; }
-#toolbar.periods-expanded .info-group .oh,
-#toolbar.periods-expanded .info-group #info-time,
-#toolbar.periods-expanded .info-group #info-amount,
-#toolbar.periods-expanded .info-guba { display: none !important; }
+/* 周期组展开: 信息区折行收缩, 不隐藏/裁切行情 (展开周期不得丢 OHLC/成交额/时间) */
+#toolbar.periods-expanded .info-group {
+  flex-wrap: wrap; white-space: normal;
+  flex-shrink: 1; min-width: 0; row-gap: 2px;
+}
 #toolbar.periods-expanded #symbol-input { width: 130px; }
 #toolbar .period-group .more-btn.expanded::before { content: "▴ "; }
 #toolbar .period-group.expanded .more-btn { color: var(--btn-active); }
@@ -506,7 +505,7 @@ body {
   #side-panel .dp-row, #side-panel .sp-row { line-height: 17px; }
 }
 @media (max-width: 480px) {
-  #toolbar #info-code, #toolbar #info-premium,
+  #toolbar #info-code, #toolbar #info-turnover, #toolbar #info-premium,
   #toolbar #info-pledge, #toolbar #info-shares, #toolbar #info-amount { display: none; }
 }
 
@@ -624,6 +623,7 @@ body {
     <span id="info-code"></span>
     <span class="name" id="info-name">—</span>
     <a id="info-guba" href="#" target="_blank" rel="noopener noreferrer" style="display:none" title="东财股吧">股吧 ↗</a>
+    <span id="info-turnover" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-pledge" style="font-size:12px;color:var(--text-secondary);display:none"></span>
     <span id="info-shares" style="font-size:12px;color:var(--text-secondary);display:none"></span>
@@ -1854,7 +1854,7 @@ function fmtPrice3(v) {
   return v == null ? '—' : Number(Number(v).toFixed(3)).toString();
 }
 
-// 流值 (股票) / 份额 (ETF) / 成交额
+// 换手 (股票) / 流值 (股票) / 份额 (ETF) / 成交额
 function updateFundInfo(q) {
   const d = STATE.klineData || {};
   const isEtf = !!d.is_etf;
@@ -1862,8 +1862,17 @@ function updateFundInfo(q) {
   const fs = d.float_shares;
   const last = q && q.last_price != null ? q.last_price : null;
 
+  const turnoverEl = document.getElementById('info-turnover');
   const sharesEl = document.getElementById('info-shares');
   const amountEl = document.getElementById('info-amount');
+
+  // 换手率 (仅股票)
+  if (q && q.turnover_rate != null && !isEtf && !isIndex) {
+    turnoverEl.textContent = `换手 ${q.turnover_rate.toFixed(2)}%`;
+    turnoverEl.style.display = '';
+  } else {
+    turnoverEl.style.display = 'none';
+  }
 
   // 流通市值 (股票) / 基金份额 (ETF)
   if (fs != null && fs > 0) {
@@ -1951,7 +1960,7 @@ function updateInfo(data) {
     document.getElementById('info-premium').style.display = 'none';
   }
 
-  // 流值/份额/成交额 (无 quote 时用末根收盘价兜底显示流值/份额)
+  // 换手/流值/份额/成交额 (无 quote 时用末根收盘价兜底显示流值/份额)
   let qf = data.quote;
   if (!qf && data.klines && data.klines.length) {
     qf = { last_price: data.klines[data.klines.length - 1].close };
