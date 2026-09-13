@@ -1294,13 +1294,17 @@ _hkus_list_lock = threading.Lock()
 _HKUS_RETRY_DELAY = 60.0                 # 失败后 60s 才允许再次后台尝试
 AF_UNIVERSE_HK = os.environ.get("AF_UNIVERSE_HK", "HK_Stock")
 AF_UNIVERSE_US = os.environ.get("AF_UNIVERSE_US", "US_Stock")
+AF_UNIVERSE_HK_INDEX = os.environ.get("AF_UNIVERSE_HK_INDEX", "HK_Index")
+AF_UNIVERSE_US_INDEX = os.environ.get("AF_UNIVERSE_US_INDEX", "US_Index")
 
 
 def _fetch_hk_list():
-    """港股列表: AlphaFeed universes 快照优先 (一次调用全市场), 回退 akshare 东财。"""
-    rows = _fetch_universe_rows(AF_UNIVERSE_HK, "hk")
-    if rows:
-        return rows
+    """港股列表: 股票池 + 指数池 (AlphaFeed universes), 回退 akshare 东财 (仅股票)。"""
+    rows = _fetch_universe_rows(AF_UNIVERSE_HK, "hk", "stock")
+    idx = _fetch_universe_rows(AF_UNIVERSE_HK_INDEX, "hk", "index")
+    merged = rows + [r for r in idx if r["symbol"] not in {x["symbol"] for x in rows}]
+    if merged:
+        return merged
     import akshare as ak
     df = ak.stock_hk_spot_em()
     out = []
@@ -1308,15 +1312,17 @@ def _fetch_hk_list():
         code = str(row.get("代码", "")).strip().zfill(5)
         name = str(row.get("名称", "")).strip()
         if code and name:
-            out.append({"symbol": f"{code}.HK", "name": name, "code": code})
+            out.append({"symbol": f"{code}.HK", "name": name, "code": code, "type": "hk"})
     return out
 
 
 def _fetch_us_list():
-    """美股列表: AlphaFeed universes 快照优先, 回退 akshare 东财。"""
-    rows = _fetch_universe_rows(AF_UNIVERSE_US, "us")
-    if rows:
-        return rows
+    """美股列表: 股票池 + 指数池 (AlphaFeed universes), 回退 akshare 东财 (仅股票)。"""
+    rows = _fetch_universe_rows(AF_UNIVERSE_US, "us", "stock")
+    idx = _fetch_universe_rows(AF_UNIVERSE_US_INDEX, "us", "index")
+    merged = rows + [r for r in idx if r["symbol"] not in {x["symbol"] for x in rows}]
+    if merged:
+        return merged
     import akshare as ak
     df = ak.stock_us_spot_em()
     out = []
@@ -1325,29 +1331,31 @@ def _fetch_us_list():
         ticker = raw.split(".")[-1].strip().upper()
         name = str(row.get("名称", "")).strip()
         if ticker and name:
-            out.append({"symbol": ticker, "name": name, "code": ticker})
+            out.append({"symbol": ticker, "name": name, "code": ticker, "type": "us"})
     return out
 
 
-def _fetch_universe_rows(universe, market_tag):
-    """AF quotes.get(universes=...) 一次拉全市场快照, 取 代码/名称 构建列表。
+def _fetch_universe_rows(universe, market_tag, default_type):
+    """AF quotes.get(universes=...) 拉一个池的全市场快照 (代码/名称/类型)。
 
-    返回 [] 表示该池不可用 (ID 不对/额度不足), 由调用方回退 akshare。
+    行类型优先取 AF 的 ext.type (stock/etf/index...), 缺失用 default_type。
+    返回 [] 表示该池不可用 (ID 不对/额度不足), 由调用方回退。
     """
     af = get_af()
     df = af.quotes.get(universes=[universe], to_dataframe=True)
     if df is None or len(df) == 0:
-        log.warning(f"AF universe {universe} 返回空, 回退 akshare")
+        log.warning(f"AF universe {universe} 返回空")
         return []
+    has_ext_type = "ext.type" in df.columns
     out = []
-    name_col = "name" if "name" in df.columns else None
     for sym, row in df.iterrows():
         s = str(sym).strip().upper()
-        name = str(row.get(name_col) or "").strip() if name_col else ""
+        name = str(row.get("name") or "").strip()
         if not s or not name:
             continue
-        code = s.split(".")[0]
-        out.append({"symbol": s, "name": name, "code": code})
+        itype = str(row.get("ext.type") or "").strip().lower() if has_ext_type else ""
+        out.append({"symbol": s, "name": name, "code": s.split(".")[0],
+                    "type": itype if itype in ("stock", "etf", "index", "fund") else default_type})
     log.info(f"AF universe {universe} 列表加载成功: {len(out)} 只")
     return out
 

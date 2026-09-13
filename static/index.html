@@ -1857,6 +1857,21 @@ function esc(s) {
   return d.innerHTML;
 }
 
+/** 搜索结果类型徽标: 指数/ETF 按类型, 港/美按代码形态 */
+function badgeType(r) {
+  if (r.type === 'index' || r.type === 'etf') return r.type;
+  const s = String(r.symbol || '').toUpperCase();
+  if (s.endsWith('.HK')) return 'hk';
+  const code = s.split('.')[0];
+  if (/^[A-Z]+$/.test(code)) return 'us';
+  return '';
+}
+function searchBadge(r) {
+  const LABELS = { index: '指数', etf: 'ETF', hk: '港', us: '美' };
+  const t = badgeType(r);
+  return LABELS[t] || '';
+}
+
 function renderHistoryTags() {
   const list = loadHistory();
   const bar = document.getElementById('history-bar');
@@ -4435,10 +4450,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderDropdown() {
     if (searchResults.length === 0) { closeDropdown(); return; }
-    const TYPE_BADGES = { index: '指数', etf: 'ETF', hk: '港', us: '美' };
     dropdown.innerHTML = searchResults.map((r, i) => {
-      const badge = TYPE_BADGES[r.type]
-        ? `<span class="type-badge tb-${r.type}">${TYPE_BADGES[r.type]}</span>` : '';
+      const badge = searchBadge(r)
+        ? `<span class="type-badge tb-${badgeType(r)}">${searchBadge(r)}</span>` : '';
       return `<div class="item${i === activeIdx ? ' active' : ''}" data-idx="${i}">
         ${badge}${esc(r.name)}<span class="code">${esc(r.code)}</span>
       </div>`;
