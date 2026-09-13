@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import trades
 from api import api_bp
-from api.common import _error, _json, _read_json_body, _require_user
+from api.common import _error, _json, _monitor_error_label, _read_json_body, _require_user
 
 
 @api_bp.route("/api/me/search-history", methods=["GET"])
@@ -64,6 +64,5 @@ def monitor_status():
     st["alerts"] = alerts
     st["monitor_enabled"] = bool(user.get("is_admin") or user.get("monitor_enabled"))
     if st.get("last_error"):
-        from logger import redact_message
-        st["last_error"] = redact_message(st["last_error"])
+        st["last_error"] = _monitor_error_label(st["last_error"])
     return _json(st)

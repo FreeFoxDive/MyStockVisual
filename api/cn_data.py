@@ -51,8 +51,7 @@ def _cached(key, fetcher, ttl=CACHE_TTL):
         log.warning(f"cn 数据拉取失败 {key}: {redact_message(str(e))}")
         if hit:
             return hit[1]  # 过期回退
-        reason = (redact_message(str(e)) or type(e).__name__)[:80]
-        return {"error": f"数据源暂时不可用 ({reason})"}
+        return {"error": "数据源暂时不可用"}
 
 
 def _clean_cell(v):

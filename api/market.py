@@ -8,7 +8,7 @@ from flask import request
 
 import market_hours
 from api import api_bp
-from api.common import _error, _json, _require_user
+from api.common import _error, _json, _monitor_error_label, _require_user
 from logger import sanitize_error as _sanitize_error
 from market import (
     _fetch_mairui_quota,
@@ -73,7 +73,7 @@ def _monitor_health():
         "backend": st.get("backend"),
         "last_poll_age_sec": age,
         "in_backoff": bool(st.get("in_backoff")),
-        "last_error": _sanitize_error(st["last_error"]) if st.get("last_error") else None,
+        "last_error": _monitor_error_label(st["last_error"]) if st.get("last_error") else None,
     }
 
 

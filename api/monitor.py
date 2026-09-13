@@ -9,8 +9,7 @@ import market_hours
 import monitor
 import trades
 from api import api_bp
-from api.common import _error, _json, _read_json_body, _require_user
-from logger import redact_message
+from api.common import _error, _json, _monitor_error_label, _read_json_body, _require_user
 
 log = logging.getLogger("api")
 
@@ -86,7 +85,7 @@ def monitor_overview():
     positions, scope_all = _merge_positions(user)
     st = monitor.get_status() or {}
     if st.get("last_error"):
-        st["last_error"] = redact_message(st["last_error"])
+        st["last_error"] = _monitor_error_label(st["last_error"])
     return _json({
         "positions": positions,
         "scope_all": scope_all,

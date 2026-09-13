@@ -1,11 +1,16 @@
 """Flask 路由: 图表画线同步 (/api/drawings, 按 用户+代码+周期 整体存取)。"""
 from __future__ import annotations
 
+import logging
+
 from flask import request
 
 import trades
 from api import api_bp
 from api.common import _error, _json, _read_json_body, _require_user
+from logger import sanitize_error as _sanitize_error
+
+log = logging.getLogger("api")
 
 
 @api_bp.route("/api/drawings", methods=["GET"])
@@ -36,7 +41,8 @@ def drawings_put():
     try:
         n = trades.save_chart_drawings(user["id"], symbol, period, body.get("drawings"))
     except ValueError as e:
-        return _error(str(e), 400)
+        log.warning("保存画线失败 %s %s: %s", symbol, period, _sanitize_error(e))
+        return _error("画线数据无效", 400)
     return _json({"ok": True, "count": n})
 
 

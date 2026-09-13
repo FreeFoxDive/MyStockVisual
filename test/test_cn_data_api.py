@@ -197,7 +197,7 @@ class CnRouteTest(unittest.TestCase):
         with mock.patch("requests.get", side_effect=fake_get):
             data = self.client.get("/api/cn/fund-flow?symbol=600000.SH").get_json()
         self.assertIn("error", data)
-        self.assertIn("RemoteDisconnected", data["error"], "错误文案应带真实原因")
+        self.assertEqual(data["error"], "数据源暂时不可用", "对外文案不应含异常原文")
 
     def test_dividends_shows_description_and_transfer_ratio(self):
         """分红列显示东财的描述文本 (每10股口径), 且送转比例列不再因列名不匹配而丢失。"""

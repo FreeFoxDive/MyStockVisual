@@ -1,11 +1,16 @@
 """Flask 路由: 任意条件预警 (/api/alerts CRUD)。"""
 from __future__ import annotations
 
+import logging
+
 from flask import request
 
 import trades
 from api import api_bp
 from api.common import _error, _json, _read_json_body, _require_user
+from logger import sanitize_error as _sanitize_error
+
+log = logging.getLogger("api")
 
 
 @api_bp.route("/api/alerts", methods=["GET"])
@@ -33,7 +38,8 @@ def alerts_create():
         alert_id = trades.create_price_alert(
             user["id"], symbol, body.get("name"), body.get("rule"), body.get("note"))
     except ValueError as e:
-        return _error(str(e), 400)
+        log.warning("创建预警失败 %s: %s", symbol, _sanitize_error(e))
+        return _error("预警规则无效", 400)
     return _json({"ok": True, "id": alert_id}, 201)
 
 

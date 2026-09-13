@@ -1,12 +1,16 @@
 """Flask 路由: 交易记录/费率/交易工具 (/api/trades*|fees|trade-reasons|repo-maturity)。"""
 from __future__ import annotations
 
+import logging
+
 from flask import request
 
 import trades
 from api import api_bp
 from api.common import _error, _json, _read_json_body, _require_user
 from logger import sanitize_error as _sanitize_error
+
+log = logging.getLogger("api")
 
 
 @api_bp.route("/api/trade-reasons", methods=["GET"])
@@ -63,7 +67,8 @@ def trades_create():
     try:
         trade = trades.create_trade(user["id"], body)
     except ValueError as e:
-        return _error(str(e), 400)
+        log.warning("创建交易失败: %s", _sanitize_error(e))
+        return _error("交易数据无效", 400)
     return _json({"trade": trade}, 201)
 
 
@@ -78,7 +83,8 @@ def trades_update(tid):
     try:
         trade = trades.update_trade(user["id"], tid, body)
     except ValueError as e:
-        return _error(str(e), 400)
+        log.warning("更新交易失败 id=%s: %s", tid, _sanitize_error(e))
+        return _error("交易数据无效", 400)
     if trade is None:
         return _error("记录不存在", 404)
     return _json({"trade": trade})
@@ -127,5 +133,6 @@ def fees_put():
     try:
         fees = trades.update_user_fees(user["id"], body)
     except ValueError as e:
-        return _error(f"费率配置无效: {_sanitize_error(e)}", 400)
+        log.warning("费率配置无效 uid=%s: %s", user["id"], _sanitize_error(e))
+        return _error("费率配置无效", 400)
     return _json({"fees": fees})

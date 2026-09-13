@@ -1,9 +1,14 @@
 """Flask 路由: 交易模型 (/api/models CRUD+restore)。"""
 from __future__ import annotations
 
+import logging
+
 import trades
 from api import api_bp
 from api.common import _error, _json, _read_json_body, _require_admin, _require_user
+from logger import sanitize_error as _sanitize_error
+
+log = logging.getLogger("api")
 
 
 @api_bp.route("/api/models", methods=["GET"])
@@ -29,7 +34,8 @@ def models_create():
             body.get("hold_days"),
         )
     except ValueError as e:
-        return _error(str(e), 409)
+        log.warning("创建模型失败: %s", _sanitize_error(e))
+        return _error("模型名称不符合要求或已存在", 409)
     return _json({"ok": True, "id": mid})
 
 
@@ -49,7 +55,8 @@ def models_update(mid):
             mid, body.get("name"), body.get("description", ""), hold_days,
         )
     except ValueError as e:
-        return _error(str(e), 409)
+        log.warning("更新模型失败 id=%s: %s", mid, _sanitize_error(e))
+        return _error("模型名称不符合要求或已存在", 409)
     if not updated:
         return _error("模型不存在", 404)
     return _json({"ok": True})
@@ -77,7 +84,8 @@ def models_restore(mid):
     try:
         restored = trades.restore_model(mid)
     except ValueError as e:
-        return _error(str(e), 409)
+        log.warning("恢复模型失败 id=%s: %s", mid, _sanitize_error(e))
+        return _error("模型名称不符合要求或已存在", 409)
     if not restored:
         return _error("模型不存在", 404)
     return _json({"ok": True})

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -23,6 +24,9 @@ import market
 from api import api_bp
 from api.common import _error, _json, _read_json_body, _require_user
 from indicators import macd, rsi, sma
+from logger import sanitize_error as _sanitize_error
+
+log = logging.getLogger("api")
 
 CONDITION_METRICS = {"macd_cross_up", "above_ma20", "chip_profit_gt", "rsi6_lt", "change_pct_gt"}
 
@@ -187,9 +191,10 @@ def _scan_worker(conditions, count):
             _job["running"] = False
         _persist_job()
     except Exception as e:
+        log.warning("选股扫描失败: %s", _sanitize_error(e))
         with _job_lock:
             _job["running"] = False
-            _job["error"] = str(e)
+            _job["error"] = "扫描失败"
 
 
 @api_bp.route("/api/screener/run", methods=["POST"])

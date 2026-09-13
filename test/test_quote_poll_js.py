@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
@@ -27,6 +28,28 @@ for p in (str(_VISUAL_DIR), str(_TEST_DIR)):
 from js_test_util import require_node, run_node  # noqa: E402
 
 INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
+
+
+class _InlineScriptParser(HTMLParser):
+    """提取内联 <script> 正文 (跳过带 src 的外链脚本)。"""
+
+    def __init__(self):
+        super().__init__()
+        self.blocks = []
+        self._buf = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "script" and not any(k.lower() == "src" for k, _ in attrs):
+            self._buf = []
+
+    def handle_data(self, data):
+        if self._buf is not None:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "script" and self._buf is not None:
+            self.blocks.append("".join(self._buf))
+            self._buf = None
 
 
 class QuotePollJsTest(unittest.TestCase):
@@ -73,9 +96,9 @@ process.stdout.write(JSON.stringify(out));
         )
 
     def test_inline_scripts_parse(self):
-        blocks = re.findall(
-            r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", self.src, re.S
-        )
+        parser = _InlineScriptParser()
+        parser.feed(self.src)
+        blocks = parser.blocks
         self.assertTrue(blocks, "未找到 inline script")
         for i, body in enumerate(blocks):
             with tempfile.NamedTemporaryFile(

@@ -1,9 +1,14 @@
 """Flask 路由: 管理员用户管理 (/api/admin/users*)。"""
 from __future__ import annotations
 
+import logging
+
 import trades
 from api import api_bp
 from api.common import _error, _json, _read_json_body, _require_admin
+from logger import sanitize_error as _sanitize_error
+
+log = logging.getLogger("api")
 
 
 @api_bp.route("/api/admin/users", methods=["GET"])
@@ -33,7 +38,8 @@ def admin_users_create():
     try:
         user_id = trades.create_user(username, password, is_admin=False)
     except ValueError as e:
-        return _error(str(e), 409)
+        log.warning("创建用户失败 %s: %s", username, _sanitize_error(e))
+        return _error("用户名已存在或不符合要求", 409)
     return _json({"ok": True, "id": user_id, "username": username})
 
 
@@ -47,7 +53,8 @@ def admin_users_delete(user_id):
     try:
         deleted = trades.delete_user(user_id)
     except ValueError as e:
-        return _error(str(e), 400)
+        log.warning("删除用户失败 id=%s: %s", user_id, _sanitize_error(e))
+        return _error("该用户不可删除", 400)
     if not deleted:
         return _error("用户不存在", 404)
     return _json({"ok": True})
@@ -69,7 +76,8 @@ def admin_users_reset(user_id):
     try:
         updated = trades.reset_password(user_id, password)
     except ValueError as e:
-        return _error(str(e), 400)
+        log.warning("重置密码失败 id=%s: %s", user_id, _sanitize_error(e))
+        return _error("密码不符合要求（至少 6 位）", 400)
     if not updated:
         return _error("用户不存在", 404)
     return _json({"ok": True})
