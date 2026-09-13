@@ -607,9 +607,15 @@ def _fetch_fund_kline(symbol, period, count):
     return df
 
 
+def _af_adjust(adj):
+    """内部复权口径 → AlphaFeed API 词汇: hfq 即后复权 = backward。"""
+    adj = kline_source.normalize_adjust(adj)
+    return "backward" if adj == kline_source.ADJUST_HFQ else adj
+
+
 def _fetch_minute_kline(symbol, period, count, adjust="forward"):
     """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
-    adj = kline_source.normalize_adjust(adjust)
+    adj = _af_adjust(adjust)
     # 港/美股 K线限频 (额度 10/min 的 4/5); 桶空返回 None 走缓存/回退
     if _symbol_market(symbol) in ("hk", "us"):
         with _hkus_lock:
@@ -636,7 +642,7 @@ def _fetch_af_kline(symbol, period, count, adjust="forward"):
     AlphaFeed 原生支持 1d/1w/1M; 股票/ETF 日K为备选源, 周/月K为主源
     (周/月K不依赖抖动的 akshare)。
     """
-    adj = kline_source.normalize_adjust(adjust)
+    adj = _af_adjust(adjust)
     try:
         af = get_af()
         dfs = af.klines.batch(

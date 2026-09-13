@@ -91,6 +91,20 @@ def kline():
         log.warning("获取K线失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("获取K线失败，请稍后重试", 500)
 
+    # 请求的复权无数据 (如 AF 不支持后复权) → 回退前复权重取一次, 保住图表
+    adjust_fallback = False
+    if df is None and adjust != kline_source.ADJUST_FORWARD and period not in MINUTE_PERIODS:
+        log.warning("%s %s 无 %s 复权数据, 回退前复权", symbol, period, adjust)
+        adjust = kline_source.ADJUST_FORWARD
+        adjust_fallback = True
+        cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
+        try:
+            df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust)
+        except Exception as e:
+            log.warning("复权回退获取失败 %s: %s", symbol, _sanitize_error(e))
+        if df is None:
+            return _error(f"无法获取 {symbol} 的K线数据", 404)
+
     if df is None:
         return _error(f"无法获取 {symbol} 的K线数据", 404)
 
@@ -224,6 +238,7 @@ def kline():
             "last_trade_date": klines[-1]["date"] if klines else None,
             "source": source,
             "adjust": adjust,
+            "adjust_fallback": adjust_fallback,
         },
     }
 

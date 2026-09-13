@@ -1038,6 +1038,7 @@ async function fetchData(opts) {
       if (Date.now() - cached.ts < ttl * 1000 && cached.data) {
         STATE.klineData = cached.data;
         updateInfo(cached.data);
+        syncAdjustMeta(cached.data);
         updateChart(false);
         cacheHit = true;
       }
@@ -1065,6 +1066,7 @@ async function fetchData(opts) {
     const data = await resp.json();
     if (STATE._fetchTs !== fetchTs) return; // 竞态: 已切到新股票, 丢弃旧响应
     STATE.klineData = data;
+    syncAdjustMeta(data);
     document.getElementById('symbol-input').value = data.symbol; // 同步服务端标准化后的 symbol
     // 保存到 localStorage (限制 2MB 总大小)
     try {
@@ -1097,6 +1099,12 @@ async function fetchData(opts) {
     updateChart(false);
   } catch (e) {
     console.error('获取数据失败:', e);
+    if (STATE._prevAdjust && STATE.adjust !== STATE._prevAdjust) {
+      // 切换复权失败 (如后复权源不可用): 回退选项, 保持图表与选项一致
+      STATE.adjust = STATE._prevAdjust;
+      document.getElementById('adj-select').value = STATE.adjust;
+      showToast('后复权数据获取失败, 已回退前复权', { type: 'warn' });
+    }
     if (!silent) showToast('行情数据加载失败: ' + e.message, { type: 'err', actionLabel: '重试', onAction: () => loadCurrent() });
   } finally {
     if (!silent) {
@@ -1260,6 +1268,17 @@ function buildTradeMarkers(klines, dates) {
     },
     data: points,
   };
+}
+
+/** 服务端实际生效的复权回填选项 (hfq 无数据回退 forward 时保持一致) */
+function syncAdjustMeta(data) {
+  const meta = data && data.meta;
+  if (!meta || !meta.adjust) return;
+  if (meta.adjust !== STATE.adjust) {
+    STATE.adjust = meta.adjust;
+    document.getElementById('adj-select').value = meta.adjust;
+    if (meta.adjust_fallback) showToast('后复权数据源不可用, 已回退前复权', { type: 'warn' });
+  }
 }
 
 async function fetchQuote() {
@@ -2255,6 +2274,7 @@ function ensurePeriodVisible(period) {
 
 /** 复权切换: 重新拉取 (分钟周期固定前复权, 由后端钳制) */
 function onAdjustChange(v) {
+  STATE._prevAdjust = STATE.adjust;  // 切换失败时回退用
   STATE.adjust = ['forward', 'hfq', 'none'].includes(v) ? v : 'forward';
   document.getElementById('adj-select').value = STATE.adjust;
   saveConfig();
