@@ -209,6 +209,18 @@ CREATE TABLE IF NOT EXISTS chart_drawings (
     UNIQUE(user_id, symbol, period),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+-- 趋势线监控触发状态 (仅记 last_fired_at, 配置挂在 chart_drawings 的 JSON 内)
+CREATE TABLE IF NOT EXISTS trendline_monitor_state (
+    user_id       INTEGER NOT NULL,
+    drawing_id    TEXT NOT NULL,         -- 画线对象 id (前端 uid)
+    symbol        TEXT NOT NULL,
+    period        TEXT NOT NULL,
+    last_fired_at TEXT,
+    PRIMARY KEY (user_id, drawing_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trendline_state_symbol
+    ON trendline_monitor_state(symbol);
 """
 
 
@@ -2404,6 +2416,108 @@ def delete_chart_drawings(user_id, symbol, period):
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ── 趋势线监控 (配置存 chart_drawings JSON 的 monitor 字段, 这里只管状态) ──
+
+_MONITORABLE_LINE_TYPES = ("trend", "ray", "hline")
+_MONITORABLE_PERIODS = ("1d", "1w", "1M")
+
+
+def list_chart_drawing_rows():
+    """全部画线原始行 (跨用户, 监控循环用, 过滤与缓存由 monitor.py 做)。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT user_id, symbol, period, drawings, updated_at FROM chart_drawings"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_trendline_monitors(user_id):
+    """某用户的监控线列表 (预警弹窗展示), 附最近触发时间。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT symbol, period, drawings FROM chart_drawings WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+        state = {
+            r["drawing_id"]: r["last_fired_at"]
+            for r in conn.execute(
+                "SELECT drawing_id, last_fired_at FROM trendline_monitor_state "
+                "WHERE user_id=?",
+                (user_id,),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        try:
+            data = json.loads(r["drawings"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, list):
+            continue
+        for d in data:
+            if not isinstance(d, dict):
+                continue
+            mon = d.get("monitor")
+            if not isinstance(mon, dict) or not mon.get("enabled"):
+                continue
+            if d.get("type") not in _MONITORABLE_LINE_TYPES:
+                continue
+            try:
+                pct = float(mon.get("pct"))
+            except (TypeError, ValueError):
+                pct = None
+            did = str(d.get("id") or "")
+            out.append({
+                "drawing_id": did,
+                "symbol": r["symbol"],
+                "period": r["period"],
+                "name": (d.get("name") or "").strip(),
+                "line_type": d["type"],
+                "pct": pct,
+                "adjust": mon.get("adjust") if mon.get("adjust") in ("forward", "hfq", "none") else "forward",
+                "last_fired_at": state.get(did),
+            })
+    return out
+
+
+def get_trendline_fired(user_id, drawing_id):
+    """该监控线最近一次触发时间 (isoformat 字符串) 或 None。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT last_fired_at FROM trendline_monitor_state "
+            "WHERE user_id=? AND drawing_id=?",
+            (user_id, drawing_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["last_fired_at"] if row else None
+
+
+def mark_trendline_fired(user_id, drawing_id, symbol, period, fired_at):
+    """记录触发时间 (upsert)。"""
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO trendline_monitor_state
+                 (user_id, drawing_id, symbol, period, last_fired_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, drawing_id)
+               DO UPDATE SET symbol=excluded.symbol, period=excluded.period,
+                             last_fired_at=excluded.last_fired_at""",
+            (user_id, drawing_id, symbol, period, fired_at),
+        )
+        conn.commit()
     finally:
         conn.close()
 

@@ -22,6 +22,8 @@ from api.common import _error, _require_user
 
 QUOTE_SSE_INTERVAL = max(3.0, float(os.environ.get("QUOTE_SSE_INTERVAL", "10")))
 QUOTE_SSE_MAX_CLIENTS = max(1, int(os.environ.get("QUOTE_SSE_MAX_CLIENTS", "3")))
+# 保活/断线探测间隔: 客户端断开后最多 ~1s 归还并发槽, 避免连续换股叠满 3 槽返回 429
+QUOTE_SSE_TICK = max(0.05, float(os.environ.get("QUOTE_SSE_TICK", "1")))
 QUOTE_SSE_MAX_SYMBOLS = 50
 
 _sse_slots = threading.BoundedSemaphore(QUOTE_SSE_MAX_CLIENTS)
@@ -45,15 +47,23 @@ def stream_quotes():
         try:
             # retry: 断线后浏览器 EventSource 重连间隔
             yield "retry: 5000\n\n"
+            # 按 TICK 小步唤醒: 未到推送点发注释帧保活, 一旦客户端断开, 下一次
+            # 写入即失败并触发 finally 归还槽位 (而非等满 INTERVAL 才醒)。
+            last_push = time.monotonic() - QUOTE_SSE_INTERVAL  # 首帧立即推送
             while True:
-                try:
-                    quotes = market.fetch_quotes(symbols)
-                    payload = json.dumps(quotes, ensure_ascii=False, cls=market.NumpyEncoder)
-                    yield f"data: {payload}\n\n"
-                except Exception:
-                    # 单次快照失败: 发注释帧保活, 下轮重试
-                    yield ": tick\n\n"
-                time.sleep(QUOTE_SSE_INTERVAL)
+                now = time.monotonic()
+                if now - last_push >= QUOTE_SSE_INTERVAL:
+                    last_push = now
+                    try:
+                        quotes = market.fetch_quotes(symbols)
+                        payload = json.dumps(quotes, ensure_ascii=False, cls=market.NumpyEncoder)
+                        yield f"data: {payload}\n\n"
+                    except Exception:
+                        # 单次快照失败: 发注释帧保活, 下轮重试
+                        yield ": tick\n\n"
+                else:
+                    yield ": keepalive\n\n"
+                time.sleep(QUOTE_SSE_TICK)
         finally:
             _sse_slots.release()
 

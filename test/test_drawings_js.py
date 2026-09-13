@@ -347,5 +347,50 @@ class TestDrawingsSmart(unittest.TestCase):
         self.assertIsNone(out["unsupported"], "rect 等非线型不参与相交提示")
 
 
+class TestDrawingsNameMonitor(unittest.TestCase):
+    """normalize: 监控趋势线的 name / monitor 字段保留与非法剔除。"""
+
+    PTS = "[{t: '2026-01-01', p: 10, off: 0}, {t: null, p: 12, off: 2}]"
+
+    def test_name_and_monitor_preserved(self):
+        out = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: ' 主升浪 ', monitor: {enabled: true, pct: '2.5'}})")
+        self.assertEqual(out["name"], "主升浪")
+        self.assertEqual(out["monitor"], {"enabled": True, "pct": 2.5})
+
+    def test_disabled_monitor_still_kept(self):
+        out = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: false, pct: 3}})")
+        self.assertEqual(out["monitor"], {"enabled": False, "pct": 3})
+
+    def test_monitor_adjust_preserved(self):
+        out = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: true, pct: 2, adjust: 'none'}})")
+        self.assertEqual(out["monitor"]["adjust"], "none")
+        bad = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: true, pct: 2, adjust: 'weird'}})")
+        self.assertNotIn("adjust", bad["monitor"])
+
+    def test_invalid_name_or_pct_dropped(self):
+        blank = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: '   ', monitor: {enabled: true, pct: 2}})")
+        self.assertNotIn("name", blank)
+        # 名称由前端开启监控时强制填写; normalize 只做字段校验, 监控配置独立保留
+        self.assertEqual(blank["monitor"]["pct"], 2)
+        bad_pct = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: true, pct: 99}})")
+        self.assertNotIn("monitor", bad_pct)
+        no_pct = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: true}})")
+        self.assertNotIn("monitor", no_pct)
+
+
 if __name__ == "__main__":
     unittest.main()

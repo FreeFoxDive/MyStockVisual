@@ -21,6 +21,7 @@ from api import market  # noqa: E402,F401
 from api import me  # noqa: E402,F401
 from api import models  # noqa: E402,F401
 from api import monitor  # noqa: E402,F401
+from api import mr_data  # noqa: E402,F401
 from api import screener  # noqa: E402,F401
 from api import stream  # noqa: E402,F401
 from api import trades  # noqa: E402,F401

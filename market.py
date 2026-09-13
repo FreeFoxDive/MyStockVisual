@@ -1778,3 +1778,340 @@ def get_daily_bar(symbol, date_str):
 
     return None
 
+
+# ═══════════════════════════════════════════════════════════════
+# 麦蕊特色数据 (基本信息侧栏 / 市场数据抽屉)
+# ═══════════════════════════════════════════════════════════════
+# 全市场榜单 (/himk/roe、/higg/zljlr) 一次返回几 MB, 必须长缓存进程内共享;
+# 逐股接口 (instrument/concepts/hscp) 按 symbol 缓存, 免费版 500 次/日额度可控。
+
+_MR_FAIL_TTL = 300.0  # 上游失败/无数据的短负缓存, 避免反复打接口
+
+
+def _mr_rows(rows):
+    """麦蕊返回归一: 非空 list 正常; dict=错误响应 / 空=无数据 → None。"""
+    if isinstance(rows, list) and rows:
+        return rows
+    return None
+
+
+def _memo(key, store, lock, ttl, fetcher):
+    """进程内 TTL 记忆 (成功 ttl / 失败 _MR_FAIL_TTL); 抛异常 → None。"""
+    now = time.time()
+    with lock:
+        ent = store.get(key)
+        if ent and now - ent["ts"] < (ttl if ent["ok"] else _MR_FAIL_TTL):
+            return ent["data"]
+    try:
+        data = fetcher()
+        ok = data is not None
+    except Exception as e:
+        log.warning(f"麦蕊数据获取失败 {key}: {_sanitize_error(e)}")
+        data, ok = None, False
+    with lock:
+        store[key] = {"ts": now, "data": data, "ok": ok}
+    return data
+
+
+# ── 全市场 ROE 排行: 一次请求同时拿到 行业(hym) / 市盈率(syld) / 市净率(sjl) ──
+_ROE_TTL = 12 * 3600
+_roe_cache = {"ts": 0.0, "data": None, "ok": False}
+_roe_lock = threading.Lock()
+
+
+def _mr_roe_map():
+    """{6位代码: {industry, pe, pb}}; 12h 缓存, 失败空 dict + 5min 负缓存。
+
+    /himk/roe (ROE 降序) 单次返回全市场, 故 PE/PB/行业 三项共用一次请求。
+    """
+    now = time.time()
+    with _roe_lock:
+        if _roe_cache["data"] is not None:
+            ttl = _ROE_TTL if _roe_cache["ok"] else _MR_FAIL_TTL
+            if now - _roe_cache["ts"] < ttl:
+                return _roe_cache["data"]
+
+    data: dict = {}
+    ok = False
+    if MAIRUI_API_KEY:
+        rows = None
+        try:
+            rows = get_mr().hsdc_himk_roe()
+        except Exception as e:
+            log.warning(f"麦蕊 ROE 排行失败: {_sanitize_error(e)}")
+        if isinstance(rows, list) and rows:
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                dm = str(r.get("dm") or "").strip()
+                if not dm:
+                    continue
+                hy = str(r.get("hym") or "").strip() or None
+                data[dm.zfill(6)] = {
+                    "industry": hy,
+                    "pe": _safe_float(r.get("syld")),
+                    "pb": _safe_float(r.get("sjl")),
+                }
+            ok = True
+
+    with _roe_lock:
+        _roe_cache.update({"ts": now, "data": data, "ok": ok})
+    return data
+
+
+# ── 股票基础信息 (涨停/跌停/前收/市值) ──
+_MR_INSTRUMENT_TTL = 24 * 3600
+_mr_instrument_cache: dict = {}
+_mr_instrument_lock = threading.Lock()
+
+
+def _mr_instrument(symbol):
+    """股票基础信息 {limit_up, limit_down, prev_close, float_value, total_value}; 24h。"""
+    symbol = normalize_symbol(symbol)
+
+    def _fetch():
+        row = get_mr().stock_instrument(symbol)
+        if not isinstance(row, dict) or row.get("error"):
+            return None
+        out = {
+            "limit_up": _safe_float(row.get("up")),
+            "limit_down": _safe_float(row.get("dp")),
+            "prev_close": _safe_float(row.get("pc")),
+            "float_value": _safe_float(row.get("fv")),
+            "total_value": _safe_float(row.get("tv")),
+            "listing_date": row.get("od"),
+        }
+        if out["limit_up"] is None and out["limit_down"] is None:
+            return None
+        return out
+
+    return _memo(symbol, _mr_instrument_cache, _mr_instrument_lock, _MR_INSTRUMENT_TTL, _fetch)
+
+
+# ── 所属行业 (相关指数/行业/概念) ──
+_MR_INDUSTRY_TTL = 7 * 24 * 3600
+_mr_industry_cache: dict = {}
+_mr_industry_lock = threading.Lock()
+_INDUSTRY_PREFIXES = ("A股-申万行业-", "A股-行业-", "申万行业-")
+
+
+def _mr_industry(code):
+    """申万行业名 (去前缀); 取不到返回 None。"""
+    def _fetch():
+        rows = get_mr().concepts_of_stock(code)
+        if not isinstance(rows, list):
+            return None
+        names = [str(r.get("name") or "").strip() for r in rows if isinstance(r, dict)]
+        for name in names:
+            for p in _INDUSTRY_PREFIXES:
+                if name.startswith(p) and name[len(p):]:
+                    return name[len(p):]
+        for name in names:  # 无标准前缀时退而取含「行业」的条目
+            if "行业" in name:
+                return name.split("-")[-1] or name
+        return None
+
+    return _memo(code, _mr_industry_cache, _mr_industry_lock, _MR_INDUSTRY_TTL, _fetch)
+
+
+# ── 个股 N 日涨幅 / 量比 / 交易状态 ──
+def _n_day_change(closes, n):
+    """最新收盘相对 n 个交易日前收盘的涨幅%; 数据不足返回 None。"""
+    if not closes or len(closes) < n + 1:
+        return None
+    last, prev = closes[-1], closes[-n - 1]
+    if not prev:
+        return None
+    try:
+        return (last - prev) / prev * 100.0
+    except (TypeError, ZeroDivisionError):
+        return None
+
+
+def _volume_ratio_from_df(df):
+    """量比 = 当日每分钟均量 / 前5日每分钟均量。
+
+    盘中用已过交易分钟折算; 非盘中用末根 bar 的全天 240 分钟口径 —— 这样
+    收盘后/休市/未开盘时侧栏也能看到最近一个交易日的量比, 而不是空白。
+    数据不足或末根无成交返回 None。
+    """
+    if df is None or len(df) < 6:
+        return None
+    vols = [_safe_float(v) for v in df["volume"].iloc[-6:].tolist()]
+    if len(vols) < 6 or vols[-1] is None or vols[-1] <= 0:
+        return None
+    hist = [v for v in vols[:-1] if v is not None and v > 0]
+    if len(hist) < 5:
+        return None
+    avg5 = sum(hist) / len(hist)
+    if avg5 <= 0:
+        return None
+    if _last_bar_date(df) == market_hours.now().date():
+        elapsed = market_hours.session_elapsed_minutes()
+        if elapsed <= 0:
+            return None  # 今日有 bar 但尚未开盘/无成交 → 盘中量比无意义
+        return (vols[-1] / elapsed) / (avg5 / 240.0)
+    # 末根非今日: 按最近一个交易日全天口径
+    return vols[-1] / avg5
+
+
+def _trade_status(quote):
+    """A 股交易状态 (code, text): 停牌/休市/未开盘/交易中/午间休市/已收盘。"""
+    now = market_hours.now()
+    if not market_hours.is_trading_day(now):
+        return "closed", "休市"
+    elapsed = market_hours.session_elapsed_minutes(now)
+    vol = _safe_float((quote or {}).get("volume"))
+    if elapsed > 0 and quote is not None and (vol is None or vol <= 0):
+        return "halt", "停牌"
+    if elapsed <= 0:
+        return "pre", "未开盘"
+    t = now.hour * 60 + now.minute
+    if 11 * 60 + 30 < t < 13 * 60:
+        return "break", "午间休市"
+    if market_hours.in_session(now):
+        return "trading", "交易中"
+    return "closed", "已收盘"
+
+
+_STOCK_INFO_TTL = 60.0
+_stock_info_cache: dict = {}
+_stock_info_lock = threading.Lock()
+
+
+def fetch_stock_info(symbol, force=False):
+    """侧栏「基本信息」数据: 行业/总手/成交额/换手/量比/涨跌停/3-5-10日涨幅/PE/PB/交易状态。
+
+    60s 进程内缓存。港股/美股跳过麦蕊专属字段 (行业/涨跌停/PE/PB 置 None)。
+    上游失败静默降级 (字段 None), 不抛异常。
+    """
+    symbol = normalize_symbol(symbol)
+    now = time.time()
+    if not force:
+        with _stock_info_lock:
+            ent = _stock_info_cache.get(symbol)
+            if ent and now - ent[0] < _STOCK_INFO_TTL:
+                return ent[1]
+
+    market = _symbol_market(symbol)
+    is_cn = market == "cn"
+    code = symbol.split(".")[0]
+    plain = not _is_etf(symbol) and not _is_index_symbol(symbol)
+
+    quote = None
+    try:
+        quote = fetch_quote(symbol)
+    except Exception as e:
+        log.warning(f"基本信息快照失败 {symbol}: {_sanitize_error(e)}")
+
+    df = None
+    try:
+        df, _name, _src = fetch_kline_ex(symbol, "1d", 12)
+    except Exception as e:
+        log.warning(f"基本信息日K失败 {symbol}: {_sanitize_error(e)}")
+
+    closes = []
+    if df is not None and len(df) > 0:
+        closes = [c for c in (_safe_float(x) for x in df["close"].tolist()) if c is not None]
+
+    industry = None
+    limit_up = limit_down = None
+    pe = pb = None
+    estimated = False
+
+    if is_cn and plain:
+        roe = _mr_roe_map().get(code)
+        if roe:
+            pe, pb = roe.get("pe"), roe.get("pb")
+            industry = roe.get("industry")
+        ind = _mr_industry(code)
+        if ind:
+            industry = ind
+        inst = _mr_instrument(symbol)
+        if inst:
+            limit_up = inst.get("limit_up")
+            limit_down = inst.get("limit_down")
+
+    # 涨停/跌停回退: 前收 ±10% (仅 A 股个股; 不区分 ST / 创业板 / 科创板)
+    prev_close = _safe_float((quote or {}).get("prev_close"))
+    if prev_close and is_cn and plain:
+        if limit_up is None:
+            limit_up, estimated = round(prev_close * 1.1, 2), True
+        if limit_down is None:
+            limit_down, estimated = round(prev_close * 0.9, 2), True
+
+    if is_cn:
+        status_code, status_text = _trade_status(quote)
+    else:
+        status_code, status_text = "", "—"
+
+    info = {
+        "symbol": symbol,
+        "name": (quote or {}).get("name") or _lookup_name(symbol),
+        "industry": industry,
+        "volume": _safe_float((quote or {}).get("volume")),
+        "amount": _safe_float((quote or {}).get("amount")),
+        "turnover_rate": _safe_float((quote or {}).get("turnover_rate")),
+        "vol_ratio": _volume_ratio_from_df(df),
+        "limit_up": limit_up,
+        "limit_down": limit_down,
+        "chg_3d": _n_day_change(closes, 3),
+        "chg_5d": _n_day_change(closes, 5),
+        "chg_10d": _n_day_change(closes, 10),
+        "pe": pe,
+        "pb": pb,
+        "trade_status": status_code,
+        "trade_status_text": status_text,
+        "limit_estimated": estimated,
+    }
+    with _stock_info_lock:
+        _stock_info_cache[symbol] = (now, info)
+    return info
+
+
+# ── 市场数据抽屉: 全市场榜单 / 公告 / 股东 / 解禁 ──
+_MR_MARKET_TTL = 600.0        # 主力净流入榜单 (每日 15:40 更新)
+_MR_ANNOUNCE_TTL = 1800.0
+_MR_HOLDER_TTL = 6 * 3600
+_MR_UNLOCK_TTL = 12 * 3600
+_mr_market_cache: dict = {}
+_mr_market_lock = threading.Lock()
+_mr_company_cache: dict = {}
+_mr_company_lock = threading.Lock()
+
+
+def mr_zljlr():
+    """全市场主力净流入额降序榜单 (原样 list); 失败 None。"""
+    return _memo("zljlr", _mr_market_cache, _mr_market_lock, _MR_MARKET_TTL,
+                 lambda: _mr_rows(get_mr().hsdc_zljlr()))
+
+
+def mr_announcements(code, lt=20):
+    """交易所公告 (6 位代码); 失败 None。"""
+    return _memo(f"ann:{code}", _mr_company_cache, _mr_company_lock, _MR_ANNOUNCE_TTL,
+                 lambda: _mr_rows(get_mr().stock_announcement(code, lt=lt)))
+
+
+def mr_holder_change(code):
+    """股东户数变化趋势 (按截止日期倒序); 失败 None。"""
+    return _memo(f"gdbh:{code}", _mr_company_cache, _mr_company_lock, _MR_HOLDER_TTL,
+                 lambda: _mr_rows(get_mr().company_holder_change(code)))
+
+
+def mr_top_holders(code):
+    """十大股东 (嵌套 sdgd, 按截止日期倒序); 失败 None。"""
+    return _memo(f"sdgd:{code}", _mr_company_cache, _mr_company_lock, _MR_HOLDER_TTL,
+                 lambda: _mr_rows(get_mr().company_top10_holders(code)))
+
+
+def mr_float_holders(code):
+    """十大流通股东 (嵌套 sdgd, 按截止日期倒序); 失败 None。"""
+    return _memo(f"ltgd:{code}", _mr_company_cache, _mr_company_lock, _MR_HOLDER_TTL,
+                 lambda: _mr_rows(get_mr().company_top10_float_holders(code)))
+
+
+def mr_unlock(code):
+    """解禁限售 (按解禁日期倒序); 失败 None。"""
+    return _memo(f"jjxs:{code}", _mr_company_cache, _mr_company_lock, _MR_UNLOCK_TTL,
+                 lambda: _mr_rows(get_mr().company_unlock(code)))
+

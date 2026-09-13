@@ -60,6 +60,8 @@
   --chart-chip-median: #7e57c2;
   --chart-gap-fill: rgba(158,158,158,0.28);
   --chart-gap-border: rgba(120,120,120,0.45);
+  --chart-predict-fill: rgba(91,143,249,0.08);
+  --chart-predict-border: rgba(91,143,249,0.35);
   --chart-tip-bg: rgba(255,255,255,0.96);
   --chart-tip-border: #dee2e6;
   /* 分类饼图 12 色板 (主题中性, JS split(',') 使用) */
@@ -120,6 +122,8 @@
   --chart-chip-median: #b39ddb;
   --chart-gap-fill: rgba(120,120,120,0.32);
   --chart-gap-border: rgba(160,160,160,0.40);
+  --chart-predict-fill: rgba(91,143,249,0.14);
+  --chart-predict-border: rgba(91,143,249,0.45);
   --chart-tip-bg: rgba(20,23,31,0.92);
   --chart-tip-border: #3a4356;
 }

@@ -347,42 +347,82 @@ body {
   position: relative;
 }
 
-/* ═══════════════ 五档盘口 (分时, 右侧) ═══════════════ */
-#depth-panel {
+/* ═══════════════ 左侧栏: 基本信息 + 五档盘口 (所有周期) ═══════════════ */
+#side-panel {
   position: absolute;
   top: 0; left: 0; bottom: 0;
-  width: 180px;
+  width: 204px;
   box-sizing: border-box;
   padding: 4px 8px;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
   font-family: monospace;
-  font-size: 14px;
+  font-size: 12px;
   z-index: 6;
   display: none;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
-#depth-panel .dp-title {
+#side-panel .sp-sec { display: flex; flex-direction: column; }
+#side-panel .sp-sec + .sp-sec { margin-top: 6px; }
+#side-panel .sp-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
   font-weight: 700;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   padding-bottom: 3px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 3px;
 }
-#depth-panel .dp-body { flex: 1; overflow: hidden; }
-#depth-panel .dp-row {
+#side-panel .sp-fold {
+  border: none; background: none; color: var(--text-secondary);
+  cursor: pointer; padding: 0 2px; font-size: 12px; line-height: 1;
+}
+#side-panel .sp-fold:hover { color: var(--text); }
+/* 五档并入基本信息框内: 无标题, 仅一条细分隔线; 块级堆叠 (勿改 flex, 否则行向变 row) */
+#depth-sec {
+  display: none;
+  margin-top: 5px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+#side-reopen {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 7;
+  display: none; padding: 8px 2px; font-size: 12px; line-height: 1;
+  border: 1px solid var(--border); border-left: none; border-radius: 0 4px 4px 0;
+  background: var(--bg-panel); color: var(--text-secondary); cursor: pointer;
+}
+#side-reopen:hover { color: var(--text); }
+#side-panel .sp-row {
   display: flex;
   align-items: baseline;
-  line-height: 20px;
+  line-height: 18px;
   white-space: nowrap;
 }
-#depth-panel .dp-row .dp-label { width: 34px; color: var(--text-secondary); }
-#depth-panel .dp-row .dp-price { flex: 1; text-align: right; padding-right: 8px; }
-#depth-panel .dp-row .dp-vol { width: 58px; text-align: right; color: var(--text); }
-#depth-panel .dp-sep { height: 1px; background: var(--border); margin: 3px 0; }
-#depth-panel .dp-empty { color: var(--text-secondary); text-align: center; padding-top: 8px; }
+#side-panel .sp-row .sp-label { width: 58px; color: var(--text-secondary); flex-shrink: 0; }
+#side-panel .sp-row .sp-val { flex: 1; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+#side-panel .dp-row {
+  display: flex;
+  align-items: baseline;
+  line-height: 18px;
+  white-space: nowrap;
+}
+#side-panel .dp-row .dp-label { width: 34px; color: var(--text-secondary); }
+#side-panel .dp-row .dp-price { flex: 1; text-align: right; padding-right: 8px; }
+#side-panel .dp-row .dp-vol { width: 58px; text-align: right; color: var(--text); }
+#side-panel .dp-sep { height: 1px; background: var(--border); margin: 3px 0; }
+#side-panel .dp-head {
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 3px; padding-bottom: 2px; font-size: 11px;
+}
+#side-panel .dp-empty { color: var(--text-secondary); text-align: center; padding-top: 8px; }
+/* 侧栏展开时右移画线工具面板, 避免被遮挡 */
+#chart-wrap.side-on #draw-palette { left: 212px; }
 
 /* ═══════════════ Scrollbar ═══════════ */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -462,8 +502,8 @@ body {
   #indicator-bar > span { flex-shrink: 0; }
   #indicator-bar::-webkit-scrollbar { display: none; }
   #indicator-bar .separator { display: none; }
-  #depth-panel { width: 150px; font-size: 13px; }
-  #depth-panel .dp-row { line-height: 22px; }
+  #side-panel { width: 150px; font-size: 11px; }
+  #side-panel .dp-row, #side-panel .sp-row { line-height: 17px; }
 }
 @media (max-width: 480px) {
   #toolbar #info-code, #toolbar #info-turnover, #toolbar #info-premium,
@@ -506,6 +546,13 @@ body {
 #cn-body th, #cn-body td { padding: 4px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; text-align: left; }
 #cn-body th { background: var(--bg-panel); color: var(--text-secondary); }
 #cn-body .pos { color: var(--up-text); } #cn-body .neg { color: var(--down-text); }
+#cn-body tr.hl { background: rgba(64,158,255,.14); }
+/* 单票键值视图 (主力净流入等) */
+#cn-body .cn-kv { max-width: 440px; }
+#cn-body .cn-kv-row { display: flex; justify-content: space-between; gap: 16px;
+  padding: 4px 0; border-bottom: 1px dashed var(--border); }
+#cn-body .cn-kv-label { color: var(--text-secondary); white-space: nowrap; }
+#cn-body .cn-kv-val { text-align: right; font-family: monospace; }
 
 /* ═══ 画线模式 ═══ */
 #draw-palette {
@@ -541,6 +588,18 @@ body {
   font-size: 13px; padding: 3px 6px; border: 1px solid #e6a23c; border-radius: 3px;
   background: var(--bg-card); color: var(--text); width: 160px;
 }
+#draw-monitor-input {
+  position: absolute; z-index: 32; display: none;
+  background: var(--bg-panel, rgba(128,128,128,.12));
+  border: 1px solid #e6a23c; border-radius: 6px;
+  padding: 8px 10px; width: 250px; font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+}
+#draw-monitor-input input {
+  font-size: 12px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--bg-card); color: var(--text);
+}
+#draw-monitor-input button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 10px; font-size: 12px; }
 #draw-suggest {
   position: absolute; z-index: 31; display: none; align-items: center; gap: 6px;
   background: var(--bg-panel); border: 1px dashed #e6a23c; border-radius: 6px;
@@ -602,7 +661,7 @@ body {
     <button id="btn-refresh" class="icon-text-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
     <button id="btn-draw" class="icon-btn" onclick="toggleDrawMode()" title="画线模式: 趋势线/水平线/斐波那契/回归通道等"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
     <button id="btn-alerts" class="icon-btn" onclick="openAlertsModal()" title="价格预警 (现价/涨跌幅条件)">🔔</button>
-    <button id="btn-cndata" class="icon-btn" onclick="toggleCnDrawer()" title="市场数据: 资金流/龙虎榜/分红/公告">📊</button>
+    <button id="btn-cndata" class="icon-btn" onclick="toggleCnDrawer()" title="市场数据: 资金流/龙虎榜/分红/公告/交易所公告/主力净流入/股东变化/十大股东/十大流通股东/解禁限售">📊</button>
     <button id="btn-shot" class="icon-btn" onclick="saveChartImage()" title="保存图表为图片"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
     <button id="btn-theme" class="icon-btn" onclick="toggleTheme()" title="切换暗色/亮色主题"></button>
   </div>
@@ -617,15 +676,16 @@ body {
 <!-- ═══════════════ Indicator Config Bar ═══════════ -->
 <div id="indicator-bar">
   <span>面板:</span>
+  <label id="lbl-info" title="左侧基本信息面板 (行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态)"><input type="checkbox" id="chk-info" checked onchange="onConfigChange()">信息</label>
+  <label id="lbl-depth" title="五档盘口 (所有周期可用)"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <label><input type="checkbox" id="chk-volume" checked onchange="onConfigChange()">成交量</label>
+  <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
   <label title="MACD 平滑异同均线 (DIF/DEA + 柱状图)"><input type="checkbox" id="chk-macd" checked onchange="onConfigChange()">MACD</label>
   <label title="KDJ 随机指标 (超买超卖)"><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
   <label title="RSI 相对强弱指标"><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
   <label title="ATR 平均真实波幅"><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label title="OBV 能量潮 (成交量累计); 数值随加载窗口变化, 比较看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
-  <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
-  <label id="lbl-depth" style="display:none"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <span>复权:</span>
   <select id="adj-select" onchange="onAdjustChange(this.value)" title="复权方式 (分钟周期固定前复权)">
     <option value="forward">前复权</option>
@@ -659,19 +719,41 @@ body {
 <div id="chart-wrap">
   <div id="chart-container"></div>
   <canvas id="draw-overlay" style="position:absolute;left:0;top:0;pointer-events:none;z-index:12"></canvas>
-  <div id="depth-panel">
-    <div class="dp-title">五档</div>
-    <div class="dp-body" id="depth-body"></div>
+  <div id="side-panel">
+    <div class="sp-sec" id="info-sec">
+      <div class="sp-title"><span>基本信息</span><button class="sp-fold" id="sp-fold-info" title="收起侧栏" onclick="foldSidePanel()">◀</button></div>
+      <div id="info-body"></div>
+      <div id="depth-sec">
+        <div class="dp-row dp-head"><span class="dp-label">档位</span><span class="dp-price">价格</span><span class="dp-vol">量</span></div>
+        <div id="depth-body"></div>
+      </div>
+    </div>
   </div>
+  <button id="side-reopen" title="展开侧栏" onclick="unfoldSidePanel()">›</button>
   <div id="draw-palette" style="display:none"></div>
   <div id="draw-menu">
     <span style="font-size:11px;color:var(--text-secondary)">颜色</span>
     <span id="draw-menu-colors" style="display:flex;gap:4px"></span>
     <button id="dm-width" title="线宽 1px/2px">细</button>
     <button id="dm-extend" title="向右延伸至最新bar之后 (预测区)">延伸</button>
+    <button id="dm-monitor" title="跌破此线推送预警 (需命名)">🔔监控</button>
     <button id="dm-delete" style="color:#f56c6c">删除</button>
   </div>
   <div id="draw-text-input"><input type="text" id="draw-text-field" maxlength="60" placeholder="输入文字, Enter确认 / Esc取消"></div>
+  <div id="draw-monitor-input">
+    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">🔔 趋势线监控 (每日最多提醒一次, 推送钉钉/ntfy) <span id="dmi-adjust" style="color:#e6a23c"></span></div>
+    <div style="display:flex;gap:4px;align-items:center">
+      <input type="text" id="dmi-name" maxlength="50" placeholder="监控名称 (必填)" style="flex:1;min-width:0">
+      <span style="font-size:11px;color:var(--text-secondary);white-space:nowrap">跌破</span>
+      <input type="number" id="dmi-pct" step="0.1" min="0.1" max="20" style="width:52px">
+      <span style="font-size:11px;color:var(--text-secondary)">%</span>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:6px;justify-content:flex-end">
+      <button id="dmi-stop" style="display:none">停止监控</button>
+      <button id="dmi-cancel">取消</button>
+      <button id="dmi-save" style="background:#e6a23c;color:#fff;border-color:#e6a23c">保存</button>
+    </div>
+  </div>
   <div id="draw-suggest">
     <span>建议修正线 (触点更多)</span>
     <button class="ds-ok" id="ds-adopt">采纳</button>
@@ -689,6 +771,12 @@ body {
       <button onclick="showCnTab('lhb')" class="cn-tab">龙虎榜</button>
       <button onclick="showCnTab('dividends')" class="cn-tab">分红</button>
       <button onclick="showCnTab('announcements')" class="cn-tab">公告</button>
+      <button onclick="showCnTab('exchange-announcement')" class="cn-tab">交易所公告</button>
+      <button onclick="showCnTab('zljlr')" class="cn-tab">主力净流入</button>
+      <button onclick="showCnTab('holder-change')" class="cn-tab">股东变化</button>
+      <button onclick="showCnTab('top-holders')" class="cn-tab">十大股东</button>
+      <button onclick="showCnTab('float-holders')" class="cn-tab">十大流通股东</button>
+      <button onclick="showCnTab('unlock')" class="cn-tab">解禁限售</button>
     </span>
     <span style="flex:1"></span>
     <button onclick="toggleCnDrawer()" style="border:none;background:none;color:var(--text-secondary);cursor:pointer;font-size:15px">✕</button>
@@ -705,6 +793,10 @@ body {
       <button onclick="closeAlertsModal()" style="border:none;background:none;color:var(--text-secondary);cursor:pointer;font-size:16px">✕</button>
     </div>
     <div id="alerts-list" style="max-height:220px;overflow-y:auto;margin-bottom:12px"></div>
+    <div style="border-top:1px solid var(--border);padding-top:8px;margin-bottom:12px">
+      <div style="font-weight:600;margin-bottom:6px">📈 趋势线监控 (图表画线菜单开启)</div>
+      <div id="tl-list" style="max-height:150px;overflow-y:auto;font-size:13px"></div>
+    </div>
     <div style="border-top:1px solid var(--border);padding-top:10px">
       <div style="font-weight:600;margin-bottom:8px">新建预警 (当前标的)</div>
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px">
@@ -835,7 +927,7 @@ const STATE = {
   klineData: null,       // raw JSON from server
   trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
   chips: null,           // 筹码分布 (/api/chips, 仅日K股票)
-  depth: null,           // 五档盘口 (/api/depth, 仅分时)
+  depth: null,           // 五档盘口 (/api/depth, 所有周期)
   chart: null,
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
   _gridRects: null,      // cached grid pixel rects
@@ -901,6 +993,7 @@ const CHART_VAR_MAP = {
   ch_1atr: '--chart-ch1', ch_2atr: '--chart-ch2', ch_3atr: '--chart-ch3',
   chipProfit: '--up-color', chipTrapped: '--down-color', chipMedian: '--chart-chip-median',
   zeroLine: '--chart-cross',
+  predictFill: '--chart-predict-fill', predictBorder: '--chart-predict-border',
   tipBg: '--chart-tip-bg', tipBorder: '--chart-tip-border', tipText: '--text',
 };
 let _chartColorsCache = { theme: null, colors: null };
@@ -1017,16 +1110,14 @@ function onSystemThemeChange() {
 async function fetchData(opts) {
   const silent = !!(opts && opts.silent);
   const symbol = STATE.symbol;
-  if (STATE.period === 'intraday') STATE.period = '1d';
+  // 分时下请求K线 (如切换复权) → 统一收口到日K, 同步按钮/面板
+  if (STATE.period === 'intraday') applyPeriodUI('1d');
   const period = STATE.period;
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
   STATE._lastBarAt = fetchTs;
   if (!silent) { STATE.trades = null; STATE.chips = null; } // 切股/切周期先清空, 避免短暂显示上一只的买卖点/筹码
   const cacheKey = `vk_${symbol}_${period}_${STATE.adjust}`;
-  if (STATE._quoteEsSym !== symbol) {  // SSE 快照流随标的重启
-    STATE._quoteEsSym = symbol;
-    startQuoteStream();
-  }
+  // SSE 快照流由 loadCurrent()/ensureQuoteStream() 统一管理, 此处不再随 fetchData 重启
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
   let cacheHit = false;
@@ -1162,15 +1253,122 @@ async function fetchChips(symbol) {
   }
 }
 
-// ── 五档盘口: 仅分时视图; 右侧面板, 盘中约 3s 刷新 (20/min = 2/3 × 30) ──
-function depthPanelOn() {
-  const chk = document.getElementById('chk-depth');
-  return STATE.period === 'intraday' && !!chk && chk.checked;
+// ── 左侧栏: 基本信息 + 五档盘口 (所有周期; 五档盘中约 3s 刷新 20/min) ──
+function infoPanelOn() {
+  const chk = document.getElementById('chk-info');
+  return !chk || chk.checked;
 }
 
-function showDepthPanel(on) {
-  const el = document.getElementById('depth-panel');
+function depthSecOn() {
+  const chk = document.getElementById('chk-depth');
+  return !!chk && chk.checked;
+}
+
+// 五档已并入基本信息框内, 侧栏可见性由「信息」决定; 「五档」只控制框内五档子块
+function sidePanelOn() {
+  return infoPanelOn();
+}
+
+function showSidePanel(on) {
+  const el = document.getElementById('side-panel');
   if (el) el.style.display = on ? 'flex' : 'none';
+  const wrap = document.getElementById('chart-wrap');
+  if (wrap) wrap.classList.toggle('side-on', !!on);
+  const reopen = document.getElementById('side-reopen');
+  if (reopen) reopen.style.display = on ? 'none' : 'block';
+}
+
+/** 收起侧栏: 记住当前 信息/五档 开关, 取消勾选后走统一重排 */
+function foldSidePanel() {
+  STATE._sidePrev = {
+    info: document.getElementById('chk-info').checked,
+    depth: document.getElementById('chk-depth').checked,
+  };
+  document.getElementById('chk-info').checked = false;
+  document.getElementById('chk-depth').checked = false;
+  onConfigChange();
+}
+
+/** 展开侧栏: 恢复收起前的 信息/五档 开关 (无记录时默认两者都开) */
+function unfoldSidePanel() {
+  const prev = STATE._sidePrev || {};
+  document.getElementById('chk-info').checked = prev.info !== false;
+  document.getElementById('chk-depth').checked = prev.depth !== false;
+  onConfigChange();
+}
+
+function showDepthSection(on) {
+  const el = document.getElementById('depth-sec');
+  // 用 block 而非 flex: 该区块已无 sp-sec 的 column 方向, flex 会变 row 使盘口行压到标题
+  if (el) el.style.display = on ? 'block' : 'none';
+}
+
+/** K线网格左边距: 侧栏展开时让出面板宽度 + Y 轴刻度标签宽度, 否则 8% */
+function panelGridLeft() {
+  if (!sidePanelOn()) return '8%';
+  const el = document.getElementById('side-panel');
+  const w = el && el.offsetWidth ? el.offsetWidth : 204;
+  // 面板贴 chart-wrap 左缘, Y 轴刻度标签画在 grid.left 左侧, 必须额外预留
+  // (如"3888.111" ≈ 58px + margin), 否则刻度被面板盖住。
+  const AXIS_LABEL_RESERVE = 72;
+  return (w + 12 + AXIS_LABEL_RESERVE) + 'px';
+}
+
+// ── 基本信息面板 (行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态) ──
+function fmtLots(v) {
+  if (v == null) return '—';
+  return Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(2) + '万手' : Math.round(v) + '手';
+}
+
+function renderStockInfo(d) {
+  const body = document.getElementById('info-body');
+  if (!body) return;
+  if (!d || d.error) { body.innerHTML = '<div class="dp-empty">无数据</div>'; return; }
+  const up = C().up, down = C().down;
+  const gray = 'var(--text-secondary)';
+  const pct = (v) => {
+    if (v == null || isNaN(v)) return '—';
+    return `<span style="color:${v >= 0 ? up : down}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+  };
+  const fixed = (v) => (v == null || isNaN(v) ? '—' : Number(v).toFixed(2));
+  const row = (label, val) =>
+    `<div class="sp-row"><span class="sp-label">${label}</span><span class="sp-val">${val}</span></div>`;
+  const statusColor = d.trade_status === 'trading' ? up
+    : (d.trade_status === 'halt' ? 'var(--chart-halt)' : gray);
+  body.innerHTML = [
+    row('行业', escHtml(d.industry || '—')),
+    row('总手', fmtLots(d.volume)),
+    row('成交额', d.amount == null ? '—' : fmtCN(d.amount)),
+    row('换手', d.turnover_rate == null ? '—' : Number(d.turnover_rate).toFixed(2) + '%'),
+    row('量比', fixed(d.vol_ratio)),
+    row('涨停价', d.limit_up == null ? '—' : `<span style="color:${up}">${fmtPrice3(d.limit_up)}</span>`),
+    row('跌停价', d.limit_down == null ? '—' : `<span style="color:${down}">${fmtPrice3(d.limit_down)}</span>`),
+    row('3日涨幅', pct(d.chg_3d)),
+    row('5日涨幅', pct(d.chg_5d)),
+    row('10日涨幅', pct(d.chg_10d)),
+    row('PE', fixed(d.pe)),
+    row('PB', fixed(d.pb)),
+    row('状态', `<span style="color:${statusColor}">${escHtml(d.trade_status_text || '—')}</span>`),
+  ].join('');
+}
+
+async function fetchStockInfo(_retry) {
+  const symbol = STATE.symbol;
+  STATE._lastInfoAt = Date.now();   // 定时刷新节流标记 (盘中约 60s)
+  try {
+    const resp = await fetch(`/api/stock-info?symbol=${encodeURIComponent(symbol)}`);
+    if (!resp.ok) {
+      // 429 限流: 短暂退避重试, 否则收盘后无定时器会让面板冻在旧股
+      if (resp.status === 429 && (_retry || 0) < 2) {
+        setTimeout(() => { if (STATE.symbol === symbol) fetchStockInfo((_retry || 0) + 1); }, 2000);
+      }
+      return;
+    }
+    const data = await resp.json();
+    if (STATE.symbol !== symbol) return; // 已切走
+    STATE.stockInfo = data;
+    renderStockInfo(data);
+  } catch (e) { /* 静默降级: 面板保留上次数据 */ }
 }
 
 function renderDepth(depth) {
@@ -1196,16 +1394,21 @@ function renderDepth(depth) {
   body.innerHTML = html;
 }
 
-async function fetchDepth() {
-  if (STATE.period !== 'intraday') return;
+async function fetchDepth(_retry) {
   const chk = document.getElementById('chk-depth');
   if (!chk || !chk.checked) return;
   const symbol = STATE.symbol;
   try {
     const resp = await fetch(`/api/depth?symbol=${encodeURIComponent(symbol)}`);
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      // 429 限流: 短暂退避重试, 否则收盘后无定时器会让五档冻在旧股
+      if (resp.status === 429 && (_retry || 0) < 2) {
+        setTimeout(() => { if (STATE.symbol === symbol) fetchDepth((_retry || 0) + 1); }, 2000);
+      }
+      return;
+    }
     const data = await resp.json();
-    if (STATE.symbol !== symbol || STATE.period !== 'intraday') return; // 已切走
+    if (STATE.symbol !== symbol) return; // 已切走
     STATE.depth = data.depth || null;
     renderDepth(STATE.depth);
   } catch (e) { /* ignore */ }
@@ -1326,6 +1529,21 @@ function startQuoteStream() {
     };
     STATE._quoteEs = es;
   } catch (e) { /* 回退轮询 */ }
+}
+
+/** 快照流订阅当前标的: 标的未变复用连接, 变了(去抖)重连 */
+function ensureQuoteStream() {
+  if (STATE._quoteEsSym === STATE.symbol) return;
+  STATE._quoteEsSym = STATE.symbol;
+  scheduleQuoteStream();
+}
+
+/** 去抖重连: 连续换股只保留最后一次, 避免瞬时占满服务端 SSE 并发槽 (429) */
+function scheduleQuoteStream() {
+  clearTimeout(STATE._quoteEsTimer);
+  try { if (STATE._quoteEs) STATE._quoteEs.close(); } catch (e) { /* ignore */ }
+  STATE._quoteEs = null;
+  STATE._quoteEsTimer = setTimeout(startQuoteStream, 500);
 }
 
 function todayYMD() {
@@ -1897,12 +2115,7 @@ function renderHistoryTags() {
 
 function switchToHistory(symbol) {
   switchSymbol(symbol);
-  if (STATE.period === 'intraday') {
-    STATE.intradayData = null;
-    fetchIntraday();
-  } else {
-    fetchData();
-  }
+  loadCurrent(); // 与搜索/回车一致: K线/分时 + 基本信息 + 五档
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1919,6 +2132,7 @@ function saveConfig() {
     atr: document.getElementById('chk-atr').checked,
     obv: document.getElementById('chk-obv').checked,
     chip: document.getElementById('chk-chip').checked,
+    info: document.getElementById('chk-info').checked,
     depth: document.getElementById('chk-depth').checked,
     tipRsi: document.getElementById('tip-rsi').checked,
     tipKdj: document.getElementById('tip-kdj').checked,
@@ -1977,6 +2191,7 @@ function loadConfig() {
     document.getElementById('chk-atr').checked = !!cfg.atr;
     document.getElementById('chk-obv').checked = !!cfg.obv;
     document.getElementById('chk-chip').checked = cfg.chip !== false;
+    document.getElementById('chk-info').checked = cfg.info !== false;
     document.getElementById('chk-depth').checked = cfg.depth !== false;
     document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
     document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
@@ -2078,11 +2293,13 @@ async function fetchIntraday() {
 
 function renderIntraday(data) {
   const chart = STATE.chart;
-  // 五档面板 (左侧): 显隐 + 用当前缓存渲染
-  showDepthPanel(depthPanelOn());
+  // 左侧栏 (基本信息 + 五档): 显隐 + 用当前缓存渲染
+  showSidePanel(sidePanelOn());
+  showDepthSection(depthSecOn());
+  if (sidePanelOn() && !STATE.stockInfo) fetchStockInfo();
   if (STATE.depth) renderDepth(STATE.depth);
-  if (!chart) return; // echarts 兜底: 图表不可用时仍保证五档面板可用
-  const gridLeft = depthPanelOn() ? 220 : '8%'; // 左侧给五档面板(180) + 价格标签留位
+  if (!chart) return; // echarts 兜底: 图表不可用时仍保证侧栏可用
+  const gridLeft = panelGridLeft();
   const bars = data.bars;
   const times = bars.map(b => b.time);
   const ohlc = bars.map(b => {
@@ -2175,7 +2392,8 @@ function renderIntraday(data) {
         data: [{ yAxis: 80, label: { show: true, formatter: '80', color: C().text, fontSize: 10 } }, { yAxis: 20, label: { show: true, formatter: '20', color: C().text, fontSize: 10 }, lineStyle: { color: C().oversold } }] };
     }
     if (showMacd && s.name === 'DIF') {
-      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().zeroLine, type: 'solid', width: 1 }, data: [{ yAxis: 0 }] };
+      s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().zeroLine, type: 'solid', width: 1 },
+        label: { show: false }, data: [{ yAxis: 0 }] };
     }
   });
 
@@ -2263,11 +2481,11 @@ function onConfigChange() {
       && !STATE.chips && STATE.klineData) {
     fetchChips(STATE.symbol);
   }
-  // 五档开关 (分时): 重排图/面板并即时拉取
-  if (STATE.period === 'intraday') {
-    showDepthPanel(depthPanelOn());
-    if (depthPanelOn()) fetchDepth();
-  }
+  // 侧栏开关 (信息/五档): 重排图/面板并即时拉取
+  showSidePanel(sidePanelOn());
+  showDepthSection(depthSecOn());
+  if (depthSecOn()) fetchDepth();
+  if (sidePanelOn() && !STATE.stockInfo) fetchStockInfo();
   onIndicatorChange();
 }
 
@@ -2517,9 +2735,10 @@ function calcGridLayout(panels, chipOn) {
   const grids = [];
   const xAxes = [];
   const yAxes = [];
+  const gLeft = panelGridLeft(); // 侧栏展开时左侧让出面板宽度
 
   // K-line grid (index 0)
-  grids.push({ left: '8%', right: rightPct, top: `${topGap}%`, height: `${klinePct}%` });
+  grids.push({ left: gLeft, right: rightPct, top: `${topGap}%`, height: `${klinePct}%` });
   xAxes.push({ gridIndex: 0, type: 'category', data: [], show: false });
   yAxes.push({ gridIndex: 0, type: STATE.logScale ? 'log' : 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } });
 
@@ -2529,7 +2748,7 @@ function calcGridLayout(panels, chipOn) {
 
   // 成交量 grid
   if (hasVolume) {
-    grids.push({ left: '8%', right: rightPct, top: `${cursor}%`, height: `${volPct}%` });
+    grids.push({ left: gLeft, right: rightPct, top: `${cursor}%`, height: `${volPct}%` });
     xAxes.push({ gridIndex: nextGi, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
     cursor += volPct + mGap;
@@ -2538,7 +2757,7 @@ function calcGridLayout(panels, chipOn) {
 
   // 指标面板
   panels.forEach((p, i) => {
-    grids.push({ left: '8%', right: rightPct, top: `${cursor}%`, height: `${indEach}%` });
+    grids.push({ left: gLeft, right: rightPct, top: `${cursor}%`, height: `${indEach}%` });
     xAxes.push({ gridIndex: nextGi + i, type: 'category', data: [], show: false });
     yAxes.push({ gridIndex: nextGi + i, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 10 } });
     cursor += indEach + mGap;
@@ -2626,6 +2845,9 @@ function updateChart(reTheme) {
   const data = STATE.klineData;
   if (!data || !data.klines || data.klines.length === 0) return;
   if (!STATE.chart) return; // echarts 兜底
+
+  showSidePanel(sidePanelOn());   // 基本信息所有周期常驻
+  showDepthSection(depthSecOn()); // 五档仅分时
 
   const chart = STATE.chart;
   const klines = data.klines;
@@ -2904,9 +3126,24 @@ function updateChart(reTheme) {
     STATE._chip = null;
   }
 
+  // ── 未来预测区标注: 每个图表 grid 的右侧空白 bar 铺一条淡色带 + 「预测区」 ──
+  const zoneItem = buildFutureZoneMarkArea(dates, futureBars, C());
+  if (zoneItem) {
+    const zoneMarked = new Set();
+    series.forEach(s => {
+      const gi = s.xAxisIndex;
+      if (gi == null || gi === chipGi || zoneMarked.has(gi)) return; // 每个 grid 只挂一次; 筹码 value 轴不标注
+      if (!s.markArea) s.markArea = { data: [] };
+      if (s.markArea.silent == null) s.markArea.silent = true; // 不抢 axis tooltip (与缺口 markArea 一致)
+      if (s.markArea.z == null) s.markArea.z = 1;
+      s.markArea.data = (s.markArea.data || []).concat([zoneItem]);
+      zoneMarked.add(gi);
+    });
+  }
+
   // ── xAxis data ──
   // 画线模式/预测延伸存在时, 右侧预留未来 bar 空间 (趋势线/回归通道向右虚线延伸)
-  xAxes.forEach(x => { x.data = dates; if (futureBars > 0) x.max = dates.length - 1 + futureBars; });
+  applyFutureSlots(xAxes, dates, futureBars);
 
   // ── DataZoom ──
   const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
@@ -3092,6 +3329,9 @@ function updateChart(reTheme) {
           series[s].markLine = {
             silent: true, symbol: 'none',
             lineStyle: { color: C().zeroLine, type: 'solid', width: 1 },
+            // 零轴是面板基线, 无需标注; 不写 label 时 markLine 默认在末端显示数值 0,
+            // 单边行情下零轴贴近底部, 那个 "0" 会落在日期刻度区像横轴出了异常刻度。
+            label: { show: false },
             data: [{ yAxis: 0 }]
           };
           break;
@@ -3134,11 +3374,24 @@ function updateChart(reTheme) {
   chart.setOption(option, true);
   if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
   // 缓存 grid 像素位置 (供 zrender mousemove 判断鼠标在哪个面板 + 画线层裁剪)
+  // 注: ECharts grid 的 left/right 可能是百分比, 也可能是 panelGridLeft() 给的 '216px';
+  // 一律按单位换算成像素, 否则侧栏展开时 left 会算成 2000+ px, 画线命中/裁剪全失效。
   const cw = chart.getWidth(), ch = chart.getHeight();
+  const spanPx = (v, total, fromEnd) => {
+    const s = String(v);
+    const n = parseFloat(s);
+    if (!isFinite(n)) return fromEnd ? total : 0;
+    const px = s.trim().endsWith('px') ? n : n / 100 * total;
+    return fromEnd ? total - px : px;
+  };
   STATE._gridRects = grids.map(g => {
-    const topPct = parseFloat(g.top) / 100, heightPct = parseFloat(g.height) / 100;
-    return { top: topPct * ch, bottom: (topPct + heightPct) * ch,
-             left: parseFloat(g.left) / 100 * cw, right: cw - parseFloat(g.right) / 100 * cw };
+    const top = spanPx(g.top, ch, false);
+    return {
+      top: top,
+      bottom: top + spanPx(g.height, ch, false),
+      left: spanPx(g.left, cw, false),
+      right: spanPx(g.right, cw, true),
+    };
   });
 
   // 每个指标面板左上角放名称标签 (graphic)
@@ -3212,7 +3465,8 @@ function updateChart(reTheme) {
 // ═══════════════════════════════════════════════════════════════
 // ACTIONS
 // ═══════════════════════════════════════════════════════════════
-function switchPeriod(period) {
+/** 同步周期相关的按钮/标签/侧栏显隐 (不触发数据请求) */
+function applyPeriodUI(period) {
   STATE.period = period;
   ensurePeriodVisible(period);
   ALL_PERIODS.forEach(p => {
@@ -3234,18 +3488,24 @@ function switchPeriod(period) {
   const lblChip = document.getElementById('lbl-chip');
   if (lblChip) lblChip.style.display = isChipPeriod(period) ? '' : 'none';
   if (!isChipPeriod(period)) STATE.chips = null;
-  // 五档: 仅分时
+  // 五档: 所有周期常显
   const lblDepth = document.getElementById('lbl-depth');
-  if (lblDepth) lblDepth.style.display = isIntra ? '' : 'none';
-  if (!isIntra) { STATE.depth = null; showDepthPanel(false); }
-  if (isIntra) {
+  if (lblDepth) lblDepth.style.display = '';
+  showSidePanel(sidePanelOn());
+  showDepthSection(depthSecOn());
+}
+
+function switchPeriod(period) {
+  applyPeriodUI(period);
+  if (period === 'intraday') {
     STATE.intradayData = null; // 清缓存，强制重新加载
-    STATE.depth = null;
     if (STATE.chart) STATE.chart.clear();
     fetchIntraday();
   } else {
     refresh();
   }
+  fetchStockInfo();
+  if (depthSecOn()) fetchDepth(); // 五档所有周期可用, 切周期即时刷新
 }
 
 /** 筹码分布: 日/周/月K (分时不适用); 服务端始终按日线粒度算, 周/月K 窗口更长 */
@@ -3283,13 +3543,26 @@ function syncSymbolUrl(replace) {
   try { history.replaceState({ symbol: STATE.symbol }, '', '/?symbol=' + encodeURIComponent(STATE.symbol)); } catch (e) { /* ignore */ }
 }
 
+/** 换股: 丢弃上只股票的面板快照, 并解除节流让信息/五档立即重取 */
+function resetSidePanelData() {
+  STATE.stockInfo = null;
+  STATE.depth = null;
+  STATE._lastInfoAt = 0;
+  STATE._lastDepthAt = 0;
+}
+
 function loadCurrent() {
+  resetSidePanelData(); // 换股先作废旧股面板数据, 避免信息/五档停留在上一只
+  ensureQuoteStream();  // SSE 快照流跟随当前标的 (含分时换股)
+  refreshSymbolPanels(); // 市场数据抽屉/预警弹窗随换股刷新
   if (STATE.period === 'intraday') {
     STATE.intradayData = null; // 清缓存，强制重新加载分时
     fetchIntraday();
   } else {
     fetchData();
   }
+  fetchStockInfo(); // 基本信息随换股刷新
+  if (depthSecOn()) fetchDepth(); // 五档随换股刷新
 }
 
 function refresh() {
@@ -3380,6 +3653,37 @@ function drawNeedsFuture() {
   return dr.drawings.some(d => d.extendRight || (d.points || []).some(p => p.off > 0));
 }
 
+/**
+ * 未来预测区 markArea 项: 画线/延伸时右侧预留的 futureBars 根空白 bar 上铺淡色带 + 「预测区」标注,
+ * 否则那段空白会被当成渲染缺口 (日期到不了右缘的原因见 drawNeedsFuture)。
+ * category 轴上 markArea 的数值坐标会吸附到槽位中心, 故起止取未来槽两端 (±0.5); 无未来槽返回 null。
+ */
+function buildFutureZoneMarkArea(dates, futureBars, colors) {
+  if (!dates || !dates.length || !(futureBars > 0)) return null;
+  const n = dates.length;
+  return [
+    {
+      xAxis: n - 0.5,
+      itemStyle: { color: colors.predictFill, borderColor: colors.predictBorder, borderWidth: 1 },
+      label: { show: true, formatter: '预测区', position: 'insideTop', color: colors.text, fontSize: 10, opacity: 0.75 },
+    },
+    { xAxis: n - 1 + futureBars + 0.5 },
+  ];
+}
+
+/**
+ * 分类轴写入日期 + 未来 bar 槽位 (画线/预测延伸时右侧留白)。
+ * 只作用于 category 轴: 筹码叠加的 xAxis 是 value 轴 (0..权重), 量纲与 bar 数量无关,
+ * 若一并写入 dates.length+futureBars 会把筹码柱压成亚像素宽 → 画线模式下筹码峰不可见。
+ */
+function applyFutureSlots(xAxes, dates, futureBars) {
+  xAxes.forEach(x => {
+    if (x.type !== 'category') return;
+    x.data = dates;
+    if (futureBars > 0) x.max = dates.length - 1 + futureBars;
+  });
+}
+
 // ── 主图 tooltip 相交提示: 线型画线在该 bar 的价位与相对 close 的偏离 ──
 const DRAW_SHORT_LABELS = {
   trend: '趋势线', ray: '射线', arrow: '箭头线', hline: '水平线',
@@ -3407,7 +3711,8 @@ function drawingCrossTooltipHtml(idx, close) {
   dr.drawings.forEach(d => {
     const label = DRAW_SHORT_LABELS[d.type];
     if (!label) return;
-    pushRow(label, d.style.color, Drawings.valueAt(d, idx, ctx));
+    const mon = (d.monitor && d.monitor.enabled && d.name) ? '🔔' + d.name + '·' : '';
+    pushRow(mon + label, d.style.color, Drawings.valueAt(d, idx, ctx));
   });
   if (hasAuto) {
     (dr._autoLines || []).forEach(a => {
@@ -3581,6 +3886,7 @@ async function api(path, options = {}) {
 
 // ── A股市场数据抽屉 ──
 let _cnTab = "fund-flow";
+let _cnSeq = 0;   // 请求序号: 丢弃过期响应, 防止旧 tab/旧股票的数据覆盖新内容
 function toggleCnDrawer() {
   const d = document.getElementById("cn-drawer");
   const show = d.style.display !== "block";
@@ -3600,6 +3906,7 @@ function fitCnDrawer() {
 
 function showCnTab(tab) {
   _cnTab = tab;
+  const seq = ++_cnSeq;
   document.querySelectorAll(".cn-tab").forEach(b => b.classList.remove("active"));
   document.querySelectorAll(".cn-tab").forEach(b => {
     if (b.getAttribute("onclick") === `showCnTab('${tab}')`) b.classList.add("active");
@@ -3609,32 +3916,88 @@ function showCnTab(tab) {
   const symbol = STATE.symbol;
   const url = `/api/cn/${tab}?symbol=${encodeURIComponent(symbol)}`;
   api(url).then(data => {
+    if (seq !== _cnSeq) return;                // 已切到新 tab, 丢弃过期响应
+    if (STATE.symbol !== symbol) return;       // 已切股
     if (data.error) { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(data.error)}</div>`; return; }
     const rows = data.rows || [];
     const hint = data.hint ? `<div style="color:var(--text-secondary);margin-bottom:6px">${escHtml(data.hint)}</div>` : "";
+    const fmtNum = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
+    // 单票键值视图 (如主力净流入): kv=[[label, value], ...], 数值按正负着色
+    if (Array.isArray(data.kv) && data.kv.length) {
+      body.innerHTML = hint + `<div class="cn-kv">` + data.kv.map(it => {
+        const label = it[0], value = it[1];
+        let v;
+        if (value == null) v = "—";
+        else if (typeof value === "number") v = `<span class="${value >= 0 ? "pos" : "neg"}">${fmtNum(value)}</span>`;
+        else v = escHtml(String(value));
+        return `<div class="cn-kv-row"><span class="cn-kv-label">${escHtml(label)}</span>` +
+               `<span class="cn-kv-val">${v}</span></div>`;
+      }).join("") + `</div>`;
+      return;
+    }
     if (!rows.length) { body.innerHTML = hint + '<div style="color:var(--text-secondary)">暂无数据</div>'; return; }
     const cols = Object.keys(rows[0]).slice(0, 7);
+    const hl = data.highlight_symbol ? String(data.highlight_symbol) : "";
     body.innerHTML = hint + `<table><thead><tr>${cols.map(c => `<th>${escHtml(c)}</th>`).join("")}</tr></thead>
-      <tbody>${rows.map(r => `<tr>${cols.map(c => {
-        const v = r[c];
-        if (typeof v === "string" && v.startsWith("http")) {
-          return `<td><a href="${escHtml(v)}" target="_blank" rel="noopener noreferrer" style="color:var(--btn-active)">查看</a></td>`;
-        }
-        const cls = typeof v === "number" ? (v >= 0 ? "pos" : "neg") : "";
-        return `<td class="${cls}">${typeof v === "number" ? v.toFixed(2) : escHtml(v)}</td>`;
-      }).join("")}</tr>`).join("")}</tbody></table>`;
-  }).catch(e => { body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(e.message || e)}</div>`; })
-    .finally(() => fitCnDrawer());   // 表格已入 DOM, 按内容宽度适配抽屉
+      <tbody>${rows.map(r => {
+        const rowHl = hl && String(r[cols[0]]) === hl ? ' class="hl"' : "";
+        return `<tr${rowHl}>${cols.map(c => {
+          const v = r[c];
+          if (typeof v === "string" && v.startsWith("http")) {
+            return `<td><a href="${escHtml(v)}" target="_blank" rel="noopener noreferrer" style="color:var(--btn-active)">查看</a></td>`;
+          }
+          const cls = typeof v === "number" ? (v >= 0 ? "pos" : "neg") : "";
+          return `<td class="${cls}">${typeof v === "number" ? fmtNum(v) : escHtml(v)}</td>`;
+        }).join("")}</tr>`;
+      }).join("")}</tbody></table>`;
+  }).catch(e => {
+    if (seq !== _cnSeq) return;                // 过期请求的报错不覆盖新内容
+    body.innerHTML = `<div style="color:var(--down-text)">加载失败: ${escHtml(e.message || e)}</div>`;
+  }).finally(() => {
+    if (seq === _cnSeq) fitCnDrawer();         // 仅当前请求按内容宽度自适应
+  });
 }
 
 window.addEventListener('resize', fitCnDrawer);
 
+/** 换股: 同步「按需打开」的 symbol 相关面板 (市场数据抽屉/预警弹窗) */
+function refreshSymbolPanels() {
+  const drawer = document.getElementById('cn-drawer');
+  if (drawer && drawer.style.display === 'block') showCnTab(_cnTab); // 重载当前 tab (seq 守卫丢弃旧股响应)
+  const modal = document.getElementById('alerts-modal');
+  const symEl = document.getElementById('alert-symbol');
+  if (modal && modal.style.display === 'block' && symEl) symEl.textContent = STATE.symbol;
+}
+
 // ── 价格预警管理 ──
+const TL_TYPE_NAMES = { trend: "趋势线", ray: "射线", hline: "水平线" };
+
+async function refreshTrendlineMonitors() {
+  const box = document.getElementById("tl-list");
+  if (!box) return;
+  try {
+    const data = await api("/api/trendline-monitors");
+    if (!data || !data.monitors) return;
+    if (!data.monitors.length) {
+      box.innerHTML = '<div class="dim" style="text-align:center;color:var(--text-secondary);padding:8px 0">暂无 — 图表画线后选中趋势线, 点 🔔监控 开启</div>';
+      return;
+    }
+    box.innerHTML = data.monitors.map(m => `
+      <div style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid var(--border)">
+        <div style="flex:1;min-width:0">
+          <b>${escHtml(m.symbol)}</b> <span style="color:#e6a23c">🔔${escHtml(m.name || "(未命名)")}</span>
+          <span class="dim" style="font-size:12px;color:var(--text-secondary)">${TL_TYPE_NAMES[m.line_type] || m.line_type} · ${escHtml(m.period)} · 跌破${m.pct != null ? m.pct : "?"}% · ${ADJUST_LABELS[m.adjust] || m.adjust || "前复权"}</span>
+        </div>
+        <span class="dim" style="font-size:11px">${m.last_fired_at ? m.last_fired_at.replace("T", " ").slice(5, 16) : "未触发"}</span>
+      </div>`).join("");
+  } catch (e) { /* ignore */ }
+}
+
 async function openAlertsModal() {
   document.getElementById("alerts-modal").style.display = "block";
   const symEl = document.getElementById("alert-symbol");
   symEl.textContent = STATE.symbol;
-  await refreshAlerts();
+  await Promise.all([refreshAlerts(), refreshTrendlineMonitors()]);
 }
 
 function closeAlertsModal() {
@@ -3840,6 +4203,15 @@ function paintDrawing(c2, d, P, ctx, selected) {
       c2.fillText((g.dir === 'long' ? '做多' : '做空') + '  R:R ' + g.rr.toFixed(2), g.x1 + 4, g.entryY - 8);
       break;
     }
+  }
+  // 监控趋势线名称标签 (🔔名称, 随线色)
+  if (d.monitor && d.monitor.enabled && d.name &&
+      (d.type === 'trend' || d.type === 'ray' || d.type === 'hline')) {
+    let lx, ly;
+    if (d.type === 'hline') { lx = P.grid.left + 4; ly = g.y; }
+    else if (g.c) { lx = g.c[2]; ly = g.c[3]; }
+    else { lx = g.raw2.x; ly = g.raw2.y; }
+    paintTag(c2, '🔔' + d.name, lx, ly, color);
   }
   if (selected) {
     Drawings.handlesOf(d, P, ctx).forEach(h => paintHandle(c2, h.x, h.y, color));
@@ -4135,6 +4507,7 @@ function runSuggest(d) {
 }
 
 function selectDrawing(id) {
+  if (id !== STATE.draw.selectedId) hideMonitorInput();
   STATE.draw.selectedId = id;
   if (!id) { STATE.draw.suggest = null; hideSuggestBox(); }
   if (id) showDrawMenu(); else hideDrawMenu();
@@ -4300,6 +4673,11 @@ function buildDrawMenu() {
     scheduleSave();
     updateChart(false); // 延伸开关影响未来bar空间
   });
+  document.getElementById('dm-monitor').addEventListener('click', () => {
+    const d = getSelected();
+    if (!d) return;
+    openMonitorInput(d);
+  });
   document.getElementById('dm-delete').addEventListener('click', () => deleteSelectedDrawing());
 }
 
@@ -4320,6 +4698,12 @@ function showDrawMenu() {
   ext.style.color = d.extendRight ? '#e6a23c' : '';
   const canExtend = ['trend', 'fib', 'regression', 'position', 'rect'].includes(d.type);
   ext.style.display = canExtend ? '' : 'none';
+  const monBtn = document.getElementById('dm-monitor');
+  const monOK = ['trend', 'ray', 'hline'].includes(d.type) && ['1d', '1w', '1M'].includes(STATE.period);
+  monBtn.style.display = monOK ? '' : 'none';
+  const isMon = !!(d.monitor && d.monitor.enabled);
+  monBtn.textContent = isMon ? '🔔监控中' : '🔔监控';
+  monBtn.style.color = isMon ? '#e6a23c' : '';
   positionDrawMenu();
 }
 
@@ -4339,6 +4723,60 @@ function positionDrawMenu() {
 
 function hideDrawMenu() {
   document.getElementById('draw-menu').style.display = 'none';
+  hideMonitorInput();
+}
+
+// ── 趋势线监控输入 (名称必填 = 强制命名) ──
+const MON_LINE_TYPES = ['trend', 'ray', 'hline'];
+const MON_PERIODS = ['1d', '1w', '1M'];
+const ADJUST_LABELS = { forward: '前复权', hfq: '后复权', none: '不复权' };
+
+function defaultMonitorPct() {
+  const kd = STATE.klineData || {};
+  return (kd.is_etf || kd.is_index) ? 3 : 2;
+}
+
+function openMonitorInput(d) {
+  const box = document.getElementById('draw-monitor-input');
+  const menu = document.getElementById('draw-menu');
+  const wrap = document.getElementById('chart-wrap');
+  const nameF = document.getElementById('dmi-name');
+  const pctF = document.getElementById('dmi-pct');
+  const stopBtn = document.getElementById('dmi-stop');
+  box.style.display = 'block';
+  const mr = menu.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+  box.style.left = Math.max(4, Math.min(mr.left - wr.left, wrap.clientWidth - box.offsetWidth - 4)) + 'px';
+  box.style.top = Math.min(mr.bottom - wr.top + 6, wrap.clientHeight - box.offsetHeight - 4) + 'px';
+  nameF.value = d.name || '';
+  pctF.value = (d.monitor && d.monitor.pct) || defaultMonitorPct();
+  const adjEl = document.getElementById('dmi-adjust');
+  if (adjEl) adjEl.textContent = '· ' + (ADJUST_LABELS[STATE.adjust] || STATE.adjust);
+  stopBtn.style.display = (d.monitor && d.monitor.enabled) ? '' : 'none';
+  setTimeout(() => nameF.focus(), 0);
+}
+
+function hideMonitorInput() {
+  const box = document.getElementById('draw-monitor-input');
+  if (box) box.style.display = 'none';
+}
+
+function saveMonitorInput(d) {
+  const nameF = document.getElementById('dmi-name');
+  const pctF = document.getElementById('dmi-pct');
+  const name = nameF.value.trim();
+  // 强制命名: 监控趋势线必须有名称 (推送与列表按名字识别)
+  if (!name) { showToast('请输入监控名称 (必填)', { type: 'warn' }); nameF.focus(); return; }
+  let pct = parseFloat(pctF.value);
+  if (!Number.isFinite(pct) || pct < 0.1 || pct > 20) {
+    showToast('跌破幅度须为 0.1-20 之间的数值', { type: 'warn' }); return;
+  }
+  d.name = name.slice(0, 50);
+  d.monitor = { enabled: true, pct, adjust: STATE.adjust };
+  hideMonitorInput();
+  scheduleSave();
+  redrawDrawings();
+  showDrawMenu(); // 刷新菜单按钮为「🔔监控中」
+  showToast(`🔔 监控已开启: 跌破「${d.name}」${pct}% 即推送`);
 }
 
 // ── 修正建议浮框 ──
@@ -4412,6 +4850,7 @@ function openTextInput(info, pt) {
 }
 
 function onDrawEscape() {
+  if (document.getElementById('draw-monitor-input').style.display === 'block') { hideMonitorInput(); return true; }
   const dr = STATE.draw;
   if (dr.draft) { cancelDraft(); return true; }
   if (dr.selectedId) { selectDrawing(null); return true; }
@@ -4464,6 +4903,25 @@ document.getElementById('ds-adopt').addEventListener('click', adoptSuggest);
 document.getElementById('ds-ignore').addEventListener('click', () => { STATE.draw.suggest = null; hideSuggestBox(); });
 buildDrawMenu();
 
+// 趋势线监控输入弹层按钮
+document.getElementById('dmi-save').addEventListener('click', () => { const d = getSelected(); if (d) saveMonitorInput(d); });
+document.getElementById('dmi-cancel').addEventListener('click', hideMonitorInput);
+document.getElementById('dmi-stop').addEventListener('click', () => {
+  const d = getSelected();
+  if (d && d.monitor) {
+    d.monitor.enabled = false;
+    scheduleSave();
+    redrawDrawings();
+    showToast('已停止监控「' + (d.name || d.id) + '」');
+  }
+  hideMonitorInput();
+  showDrawMenu(); // 刷新菜单按钮状态
+});
+document.getElementById('dmi-name').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') { ev.preventDefault(); const d = getSelected(); if (d) saveMonitorInput(d); }
+  else if (ev.key === 'Escape') hideMonitorInput();
+});
+
 // ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
@@ -4472,6 +4930,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();
+
+  // 左侧栏初始显隐 (基本信息 + 五档, 所有周期), 不等首根K线渲染
+  showSidePanel(sidePanelOn());
+  showDepthSection(depthSecOn());
+  if (depthSecOn()) fetchDepth();  // 五档初始拉取 (与周期无关)
+  if (infoPanelOn() && !STATE.stockInfo) fetchStockInfo();
 
   // ── 自动主题: 系统偏好 > 时间 ──
   if (STATE._themeAuto) {
@@ -4551,12 +5015,7 @@ document.addEventListener('DOMContentLoaded', () => {
     closeDropdown();
     STATE._lastSearchType = r.type || '';
     switchSymbol(r.symbol);
-    if (STATE.period === 'intraday') {
-      STATE.intradayData = null;
-      fetchIntraday();
-    } else {
-      refresh();
-    }
+    loadCurrent(); // 分时/日K 都刷新 基本信息 + 五档
   }
 
   symInput.addEventListener('input', () => {
@@ -4791,11 +5250,15 @@ document.addEventListener('DOMContentLoaded', () => {
       STATE._lastChipsAt = now;
       fetchChips(STATE.symbol);
     }
-    // 五档: 盘中约 3s 刷新 (20/min = 2/3 × 30)
-    if (STATE.period === 'intraday' && depthPanelOn()
-        && now - (STATE._lastDepthAt || 0) >= 3000) {
+    // 五档: 盘中约 3s 刷新 (20/min = 2/3 × 30); 所有周期
+    if (depthSecOn() && now - (STATE._lastDepthAt || 0) >= 3000) {
       STATE._lastDepthAt = now;
       fetchDepth();
+    }
+    // 基本信息: 盘中约 60s 刷新 (后端 60s 缓存); 成交额/换手/量比随行情变化
+    if (infoPanelOn() && now - (STATE._lastInfoAt || 0) >= 60e3) {
+      STATE._lastInfoAt = now;
+      fetchStockInfo();
     }
   }, 1000);
 });

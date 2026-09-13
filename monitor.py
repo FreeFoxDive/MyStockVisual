@@ -606,14 +606,219 @@ def _evaluate_price_alerts(alerts, quotes, now_dt, persist=True, notify=True):
     return fired
 
 
+# ── 趋势线跌破监控 ──
+
+LINE_MONITOR_TYPES = frozenset({"trend", "ray", "hline"})
+LINE_MONITOR_PERIODS = frozenset({"1d", "1w", "1M"})
+LINE_MONITOR_PCT_MIN, LINE_MONITOR_PCT_MAX = 0.1, 20.0
+
+_line_mon_cache = {}          # (user_id, symbol, period) -> (updated_at, [monitor])
+_line_mon_lock = threading.Lock()
+
+
+def _clean_monitored_drawing(d):
+    """画线 dict → 监控条目; 未启用/类型/参数无效返回 None。"""
+    if not isinstance(d, dict):
+        return None
+    mon = d.get("monitor")
+    if not isinstance(mon, dict) or not mon.get("enabled"):
+        return None
+    if d.get("type") not in LINE_MONITOR_TYPES:
+        return None
+    try:
+        pct = float(mon.get("pct"))
+    except (TypeError, ValueError):
+        return None
+    if not (LINE_MONITOR_PCT_MIN <= pct <= LINE_MONITOR_PCT_MAX):
+        return None
+    pts = d.get("points")
+    if not isinstance(pts, list) or not pts:
+        return None
+    did = str(d.get("id") or "")
+    if not did:
+        return None
+    return {
+        "drawing_id": did,
+        "name": (d.get("name") or "").strip(),
+        "line_type": d["type"],
+        "pct": pct,
+        "adjust": mon.get("adjust") if mon.get("adjust") in ("forward", "hfq", "none") else "forward",
+        "points": pts,
+    }
+
+
+def _load_line_monitors():
+    """全部启用中的趋势线监控, 按 (user, symbol, period, updated_at) 缓存解析结果。"""
+    out = []
+    for row in trades.list_chart_drawing_rows():
+        if row["period"] not in LINE_MONITOR_PERIODS:
+            continue
+        key = (row["user_id"], row["symbol"], row["period"])
+        with _line_mon_lock:
+            ent = _line_mon_cache.get(key)
+        if ent and ent[0] == row["updated_at"]:
+            out.extend(ent[1])
+            continue
+        try:
+            data = json.loads(row["drawings"])
+        except (TypeError, json.JSONDecodeError):
+            data = []
+        mons = []
+        for d in data if isinstance(data, list) else []:
+            m = _clean_monitored_drawing(d)
+            if m:
+                m.update(user_id=row["user_id"], symbol=row["symbol"],
+                         period=row["period"])
+                mons.append(m)
+        with _line_mon_lock:
+            _line_mon_cache[key] = (row["updated_at"], mons)
+        out.extend(mons)
+    return out
+
+
+def _resolve_anchor_idx(pt, date_map, n):
+    """与前端 resolveIdx 一致: 锚点 t 命中日期表取 idx, 否则 n-1+off。"""
+    t = pt.get("t")
+    if t:
+        idx = date_map.get(str(t)[:10])
+        if idx is not None:
+            return idx
+    try:
+        off = float(pt.get("off") or 0)
+    except (TypeError, ValueError):
+        off = 0.0
+    return n - 1 + off
+
+
+def evaluate_trendline_break(points, line_type, pct, dates, price):
+    """纯函数: 现价是否向下突破线值 × (1 - pct/100)。
+
+    points: 画线锚点 [{t, p, off}]; dates: bar 日期字符串列表 (升序)。
+    trend/ray 按两锚点线性外推到最后一根 bar (监控语义=线向右延伸);
+    hline 取锚点价格。触发返回 {value, threshold}, 否则/无法评估返回 None。
+    """
+    if not points or price is None or price <= 0:
+        return None
+    try:
+        pct = float(pct)
+    except (TypeError, ValueError):
+        return None
+    if not (LINE_MONITOR_PCT_MIN <= pct <= LINE_MONITOR_PCT_MAX):
+        return None
+    n = len(dates)
+    if n < 2:
+        return None
+    date_map = {}
+    for i, d in enumerate(dates):
+        if d not in date_map:
+            date_map[d] = i
+
+    def _price(pt):
+        try:
+            v = float(pt.get("p"))
+            return v if math.isfinite(v) else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    if line_type == "hline":
+        value = _price(points[0])
+    elif line_type in ("trend", "ray"):
+        if len(points) < 2:
+            return None
+        p1, p2 = _price(points[0]), _price(points[1])
+        if p1 is None or p2 is None:
+            return None
+        i1 = _resolve_anchor_idx(points[0], date_map, n)
+        i2 = _resolve_anchor_idx(points[1], date_map, n)
+        if i2 == i1:
+            value = p1
+        else:
+            value = p1 + (p2 - p1) * ((n - 1) - i1) / (i2 - i1)
+    else:
+        return None
+    if value is None or value <= 0:
+        return None
+    threshold = value * (1 - pct / 100.0)
+    if price <= threshold:
+        return {"value": value, "threshold": threshold}
+    return None
+
+
+def _load_bar_dates(symbol, period, adjust="forward"):
+    """取该 (symbol, period, adjust) 的 bar 日期列表 (与图表同口径/同根数, 磁盘缓存兜底)。"""
+    try:
+        import market
+        count = 1006 if period == "1d" else 200  # 与 /api/kline 默认根数一致
+        df, _name = market.fetch_kline(symbol, period, count, adjust=adjust)
+    except Exception as e:
+        log.warning(f"趋势线监控取K线失败 {symbol} {period}: {e}")
+        return None
+    if df is None or len(df) < 2:
+        return None
+    dates = [str(d)[:10] for d in df.index]
+    return dates, len(dates)
+
+
+def _evaluate_trendline_monitors(monitors, quotes, now_dt, persist=True, notify=True):
+    """趋势线跌破: 逐条评估, 每条每日一次, 落库+钉钉/ntfy 推送。"""
+    fired = []
+    bars_cache = {}   # (symbol, period) -> (dates, n) | None
+    today = now_dt.strftime("%Y-%m-%d")
+    for m in monitors:
+        q = quotes.get(m["symbol"]) or {}
+        price = q.get("last_price")
+        if price is None or price <= 0:
+            continue
+        key = (m["symbol"], m["period"], m.get("adjust") or "forward")
+        if key not in bars_cache:
+            bars_cache[key] = _load_bar_dates(m["symbol"], m["period"], key[2])
+        bars_info = bars_cache[key]
+        if not bars_info:
+            continue
+        r = evaluate_trendline_break(
+            m["points"], m["line_type"], m["pct"], bars_info[0], price)
+        if not r:
+            continue
+        last = trades.get_trendline_fired(m["user_id"], m["drawing_id"])
+        if last and str(last)[:10] == today:
+            continue
+        detail = (
+            f"{m['name'] or LINE_TYPE_NAMES.get(m['line_type'], m['line_type'])}"
+            f" 向下突破{m['pct']:g}%: 现价{price:.2f} 线值{r['value']:.2f}"
+            f" 阈值{r['threshold']:.2f} ({m['period']})"
+        )
+        if persist:
+            trades.insert_monitor_alert(
+                m["user_id"], None, m["symbol"], "trendline_break", today,
+                price=price, detail=detail,
+            )
+            trades.mark_trendline_fired(
+                m["user_id"], m["drawing_id"], m["symbol"], m["period"],
+                now_dt.isoformat(timespec="seconds"),
+            )
+        fired.append({"monitor": m, "price": price, "detail": detail})
+    if fired and notify:
+        now_str = now_dt.strftime("%Y-%m-%d %H:%M")
+        lines = [f"- **{f['monitor']['symbol']}**: {f['detail']}" for f in fired]
+        md = f"## 趋势线跌破预警 {now_str}\n" + "\n".join(lines)
+        dingtalk.send_markdown("趋势线跌破预警", md)
+        ntfy.send_markdown("趋势线跌破预警", md)
+    return fired
+
+
+LINE_TYPE_NAMES = {"trend": "趋势线", "ray": "射线", "hline": "水平线"}
+
+
 def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     """一轮: 取持仓 → 补种 → 快照 → 判定 → 节流 → 推送。返回 fired 列表。"""
     now_dt = now_dt or market_hours.now()
     positions = trades.list_monitored_positions()
     price_alerts = trades.list_enabled_price_alerts()
     alert_symbols = {a["symbol"] for a in price_alerts}
+    line_monitors = _load_line_monitors()
+    line_symbols = {m["symbol"] for m in line_monitors}
     symbols = list(dict.fromkeys(
-        [p["symbol"] for p in positions] + sorted(alert_symbols)))
+        [p["symbol"] for p in positions] + sorted(alert_symbols | line_symbols)))
     _set_status(n_symbols=len(symbols), last_poll=now_dt.isoformat(timespec="seconds"))
     if not symbols:
         return []
@@ -657,6 +862,13 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
             _evaluate_price_alerts(price_alerts, quotes, now_dt)
         except Exception as e:
             log.warning(f"价格预警评估失败: {e}")
+
+    # 趋势线跌破监控 (每条线每日一次)
+    if line_monitors:
+        try:
+            _evaluate_trendline_monitors(line_monitors, quotes, now_dt)
+        except Exception as e:
+            log.warning(f"趋势线监控评估失败: {e}")
 
     elapsed = market_hours.session_elapsed_minutes(now_dt)
 

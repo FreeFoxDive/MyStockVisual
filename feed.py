@@ -150,7 +150,10 @@ class RestFeed:
 
         quote_dict: last_price, prev_close, open, high, low, volume, amount,
                     timestamp (epoch seconds, 交易所时间), name, change_pct (小数)。
-        令牌不足时跳过本轮 (返回 {}); 失败回退 fallback_quotes。
+        令牌不足时跳过本轮 (返回 {}); 失败回退 fallback_quotes;
+        AF 批量成功但个别标的无数据 (典型: 指数) 时, 缺失部分走 fallback
+        (market.fetch_quotes 内含麦蕊 指数/ETF/股票 逐类回退), 否则这些标的
+        上的预警永远拿不到行情、静默失效。
         """
         symbols = list(dict.fromkeys(s for s in symbols if s))
         if not symbols:
@@ -172,6 +175,9 @@ class RestFeed:
                     q = _row_to_quote(row)
                     if q and q.get("symbol"):
                         out[q["symbol"]] = q
+            missing = [s for s in symbols if s not in out]
+            if missing:
+                out.update(self._fallback(missing))
             return out
         except Exception as e:
             wait = _retry_after_ms(e)

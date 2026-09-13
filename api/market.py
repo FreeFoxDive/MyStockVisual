@@ -17,6 +17,7 @@ from market import (
     fetch_depth,
     fetch_quote,
     fetch_quotes,
+    fetch_stock_info,
     normalize_symbol,
 )
 
@@ -85,6 +86,20 @@ def depth():
         log.warning("获取五档异常 %s: %s", symbol, _sanitize_error(e))
         return _error("获取五档失败", 500)
     return _json({"symbol": symbol, "depth": d})
+
+
+@api_bp.route("/api/stock-info", methods=["GET"])
+def stock_info():
+    """侧栏基本信息 (行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态)。"""
+    symbol_raw = request.args.get("symbol")
+    if not symbol_raw:
+        return _error("缺少 symbol 参数")
+    symbol = normalize_symbol(symbol_raw)
+    try:
+        return _json(fetch_stock_info(symbol))
+    except Exception as e:
+        log.warning("获取基本信息失败 %s: %s", symbol, _sanitize_error(e))
+        return _error("获取基本信息失败，请稍后重试", 500)
 
 
 @api_bp.route("/api/pledge", methods=["GET"])

@@ -48,8 +48,10 @@ class QuoteSseTest(unittest.TestCase):
         self.stream = stream
         self._orig_slots = stream._sse_slots
         self._orig_interval = stream.QUOTE_SSE_INTERVAL
+        self._orig_tick = stream.QUOTE_SSE_TICK
         stream._sse_slots = threading.BoundedSemaphore(stream.QUOTE_SSE_MAX_CLIENTS)
         stream.QUOTE_SSE_INTERVAL = 0.0
+        stream.QUOTE_SSE_TICK = 0.0  # 测试内不真实等待, 断连后立即归还槽位
         self.addCleanup(self._restore)
         self.client = self.app.test_client()
         token, _ = trades.create_session(self.uid)
@@ -58,6 +60,7 @@ class QuoteSseTest(unittest.TestCase):
     def _restore(self):
         self.stream._sse_slots = self._orig_slots
         self.stream.QUOTE_SSE_INTERVAL = self._orig_interval
+        self.stream.QUOTE_SSE_TICK = self._orig_tick
 
     def _frames(self, url, n=2):
         """读前 n 帧后立即关闭 (不触发无限循环)。"""
@@ -113,6 +116,15 @@ class QuoteSseTest(unittest.TestCase):
             _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}")
         self.assertEqual(frames[0], "retry: 5000\n\n")
         self.assertEqual(frames[1], ": tick\n\n", "单次快照失败应发保活帧而非断开")
+
+    def test_keepalive_frame_between_snapshots(self):
+        # 推送间隔未到时发 : keepalive 注释帧, 使断线能在 ~1s 内被发现并归还槽位
+        self.stream.QUOTE_SSE_INTERVAL = 3600.0
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
+            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=3)
+        self.assertEqual(frames[0], "retry: 5000\n\n")
+        self.assertTrue(frames[1].startswith("data: "), "首帧应推送快照")
+        self.assertEqual(frames[2], ": keepalive\n\n", "间隔未到应发保活注释帧")
 
     def test_429_when_slots_exhausted(self):
         for _ in range(self.stream.QUOTE_SSE_MAX_CLIENTS):

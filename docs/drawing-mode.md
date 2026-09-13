@@ -33,7 +33,7 @@
 - **🧲 磁吸**：落子/拖拽时端点吸附 12px 内最近的 K 线开/高/低/收价，锚点更精准。
 - **⚡ 自动建议线**：开启后对最近 150 根做 ZigZag（阈值 2%）摆动点拟合，支撑（低点连线）与压力（高点连线）各取触点最多（≥3 触点，收盘破位超过 1 根即否决）的一条，虚线标注「自动支撑/自动压力 · N触点」，自动向右延伸。自动线不持久化，数据刷新后重算。
 - **画线修正建议**：趋势线/射线落子或拖拽后，在原锚点 ±4 根内搜索更优锚点（吸附该 bar 极值），触点评分更高时显示橙色虚线幽灵方案 + 「采纳/忽略」浮框，采纳即替换原画线。
-- **未来预测延伸**：画线模式开启或存在延伸线/自动线时，图表右侧预留 8 根空白 bar（仅此时改变坐标轴范围，日常视图不受影响）；趋势线（迷你菜单开「延伸」）、射线、回归通道、自动线向右以虚线延伸并标注末端预测价。
+- **未来预测延伸**：画线模式开启或存在延伸线/自动线时，图表右侧预留 8 根空白 bar（仅此时改变坐标轴范围，日常视图不受影响）；趋势线（迷你菜单开「延伸」）、射线、回归通道、自动线向右以虚线延伸并标注末端预测价。该区在各面板上以淡色带 + 「预测区」标注（`buildFutureZoneMarkArea`），否则没有分类标签的空白段会被误认为渲染缺口。
 
 ## 3. 交互与编辑
 
@@ -52,17 +52,21 @@
   - `PUT /api/drawings` body `{symbol, period, drawings}` → 整体 upsert（≤500 条 / 512KB）
   - `DELETE /api/drawings?symbol=&period=`
 - **前端同步**：切换代码/周期时拉取覆盖本地；每次编辑 800ms 防抖整体保存；请求由全局 fetch 包装器自动附加 CSRF 头。
+- **趋势线监控字段**：`name`（监控名称，开启监控时前端强制填写）+ `monitor`（`{enabled, pct, adjust}`，跌破幅度 % 与复权口径）。监控配置随画线 JSON 一起保存，后端监控循环读取最新锚点评估，拖动/删除线天然跟随；`line_type` 仅 trend/ray/hline，周期仅 1d/1w/1M。`adjust` 记录开启监控时的图表复权方式（forward/hfq/none），后端用同一口径取 K 线算线值，避免前复权/不复权价格差异导致线值错位。触发状态（每条线每日一次）单独存 `trendline_monitor_state` 表，避免后端写画线 JSON 与前端整体覆盖互相踩踏。
 
 ## 5. 架构与实现要点
 
 - **`static/js/drawings.js`（纯逻辑 UMD，无 DOM 依赖，Node 可测）**：日期索引映射与线性外推换算（支持未来 bar 越界）、Liang-Barsky 线段裁剪、命中测试、磁吸、ZigZag 摆动点、趋势线触点评分与修正寻优、最小二乘回归、斐波那契、`valueAt`（tooltip 相交价）。
 - **渲染层：独立 overlay canvas**（`#draw-overlay`，`pointer-events:none`，事件仍由 zrender 派发）。不使用 ECharts graphic——其增量合并对新增元素会静默丢弃；overlay 每帧 `clearRect` 全量重绘，确定性无状态。面板名称标签同样由 overlay 绘制。
-- **未来空间**：仅按需把 category xAxis `max = len-1+8`，不改数据数组，指标/缺口/筹码逻辑零影响。
+- **未来空间**：仅按需把 category xAxis `max = len-1+8`，不改数据数组。**只作用于分类（日期）轴**：筹码叠加的 xAxis 是 value 轴（量纲 0..权重），一并写入会让筹码柱宽变亚像素、画线模式下整片消失（见 `applyFutureSlots` 的类型守卫）。
 - **截图导出**：`saveChartImage()` 将 overlay 与 ECharts 画布手动合成后导出。
 
 ## 6. 测试
 
-- `test/test_drawings_js.py`：Node 驱动（仿 `test_gaps_js.py`），17 项——坐标解析/未来偏移、裁剪、斐波那契、回归拟合、测量统计、几何与命中、ZigZag、支撑线检测、修正寻优、磁吸、序列化、`valueAt` 跨度语义。
+- `test/test_drawings_js.py`：Node 驱动（仿 `test_gaps_js.py`），20 项——坐标解析/未来偏移、裁剪、斐波那契、回归拟合、测量统计、几何与命中、ZigZag、支撑线检测、修正寻优、磁吸、序列化与 `name`/`monitor` 字段、`valueAt` 跨度语义。
+- `test/test_chip_draw_mode_js.py`：画线模式与筹码峰共存——`applyFutureSlots` 只写 category 轴，筹码 value 轴 `max` 不被覆盖（画线开关两种状态）。
+- `test/test_chart_annotations_js.py`：未来预测区标注（`buildFutureZoneMarkArea` 的起止槽位/文案/色带，无未来槽返回 null）+ 零轴 `markLine` 必须隐藏默认数值标签。
+- `test/test_monitor_trendline.py`：趋势线跌破监控——纯评估函数（hline/trend/ray 外推、阈值、未来锚点 off 兜底）、监控线加载与缓存、每日一次触发/落库/推送、`_poll_once` 接入、`RestFeed.quotes` 缺失标的（指数）回退。
 - `test/test_drawings_api.py`：Flask test client——GET/PUT/DELETE 往返、周期隔离、参数校验、未登录 401、CSRF 403。
 - `smoke_server.py`：冒烟工具——临时 DB + 独立端口 8899 启动完整服务（不触碰 `data/trades.db`），配合浏览器手工/自动化验证。
 
@@ -71,3 +75,4 @@
 - 分时视图不支持画线（切回 K 线周期使用）。
 - 文本标注暂不支持双击编辑既有文字（需删除重建）。
 - 画线坐标以「日期字符串 + 相对偏移」锚定：分钟周期滚动出新 bar 后，超出数据窗口的旧锚点按相对偏移平移。
+- 趋势线监控仅支持 日/周/月 K 与 趋势线/射线/水平线；分钟周期趋势线暂不参与监控（锚点解析复杂、场景少）。监控按线向右线性延伸的线值计算，即使画线未开「延伸」。

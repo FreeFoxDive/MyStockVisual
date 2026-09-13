@@ -1,0 +1,257 @@
+# -*- coding: utf-8 -*-
+"""左侧栏 (基本信息+五档) 前端测试: 静态结构断言 + panelGridLeft 行为镜像。
+
+关键回归点:
+  * 五档所有周期可用: depthSecOn() 不再按周期门控, 轮询/显隐统一走它;
+  * 基本信息面板可收起/展开 (sp-fold / side-reopen);
+  * 网格左边距 = 面板宽度 + 12 + Y 轴刻度预留, 避免面板遮挡左侧刻度;
+  * 分时下切换复权不再静默改写 STATE.period (漏态根因)。
+
+运行:
+    venv/Scripts/python.exe -u visual/test/test_side_panel_js.py
+"""
+import json
+import re
+import shutil
+import subprocess
+import unittest
+from pathlib import Path
+
+_VISUAL_DIR = Path(__file__).resolve().parents[1]
+INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
+
+
+def _extract_fn(src: str, name: str) -> str:
+    m = re.search(r"function\s+" + re.escape(name) + r"\s*\(", src)
+    if not m:
+        raise AssertionError(f"index.html 中找不到 function {name}")
+    start = src.index("{", m.end() - 1)
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[m.start():i + 1]
+    raise AssertionError(f"function {name} 大括号不配对")
+
+
+class SidePanelStaticTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.src = INDEX_HTML.read_text(encoding="utf-8")
+
+    def test_panel_structure(self):
+        for token in ('id="side-panel"', 'id="info-sec"', 'id="info-body"',
+                      'id="depth-sec"', 'id="depth-body"', 'id="chk-info"'):
+            self.assertIn(token, self.src, token)
+
+    def test_old_depth_panel_removed(self):
+        self.assertNotIn("depthPanelOn", self.src)
+        self.assertNotIn("showDepthPanel", self.src)
+        self.assertNotIn('id="depth-panel"', self.src)
+
+    def test_depth_section_not_gated_by_period(self):
+        body = _extract_fn(self.src, "depthSecOn")
+        self.assertNotIn("intraday", body, "五档应所有周期可用, 不再按周期门控")
+        self.assertIn("chk-depth", body)
+
+    def test_depth_has_header_row(self):
+        # 五档盘口补列头 (基本信息每行自带 sp-label, 五档此前缺失)
+        head = self.src.index('id="depth-sec"')
+        body = self.src.index('id="depth-body"')
+        self.assertLess(head, body, "表头应位于 depth-body 之前")
+        seg = self.src[head:body]
+        self.assertIn('dp-head', seg)
+        for col in ('档位', '价格', '量'):
+            self.assertIn(col, seg, col)
+        self.assertIn('#side-panel .dp-head', self.src)
+
+    def test_history_and_search_switch_refresh_panels(self):
+        # 历史标签/搜索下拉换股必须与回车一致地刷新 基本信息 + 五档
+        for name in ('switchToHistory', 'selectResult'):
+            self.assertIn('loadCurrent()', _extract_fn(self.src, name),
+                          f'{name} 换股须经 loadCurrent 刷新信息/五档')
+
+    def test_load_current_resets_panel_state(self):
+        # 换股先作废旧股面板缓存并解除节流, 否则信息/五档停留上一只
+        body = _extract_fn(self.src, 'loadCurrent')
+        self.assertIn('resetSidePanelData()', body)
+        self.assertIn('ensureQuoteStream()', body)
+        reset = _extract_fn(self.src, 'resetSidePanelData')
+        for token in ('STATE.stockInfo = null', 'STATE.depth = null',
+                      'STATE._lastInfoAt = 0', 'STATE._lastDepthAt = 0'):
+            self.assertIn(token, reset, token)
+
+    def test_fetch_data_no_longer_restarts_stream(self):
+        # 快照流启动统一由 loadCurrent/ensureQuoteStream 管理 (含分时换股)
+        body = _extract_fn(self.src, 'fetchData')
+        self.assertNotIn('startQuoteStream()', body)
+        self.assertIn('ensureQuoteStream', self.src)
+
+    def test_fetch_depth_no_period_gate(self):
+        body = _extract_fn(self.src, "fetchDepth")
+        self.assertNotIn("STATE.period", body, "五档拉取不应再按周期拦截")
+
+    def test_panel_fold_controls_present(self):
+        self.assertIn('id="side-reopen"', self.src)
+        self.assertIn('id="sp-fold-info"', self.src)
+        self.assertIn('onclick="foldSidePanel()"', self.src)
+        self.assertIn('onclick="unfoldSidePanel()"', self.src)
+        show = _extract_fn(self.src, "showSidePanel")
+        self.assertIn("'side-reopen'", show)
+        self.assertIn("'block'", show)
+        # 收起按钮与展开恢复都要保留信息/五档开关
+        fold = _extract_fn(self.src, "foldSidePanel")
+        self.assertIn("_sidePrev", fold)
+        unfold = _extract_fn(self.src, "unfoldSidePanel")
+        self.assertIn("_sidePrev", unfold)
+
+    def test_panel_grid_left_reserves_axis_labels(self):
+        body = _extract_fn(self.src, "panelGridLeft")
+        self.assertIn("AXIS_LABEL_RESERVE", body)
+        self.assertIn("offsetWidth", body)
+
+    def test_info_checkbox_first_in_panel_bar(self):
+        bar = self.src[self.src.index('id="indicator-bar"'):self.src.index("<span>复权:</span>")]
+        self.assertLess(bar.index('id="lbl-info"'), bar.index('id="chk-volume"'),
+                        "信息 应排在其他面板勾选框之前")
+        self.assertLess(bar.index('id="lbl-depth"'), bar.index('id="chk-volume"'),
+                        "五档 与 信息 同组靠前")
+
+    def test_chip_checkbox_right_after_volume(self):
+        # 筹码紧跟在成交量之后 (同属量能类), 排在 MACD 等振荡指标之前
+        bar = self.src[self.src.index('id="indicator-bar"'):self.src.index("<span>复权:</span>")]
+        self.assertLess(bar.index('id="chk-volume"'), bar.index('id="lbl-chip"'),
+                        "筹码 应排在成交量之后")
+        self.assertLess(bar.index('id="lbl-chip"'), bar.index('id="chk-macd"'),
+                        "筹码 应排在 MACD 之前")
+
+    def test_depth_nested_in_info_box(self):
+        # 五档不再是独立的 sp-sec 块, 也不是独立带标题的框; 并入信息框内且无 label
+        seg = self.src[self.src.index('id="info-sec"'):self.src.index('id="side-reopen"')]
+        self.assertIn('id="depth-sec"', seg, "五档区块应包含在信息区块内")
+        self.assertNotIn('class="sp-sec" id="depth-sec"', seg, "五档不应再是独立 box")
+        depth_seg = seg[seg.index('id="depth-sec"'):]
+        self.assertNotIn("sp-subtitle", depth_seg, "五档不再显示 label")
+        self.assertNotIn("<span>五档</span>", depth_seg, "五档不应再有文字标题")
+
+    def test_depth_section_uses_block_display(self):
+        # 回归: 五档块已无 sp-sec 的 column 方向, 若改回 flex 会变 row 使盘口行压到标题
+        body = _extract_fn(self.src, "showDepthSection")
+        self.assertIn("'block'", body)
+        self.assertNotIn("'flex'", body)
+
+    def test_panel_visibility_follows_info(self):
+        # 五档并入信息框后, 侧栏由「信息」控制 (五档只控框内子块)
+        body = _extract_fn(self.src, "sidePanelOn")
+        self.assertIn("infoPanelOn()", body)
+        self.assertNotIn("depthSecOn", body)
+
+    def test_no_depth_close_button(self):
+        # 五档只由面板栏勾选框开关, 标题栏不再提供 ✕ (避免收起后找不到恢复入口)
+        self.assertNotIn("sp-fold-depth", self.src)
+        self.assertNotIn("closeDepthSection", self.src)
+
+    def test_stock_info_periodic_refresh(self):
+        # 基本信息须随行情定时刷新 (否则盘中量比/成交额停留在加载时快照)
+        self.assertIn("_lastInfoAt", self.src)
+        self.assertGreaterEqual(self.src.count("fetchStockInfo()"), 3)
+
+    def test_poll_uses_depth_sec_on(self):
+        idx = self.src.index("五档: 盘中约 3s 刷新")
+        self.assertIn("depthSecOn()", self.src[idx:idx + 160])
+
+    def test_grid_uses_panel_grid_left(self):
+        self.assertIn("panelGridLeft()", self.src)
+        calc = _extract_fn(self.src, "calcGridLayout")
+        self.assertIn("gLeft", calc, "calcGridLayout 应使用 panelGridLeft 计算左边距")
+
+    def test_fetchdata_period_coercion_routed_through_apply(self):
+        fetch = _extract_fn(self.src, "fetchData")
+        self.assertNotIn("STATE.period = '1d'", fetch, "分时切换复权不得静默改写周期")
+        self.assertIn("applyPeriodUI('1d')", fetch)
+        self.assertIn("function applyPeriodUI", self.src)
+
+    def test_drawer_new_tabs(self):
+        for tab in ("exchange-announcement", "zljlr", "holder-change",
+                    "top-holders", "float-holders", "unlock"):
+            self.assertIn(f"showCnTab('{tab}')", self.src, tab)
+
+    def test_drawer_highlight_and_int_format(self):
+        self.assertIn("highlight_symbol", self.src)
+        self.assertIn("#cn-body tr.hl", self.src)
+        self.assertIn("Number.isInteger(v)", self.src)
+
+    def test_drawer_kv_mode(self):
+        # 单票键值视图 (主力净流入): showCnTab 需支持 data.kv 分支与样式
+        self.assertIn("Array.isArray(data.kv)", self.src)
+        self.assertIn(".cn-kv-row", self.src)
+        self.assertIn("cn-kv-label", self.src)
+
+    def test_drawer_tab_race_guard(self):
+        # tab 快速切换: 过期响应不得覆盖新 tab (请求序号 + 股票比对)
+        fn = _extract_fn(self.src, "showCnTab")
+        self.assertIn("_cnSeq", fn)
+        self.assertIn("seq !== _cnSeq", fn)
+        self.assertIn("STATE.symbol !== symbol", fn)
+        self.assertIn("seq === _cnSeq", fn, "finally 也需按序号守卫")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+class PanelGridLeftBehaviorTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        src = INDEX_HTML.read_text(encoding="utf-8")
+        fns = "\n".join(_extract_fn(src, n) for n in
+                        ("infoPanelOn", "depthSecOn", "sidePanelOn", "panelGridLeft"))
+        cls.script = (
+            fns + "\n"
+            + "const c = JSON.parse(process.argv[1]);"
+            + "globalThis.STATE = {period: c.period};"
+            + "globalThis.document = {getElementById: (id) => c.el[id] || null};"
+            + "process.stdout.write(JSON.stringify({"
+            + " side: sidePanelOn(), depth: depthSecOn(), left: panelGridLeft()}));"
+        )
+
+    def _run(self, period, el):
+        proc = subprocess.run(["node", "-e", self.script, json.dumps({"period": period, "el": el})],
+                              capture_output=True, check=True)
+        return json.loads(proc.stdout.decode("utf-8"))
+
+    def test_info_on_daily(self):
+        out = self._run("1d", {"chk-info": {"checked": True}, "side-panel": {"offsetWidth": 204}})
+        self.assertTrue(out["side"])
+        self.assertFalse(out["depth"], "未勾选五档则不出五档")
+        # 204(面板) + 12(间距) + 72(Y轴刻度预留)
+        self.assertEqual(out["left"], "288px")
+
+    def test_depth_on_daily_narrow(self):
+        out = self._run("1d", {"chk-info": {"checked": True}, "chk-depth": {"checked": True},
+                               "side-panel": {"offsetWidth": 150}})
+        self.assertTrue(out["side"])
+        self.assertTrue(out["depth"], "五档在日K也应显示")
+        self.assertEqual(out["left"], "234px", "窄屏按实际面板宽度让位 + 刻度预留")
+
+    def test_intraday_depth_on_narrow(self):
+        out = self._run("intraday", {"chk-info": {"checked": True}, "chk-depth": {"checked": True},
+                                     "side-panel": {"offsetWidth": 150}})
+        self.assertTrue(out["side"])
+        self.assertTrue(out["depth"])
+        self.assertEqual(out["left"], "234px")
+
+    def test_both_off_no_space(self):
+        out = self._run("1d", {"chk-info": {"checked": False}, "chk-depth": {"checked": False}})
+        self.assertFalse(out["side"], "信息与五档都关闭 → 侧栏隐藏")
+        self.assertEqual(out["left"], "8%")
+
+    def test_depth_alone_does_not_keep_panel_on_daily(self):
+        out = self._run("1d", {"chk-info": {"checked": False}, "chk-depth": {"checked": True},
+                               "side-panel": {"offsetWidth": 204}})
+        self.assertFalse(out["side"], "五档已并入信息框, 信息关闭则整框隐藏")
+        self.assertEqual(out["left"], "8%")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

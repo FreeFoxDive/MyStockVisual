@@ -56,3 +56,12 @@ def alerts_delete(alert_id):
         return _error("未登录", 401)
     ok = trades.delete_price_alert(user["id"], alert_id)
     return _json({"ok": bool(ok)})
+
+
+@api_bp.route("/api/trendline-monitors", methods=["GET"])
+def trendline_monitors_list():
+    """当前用户的趋势线监控列表 (配置挂在画线上, 这里只读展示)。"""
+    user = _require_user()
+    if not user:
+        return _error("未登录", 401)
+    return _json({"monitors": trades.list_trendline_monitors(user["id"])})

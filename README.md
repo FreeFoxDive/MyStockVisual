@@ -27,7 +27,7 @@ venv/Scripts/python.exe -u visual/server.py
 | OBV 面板 | OBV + MAOBV(30)（东财/通达信口径），零轴参考线 |
 | 成交量面板 | 可开关；叠加 VOL MA5/MA10/MA20（东财口径）；关闭时 K线自动拉高 |
 | 筹码分布 | 日/周/月 K 股票/ETF，东财原版 CYQ 算法（始终日线粒度，回看窗口 210/600/1500 根日线，前复权），右侧叠加、与主图价格轴联动；含获利比例/平均成本/90·70成本区间 |
-| 五档盘口 | 仅分时视图：**左侧**面板显示买1-5/卖1-5，盘中约 3s 刷新（令牌桶 2/3×30/min），可开关 |
+| 左侧信息栏 | **所有周期**显示「基本信息」(行业/总手/成交额/换手/量比/涨停价/跌停价/3·5·10日涨幅/PE/PB/交易状态)；盘中每 60s 刷新，标题栏 ◀ 可收起（收起后左缘 › 展开）。同一框内下方接「五档」(买1-5/卖1-5) **所有周期**可用（盘中约 3s 刷新，独立令牌桶 2/3×30/min）；整框显隐由面板栏「信息」勾选框控制，「五档」勾选框单独控制框内五档子块 |
 | 换手/流值/份额/成交额 | 顶部信息栏：股票显示换手率与流通市值；ETF 显示份额；均显示当日成交额 |
 | 动力系统 | Elder Impulse System — EMA13方向 + MACD柱方向决定蜡烛颜色(红多/绿空/蓝中性)，日/周/月K |
 | ATR 通道 | EMA13 ± 1/2/3 ATR 共6条虚线，日/周/月K，默认关闭 |
@@ -52,8 +52,9 @@ venv/Scripts/python.exe -u visual/server.py
 | 港股/美股 | AlphaFeed 源 日/周/月K + 快照；专用令牌桶 8/min（额度 10/min 的 4/5，env 可调）；v1 不含分时 |
 | 搜索增强 | 覆盖 A股/ETF/指数/港股/美股，结果带类型徽标（指数/ETF/港/美）；排序 股票(含港/美) > ETF > 指数，下拉最多 50 条 |
 | 价格预警 | 自定义条件（现价/涨跌幅 ≥/≤ 数值，AND 组合），监控循环盘中评估，30 分钟冷却，钉钉/ntfy 推送；工具栏 🔔 管理 |
+| 趋势线监控 | 选中趋势线/射线/水平线 → 画线菜单「🔔监控」→ 强制命名 + 跌破幅度%（默认 个股 2 / ETF·指数 3）→ 现价跌破线值×(1−pct%) 时盘中推送钉钉/ntfy，每条线每日一次；监控配置随画线保存（含复权口径），拖动即跟随，预警弹窗可总览；日/周/月K 支持 |
 | 条件选股 | `/screener.html`：MACD金叉 / 站上MA20 / 筹码获利盘 / RSI / 5日涨幅 条件组合后台扫描（`SCREENER_MAX_SYMBOLS` 控制范围） |
-| 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存） |
+| 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存）；麦蕊源：交易所公告（日期倒序）、主力净流入（当前股单票键值视图 + 全市场排名）、股东户数变化、十大股东、十大流通股东、解禁限售（含解禁市值/占流通股%） |
 
 ## 文件结构
 
@@ -123,7 +124,18 @@ visual/
 | `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（含 OBV/MAOBV/量均线）+ 流通股本元数据（日K默认 1006≈3年可见+RSI250 warmup） |
 | `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数） |
 | `GET /api/chips?symbol=600519.SH&period=1w` | 筹码分布（股票/ETF；`period` 1d/1w/1M 决定日线回看窗口 210/600/1500 根，返回直方图+汇总+`source`/`period`；指数返回 null）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
-| `GET /api/depth?symbol=600519.SH` | 五档盘口（分时用；独立令牌桶 2/3×30/min，失败返回 `depth=null`） |
+| `GET /api/depth?symbol=600519.SH` | 五档盘口（所有周期可用；独立令牌桶 2/3×30/min，失败返回 `depth=null`） |
+| `GET /api/stock-info?symbol=600519.SH` | 侧栏基本信息（行业/总手/成交额/换手/量比/涨停跌停/N日涨幅/PE/PB/交易状态；麦蕊 + 日K，整包 60s 缓存，港/美股降级为 None） |
+| `GET /api/cn/fund-flow?symbol=` | 个股资金流向（东财，15min 缓存） |
+| `GET /api/cn/lhb?symbol=` | 龙虎榜（近 7 日，30min 缓存） |
+| `GET /api/cn/dividends?symbol=` | 分红送配（1h 缓存） |
+| `GET /api/cn/announcements?symbol=` | 公告（巨潮/akshare，近 90 天，30min 缓存） |
+| `GET /api/cn/exchange-announcement?symbol=` | 交易所公告（麦蕊 `/hsstock/announcement`，源升序→按日期倒序展示，30min 缓存） |
+| `GET /api/cn/zljlr?symbol=` | 当前股票主力净流入（单票键值视图：主力净额/率、主力流入/流出、净额/率、量价换手、全市场排名；麦蕊 `/higg/zljlr` 全市场快照，10min 缓存） |
+| `GET /api/cn/holder-change?symbol=` | 股东户数变化趋势（麦蕊 `/hscp/gdbh`，6h 缓存） |
+| `GET /api/cn/top-holders?symbol=` | 十大股东（最新报告期展平，麦蕊 `/hscp/sdgd`，6h 缓存） |
+| `GET /api/cn/float-holders?symbol=` | 十大流通股东（麦蕊 `/hscp/ltgd`，6h 缓存） |
+| `GET /api/cn/unlock?symbol=` | 解禁限售（麦蕊 `/hscp/jjxs`，12h 缓存；附 解禁市值(亿)、解禁均价(元)=市值÷数量、占流通股% = 解禁数量÷流通股本） |
 | `GET /api/search?q=茅台` | 模糊搜索 (全量A股+ETF，内存+磁盘双层缓存，24h刷新；最多返回 50 条，排序 股票>ETF>指数) |
 | `GET /api/ping` | 健康检查 |
 | `POST /api/auth/login` | 登录，返回 `Set-Cookie: session` |
@@ -132,6 +144,7 @@ visual/
 | `GET /api/drawings?symbol=&period=` | 当前用户的图表画线（用户+代码+周期隔离） |
 | `PUT /api/drawings` | 整体保存画线 `{symbol,period,drawings}`（登录+CSRF，≤500条） |
 | `DELETE /api/drawings?symbol=&period=` | 清空该代码/周期的画线（登录+CSRF） |
+| `GET /api/trendline-monitors` | 当前用户的趋势线监控列表（配置存于画线 `monitor` 字段，只读展示） |
 | `GET /api/admin/users` | 用户列表（仅管理员） |
 | `POST /api/admin/users` | 添加用户 `{username,password}`（仅管理员） |
 | `DELETE /api/admin/users/{id}` | 删除用户（仅管理员） |
@@ -224,7 +237,8 @@ KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复�
 - 基金日K口径：默认链 AlphaFeed/东财 volume 为「手」，与快照一致；麦蕊 `jj/lskx` 为「股」，仅在显式配置且未复权时可用
 - ETF 溢价线用未复权收盘价对齐单位净值；股吧链接 ETF 带 `sh`/`sz` 前缀（如 `list,sh588200.html`）
 - `/api/kline` 响应 `meta.source` 返回实际服务的数据源，便于观察回退是否生效
-- 五档（`/api/depth`，仅分时）独立令牌桶，速率 = `AF_DEPTH_RATE_PER_MIN`（默认 30，实测 depth 限额 30/min）× 2/3 = 20/min；2s 缓存去重，仅盘中轮询
+- 五档（`/api/depth`，所有周期）独立令牌桶，速率 = `AF_DEPTH_RATE_PER_MIN`（默认 30，实测 depth 限额 30/min）× 2/3 = 20/min；2s 缓存去重，仅盘中轮询
+- 麦蕊特色数据（侧栏基本信息 / 抽屉新标签）：全市场榜单（`/himk/roe`、`/higg/zljlr`）单次请求 + 进程内长缓存（ROE 12h、主力净流入 10min、股东 6h、解禁 12h、公告 30min、个股基础信息 24h、行业 7d），基本信息整包 60s；`/api/stock-info` 换股/换周期即时拉取，盘中另每 60s 刷新一次。量比盘中按已过交易分钟折算，非盘中按最近一个交易日全天 240 分钟口径（休市也能看到最近量比）。付费版额度见 [MAIRUI_API.md](../MAIRUI_API.md)
 - ⚠️ **麦蕊股票日K当日 bar 盘中为滞后/部分成交快照**：如 601058.SH 2026-09-10，麦蕊 `low=14.30/vol=144462`，而实时快照与 AlphaFeed 为 `low=14.18/vol=264196`（当日无除权）。成交校验与日K图表当日 bar 均已改为以实时快照为准（`market.get_daily_bar` / `_maybe_append_today_bar`）；非交易日、停牌（volume=0）不覆盖。详见 [docs/known-issues.md](docs/known-issues.md)
 - 磁盘缓存按**数据源链隔离**（key 含 `kline_source.chain_tag`）：改 `KLINE_SOURCE_*` 后旧源缓存自动失效，不会串源；改配置仍需重启生效（`.env` 仅启动时加载）
 

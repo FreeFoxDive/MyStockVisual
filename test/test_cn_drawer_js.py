@@ -83,5 +83,159 @@ class CnDrawerFitTest(unittest.TestCase):
         self.assertIn("clamp(", style, "抽屉默认宽度应为 clamp(...) 自适应")
 
 
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+class ShowCnTabRaceTest(unittest.TestCase):
+    """tab 切换竞态: 过期响应不得覆盖新 tab 内容。
+
+    抽取 index.html 的 showCnTab 真实源码, 用可控 api (手动 resolve/reject) 模拟乱序返回。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        src = INDEX_HTML.read_text(encoding="utf-8")
+        fn = _extract_fn(src, "showCnTab")
+        cls.script = (
+            "let _cnTab = 'seed'; let _cnSeq = 0;\n"
+            + fn + "\n"
+            + """
+const mode = process.argv[1];
+const tick = () => new Promise(r => setTimeout(r, 0));
+const pending = [];
+const bodyEl = { innerHTML: "" };
+let fits = 0;
+globalThis.STATE = { symbol: "AAA.SZ" };
+globalThis.escHtml = (s) => String(s);
+globalThis.fitCnDrawer = () => { fits += 1; };
+globalThis.api = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+globalThis.document = {
+  getElementById: (id) => (id === "cn-body" ? bodyEl : null),
+  querySelectorAll: () => [],
+};
+(async () => {
+  if (mode === "out-of-order") {
+    showCnTab("fund-flow");
+    showCnTab("unlock");
+    await tick();
+    pending[1].resolve({ rows: [{ "解禁日期": "2026-01-01" }] });   // 新 tab 先返回
+    await tick();
+    pending[0].resolve({ rows: [{ "主力净流入额(亿)": 1 }] });      // 旧 tab 晚到
+    await tick();
+  } else if (mode === "normal") {
+    showCnTab("unlock");
+    await tick();
+    pending[0].resolve({ rows: [{ "解禁日期": "2026-01-01" }] });
+    await tick();
+  } else if (mode === "symbol-change") {
+    showCnTab("unlock");
+    STATE.symbol = "BBB.SZ";                                      // 期间切股
+    await tick();
+    pending[0].resolve({ rows: [{ "解禁日期": "2026-01-01" }] });
+    await tick();
+  } else if (mode === "stale-error") {
+    showCnTab("fund-flow");
+    showCnTab("unlock");
+    await tick();
+    pending[0].reject(new Error("boom"));                          // 旧请求报错
+    await tick();
+  }
+  process.stdout.write(JSON.stringify({ html: bodyEl.innerHTML, fits, tab: _cnTab }));
+})();
+"""
+        )
+
+    def _run(self, mode):
+        proc = subprocess.run(["node", "-e", self.script, mode], capture_output=True, check=True)
+        return json.loads(proc.stdout.decode("utf-8"))
+
+    def test_late_old_response_does_not_overwrite_new_tab(self):
+        out = self._run("out-of-order")
+        self.assertIn("解禁日期", out["html"], "新 tab 内容应保留")
+        self.assertNotIn("主力净流入额(亿)", out["html"], "旧 tab 晚到响应不得覆盖")
+        self.assertEqual(out["fits"], 1, "只有当前请求触发 fitCnDrawer")
+
+    def test_current_response_renders(self):
+        out = self._run("normal")
+        self.assertIn("解禁日期", out["html"], "当前请求应正常渲染 (守卫不误杀)")
+        self.assertEqual(out["fits"], 1)
+
+    def test_symbol_change_drops_response(self):
+        out = self._run("symbol-change")
+        self.assertIn("加载中", out["html"], "已切股 → 丢弃响应, 保持加载中")
+        self.assertNotIn("解禁日期", out["html"])
+
+    def test_stale_error_does_not_overwrite(self):
+        out = self._run("stale-error")
+        self.assertNotIn("加载失败", out["html"], "过期请求报错不得覆盖新 tab")
+        self.assertIn("加载中", out["html"])
+
+
+class CnDrawerSymbolSwitchTest(unittest.TestCase):
+    """换股时已打开的市场数据抽屉必须重载当前 tab (而非停在上一只股票)。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = INDEX_HTML.read_text(encoding="utf-8")
+
+    def test_load_current_refreshes_symbol_panels(self):
+        self.assertIn("refreshSymbolPanels()", _extract_fn(self.src, "loadCurrent"))
+
+    def test_refresh_symbol_panels_guards_and_reloads(self):
+        fn = _extract_fn(self.src, "refreshSymbolPanels")
+        self.assertIn("cn-drawer", fn)
+        self.assertIn("'block'", fn, "仅在抽屉可见时重载")
+        self.assertIn("showCnTab(_cnTab)", fn, "重载当前 tab")
+        self.assertIn("alert-symbol", fn, "预警弹窗标的标签同步")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+class CnDrawerSymbolRefreshBehaviorTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        src = INDEX_HTML.read_text(encoding="utf-8")
+        fn = _extract_fn(src, "refreshSymbolPanels")
+        cls.script = (
+            "let _cnTab = 'unlock';\n"
+            + fn + "\n"
+            + """
+const c = JSON.parse(process.argv[1]);
+let reloaded = 0, lastTab = null;
+globalThis.showCnTab = (t) => { reloaded++; lastTab = t; };
+globalThis.STATE = { symbol: c.symbol };
+const els = {
+  "cn-drawer": { style: { display: c.drawer } },
+  "alerts-modal": { style: { display: c.modal } },
+  "alert-symbol": { textContent: "OLD.SZ" },
+};
+globalThis.document = { getElementById: (id) => els[id] || null };
+refreshSymbolPanels();
+process.stdout.write(JSON.stringify({
+  reloaded, lastTab, label: els["alert-symbol"].textContent }));
+"""
+        )
+
+    def _run(self, drawer, modal="none", symbol="BBB.SZ"):
+        proc = subprocess.run(["node", "-e", self.script,
+                               json.dumps({"drawer": drawer, "modal": modal, "symbol": symbol})],
+                              capture_output=True, check=True)
+        return json.loads(proc.stdout.decode("utf-8"))
+
+    def test_open_drawer_reloads_current_tab(self):
+        out = self._run("block")
+        self.assertEqual(out["reloaded"], 1, "抽屉打开 → 重载一次")
+        self.assertEqual(out["lastTab"], "unlock", "重载的是当前 tab")
+
+    def test_closed_drawer_no_reload(self):
+        out = self._run("none")
+        self.assertEqual(out["reloaded"], 0, "抽屉关闭 → 不发起请求")
+
+    def test_open_alerts_modal_updates_symbol_label(self):
+        out = self._run("none", modal="block", symbol="000001.SZ")
+        self.assertEqual(out["label"], "000001.SZ")
+
+    def test_closed_alerts_modal_keeps_label(self):
+        out = self._run("none", modal="none", symbol="000001.SZ")
+        self.assertEqual(out["label"], "OLD.SZ", "弹窗未打开不写标签")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
