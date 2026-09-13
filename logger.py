@@ -74,11 +74,11 @@ _ENV_ASSIGN_RE = re.compile(
     r"(\s*[=:]\s*)([^\s&;,\"'}]+|\"[^\"]*\"|'[^']*')"
 )
 
-# 短字段名: password= / token= / api_key=
+# 短字段名: password= / token= / api_key= / 'lid': '...' (dict/JSON repr 带引号)
 _KV_RE = re.compile(
     r"(?i)\b("
     + "|".join(re.escape(k) for k in sorted(set(_WHOLE_MASK_KEYS + _PARTIAL_MASK_KEYS), key=len, reverse=True))
-    + r")\b(\s*[=:]\s*)([^\s&;,\"'}]+|\"[^\"]*\"|'[^']*')"
+    + r")\b(['\"]?\s*[=:]\s*['\"]?)([^\s&;,\"'}]+|\"[^\"]*\"|'[^']*')"
 )
 
 # URL query: access_token=... & api_key=...
@@ -88,9 +88,31 @@ _URL_QUERY_RE = re.compile(
     + r")=([^&\s\"']+)"
 )
 
-# 麦蕊等: path 末段疑似 licence (长 hex/alnum)
+# 麦蕊等: path 末段疑似 licence (长 hex/alnum)。仅覆盖少量已知路径。
 _PATH_TAIL_RE = re.compile(
     r"(https?://[^\s\"']*?/(?:lskx|hsrl|licenceinfo)[^\s\"']*?/)([A-Za-z0-9_-]{16,})(/?|\?|$)"
+)
+
+# 麦蕊 licence 是 UUID, 且出现在几乎所有接口路径末段 (/hsindex/list、/himk/roe、
+# /hsstock/history/{code}/{period}/{div}、/hsstock/instrument/{code}.{mkt} 等),
+# 上面的 _PATH_TAIL_RE 覆盖不到。这里统一按 URL 路径中的 UUID 段脱敏。
+_UUID_PATH_RE = re.compile(
+    r"(https?://[^\s\"'<>]*?/)"
+    r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"
+    r"([/\s\"'<>?)]|$)"
+)
+
+# 限流: 只认明确特征 (HTTP 429 / Retry-After / rate limit 等)。刻意不含裸 "限流",
+# 因为 SDK 的 401/403 文案("...是否欠费限流")里也有该词, 会被误判成限流。
+_RATE_LIMIT_RE = re.compile(
+    r"(?i)\b429\b|too many requests|rate[\s_-]?limit|ratelimit|throttle|retry-after"
+    r"|请求过于频繁|访问过于频繁|访问频繁"
+)
+# 鉴权/密钥: 不含裸 "api" —— api.mairuiapi.com 是接口域名, 会把限流误判成密钥错误。
+# 裸 "key" 保留 (不是本次误判的来源: 麦蕊 URL 里没有 "key")。
+_AUTH_RE = re.compile(
+    r"(?i)api[\s_-]?key|apikey|\bkey\b|unauthoriz|forbidden|invalid[ _-]?(licence|license|token)"
+    r"|\bauth\b|token|permission|licence|license|鉴权|未授权|欠费"
 )
 
 
@@ -115,18 +137,24 @@ def redact_message(msg):
         return s
     s = _URL_QUERY_RE.sub(_mask_url_query, s)
     s = _PATH_TAIL_RE.sub(_mask_path_tail, s)
+    s = _UUID_PATH_RE.sub(_mask_path_tail, s)
     s = _ENV_ASSIGN_RE.sub(_mask_kv, s)
     s = _KV_RE.sub(_mask_kv, s)
     return s
 
 
 def sanitize_error(e):
-    """对外 API/状态用的错误文案: 限流归类 + 密钥脱敏 + 截断。"""
+    """对外 API/状态用的错误文案: 限流归类 + 密钥脱敏 + 截断。
+
+    限流判定优先且用明确特征: 麦蕊 SDK 的 429 消息形如
+    "HTTP 429: https://api.mairuiapi.com/...", 若按关键词匹配 "api" 会被
+    归成密钥错误, 把限流显示成"服务暂不可用"。故先判限流, 且鉴权关键词
+    不再含裸 "api"。
+    """
     msg = redact_message(str(e))
-    low = msg.lower()
-    if any(k in low for k in ("rate", "limit", "too many", "throttle")):
+    if _RATE_LIMIT_RE.search(msg):
         return "请求过于频繁，请稍后重试"
-    if any(k in low for k in ("api", "key", "auth", "token", "permission", "licence", "license")):
+    if _AUTH_RE.search(msg):
         return "服务暂不可用，请稍后重试"
     if len(msg) > 120:
         return msg[:120] + "..."

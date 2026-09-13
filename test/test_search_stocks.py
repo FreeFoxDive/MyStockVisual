@@ -31,16 +31,15 @@ def _stock(symbol, name, type_="stock"):
 
 @contextmanager
 def _env(stocks, indices=None, hk=None, us=None):
-    """隔离 _search_stocks 的外部依赖: 股票列表/指数/港美股/后台预热。"""
+    """隔离 _search_stocks 的外部依赖: 股票列表/指数/港美股。"""
 
-    def _universe_mem(path, attr):
+    def _universe(attr):
         return list(hk or []) if attr == "hk" else list(us or [])
 
     with mock.patch.object(market, "_load_stock_list", return_value=list(stocks)), \
          mock.patch.object(market, "_load_index_cache", return_value=set(indices or {})), \
          mock.patch.object(market, "_index_names", dict(indices or {})), \
-         mock.patch.object(market, "_load_universe_mem", side_effect=_universe_mem), \
-         mock.patch.object(market, "_refresh_hkus_lists_async"):
+         mock.patch.object(market, "_load_universe", side_effect=_universe):
         yield
 
 

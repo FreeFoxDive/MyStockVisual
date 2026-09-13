@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -65,14 +66,203 @@ _mr = None
 _mr_lock = threading.Lock()
 
 
+# ── 麦蕊 429 熔断退避 ──
+# 官方限流: 同一证书在 60s 滑动窗口内最多允许 2 个不同来源 IP, 超出返回 429
+# (错误码 103, 与日额度无关 —— 白金版日额度"无限")。本机同时存在 Xray 隧道与
+# WLAN 两条默认路由, 同一证书的请求会从不同出口 IP 发出, 因此极易命中。
+# 命中后进程内全局退避, 窗口内不再发 HTTP, 直接走既有回退链。
+MAIRUI_BACKOFF_SEC = float(os.environ.get("MAIRUI_BACKOFF_SEC", "60"))
+_mr_backoff_until = 0.0
+_mr_backoff_lock = threading.Lock()
+
+
+class MairuiBackoff(RuntimeError):
+    """429 退避窗口内主动跳过 (未发 HTTP)。"""
+
+
+def _mr_backoff_remaining():
+    """退避剩余秒数; 0 表示可正常请求。"""
+    return max(0.0, _mr_backoff_until - time.time())
+
+
+def _mr_retry_after_sec(e):
+    """尽力取 Retry-After: requests 异常在 .response.headers, urllib 在 .headers。"""
+    headers = getattr(getattr(e, "response", None), "headers", None) or getattr(e, "headers", None)
+    try:
+        ra = str(headers.get("Retry-After", "")).strip() if headers else ""
+    except Exception:
+        return None
+    return float(ra) if ra.isdigit() else None
+
+
+def _mr_is_429(e):
+    """只认状态码, 不用子串匹配 (000429.SZ 这类代码会误伤)。"""
+    code = getattr(e, "status_code", None)
+    if code is None:
+        code = getattr(e, "code", None)          # urllib.error.HTTPError
+    return code == 429
+
+
+def _mr_note_429(e):
+    """记录 429 并开启进程级退避窗口。"""
+    global _mr_backoff_until
+    sec = max(1.0, _mr_retry_after_sec(e) or MAIRUI_BACKOFF_SEC)
+    with _mr_backoff_lock:
+        _mr_backoff_until = max(_mr_backoff_until, time.time() + sec)
+    payload = getattr(e, "payload", None)
+    detail = f" payload={redact_message(payload)}" if payload is not None else ""
+    log.warning(f"麦蕊触发 429 限流, 退避 {sec:.0f}s (窗口内不再请求, 走回退){detail}")
+
+
+class _MairuiClient:
+    """mairui Client 代理: 所有 SDK 调用统一受 429 熔断退避约束。
+
+    __getattr__ 透传 Client 的公开方法; 调用前检查退避窗口 (命中则抛
+    MairuiBackoff, 不发 HTTP), 调用后识别 429 开启退避并原样抛出,
+    使各调用点既有的 except → 回退语义保持不变。
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def __getattr__(self, name):
+        attr = getattr(self._client, name)
+        if not callable(attr):
+            return attr
+
+        def _guarded(*args, **kwargs):
+            left = _mr_backoff_remaining()
+            if left > 0:
+                raise MairuiBackoff(f"麦蕊 429 退避中, 剩余 {left:.0f}s")
+            try:
+                return attr(*args, **kwargs)
+            except Exception as e:
+                if _mr_is_429(e):
+                    _mr_note_429(e)
+                raise
+
+        return _guarded
+
+
+def _mr_urlopen_json(url, timeout=8):
+    """直接 HTTP 调麦蕊 (SDK 未封装接口), 同样受 429 熔断退避约束。"""
+    left = _mr_backoff_remaining()
+    if left > 0:
+        raise MairuiBackoff(f"麦蕊 429 退避中, 剩余 {left:.0f}s")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            _mr_note_429(e)
+        raise
+
+
 def get_mr():
     global _mr
     if _mr is None:
         with _mr_lock:
             if _mr is None:
                 from mairui import Client
-                _mr = Client(licence=MAIRUI_API_KEY, timeout=MAIRUI_TIMEOUT)
+                _mr = _MairuiClient(Client(licence=MAIRUI_API_KEY, timeout=MAIRUI_TIMEOUT))
     return _mr
+
+
+# ── 静态列表缓存 (指数/股票/港美股: 内存 + 磁盘, 24h TTL, 用到时刷新) ──
+# 静态信息变化缓慢, 一天一更新即可。取用顺序: 内存新鲜 → 直接返回; 否则读磁盘
+# (正常重启零联网); 磁盘也过期/缺失才在锁内同步刷新一次 (single-flight, 无后台线程)。
+# 刷新失败保留旧数据并退避 STATIC_LIST_RETRY_DELAY, 避免每个请求都阻塞重试。
+STATIC_LIST_TTL = 24 * 3600
+STATIC_LIST_RETRY_DELAY = 300.0
+
+
+class _StaticListCache:
+    """静态列表的 内存+磁盘 缓存 (24h TTL, 用到时同步刷新)。
+
+    fetcher() 返回非空 list 视为成功; 空/异常视为失败 (保留旧数据)。
+    磁盘格式 {"rows": [...], "ts": ...}, 原子写 (临时文件 + replace)。
+    """
+
+    def __init__(self, name, path, fetcher, ttl=STATIC_LIST_TTL,
+                 retry_delay=STATIC_LIST_RETRY_DELAY):
+        self.name = name
+        self.path = path
+        self.fetcher = fetcher
+        self.ttl = ttl
+        self.retry_delay = retry_delay
+        self._lock = threading.Lock()
+        self._data = None
+        self._ts = 0.0
+        self._fail_at = 0.0
+
+    @property
+    def ts(self):
+        """当前内存数据的时间戳 (0 = 无可用数据)。"""
+        return self._ts
+
+    def _read_disk(self):
+        """读磁盘缓存, 返回 (rows, ts); 失败/无则 (None, 0)。"""
+        try:
+            if self.path.exists():
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and raw.get("rows"):
+                    return raw["rows"], raw.get("ts", 0)
+        except Exception as e:
+            log.warning(f"读取{self.name}缓存失败: {redact_message(e)}")
+        return None, 0
+
+    def _write_disk(self, rows, ts):
+        """原子写磁盘 (临时文件 + replace)。"""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"rows": rows, "ts": ts}, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(self.path)
+        except Exception as e:
+            log.warning(f"写入{self.name}缓存失败: {redact_message(e)}")
+
+    def _cached(self):
+        """内存/磁盘里的旧值 (不联网): 内存优先, 其次磁盘。"""
+        if self._data is not None:
+            return self._data, self._ts
+        rows, ts = self._read_disk()
+        if rows:
+            self._data, self._ts = rows, ts
+        return rows, ts
+
+    def get(self):
+        """取静态列表; 过期则同步刷新一次。永不抛异常, 取不到返回 []。"""
+        now = time.time()
+        if self._data is not None and now - self._ts < self.ttl:
+            return self._data
+
+        rows, ts = self._cached()
+        if rows and now - ts < self.ttl:
+            return rows
+
+        with self._lock:
+            now = time.time()
+            if self._data is not None and now - self._ts < self.ttl:
+                return self._data
+            if self._fail_at and now - self._fail_at < self.retry_delay:
+                return self._data or rows or []
+            try:
+                fresh = self.fetcher()
+            except Exception as e:
+                log.warning(f"刷新{self.name}失败: {redact_message(e)}")
+                fresh = None
+            if not fresh:
+                self._fail_at = now
+                if self._data is None and rows:
+                    self._data, self._ts = rows, ts
+                return self._data or []
+            ts = time.time()
+            self._data, self._ts, self._fail_at = fresh, ts, 0.0
+            self._write_disk(fresh, ts)
+            log.info(f"已加载{self.name}: {len(fresh)} 条")
+            return fresh
 
 
 # ── 麦蕊额度查询 (抓官方证书查询页, 麦蕊无额度 API) ──
@@ -145,43 +335,53 @@ def _fetch_mairui_quota():
     return data
 
 
-# ── 指数集合 + 名称映射 (懒加载内存缓存) ──
-_index_symbols = None
-_index_names = {}
+# ── 指数集合 + 名称映射 (派生缓存, 底层为 24h 磁盘缓存) ──
+_index_symbols = None      # 派生: 指数 symbol 集合 (None = 尚未派生)
+_index_names = {}          # 派生: symbol → 指数名称
+_index_derived_ts = None   # 派生自哪一版列表 (_index_cache.ts)
 _index_lock = threading.Lock()
 _name_map = None
 _name_map_ts = 0.0     # _name_map 构建时的股票列表时间戳, 跟随列表刷新重建
 _name_map_lock = threading.Lock()
 
+INDEX_LIST_FILE = SCRIPT_DIR / ".cache" / "index_list.json"
+_index_cache = _StaticListCache("指数列表", INDEX_LIST_FILE, lambda: get_mr().index_list())
+
+
+def _index_rows_to_cache(rows):
+    """rows → (symbols, names); 无有效行返回 (None, None)。"""
+    symbols, names = set(), {}
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("dm", "")).strip().upper()
+        name = str(r.get("mc", "")).strip()
+        if sym:
+            symbols.add(sym)
+            if name:
+                names[sym] = name
+    return (symbols, names) if symbols else (None, None)
+
 
 def _load_index_cache():
-    """懒加载沪深指数列表 (symbol 集合 + symbol→名称), 成功后缓存服务周期。
+    """沪深指数列表 (symbol 集合 + symbol→名称)。
 
-    加载失败不缓存 (保持 None), 下次调用重试 —— 若把空集合固化, 进程
-    生命周期内所有指数都会被当股票路由 (index_history → stock_history)。
+    底层 _index_cache 是 24h 磁盘缓存: 正常重启零联网, 过期才同步刷新一次。
+    派生结果按缓存版本 (_index_cache.ts) 记忆, _is_index_symbol 热路径零开销。
+    返回空集合 = 未知 (既不能确认是指数, 也不能确认不是); 空集合不固化 ——
+    固化会让进程内所有指数都被当股票路由 (index_history → stock_history)。
     """
-    global _index_symbols, _index_names
-    if _index_symbols is not None:
-        return _index_symbols
-    with _index_lock:
-        if _index_symbols is not None:
-            return _index_symbols
-        symbols, names = set(), {}
-        try:
-            rows = get_mr().index_list()
-            if rows:
-                for r in rows:
-                    sym = str(r.get("dm", "")).strip().upper()
-                    name = str(r.get("mc", "")).strip()
-                    if sym:
-                        symbols.add(sym)
-                        if name:
-                            names[sym] = name
+    global _index_symbols, _index_names, _index_derived_ts
+    rows = _index_cache.get()
+    ts = _index_cache.ts
+    if rows and ts != _index_derived_ts:
+        with _index_lock:
+            if ts != _index_derived_ts:
+                symbols, names = _index_rows_to_cache(rows)
                 if symbols:
                     _index_symbols, _index_names = symbols, names
-        except Exception as e:
-            log.warning(f"加载指数列表失败: {e}")
-        return symbols
+                _index_derived_ts = ts
+    return _index_symbols if _index_symbols is not None else set()
 
 
 def _is_index_symbol(symbol):
@@ -586,11 +786,9 @@ def _fetch_fund_kline(symbol, period, count):
     mr_period = {"1d": "d", "1w": "w", "1M": "m"}.get(period, "d")
     url = f"https://api.mairuiapi.com/jj/lskx/{code}/{mr_period}/{MAIRUI_API_KEY}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            rows = json.loads(resp.read().decode("utf-8", "ignore"))
+        rows = _mr_urlopen_json(url)
     except Exception as e:
-        log.warning(f"麦蕊获取ETF K线失败 {symbol}: {e}")
+        log.warning(f"麦蕊获取ETF K线失败 {symbol}: {redact_message(e)}")
         return None
 
     # dict = 错误响应, 空列表 = 无数据
@@ -679,11 +877,9 @@ def _fetch_mr_minute_kline(symbol, period, count):
     # fsjy 路径用带交易所后缀的代码 (probe 实测 600519.SH 可用, 同 stock_history 风格)
     url = f"https://api.mairuiapi.com/hszbl/fsjy/{symbol}/{period}/{MAIRUI_API_KEY}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            rows = json.loads(resp.read().decode("utf-8", "ignore"))
+        rows = _mr_urlopen_json(url)
     except Exception as e:
-        log.warning(f"麦蕊获取分钟K线失败 {symbol} {period}: {e}")
+        log.warning(f"麦蕊获取分钟K线失败 {symbol} {period}: {redact_message(e)}")
         return None
 
     # dict = 错误响应, 空列表 = 无数据
@@ -1145,44 +1341,19 @@ def fetch_depth(symbol):
     return out
 
 
-# ── 全量股票搜索缓存 ──
+# ── 全量股票搜索缓存 (内存 + 磁盘, 24h TTL, 用到时刷新) ──
 _stock_list = None
 _stock_list_time = 0
-_stock_lock = threading.Lock()
-_refreshing = False  # 后台刷新是否进行中 (stale-while-revalidate)
-
 STOCK_LIST_FILE = SCRIPT_DIR / ".cache" / "stock_list.json"
-STOCK_LIST_TTL = 24 * 3600  # 股票列表变化缓慢, 24h 刷新一次即可
-
-
-def _stock_list_from_disk():
-    """读磁盘股票列表, 返回 (stocks, ts); 失败/无则 (None, 0)"""
-    try:
-        if STOCK_LIST_FILE.exists():
-            data = json.loads(STOCK_LIST_FILE.read_text(encoding="utf-8"))
-            stocks = data.get("stocks")
-            ts = data.get("ts", 0)
-            if stocks:
-                return stocks, ts
-    except Exception as e:
-        log.warning(f"读取股票列表缓存失败: {e}")
-    return None, 0
-
-
-def _stock_list_to_disk(stocks, ts):
-    """原子写入磁盘股票列表 (临时文件 + replace)"""
-    try:
-        STOCK_LIST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = STOCK_LIST_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"stocks": stocks, "ts": ts}, ensure_ascii=False),
-                       encoding="utf-8")
-        tmp.replace(STOCK_LIST_FILE)
-    except Exception as e:
-        log.warning(f"写入股票列表缓存失败: {e}")
 
 
 def _fetch_stock_list():
-    """从麦蕊拉取 symbol+name 列表 (沪深A股 + 北交所 + 场内基金)"""
+    """从麦蕊拉取 symbol+name 列表 (沪深A股 + 北交所 + 场内基金)。
+
+    任一来源抛异常即整体视为失败 (异常向上抛 → 缓存保留旧数据): 列表要缓存
+    24h, 不能把"少了一截"的结果落盘, 否则搜索会长时间静默缺票。HTTP 200 但
+    返回空只告警跳过 (多为该市场确实无数据, 不该因此整份列表不可用)。
+    """
     api = get_mr()
     stocks = []
 
@@ -1202,101 +1373,35 @@ def _fetch_stock_list():
                       (api.bj_stock_list, "北交所"),
                       (api.fund_list, "场内基金")):
         try:
-            _append(fn())
+            rows = fn()
         except Exception as e:
-            log.warning(f"{label} 列表加载失败: {e}")
+            log.warning(f"{label} 列表加载失败: {redact_message(e)}")
+            raise RuntimeError(f"{label} 列表加载失败") from e
+        if not rows:
+            log.warning(f"{label} 列表返回空, 跳过")
+            continue
+        _append(rows)
     return stocks
 
 
-def _refresh_stock_list_async():
-    """后台异步刷新股票列表 (stale-while-revalidate), 同一时刻只跑一个"""
-    global _refreshing, _stock_list, _stock_list_time
-    with _stock_lock:
-        if _refreshing:
-            return
-        _refreshing = True
-
-    def _worker():
-        global _refreshing, _stock_list, _stock_list_time
-        try:
-            stocks = _fetch_stock_list()
-            if stocks:
-                ts = time.time()
-                _stock_list_to_disk(stocks, ts)
-                with _stock_lock:
-                    _stock_list = stocks
-                    _stock_list_time = ts
-                log.info(f"后台刷新股票列表完成: {len(stocks)} 只标的")
-        except Exception as e:
-            log.warning(f"后台刷新股票列表失败: {e}")
-        finally:
-            with _stock_lock:
-                _refreshing = False
-
-    threading.Thread(target=_worker, daemon=True).start()
+# fetcher 用 lambda 延迟取全局名: 便于测试 patch, 也避免绑定旧函数对象
+_stock_cache = _StaticListCache("股票列表", STOCK_LIST_FILE, lambda: _fetch_stock_list())
 
 
 def _load_stock_list():
-    """加载全量A股+ETF列表 (内存+磁盘双层缓存, stale-while-revalidate)
+    """全量A股+ETF列表 (内存 + 磁盘, 24h TTL, 用到时同步刷新)。
 
-    有旧数据时绝不阻塞: 立即返回旧列表, 同时后台刷新。
-    仅在无任何缓存 (首次运行) 时才同步拉取 API。
+    正常重启零联网 (磁盘缓存直接命中); 过期才刷新一次, 失败保留旧数据并退避
+    STATIC_LIST_RETRY_DELAY。app.py 启动时会另起线程调用本函数预热。
     """
     global _stock_list, _stock_list_time
-    now = time.time()
-
-    # 1) 内存缓存新鲜 → 直接返回
-    if _stock_list is not None and now - _stock_list_time < STOCK_LIST_TTL:
-        return _stock_list
-
-    # 2) 内存有但过期 → 返回旧数据 + 后台刷新 (不阻塞)
-    if _stock_list is not None:
-        _refresh_stock_list_async()
-        return _stock_list
-
-    # 3) 磁盘缓存 → 加载返回; 过期则后台刷新 (不阻塞)
-    stocks, ts = _stock_list_from_disk()
-    if stocks:
-        with _stock_lock:
-            if _stock_list is None:
-                _stock_list, _stock_list_time = stocks, ts
-        if now - ts < STOCK_LIST_TTL:
-            return stocks
-        _refresh_stock_list_async()
-        return stocks
-
-    # 4) 无任何缓存 (首次运行) → 同步拉取, 加锁避免并发重复拉取
-    with _stock_lock:
-        if _stock_list is not None:
-            return _stock_list
-        log.info("首次加载全量A股+场内基金列表...")
-        stocks = []
-        for attempt in range(2):
-            try:
-                stocks = _fetch_stock_list()
-                if stocks:
-                    break
-            except Exception as e:
-                log.warning(f"加载列表({attempt+1}/2)失败: {e}")
-            if attempt == 0:
-                time.sleep(3)
-        if stocks:
-            ts = time.time()
-            _stock_list, _stock_list_time = stocks, ts
-            _stock_list_to_disk(stocks, ts)
-            log.info(f"已加载 {len(stocks)} 只标的 (A股+场内基金)")
-        else:
-            _stock_list = []
-        return _stock_list
+    _stock_list = _stock_cache.get()
+    _stock_list_time = _stock_cache.ts
+    return _stock_list
 
 
 _HK_LIST_FILE = SCRIPT_DIR / ".cache" / "hk_list.json"
 _US_LIST_FILE = SCRIPT_DIR / ".cache" / "us_list.json"
-_hk_list, _us_list = None, None          # None=尚未加载成功; []=尝试过但无数据
-_hk_list_failed_at, _us_list_failed_at = 0.0, 0.0
-_hkus_refreshing = False
-_hkus_list_lock = threading.Lock()
-_HKUS_RETRY_DELAY = 60.0                 # 失败后 60s 才允许再次后台尝试
 # AF universes 文档确认仅 4 池: CN_Stock / US_Stock / HK_Stock / CN_ETF (无指数池)
 AF_UNIVERSE_HK = os.environ.get("AF_UNIVERSE_HK", "HK_Stock")
 AF_UNIVERSE_US = os.environ.get("AF_UNIVERSE_US", "US_Stock")
@@ -1375,75 +1480,13 @@ def _fetch_universe_rows(universe, market_tag, default_type):
     return out
 
 
-def _load_universe_mem(path, attr):
-    """只读内存/磁盘缓存 (24h TTL, 过期仍回退), 绝不发网络请求 —— 搜索路径零阻塞。"""
-    global _hk_list, _us_list
-    mem = _hk_list if attr == "hk" else _us_list
-    if mem is not None:
-        return mem
-    path = _HK_LIST_FILE if attr == "hk" else _US_LIST_FILE
-    try:
-        if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            rows = raw.get("rows") if isinstance(raw, dict) else None
-            if rows:
-                if attr == "hk":
-                    _hk_list = rows
-                else:
-                    _us_list = rows
-                return rows
-    except Exception as e:
-        log.warning(f"读取列表缓存失败 {path.name}: {e}")
-    return None
+_hk_cache = _StaticListCache("港股列表", _HK_LIST_FILE, lambda: _fetch_hk_list())
+_us_cache = _StaticListCache("美股列表", _US_LIST_FILE, lambda: _fetch_us_list())
 
 
-def _refresh_hkus_lists_async():
-    """后台拉取港/美股列表 (搜索请求绝不阻塞); 失败 60s 后才再次尝试。"""
-    global _hkus_refreshing
-    now = time.time()
-    need = []
-    with _hkus_list_lock:
-        if _hkus_refreshing:
-            return
-        if _hk_list is None and now - _hk_list_failed_at > _HKUS_RETRY_DELAY:
-            need.append("hk")
-        if _us_list is None and now - _us_list_failed_at > _HKUS_RETRY_DELAY:
-            need.append("us")
-        if not need:
-            return
-        _hkus_refreshing = True
-
-    def worker():
-        global _hk_list, _us_list, _hkus_refreshing
-        try:
-            for attr in need:
-                try:
-                    rows = _fetch_hk_list() if attr == "hk" else _fetch_us_list()
-                    if rows:
-                        path = _HK_LIST_FILE if attr == "hk" else _US_LIST_FILE
-                        try:
-                            path.write_text(json.dumps(
-                                {"ts": time.time(), "rows": rows}, ensure_ascii=False),
-                                encoding="utf-8")
-                        except Exception:
-                            pass
-                        with _hkus_list_lock:
-                            if attr == "hk":
-                                _hk_list = rows
-                            else:
-                                _us_list = rows
-                except Exception as e:
-                    log.warning(f"拉取列表失败 {attr}: {redact_message(str(e))}")
-                finally:
-                    if attr == "hk":
-                        globals()["_hk_list_failed_at"] = time.time()
-                    else:
-                        globals()["_us_list_failed_at"] = time.time()
-        finally:
-            with _hkus_list_lock:
-                _hkus_refreshing = False
-
-    threading.Thread(target=worker, daemon=True).start()
+def _load_universe(attr):
+    """港/美股列表 (内存 + 磁盘, 24h TTL, 用到时同步刷新); 取不到返回 []。"""
+    return (_hk_cache if attr == "hk" else _us_cache).get()
 
 
 SEARCH_MAX_RESULTS = 50           # 下拉返回上限 (前端一屏约 18 条, 可滚动)
@@ -1466,11 +1509,10 @@ def _search_stocks(query):
         for sym, name in _index_names.items():
             universe.append({"symbol": sym, "name": name,
                              "code": sym.split(".")[0], "type": "index"})
-    hk_rows = _load_universe_mem(_HK_LIST_FILE, "hk") or []
-    us_rows = _load_universe_mem(_US_LIST_FILE, "us") or []
+    hk_rows = _load_universe("hk")
+    us_rows = _load_universe("us")
     universe.extend(hk_rows)
     universe.extend(us_rows)
-    _refresh_hkus_lists_async()  # 空/过期 → 后台预热 (AF 优先), 搜索请求不阻塞
 
     q = query.strip().lower()
     results = []

@@ -268,7 +268,19 @@ def start_background_jobs():
     except Exception:
         pass
 
-    threading.Thread(target=market._load_stock_list, daemon=True).start()
+    # 静态列表预热: 走后台线程, 避免"24h 后第一次取用"落在用户请求上同步刷新
+    # (指数/股票走麦蕊, 港美股走 AF/akshare, 冷启动或上游慢时不阻塞搜索)
+    def _warm_static_lists():
+        for name, fn in (("股票列表", lambda: market._load_stock_list()),
+                         ("指数列表", lambda: market._load_index_cache()),
+                         ("港股列表", lambda: market._load_universe("hk")),
+                         ("美股列表", lambda: market._load_universe("us"))):
+            try:
+                fn()
+            except Exception as e:
+                log.warning(f"{name} 预热失败: {e}")
+
+    threading.Thread(target=_warm_static_lists, daemon=True).start()
     threading.Thread(target=market._pledge_scheduler, daemon=True).start()
 
     try:

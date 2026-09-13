@@ -5,7 +5,7 @@
 - _fetch_universe_rows: ext.type 映射 / 缺列回退 default_type / 空行跳过 / to_dataframe 传参
 - AF 套餐无 universe 权限 (403 / not available): 熔断置位, 后续调用不再触碰 AF
 - akshare 回退: _fetch_hk_list / _fetch_us_list 代码归一 (港股 zfill(5)+.HK, 美股取末段大写)
-- _refresh_hkus_lists_async: 拉取成功写入内存并落盘; 失败后 60s 内不重试
+- _load_universe: 24h 磁盘缓存命中零联网; 过期同步刷新并落盘; 失败保留旧数据并退避
 
 运行:
     venv/Scripts/python.exe -u visual/test/test_universe_fetch.py
@@ -27,17 +27,6 @@ if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
 import market  # noqa: E402
-
-
-class _SyncThread:
-    """把 Thread(target=...).start() 变成同步立即执行, 免跨线程抖动。"""
-
-    def __init__(self, target=None, daemon=None, **_kw):
-        self._target = target
-
-    def start(self):
-        if self._target:
-            self._target()
 
 
 def _af_quotes(get_impl):
@@ -68,21 +57,24 @@ class UniverseFetchTest(unittest.TestCase):
     def setUp(self):
         self._orig = (
             market._hkus_universe_perm_denied,
-            market._hk_list, market._us_list,
-            market._hk_list_failed_at, market._us_list_failed_at,
-            market._hkus_refreshing,
             market._HK_LIST_FILE, market._US_LIST_FILE,
+            market._hk_cache, market._us_cache,
         )
         market._hkus_universe_perm_denied = False
         self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        # 缓存实例在构造时捕获 path, 故换文件必须重建实例 (隔离内存/磁盘状态)
+        market._HK_LIST_FILE = Path(self._tmpdir.name) / "hk_list.json"
+        market._US_LIST_FILE = Path(self._tmpdir.name) / "us_list.json"
+        market._hk_cache = market._StaticListCache(
+            "港股列表", market._HK_LIST_FILE, lambda: market._fetch_hk_list())
+        market._us_cache = market._StaticListCache(
+            "美股列表", market._US_LIST_FILE, lambda: market._fetch_us_list())
         self.addCleanup(self._restore)
 
     def _restore(self):
         (market._hkus_universe_perm_denied,
-         market._hk_list, market._us_list,
-         market._hk_list_failed_at, market._us_list_failed_at,
-         market._hkus_refreshing,
-         market._HK_LIST_FILE, market._US_LIST_FILE) = self._orig
+         market._HK_LIST_FILE, market._US_LIST_FILE,
+         market._hk_cache, market._us_cache) = self._orig
         self._tmpdir.cleanup()
 
     # ── _fetch_universe_rows ──
@@ -171,33 +163,35 @@ class UniverseFetchTest(unittest.TestCase):
                                    "code": "AAPL", "type": "us"})
         self.assertEqual(rows[1]["symbol"], "TSLA")
 
-    # ── _refresh_hkus_lists_async ──
-    def test_refresh_writes_mem_and_disk(self):
-        market._hk_list, market._us_list = None, None
-        market._hk_list_failed_at = market._us_list_failed_at = 0.0
-        market._HK_LIST_FILE = Path(self._tmpdir.name) / "hk_list.json"
-        market._US_LIST_FILE = Path(self._tmpdir.name) / "us_list.json"
+    # ── _load_universe (24h 磁盘缓存, 用到时刷新) ──
+    def test_disk_hit_needs_no_network(self):
         hk = [{"symbol": "00700.HK", "name": "腾讯控股", "code": "00700", "type": "hk"}]
-        us = [{"symbol": "AAPL", "name": "苹果", "code": "AAPL", "type": "us"}]
-        with mock.patch.object(market, "_fetch_hk_list", return_value=hk), \
-             mock.patch.object(market, "_fetch_us_list", return_value=us), \
-             mock.patch.object(market, "threading", types.SimpleNamespace(Thread=_SyncThread)):
-            market._refresh_hkus_lists_async()
-        self.assertEqual(market._hk_list, hk)
-        self.assertEqual(market._us_list, us)
-        self.assertEqual(json.loads(market._HK_LIST_FILE.read_text(encoding="utf-8"))["rows"], hk)
-        self.assertEqual(json.loads(market._US_LIST_FILE.read_text(encoding="utf-8"))["rows"], us)
-
-    def test_refresh_skips_within_retry_delay(self):
-        market._hk_list, market._us_list = None, None
-        now = time.time()
-        market._hk_list_failed_at = market._us_list_failed_at = now
-        with mock.patch.object(market, "_fetch_hk_list") as fh, \
-             mock.patch.object(market, "_fetch_us_list") as fu, \
-             mock.patch.object(market, "threading", types.SimpleNamespace(Thread=_SyncThread)):
-            market._refresh_hkus_lists_async()
+        market._HK_LIST_FILE.write_text(
+            json.dumps({"rows": hk, "ts": time.time()}), encoding="utf-8")
+        with mock.patch.object(market, "_fetch_hk_list") as fh:
+            self.assertEqual(market._load_universe("hk"), hk)
         fh.assert_not_called()
-        fu.assert_not_called()
+
+    def test_stale_disk_refreshes_and_persists(self):
+        old = [{"symbol": "00001.HK", "name": "旧", "code": "00001", "type": "hk"}]
+        fresh = [{"symbol": "00700.HK", "name": "腾讯控股", "code": "00700", "type": "hk"}]
+        market._HK_LIST_FILE.write_text(
+            json.dumps({"rows": old, "ts": 0}), encoding="utf-8")
+        with mock.patch.object(market, "_fetch_hk_list", return_value=fresh):
+            self.assertEqual(market._load_universe("hk"), fresh)
+        saved = json.loads(market._HK_LIST_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(saved["rows"], fresh)
+        self.assertGreater(saved["ts"], 0)
+
+    def test_failure_keeps_old_and_backs_off(self):
+        old = [{"symbol": "00001.HK", "name": "旧", "code": "00001", "type": "hk"}]
+        market._HK_LIST_FILE.write_text(
+            json.dumps({"rows": old, "ts": 0}), encoding="utf-8")
+        with mock.patch.object(market, "_fetch_hk_list", return_value=[]) as fh:
+            # 刷新失败 → 保留旧数据, 且退避期内不再重复拉取
+            self.assertEqual(market._load_universe("hk"), old)
+            self.assertEqual(market._load_universe("hk"), old)
+            self.assertEqual(fh.call_count, 1)
 
 
 if __name__ == "__main__":
