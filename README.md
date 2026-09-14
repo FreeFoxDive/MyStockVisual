@@ -253,7 +253,7 @@ KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复�
 ## 依赖
 
 - Python: `flask`, `waitress`, `alphafeed`, `numpy`, `pandas`, `akshare`, `mairui`, `pandas_market_calendars`（见 `requirements.txt`）
-- 前端: ECharts 5.5.0 (通过 CDN `https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js` 加载)
+- 前端: ECharts 5.5.0 (自托管于 `static/vendor/echarts-5.5.0.min.js`，来源与 sha256 见 `static/vendor/README.md`)
 
 ### 持仓监控配置
 
@@ -311,7 +311,9 @@ venv/Scripts/python.exe -u visual/test/test_monitor.py TestNtfy.test_live_reacha
 限制为同源请求，避免跨域滥用。默认监听 localhost。
 
 ### Content-Security-Policy
-所有响应包含 `Content-Security-Policy` 头，限制脚本来源仅为 `self` 和 `cdn.jsdelivr.net`。
+所有响应包含 `Content-Security-Policy` 头，脚本来源仅为 `self`（含内联脚本所需的 `'unsafe-inline'`），
+无任何第三方脚本源：ECharts 自托管于 `static/vendor/`。
+带版本号的 vendor 资源发 `public, max-age=31536000, immutable`，其余静态（HTML、`/js/*.js`）发 `no-store`。
 
 ### SQL
 `trades.py` 对用户输入使用参数化查询（`?` 占位），不拼接请求字符串进 SQL。

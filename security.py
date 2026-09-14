@@ -22,12 +22,16 @@ PUBLIC_API_POST = {"/api/auth/login", "/api/auth/logout"}
 RATE_LIMIT_EXEMPT = {"/api/health"}
 
 # CSP: 'unsafe-inline' 必需 (页面内联 script/style)
+# 第三方脚本源已清零: ECharts 自托管在 static/vendor/ (来源与 sha256 见该目录 README)
+# 曾放行 static.cloudflareinsights.com 以允许 CF 边缘注入的 Web Analytics beacon;
+# 该 beacon flush 指标时抛 TypeError(navigationEntry.startTime), 统计亦无实际用途,
+# 已于 2026-09-14 在 CF 面板停用 Web Analytics; 重新启用需同步加回此处白名单。
 CSP_HEADER = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
+    "script-src 'self' 'unsafe-inline'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
-    "connect-src 'self' https://static.cloudflareinsights.com https://cloudflareinsights.com"
+    "connect-src 'self'"
 )
 
 RATE_LIMIT_PER_MIN = 120

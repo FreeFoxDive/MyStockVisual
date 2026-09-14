@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -51,6 +52,11 @@ from security import (  # noqa: E402
 
 log = logging.getLogger("app")
 STATIC_DIR = SCRIPT_DIR / "static"
+
+# 版本化第三方库 (文件名带版本号 → URL 变则内容变): 可长缓存; 其余静态一律 no-store
+# (HTML / 无版本 JS 改了必须立刻生效, 否则用户拿到旧 JS 与后端口径不一致)
+_IMMUTABLE_VENDOR = re.compile(r"^vendor/[\w.-]+-\d[\w.]*\.min\.(?:js|css)$")
+_VENDOR_CACHE = "public, max-age=31536000, immutable"
 
 
 def _api_json_error(msg, code):
@@ -181,7 +187,9 @@ def create_app():
     def _send_static(rel):
         # 防穿越: send_from_directory 已限制在 STATIC_DIR
         resp = send_from_directory(STATIC_DIR, rel)
-        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Cache-Control"] = (
+            _VENDOR_CACHE if _IMMUTABLE_VENDOR.match(rel) else "no-store"
+        )
         return resp
 
     @app.route("/login.html")
