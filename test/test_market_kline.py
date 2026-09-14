@@ -295,5 +295,88 @@ class TestDailyDiskCacheRoundtrip(unittest.TestCase):
         self.assertEqual(bar_yday["date"], yesterday.isoformat())
 
 
+class TestDailyDiskTtl(unittest.TestCase):
+    """日K 磁盘 TTL 抬高后: 当日 bar 仍每次由实时快照重拼 (契约不变)。
+
+    冷命中要走完整数据源链 (含不可靠的 akshare 兜底), 是切换标的忽快忽慢的主因,
+    故日K TTL 显著长于分钟线; 但"当日 bar 以服务端快照为准"的契约必须原样保留。
+    """
+
+    SYM = "000975.SZ"
+
+    @staticmethod
+    def _payload(dates, name="山金国际", source="alphafeed"):
+        df = _df_with_dates(dates)
+        df.index.name = "trade_date"
+        return {"name": name, "source": source,
+                "data": df.reset_index().to_dict(orient="records")}
+
+    def test_hit_still_refreshes_today_bar_from_quote(self):
+        today = date.today()
+        dates = [
+            (pd.Timestamp(today) - pd.Timedelta(days=i)).date().isoformat()
+            for i in range(6, 0, -1)  # 6 根历史 (>=5, 否则 _normalize 判无效)
+        ]
+        quote = {
+            "date": today.isoformat(), "open": 11.0, "high": 12.0,
+            "low": 10.5, "close": 11.5, "volume": 5000,
+        }
+        timing = {}
+        with mock.patch.object(market_mod._disk_cache, "get",
+                               return_value=self._payload(dates)):
+            with mock.patch.object(market_mod, "_daily_bar_from_quote",
+                                   return_value=quote) as fq:
+                with mock.patch("market_hours.is_trading_day", return_value=True):
+                    with _phase("trading"):
+                        df, name, source = market_mod.fetch_kline_ex(
+                            self.SYM, "1d", 1006, timing=timing)
+        self.assertEqual(timing["disk"], "hit")
+        self.assertEqual(source, "alphafeed")
+        self.assertEqual(name, "山金国际")
+        # 契约: 命中磁盘缓存也要现取快照补当日 bar
+        fq.assert_called_once()
+        self.assertEqual(market_mod._last_bar_date(df), today)
+        self.assertEqual(df.iloc[-1]["close"], 11.5)
+
+    def test_daily_ttl_uses_configured_value(self):
+        """日K TTL 走 KLINE_DISK_TTL_*, 且确实长于盘中原值 60s。"""
+        seen = []
+
+        def _get(symbol, period, count, ttl, **kw):
+            seen.append(ttl)
+            return None
+
+        with mock.patch.object(market_mod._disk_cache, "get", side_effect=_get):
+            with mock.patch.object(market_mod.kline_source, "fetch_kline_df",
+                                   return_value=(None, None)):
+                with mock.patch.object(market_mod, "market_hours") as mh:
+                    mh.in_session.return_value = True
+                    market_mod.fetch_kline_ex(self.SYM, "1d", 1006)
+                    mh.in_session.return_value = False
+                    market_mod.fetch_kline_ex(self.SYM, "1d", 1006)
+        self.assertEqual(seen[0], market_mod.KLINE_DISK_TTL_SEC)
+        self.assertEqual(seen[1], market_mod.KLINE_DISK_TTL_OFF_SEC)
+        self.assertGreater(market_mod.KLINE_DISK_TTL_SEC, 60.0,
+                           "盘中 TTL 必须长于原 60s, 否则冷命中仍是常态")
+        self.assertGreater(market_mod.KLINE_DISK_TTL_OFF_SEC, 300.0,
+                           "盘后 TTL 必须长于原 300s")
+
+    def test_minute_ttl_stays_short(self):
+        """分钟 bar 不拼快照, TTL 必须保持短 (否则图表滞后于实时行情)。"""
+        seen = []
+
+        def _get(symbol, period, count, ttl, **kw):
+            seen.append(ttl)
+            return None
+
+        with mock.patch.object(market_mod._disk_cache, "get", side_effect=_get):
+            with mock.patch.object(market_mod.kline_source, "fetch_kline_df",
+                                   return_value=(None, None)):
+                with mock.patch.object(market_mod, "market_hours") as mh:
+                    mh.in_session.return_value = True
+                    market_mod.fetch_kline_ex(self.SYM, "5m", 480)
+        self.assertEqual(seen[0], 60.0)
+
+
 if __name__ == "__main__":
     unittest.main()

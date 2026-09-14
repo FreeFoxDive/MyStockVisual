@@ -20,15 +20,121 @@ import abc
 import hashlib
 import logging
 import os
+import threading
+import time
 from datetime import timedelta
 
 import market_hours
+import perf
 
 log = logging.getLogger("kline_source")
 
 # 分钟末根 bar 距今超过该天数视为数据源滞后 (判失败, 继续回退)。
 # 覆盖长假 + 短期停牌; 麦蕊 fsjy 冻结窗口 (数月) 会被拦下。
 MINUTE_STALE_DAYS = 30
+
+# 单源取数硬超时 (秒): akshare 内部 requests 调用**无超时**, 上游挂起会把用户
+# 请求一起拖住 (waitress 只有 8 个线程), 表现为"同一只票忽快忽慢"。超时即判该源
+# 失败并下沉到下一源。
+SOURCE_TIMEOUT_SEC = max(1.0, float(os.environ.get("KLINE_SOURCE_TIMEOUT_SEC", "8")))
+# 源级熔断: 连续失败达阈值后, 冷却期内直接跳过该源 (不再重吃同一份超时)。
+SOURCE_FAIL_THRESHOLD = max(1, int(os.environ.get("KLINE_SOURCE_FAIL_THRESHOLD", "3")))
+SOURCE_COOLDOWN_SEC = max(1.0, float(os.environ.get("KLINE_SOURCE_COOLDOWN_SEC", "60")))
+
+_health_lock = threading.Lock()
+_health = {}   # name -> {"fails": 连续失败数, "until": 冷却截止 ts}
+
+
+def reset_health():
+    """清空源级健康状态 (测试隔离用)。"""
+    with _health_lock:
+        _health.clear()
+
+
+def _in_cooldown(name):
+    with _health_lock:
+        ent = _health.get(name)
+    return bool(ent and ent["until"] > time.time())
+
+
+def _note_ok(name):
+    with _health_lock:
+        _health.pop(name, None)
+
+
+def _note_fail(name):
+    """连续失败计一次; 达阈值则进入冷却窗口。"""
+    now = time.time()
+    entered = False
+    with _health_lock:
+        ent = _health.setdefault(name, {"fails": 0, "until": 0.0})
+        ent["fails"] += 1
+        if ent["fails"] >= SOURCE_FAIL_THRESHOLD:
+            ent["until"] = now + SOURCE_COOLDOWN_SEC
+            ent["fails"] = 0
+            entered = True
+    if entered:
+        perf.bump(f"src_cooldown_{name}")
+        log.warning("数据源 %s 连续失败 %d 次, 冷却 %.0fs 内跳过",
+                    name, SOURCE_FAIL_THRESHOLD, SOURCE_COOLDOWN_SEC)
+
+
+def _fetch_bounded(src, symbol, period, count, adj, name):
+    """在独立线程里跑单源取数并加硬超时, 返回 df; 源内异常原样抛出。
+
+    用「每次调用一个 daemon 线程 + join(timeout)」而非线程池: 池的队列会在
+    多个上游同时挂起时让后续任务"排队即超时", 反而把所有源一起废掉。超时后
+    工作线程无法强杀, 可能仍阻塞到上游返回, 故配合 _note_fail 的冷却把这类
+    线程数量限制在 (阈值 × 源数) 以内。
+    """
+    box = {}
+
+    def _work():
+        try:
+            box["df"] = src.fetch(symbol, period, count, adj)
+        except Exception as e:  # 交给调用方按原语义记 warning 并下沉
+            box["err"] = e
+
+    t = threading.Thread(target=_work, name=f"klinesrc-{name}", daemon=True)
+    t.start()
+    t.join(SOURCE_TIMEOUT_SEC)
+    if t.is_alive():
+        perf.bump(f"src_timeout_{name}")
+        log.warning("数据源 %s 获取 %s %s 超时 (>%.1fs), 判失败回退",
+                    name, symbol, period, SOURCE_TIMEOUT_SEC)
+        return None
+    if "err" in box:
+        raise box["err"]
+    return box.get("df")
+
+
+def _try_source(name, symbol, period, count, adj, category, idx, chain):
+    """单源尝试: 有界取数 + 新鲜度守卫 + 健康计数。返回 df 或 None。"""
+    src = SOURCES[name]
+    try:
+        df = _fetch_bounded(src, symbol, period, count, adj, name)
+    except Exception as e:  # 单源异常不拖垮整条链
+        log.warning("数据源 %s 获取 %s %s 异常: %s", name, symbol, period, e)
+        df = None
+    if df is not None and category == "minute" and not _minute_fresh(df):
+        log.warning("数据源 %s 分钟K数据过旧 (末根 %s), 视为失败",
+                    name, df.index[-1])
+        perf.bump(f"src_stale_{name}")
+        df = None
+    if df is not None:
+        _note_ok(name)
+        if idx > 0:
+            perf.bump("fallback")
+            log.info("%s %s 已回退到数据源 %s", symbol, period, name)
+        return df
+    # 该源本次未取到数据 (异常/空/过旧/超时): 计健康计数, 用于确认慢请求是否
+    # 集中在个别坏源上 (回退链会把其耗时叠加到用户请求上)
+    _note_fail(name)
+    perf.bump(f"src_fail_{name}")
+    if idx < len(chain) - 1:
+        log.warning("数据源 %s 获取 %s %s 失败, 回退 %s",
+                    name, symbol, period, chain[idx + 1])
+    return None
 
 # 内部口径: forward=前复权 / hfq=后复权 / none=未复权
 ADJUST_FORWARD = "forward"
@@ -321,24 +427,28 @@ def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD):
     """
     adj = normalize_adjust(adjust)
     chain = _chain(category)
+    skipped, tried = [], 0
     for i, name in enumerate(chain):
         src = SOURCES[name]
         if not src.supports(category, period, adj):
             continue
-        try:
-            df = src.fetch(symbol, period, count, adj)
-        except Exception as e:  # 单源异常不拖垮整条链
-            log.warning("数据源 %s 获取 %s %s 异常: %s", name, symbol, period, e)
-            df = None
-        if df is not None and category == "minute" and not _minute_fresh(df):
-            log.warning("数据源 %s 分钟K数据过旧 (末根 %s), 视为失败",
-                        name, df.index[-1])
-            df = None
+        if _in_cooldown(name):
+            # 该源刚连续失败过: 冷却期内直接跳过, 不再重吃同一份超时
+            skipped.append(name)
+            perf.bump(f"src_skip_cooldown_{name}")
+            log.info("数据源 %s 冷却中, 跳过 %s %s", name, symbol, period)
+            continue
+        tried += 1
+        df = _try_source(name, symbol, period, count, adj, category, i, chain)
         if df is not None:
-            if i > 0:
-                log.info("%s %s 已回退到数据源 %s", symbol, period, name)
             return df, name
-        if i < len(chain) - 1:
-            log.warning("数据源 %s 获取 %s %s 失败, 回退 %s",
-                        name, symbol, period, chain[i + 1])
+    if skipped and not tried:
+        # 全部候选都在冷却中: 不能让用户请求直接 404, 对链首破例试一次
+        name = skipped[0]
+        perf.bump("cooldown_bypass")
+        log.warning("所有数据源均在冷却中, 破例重试 %s (%s %s)", name, symbol, period)
+        df = _try_source(name, symbol, period, count, adj, category, 0, chain)
+        if df is not None:
+            return df, name
+    perf.bump("chain_exhausted")
     return None, None

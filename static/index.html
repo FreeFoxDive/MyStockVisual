@@ -941,6 +941,8 @@ const STATE = {
   klineData: null,       // raw JSON from server
   trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
   chips: null,           // 筹码分布 (/api/chips, 仅日K股票)
+  premium: null,         // ETF 溢价 {symbol, period, map:{date:val}} (/api/kline/deferred)
+  _klineAbort: null,     // 在途 /api/kline 的 AbortController (换股即取消, 别占线程)
   depth: null,           // 五档盘口 (/api/depth, 所有周期)
   stockInfo: null,
   _serverTradingDay: null,
@@ -1166,6 +1168,71 @@ function renderFetchedKline(data) {
   return true;
 }
 
+// ── 慢派生字段: ETF 溢价 (/api/kline/deferred) ──
+// 溢价依赖 akshare 净值, 内联在 /api/kline 会让每次 ETF 切换都等它, 故后端改为
+// meta.deferred 声明 + 后台预热, 这里在 K 线到手后异步补齐。按 date 建映射,
+// 避免与 bar 数量/顺序耦合; 补齐后 updateChart 重绘 (消费点本就把 null 显示为 —)。
+function applyPremiumToKlines() {
+  const p = STATE.premium, d = STATE.klineData;
+  if (!p || !p.map || !d || !Array.isArray(d.klines)) return false;
+  if (d.symbol !== p.symbol || d.period !== p.period) return false;
+  let changed = false;
+  for (const k of d.klines) {
+    const v = p.map[String(k.date).slice(0, 10)];
+    if (v === undefined || k.premium === v) continue;
+    k.premium = v;
+    changed = true;
+  }
+  return changed;
+}
+
+function reapplyPremium() {
+  if (!applyPremiumToKlines()) return;
+  // 工具条徽标在 updateInfo, 溢价曲线在 updateChart: 两处都要刷新
+  if (STATE.klineData) updateInfo(STATE.klineData);
+  updateChart(false);
+}
+
+/** 已在内存中的溢价直接回填 (切换 symbol 的整包替换会丢掉 bar 上的 premium) */
+function premiumInMemory(symbol, period) {
+  if (STATE.premium && STATE.premium.symbol === symbol && STATE.premium.period === period) {
+    reapplyPremium();
+    return true;
+  }
+  return false;
+}
+
+/** 拉溢价: 未就绪时退避重试 (ready:false 不是错误, 静默重试即可) */
+async function fetchPremium(symbol, period, count, fetchTs) {
+  const d = STATE.klineData;
+  const want = d && d.symbol === symbol && d.period === period && d.meta
+    && Array.isArray(d.meta.deferred) && d.meta.deferred.includes('premium');
+  if (!want || premiumInMemory(symbol, period)) return;
+  const delays = [400, 800, 1600, 3200, 3200];
+  for (let i = 0; i < delays.length; i++) {
+    const stale = () => STATE._fetchTs !== fetchTs || STATE.symbol !== symbol
+      || STATE.period !== period;
+    if (stale()) return;
+    let prem = null;
+    try {
+      const r = await fetch(`/api/kline/deferred?symbol=${encodeURIComponent(symbol)}`
+        + `&period=${encodeURIComponent(period)}&count=${count}&fields=premium`);
+      if (r.ok) prem = (await r.json()).premium;
+    } catch (e) { /* 静默: 溢价缺席只是少一条曲线, 不影响 K 线 */ }
+    if (stale()) return;
+    if (prem && prem.ready && Array.isArray(prem.dates)) {
+      const map = {};
+      prem.dates.forEach((dt, idx) => {
+        map[String(dt).slice(0, 10)] = prem.values ? prem.values[idx] : null;
+      });
+      STATE.premium = { symbol, period, map };
+      reapplyPremium();
+      return;
+    }
+    await new Promise((res) => setTimeout(res, delays[i]));
+  }
+}
+
 async function fetchData(opts) {
   const silent = !!(opts && opts.silent);
   const retainPanels = !!(opts && opts.retainPanels);
@@ -1188,6 +1255,7 @@ async function fetchData(opts) {
       const ttl = MINUTE_PERIODS.includes(period) ? 60 : (period === '1d' ? 120 : 300);
       if (Date.now() - cached.ts < ttl * 1000 && cached.data) {
         STATE.klineData = cached.data;
+        applyPremiumToKlines();   // 整包替换会丢 bar 上的 premium, 用内存副本回填
         reconcileLiveBars(cached.data);
         updateInfo(cached.data);
         syncAdjustMeta(cached.data);
@@ -1201,12 +1269,19 @@ async function fetchData(opts) {
   const adjParam = MINUTE_PERIODS.includes(period) ? '' : `&adjust=${STATE.adjust}`;
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
+  // 换股/切周期时取消上一次仍在途的 K 线请求: 仅靠 _fetchTs 丢弃响应不够,
+  // 请求本身还会占住 waitress 线程 (只有 8 个), 连续切换会互相排队放大等待。
+  // silent 后台刷新不取消前台请求。
+  if (!silent) {
+    if (STATE._klineAbort) STATE._klineAbort.abort();
+    STATE._klineAbort = new AbortController();
+  }
   if (!silent && !retainPanels && !cacheHit && !sameView) {
     document.getElementById('btn-refresh')?.classList.add('loading');
     if (STATE.chart) STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
   }
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(url, STATE._klineAbort ? { signal: STATE._klineAbort.signal } : undefined);
     if (!resp.ok) {
       let msg = 'HTTP ' + resp.status;
       try {
@@ -1220,6 +1295,7 @@ async function fetchData(opts) {
     syncAdjustMeta(data);
     ensureQuoteStream();
     STATE.klineData = data;
+    applyPremiumToKlines();   // 与缓存命中同理: 新响应不含 premium
     reconcileLiveBars(data);
     document.getElementById('symbol-input').value = data.symbol; // 同步服务端标准化后的 symbol
     // 保存到 localStorage (限制 2MB 总大小)
@@ -1252,7 +1328,9 @@ async function fetchData(opts) {
     }
     if (retainPanels && isChipPeriod(period)) fetchChips(data.symbol);
     renderFetchedKline(data);
+    fetchPremium(data.symbol, data.period, count, fetchTs);  // 慢派生字段异步补齐
   } catch (e) {
+    if (e && e.name === 'AbortError') return;  // 已被新的切换取消, 不是错误
     console.error('获取数据失败:', e);
     if (STATE._prevAdjust && STATE.adjust !== STATE._prevAdjust) {
       // 切换复权失败 (如后复权源不可用): 回退选项, 保持图表与选项一致
@@ -1262,7 +1340,8 @@ async function fetchData(opts) {
     }
     if (!silent) showToast('行情数据加载失败: ' + e.message, { type: 'err', actionLabel: '重试', onAction: () => loadCurrent() });
   } finally {
-    if (!silent) {
+    // 仅当前请求负责收尾: 被取代的请求不得清掉新请求刚显示的加载态
+    if (!silent && STATE._fetchTs === fetchTs) {
       document.getElementById('btn-refresh')?.classList.remove('loading');
       if (STATE.chart) STATE.chart.hideLoading();
     }
@@ -2062,6 +2141,14 @@ const HIST_MAX = 20;
 const LS_CACHE_BUDGET = 2 * 1024 * 1024; // vk_/vi_ 缓存上限 2MB，保留历史/配置键
 const LS_KEEP_KEYS = new Set([HIST_KEY, 'visual_chart_config', 'visual-theme', 'trades-theme']);
 
+/** 只取开头的 ts: 淘汰策略不必为每条 ~600KB 的响应整包 JSON.parse。
+ *  缓存条目一律以 {"ts":<数字>,... 写入 (见 kline/chips/分时 三处 setItem),
+ *  取不到时返回 0 (按最旧处理, 优先被淘汰, 安全降级)。 */
+function _cacheEntryTs(v) {
+  const m = /^\{"ts":(\d+)/.exec(v || '');
+  return m ? Number(m[1]) : 0;
+}
+
 function _cleanLocalStorage() {
   try {
     let total = 0;
@@ -2072,9 +2159,7 @@ function _cleanLocalStorage() {
       const v = localStorage.getItem(k) || '';
       total += k.length + v.length;
       if ((k.startsWith('vk_') || k.startsWith('vi_') || k.startsWith('vc_')) && !LS_KEEP_KEYS.has(k)) {
-        let ts = 0;
-        try { ts = (JSON.parse(v) || {}).ts || 0; } catch (_) {}
-        cacheEntries.push({ k, ts, size: k.length + v.length });
+        cacheEntries.push({ k, ts: _cacheEntryTs(v), size: k.length + v.length });
       }
     }
     if (total <= LS_CACHE_BUDGET) return;

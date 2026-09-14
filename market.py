@@ -26,6 +26,7 @@ import decimal as dec_mod
 import feed
 import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_source 惰性反向引用本模块)
 import market_hours  # noqa: E402
+import perf  # noqa: E402
 import search_index  # noqa: E402
 
 # ── AlphaFeed ──
@@ -111,6 +112,7 @@ def _mr_note_429(e):
     sec = max(1.0, _mr_retry_after_sec(e) or MAIRUI_BACKOFF_SEC)
     with _mr_backoff_lock:
         _mr_backoff_until = max(_mr_backoff_until, time.time() + sec)
+    perf.bump("mr_429")
     payload = getattr(e, "payload", None)
     detail = f" payload={redact_message(payload)}" if payload is not None else ""
     log.warning(f"麦蕊触发 429 限流, 退避 {sec:.0f}s (窗口内不再请求, 走回退){detail}")
@@ -135,6 +137,8 @@ class _MairuiClient:
         def _guarded(*args, **kwargs):
             left = _mr_backoff_remaining()
             if left > 0:
+                # 退避窗口内主动跳过 (未发 HTTP): 单独计数, 与 429 本身区分
+                perf.bump("mr_backoff_skip")
                 raise MairuiBackoff(f"麦蕊 429 退避中, 剩余 {left:.0f}s")
             try:
                 return attr(*args, **kwargs)
@@ -583,6 +587,14 @@ class TTLCache:
 MINUTE_PERIODS = frozenset({"1m", "5m", "15m", "30m", "60m"})
 MINUTE_COUNTS = {"1m": 1200, "5m": 480, "15m": 320, "30m": 320, "60m": 1000}
 
+# 日K 磁盘缓存 TTL (秒, 盘中/盘后)。历史序列盘中不变, 且当日 bar 每次都由实时
+# 快照重新拼 (_strip_today_bar_df → _maybe_append_today_bar), 故可远长于分钟线:
+# 冷命中才需要走完整数据源链 (含不可靠的 akshare 兜底), 是切换标的忽快忽慢的主因。
+# 唯一残留窗口: 除权日 qfq 历史会整体重算, TTL 内可能短暂不连续 —— 这也是不取更
+# 长值的原因。市值: 冷命中率 vs 除权日误差窗口。
+KLINE_DISK_TTL_SEC = float(os.environ.get("KLINE_DISK_TTL_SEC", "300"))
+KLINE_DISK_TTL_OFF_SEC = float(os.environ.get("KLINE_DISK_TTL_OFF_SEC", "1800"))
+
 # 缓存: 日K 120s, 分钟K 60s, 周/月K 300s, 快照 1.25s, 上限 500 条目
 kline_cache = TTLCache(ttl_seconds=120)
 kline_cache_minute = TTLCache(ttl_seconds=60)
@@ -832,7 +844,28 @@ def _is_etf(symbol):
     return code[:2] in ("51", "58", "15", "16", "56", "11", "18") or code.startswith("5")
 
 
+# ETF 历史净值: akshare 调用原本无缓存无超时, 是 ETF 溢价慢的主因。净值日频
+# 变化, 长 TTL 内存缓存即可; 失败不写缓存 (由 premium 的负缓存兜底)。
+_ETF_NAV_TTL = float(os.environ.get("ETF_NAV_TTL", "21600"))
+_etf_nav_cache = {}   # symbol -> (ts, df)
+_etf_nav_lock = threading.Lock()
+
+
 def _fetch_etf_nav(symbol):
+    """从 akshare 获取 ETF 历史净值 (单位净值), 长 TTL 内存缓存。"""
+    now = time.time()
+    with _etf_nav_lock:
+        ent = _etf_nav_cache.get(symbol)
+        if ent and now - ent[0] < _ETF_NAV_TTL:
+            return ent[1]
+    df = _fetch_etf_nav_uncached(symbol)
+    if df is not None and len(df) > 0:
+        with _etf_nav_lock:
+            _etf_nav_cache[symbol] = (time.time(), df)
+    return df
+
+
+def _fetch_etf_nav_uncached(symbol):
     """从 akshare 获取 ETF 历史净值 (单位净值)"""
     code = symbol.split(".")[0]
     try:
@@ -1028,25 +1061,33 @@ def fetch_kline(symbol, period, count, adjust="forward"):
     return df, name
 
 
-def fetch_kline_ex(symbol, period, count, adjust="forward"):
+def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
+                   quote_fresh=True):
     """fetch_kline 完整版, 额外返回实际服务的数据源名 (观测/透传 meta 用)。
 
     返回 (标准化 DataFrame, 名称, 数据源名); 失败 (None, None, None)。
+    timing: 可选 dict, 填入 disk/fetch_ms/append_bar_ms/quote_ms 观测字段。
+    quote_fresh: 当日 bar 的快照新鲜度, False 时复用 quote_cache (见
+        _daily_bar_from_quote)。默认 True = 每次强制拉新快照 (旧行为)。
     """
     adj = kline_source.normalize_adjust(adjust)
     category = _kline_category(symbol, period)
     ct = kline_source.chain_tag(category)  # 缓存按数据源链隔离, 改链即失效
-    # 检查磁盘缓存 (日K/分钟 盘中 60s/盘后 300s, 周月K 600s)
+    # 检查磁盘缓存 (周月K 600s; 分钟 盘中 60s/盘后 300s; 日K 见 KLINE_DISK_TTL_*)
     now = market_hours.now()
     in_trading = market_hours.in_session(now)
     if period in MINUTE_PERIODS:
+        # 分钟 bar 不拼快照, TTL 必须短, 否则图表会滞后于实时行情
         ttl = 60 if in_trading else 300
     elif period == "1d":
-        ttl = 60 if in_trading else 300
+        ttl = KLINE_DISK_TTL_SEC if in_trading else KLINE_DISK_TTL_OFF_SEC
     else:
         ttl = 600
     cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj, chain_tag=ct)
     if cached:
+        if timing is not None:
+            timing["disk"] = "hit"
+            timing["source"] = cached.get("source")
         df = pd.DataFrame(cached["data"])
         if period == "1d":
             # concat 后索引名可能丢失，落盘列名为 index；统一走 _normalize
@@ -1055,7 +1096,9 @@ def fetch_kline_ex(symbol, period, count, adjust="forward"):
                 cached = None
             else:
                 df = _strip_today_bar_df(df)
-                df = _maybe_append_today_bar(symbol, df)
+                with perf.Span(timing, "append_bar_ms"):
+                    df = _maybe_append_today_bar(symbol, df, timing=timing,
+                                                 fresh=quote_fresh)
                 return df, cached.get("name", symbol), cached.get("source")
         else:
             # 分钟线优先 trade_time: JSON 常同时带 trade_date(日) 与 trade_time,
@@ -1069,16 +1112,23 @@ def fetch_kline_ex(symbol, period, count, adjust="forward"):
             df = df.sort_index()
             return df, cached.get("name", symbol), cached.get("source")
 
-    df, source = kline_source.fetch_kline_df(
-        category, symbol, period, count, adjust=adj
-    )
+    if timing is not None:
+        timing["disk"] = "miss"
+    with perf.Span(timing, "fetch_ms"):
+        df, source = kline_source.fetch_kline_df(
+            category, symbol, period, count, adjust=adj
+        )
+    if timing is not None:
+        timing["source"] = source
     name = _lookup_name(symbol) if df is not None else None
 
     if df is None:
         return None, None, None
 
     if period == "1d":
-        df = _maybe_append_today_bar(symbol, df)
+        with perf.Span(timing, "append_bar_ms"):
+            df = _maybe_append_today_bar(symbol, df, timing=timing,
+                                         fresh=quote_fresh)
 
     # 存入磁盘缓存 (日K 当日 bar 不写入，默认 dirty)
     cache_df = _strip_today_bar_df(df) if period == "1d" else df
@@ -2022,11 +2072,12 @@ def _apply_quote_bar_to_df(df, quote_bar):
     return out
 
 
-def _maybe_append_today_bar(symbol, df):
+def _maybe_append_today_bar(symbol, df, timing=None, fresh=True):
     """日K: 用实时快照补/刷新当日 bar。
 
     交易日只要快照可用就覆盖末根「今天」OHLCV (盘中/收盘后一致);
     快照不可用 (非交易日/停牌 volume=0/网络/高低缺) 时原样返回源 bar。
+    fresh 透传给 _daily_bar_from_quote (见其 docstring)。
     """
     if df is None or len(df) == 0:
         return df
@@ -2041,14 +2092,22 @@ def _maybe_append_today_bar(symbol, df):
         return df
     if last_date > today:
         return df
-    quote_bar = _daily_bar_from_quote(symbol, today)
+    quote_bar = _daily_bar_from_quote(symbol, today, timing=timing, fresh=fresh)
     if not quote_bar:
         return df
     return _apply_quote_bar_to_df(df, quote_bar)
 
 
-def _daily_bar_from_quote(symbol, target):
-    """历史日K尚无当天 bar 时, 用实时快照拼一根 (仅今天 + 交易日 + 成交量>0)。"""
+def _daily_bar_from_quote(symbol, target, timing=None, fresh=True):
+    """历史日K尚无当天 bar 时, 用实时快照拼一根 (仅今天 + 交易日 + 成交量>0)。
+
+    fresh=False 复用 quote_cache (TTL 1.25s), 不再每次强制走网络: 图表路径用,
+    因为实测该强制往返在 0~700ms 抖动, 是热路径上仅剩的耗时来源。当日 bar 仍
+    完全由后端快照产出, 只是允许最多旧 1.25s。
+
+    成交校验等对「当天终值」敏感的调用方 (market.get_daily_bar) 必须保持
+    fresh=True —— 当日 bar 不准曾导致买入价被误拒 (见 docs/known-issues.md #1)。
+    """
     from datetime import date as _date
 
     today = market_hours.now().date()
@@ -2059,7 +2118,9 @@ def _daily_bar_from_quote(symbol, target):
     if market_hours.session_phase() == "pre":
         # 盘前不拼当日 bar (快照为上一交易日残留)
         return None
-    q = fetch_quotes([symbol], fresh=True).get(normalize_symbol(symbol))
+    # 观测: 该往返的耗时即 quote_ms, 是 /api/kline 关键路径上的网络成本
+    with perf.Span(timing, "quote_ms"):
+        q = fetch_quotes([symbol], fresh=fresh).get(normalize_symbol(symbol))
     if not q:
         return None
     # 快照自带交易所时间戳时校验日期: 挡住盘前/停牌等陈旧快照被当今日
