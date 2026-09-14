@@ -26,6 +26,7 @@ import decimal as dec_mod
 import feed
 import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_source 惰性反向引用本模块)
 import market_hours  # noqa: E402
+import search_index  # noqa: E402
 
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
@@ -196,6 +197,7 @@ class _StaticListCache:
         self._data = None
         self._ts = 0.0
         self._fail_at = 0.0
+        self._refreshing = False
 
     @property
     def ts(self):
@@ -234,7 +236,7 @@ class _StaticListCache:
         return rows, ts
 
     def get(self):
-        """取静态列表; 过期则同步刷新一次。永不抛异常, 取不到返回 []。"""
+        """取静态列表; 有旧版时立即返回并后台刷新。永不抛异常。"""
         now = time.time()
         if self._data is not None and now - self._ts < self.ttl:
             return self._data
@@ -242,6 +244,32 @@ class _StaticListCache:
         rows, ts = self._cached()
         if rows and now - ts < self.ttl:
             return rows
+
+        # 旧目录仍可用于搜索；刷新决不能卡在用户请求上。
+        if rows:
+            self._schedule_refresh()
+            return rows
+
+        return self._refresh()
+
+    def _schedule_refresh(self):
+        with self._lock:
+            now = time.time()
+            if self._refreshing or (self._fail_at and now - self._fail_at < self.retry_delay):
+                return
+            self._refreshing = True
+        threading.Thread(target=self._refresh_in_background, daemon=True).start()
+
+    def _refresh_in_background(self):
+        try:
+            self._refresh()
+        finally:
+            with self._lock:
+                self._refreshing = False
+
+    def _refresh(self):
+        """Refresh synchronously only when no usable cache exists."""
+        rows, ts = self._cached()
 
         with self._lock:
             now = time.time()
@@ -346,7 +374,28 @@ _name_map_ts = 0.0     # _name_map 构建时的股票列表时间戳, 跟随列�
 _name_map_lock = threading.Lock()
 
 INDEX_LIST_FILE = SCRIPT_DIR / ".cache" / "index_list.json"
-_index_cache = _StaticListCache("指数列表", INDEX_LIST_FILE, lambda: get_mr().index_list())
+
+
+def _fetch_index_list():
+    rows = []
+    try:
+        rows.extend(get_mr().index_list() or [])
+    except Exception as e:
+        log.warning("麦蕊指数列表失败，继续尝试 akshare 港股指数: %s", _sanitize_error(e))
+    try:
+        import akshare as ak
+        df = _fetch_akshare_with_retry("港股指数", ak.stock_hk_index_spot_em)
+        for _, row in df.iterrows():
+            code = str(row.get("代码", "")).strip()
+            name = str(row.get("名称", "")).strip()
+            if code and name:
+                rows.append({"dm": f"{code}.HK", "mc": name})
+    except Exception as e:
+        log.warning("akshare 港股指数列表失败: %s", _sanitize_error(e))
+    return rows
+
+
+_index_cache = _StaticListCache("指数列表", INDEX_LIST_FILE, _fetch_index_list)
 
 
 def _index_rows_to_cache(rows):
@@ -1578,15 +1627,38 @@ _US_LIST_FILE = SCRIPT_DIR / ".cache" / "us_list.json"
 # AF universes 文档确认仅 4 池: CN_Stock / US_Stock / HK_Stock / CN_ETF (无指数池)
 AF_UNIVERSE_HK = os.environ.get("AF_UNIVERSE_HK", "HK_Stock")
 AF_UNIVERSE_US = os.environ.get("AF_UNIVERSE_US", "US_Stock")
+AF_UNIVERSE_ENABLED = os.environ.get("AF_UNIVERSE_ENABLED", "0").lower() in ("1", "true", "yes")
+AKSHARE_HKUS_LIST_ENABLED = os.environ.get("AKSHARE_HKUS_LIST_ENABLED", "0").lower() in ("1", "true", "yes")
+
+
+def _fetch_akshare_with_retry(label, fetcher, attempts=3):
+    """Fetch a full-market list with bounded retry and source-specific logging."""
+    last = None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = fetcher()
+            if result is None or len(result) == 0:
+                raise RuntimeError("返回空数据")
+            log.info("akshare %s 列表加载成功: %s 条", label, len(result))
+            return result
+        except Exception as e:
+            last = e
+            log.warning("akshare %s 列表失败 (%d/%d): %s", label, attempt, attempts, _sanitize_error(e))
+            if attempt < attempts:
+                time.sleep(min(2 ** (attempt - 1), 4))
+    raise RuntimeError(f"akshare {label} 列表连续失败") from last
 
 
 def _fetch_hk_list():
     """港股列表: AlphaFeed 股票池 (一次调用全市场), 回退 akshare 东财。"""
+    if not AKSHARE_HKUS_LIST_ENABLED:
+        log.info("港股列表数据源默认关闭，使用已有快照")
+        return []
     rows = _fetch_universe_rows(AF_UNIVERSE_HK, "hk", "stock")
     if rows:
         return rows
     import akshare as ak
-    df = ak.stock_hk_spot_em()
+    df = _fetch_akshare_with_retry("港股", ak.stock_hk_spot_em)
     out = []
     for _, row in df.iterrows():
         code = str(row.get("代码", "")).strip().zfill(5)
@@ -1598,11 +1670,14 @@ def _fetch_hk_list():
 
 def _fetch_us_list():
     """美股列表: AlphaFeed 股票池 (一次调用全市场), 回退 akshare 东财。"""
+    if not AKSHARE_HKUS_LIST_ENABLED:
+        log.info("美股列表数据源默认关闭，使用已有快照")
+        return []
     rows = _fetch_universe_rows(AF_UNIVERSE_US, "us", "stock")
     if rows:
         return rows
     import akshare as ak
-    df = ak.stock_us_spot_em()
+    df = _fetch_akshare_with_retry("美股", ak.stock_us_spot_em)
     out = []
     for _, row in df.iterrows():
         raw = str(row.get("代码", "")).strip()
@@ -1613,7 +1688,7 @@ def _fetch_us_list():
     return out
 
 
-_hkus_universe_perm_denied = False  # AF 套餐无 universe 查询权限时置位, 进程内不再尝试
+_hkus_universe_perm_denied = not AF_UNIVERSE_ENABLED  # 当前套餐默认无 universe 权限
 
 
 def _fetch_universe_rows(universe, market_tag, default_type):
@@ -1632,9 +1707,9 @@ def _fetch_universe_rows(universe, market_tag, default_type):
         msg = str(e)
         if "not available" in msg or "403" in msg or "Permission" in type(e).__name__:
             _hkus_universe_perm_denied = True
-            log.warning("AF 套餐无 universe 查询权限, 港/美股列表改用 akshare (本进程内不再尝试 AF)")
+            log.warning("AlphaFeed %s universe 无权限, 改用 akshare", market_tag)
         else:
-            log.warning(f"AF universe {universe} 拉取失败: {_sanitize_error(e)}")
+            log.warning("AlphaFeed %s universe 请求失败: %s", market_tag, _sanitize_error(e))
         return []
     if df is None or len(df) == 0:
         log.warning(f"AF universe {universe} 返回空")
@@ -1659,10 +1734,57 @@ _us_cache = _StaticListCache("美股列表", _US_LIST_FILE, lambda: _fetch_us_li
 
 def _load_universe(attr):
     """港/美股列表 (内存 + 磁盘, 24h TTL, 用到时同步刷新); 取不到返回 []。"""
-    return (_hk_cache if attr == "hk" else _us_cache).get()
+    cache = _hk_cache if attr == "hk" else _us_cache
+    if not AKSHARE_HKUS_LIST_ENABLED and _hkus_universe_perm_denied:
+        # 当前账号未开通 AlphaFeed universe，且 akshare 列表默认关闭：只读已有快照。
+        rows, _ = cache._cached()
+        return rows or []
+    return cache.get()
 
 
 SEARCH_MAX_RESULTS = 50           # 下拉返回上限 (前端一屏约 18 条, 可滚动)
+SEARCH_INDEX_FILE = SCRIPT_DIR / ".cache" / "search_catalog.sqlite3"
+
+
+def _build_search_index():
+    """Build and atomically publish the local FTS5 catalogue from cached lists."""
+    stocks = _load_stock_list()
+    _load_index_cache()
+    rows = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
+             "type": "etf" if _is_etf(s["symbol"]) else "stock"} for s in stocks]
+    rows.extend({"symbol": sym, "name": name, "code": sym.split(".")[0], "type": "index"}
+                for sym, name in _index_names.items())
+    rows.extend(_load_universe("hk"))
+    rows.extend(_load_universe("us"))
+    if not rows:
+        return 0
+    count = search_index.build_index(rows, SEARCH_INDEX_FILE)
+    log.info("已发布本地搜索索引: %s 条", count)
+    return count
+
+
+def _search_catalog_status():
+    """Report actual source freshness without fetching or refreshing any source."""
+    now = time.time()
+    sources = []
+    for key, label, cache in (("cn", "A股/基金", _stock_cache),
+                              ("index", "沪深指数", _index_cache),
+                              ("hk", "港股", _hk_cache),
+                              ("us", "美股", _us_cache)):
+        available = bool(cache._data)
+        sources.append({"key": key, "label": label,
+                        "updated_at": cache.ts if available else None,
+                        "state": "unavailable" if not available else
+                                 "stale" if now - cache.ts >= cache.ttl else "ready",
+                        "refresh_failed": bool(cache._fail_at)})
+    index_ts = search_index.index_timestamp(SEARCH_INDEX_FILE)
+    return {"sources": sources,
+            "complete": all(s["state"] == "ready" for s in sources),
+            "index_ready": bool(index_ts),
+            "index_updated_at": index_ts,
+            "coverage_note": "指数目录目前覆盖沪深指数，尚未包含完整港美指数。"}
+
+
 # 结果分组顺序: 股票(含港/美) > ETF > 指数; 组内再按匹配分, 同分 A股 > 港 > 美
 _SEARCH_TYPE_RANK = {"etf": 1, "fund": 1, "index": 2}
 _SEARCH_MARKET_RANK = {"cn": 0, "hk": 1, "us": 2}
@@ -1674,16 +1796,19 @@ def _search_stocks(query):
     覆盖 A股/基金/指数/港股/美股; 结果带 type (stock/etf/index/hk/us)。
     排序为 股票(含港/美) > ETF > 指数, 组内按匹配分, 同分 A股 > 港 > 美。
     """
-    stocks = _load_stock_list()
+    indexed = search_index.search(SEARCH_INDEX_FILE, query)
+    stocks = indexed if indexed else _load_stock_list()
     universe = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
-                 "type": "etf" if _is_etf(s["symbol"]) else "stock"} for s in stocks]
-    _load_index_cache()
-    if _index_names:
+                 "type": s.get("type") if indexed and s.get("type") else
+                         ("etf" if _is_etf(s["symbol"]) else "stock")} for s in stocks]
+    if not indexed:
+        _load_index_cache()
+    if not indexed and _index_names:
         for sym, name in _index_names.items():
             universe.append({"symbol": sym, "name": name,
                              "code": sym.split(".")[0], "type": "index"})
-    hk_rows = _load_universe("hk")
-    us_rows = _load_universe("us")
+    hk_rows = [] if indexed else _load_universe("hk")
+    us_rows = [] if indexed else _load_universe("us")
     universe.extend(hk_rows)
     universe.extend(us_rows)
 

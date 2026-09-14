@@ -83,6 +83,7 @@ body {
   z-index: 100;
 }
 .search-dropdown.show { display: block; }
+.search-status { padding: 8px 12px; color: var(--text-secondary); font-size: 12px; white-space: normal; }
 .search-dropdown .item {
   padding: 6px 10px;
   cursor: pointer;
@@ -293,6 +294,8 @@ body {
   background: rgba(var(--btn-active-rgb), 0.12); color: var(--btn-active);
 }
 .search-dropdown .item .type-badge { margin-right: 6px; }
+.type-badge.tb-etf { color: var(--btn-active); background: rgba(var(--btn-active-rgb), 0.12); }
+.type-badge.tb-index { color: var(--warn-text); background: rgba(212, 160, 23, 0.16); }
 
 /* ═══════════════ Indicator config ═══════════ */
 #indicator-bar {
@@ -442,7 +445,8 @@ body {
 #toast-box {
   position: fixed;
   top: 12px;
-  right: 12px;
+  left: 12px;
+  max-width: calc(100vw - 24px);
   z-index: 400;
   display: flex;
   flex-direction: column;
@@ -469,7 +473,7 @@ body {
 .toast.err { border-left-color: var(--up-text); }
 .toast .toast-btn { margin-left: auto; padding: 2px 10px; font-size: 12px; flex-shrink: 0; }
 @keyframes toast-in {
-  from { opacity: 0; transform: translateX(12px); }
+  from { opacity: 0; transform: translateX(-12px); }
   to { opacity: 1; transform: none; }
 }
 
@@ -2187,7 +2191,7 @@ function deriveSymbolType(symbol) {
 
 /** 类型徽标 (历史标签) */
 function typeBadge(type) {
-  const MAP = { index: '指数', etf: 'ETF', hk: '港', us: '美' };
+  const MAP = { index: '指数', etf: 'ETF', hk: '港股', us: '美股' };
   return MAP[type] ? `<span class="type-badge tb-${esc(type)}">${MAP[type]}</span>` : '';
 }
 
@@ -2207,7 +2211,7 @@ function badgeType(r) {
   return '';
 }
 function searchBadge(r) {
-  const LABELS = { index: '指数', etf: 'ETF', hk: '港', us: '美' };
+  const LABELS = { index: '指数', etf: 'ETF', hk: '港股', us: '美股' };
   const t = badgeType(r);
   return LABELS[t] || '';
 }
@@ -5169,28 +5173,61 @@ document.addEventListener('DOMContentLoaded', () => {
   const symInput = document.getElementById('symbol-input');
   const dropdown = document.getElementById('search-dropdown');
   let searchTimer = null, activeIdx = -1, searchResults = [];
+  let searchSeq = 0, searchController = null, composing = false;
+  let searchNotice = '', resultsQuery = '';
+
+  function catalogNotice(catalog) {
+    if (!catalog || !Array.isArray(catalog.sources)) return '';
+    const date = ts => new Date(ts * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    const messages = catalog.sources.map(s => {
+      if (s.state === 'unavailable') return `${s.label}目录暂不可用，搜索覆盖不完整。`;
+      if (s.state === 'stale') return `${s.label}目录${s.refresh_failed ? '更新暂未成功' : '已过期'}，当前使用 ${date(s.updated_at)} 数据，可能缺少新上市证券。`;
+      return '';
+    }).filter(Boolean);
+    if (!messages.length) {
+      const times = catalog.sources.map(s => s.updated_at).filter(Boolean);
+      if (times.length) messages.push(`证券目录更新于 ${date(Math.min(...times))}`);
+    }
+    if (catalog.coverage_note) messages.push(catalog.coverage_note);
+    if (catalog.index_ready === false) messages.push('本地搜索索引正在初始化，当前使用兼容搜索。');
+    return messages.join(' ');
+  }
 
   function doSearch() {
     const q = symInput.value.trim();
     if (!q || q.length < 1) { closeDropdown(); return; }
-    fetch(`/api/search?q=${encodeURIComponent(q)}`)
-      .then(r => r.json())
+    const seq = ++searchSeq;
+    if (searchController) searchController.abort();
+    searchController = new AbortController();
+    searchNotice = '搜索中…';
+    renderDropdown();
+    fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: searchController.signal })
+      .then(r => {
+        if (!r.ok) throw new Error(r.status === 429 ? '请求频繁，请稍后重试。' : '搜索请求失败，请稍后重试。');
+        return r.json();
+      })
       .then(data => {
+        if (seq !== searchSeq || symInput.value.trim() !== q) return;
         searchResults = data.results || [];
+        resultsQuery = q;
+        searchNotice = [searchResults.length ? '' : '未找到匹配结果，可尝试完整代码。', catalogNotice(data.catalog)].filter(Boolean).join(' ');
         activeIdx = -1;
         renderDropdown();
-      }).catch(() => closeDropdown());
+      }).catch(error => {
+        if (seq !== searchSeq || error.name === 'AbortError') return;
+        searchNotice = error.message || '搜索请求失败，请稍后重试。';
+        renderDropdown();
+      });
   }
 
   function renderDropdown() {
-    if (searchResults.length === 0) { closeDropdown(); return; }
     dropdown.innerHTML = searchResults.map((r, i) => {
       const badge = searchBadge(r)
         ? `<span class="type-badge tb-${badgeType(r)}">${searchBadge(r)}</span>` : '';
       return `<div class="item${i === activeIdx ? ' active' : ''}" data-idx="${i}">
         ${badge}${esc(r.name)}<span class="code">${esc(r.code)}</span>
       </div>`;
-    }).join('');
+    }).join('') + (searchNotice ? `<div class="search-status" role="status">${esc(searchNotice)}</div>` : '');
     dropdown.classList.add('show');
     // Click + hover handlers
     dropdown.querySelectorAll('.item').forEach(el => {
@@ -5217,6 +5254,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function closeDropdown() {
+    clearTimeout(searchTimer);
+    ++searchSeq;
+    if (searchController) searchController.abort();
     dropdown.classList.remove('show');
     searchResults = [];
     activeIdx = -1;
@@ -5233,10 +5273,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
   symInput.addEventListener('input', () => {
     clearTimeout(searchTimer);
+    ++searchSeq;
+    if (searchController) searchController.abort();
+    if (!symInput.value.trim()) { closeDropdown(); return; }
+    if (composing) return;
     searchTimer = setTimeout(doSearch, 250);
+  });
+  symInput.addEventListener('compositionstart', () => { composing = true; closeDropdown(); });
+  symInput.addEventListener('compositionend', () => {
+    composing = false;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(doSearch, 250);
+  });
+  symInput.addEventListener('focus', () => {
+    if (symInput.value.trim() === resultsQuery && searchResults.length) renderDropdown();
   });
 
   symInput.addEventListener('keydown', (e) => {
+    if (composing || e.isComposing) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       activeIdx = Math.min(activeIdx + 1, searchResults.length - 1);
@@ -5246,9 +5300,9 @@ document.addEventListener('DOMContentLoaded', () => {
       activeIdx = Math.max(activeIdx - 1, 0);
       updateActive();
     } else if (e.key === 'Enter') {
-      if (activeIdx >= 0 && searchResults.length > 0) {
+      if (dropdown.classList.contains('show') && searchResults.length > 0) {
         e.preventDefault();
-        selectResult(activeIdx);
+        selectResult(Math.max(activeIdx, 0));
       } else {
         refresh();
       }

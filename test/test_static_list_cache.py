@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """market._StaticListCache 单测 (离线, 不联网)。
 
-覆盖静态列表的缓存契约: 内存/磁盘命中零联网、24h TTL、过期同步刷新并落盘、
+覆盖静态列表的缓存契约: 内存/磁盘命中零联网、24h TTL、过期后台刷新并落盘、
 失败保留旧数据并退避、原子写无残留临时文件。
 
 运行:
@@ -62,11 +62,19 @@ class StaticListCacheTest(unittest.TestCase):
         self.assertGreater(saved["ts"], 0)
         self.assertFalse(self.path.with_suffix(".json.tmp").exists(), "临时文件应已 replace")
 
-    def test_stale_disk_refreshes_and_persists(self):
+    def test_stale_disk_returns_immediately_then_refreshes_and_persists(self):
         self._write([{"old": 1}], 0)
         fetcher = mock.Mock(return_value=[{"new": 1}])
-        self.assertEqual(self._cache(fetcher).get(), [{"new": 1}])
-        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        c = self._cache(fetcher)
+        self.assertEqual(c.get(), [{"old": 1}])
+        for _ in range(50):
+            try:
+                saved = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                saved = {}
+            if saved.get("rows") == [{"new": 1}]:
+                break
+            time.sleep(0.01)
         self.assertEqual(saved["rows"], [{"new": 1}])
         fetcher.assert_called_once()
 
@@ -75,6 +83,10 @@ class StaticListCacheTest(unittest.TestCase):
         fetcher = mock.Mock(side_effect=RuntimeError("boom"))
         c = self._cache(fetcher)
         self.assertEqual(c.get(), [{"old": 1}])   # 刷新失败 → 保留旧数据
+        for _ in range(50):
+            if fetcher.called:
+                break
+            time.sleep(0.01)
         self.assertEqual(c.get(), [{"old": 1}])   # 退避期内不再重试
         self.assertEqual(fetcher.call_count, 1)
 

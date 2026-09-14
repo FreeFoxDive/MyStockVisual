@@ -37,6 +37,7 @@ def _env(stocks, indices=None, hk=None, us=None):
         return list(hk or []) if attr == "hk" else list(us or [])
 
     with mock.patch.object(market, "_load_stock_list", return_value=list(stocks)), \
+         mock.patch.object(market.search_index, "search", return_value=[]), \
          mock.patch.object(market, "_load_index_cache", return_value=set(indices or {})), \
          mock.patch.object(market, "_index_names", dict(indices or {})), \
          mock.patch.object(market, "_load_universe", side_effect=_universe):

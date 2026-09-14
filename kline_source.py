@@ -143,7 +143,7 @@ class AkshareSource(KlineSource):
         import market
         if category == "minute":
             return period in market.MINUTE_PERIODS
-        return category in ("stock", "index", "fund") and period in ("1d", "1w", "1M")
+        return category in ("stock", "index", "fund", "hk", "us") and period in ("1d", "1w", "1M")
 
     def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
         import akshare as ak
@@ -166,11 +166,21 @@ class AkshareSource(KlineSource):
         natural = int(count * 1.7) + 40
         start = (market_hours.now() - timedelta(days=natural)).strftime("%Y%m%d")
         code = symbol.split(".")[0]
+        category = market._symbol_market(symbol)
         ak_adj = self._ak_adjust(adjust)
         try:
             if market._is_etf(symbol):
                 df = ak.fund_etf_hist_em(symbol=code, period=self._AK_PERIOD[period],
                                          start_date=start, end_date="20991231", adjust=ak_adj)
+            elif category in ("hk", "us"):
+                code = symbol.split(".")[0]
+                if category == "hk":
+                    code = code.zfill(5)
+                    df = ak.stock_hk_hist(symbol=code, period=self._AK_PERIOD[period],
+                                          start_date=start, end_date="20991231", adjust=ak_adj)
+                else:
+                    df = ak.stock_us_hist(symbol=code, period=self._AK_PERIOD[period],
+                                          start_date=start, end_date="20991231", adjust=ak_adj)
             elif market._is_index_symbol(symbol):
                 # 指数接口无复权参数
                 df = ak.index_zh_a_hist(symbol=code, period=self._AK_PERIOD[period],
@@ -191,6 +201,7 @@ class AkshareSource(KlineSource):
 
     def _fetch_minute(self, ak, market, symbol, period, count, adjust):
         code = symbol.split(".")[0]
+        category = market._symbol_market(symbol)
         minutes = period[:-1]  # "5m" -> 东财接口的 "5"
         ak_adj = self._ak_adjust(adjust)
         # 东财分钟接口: 股票/ETF 支持 adjust, 指数接口无该参数;
@@ -198,6 +209,12 @@ class AkshareSource(KlineSource):
         try:
             if market._is_etf(symbol):
                 df = ak.fund_etf_hist_min_em(symbol=code, period=minutes, adjust=ak_adj)
+            elif category in ("hk", "us"):
+                code = symbol.split(".")[0]
+                if category == "hk":
+                    df = ak.stock_hk_hist_min_em(symbol=code.zfill(5), period=minutes, adjust=ak_adj)
+                else:
+                    df = ak.stock_us_hist_min_em(symbol=code)
             elif market._is_index_symbol(symbol):
                 df = ak.index_zh_a_hist_min_em(symbol=code, period=minutes)
             else:
@@ -227,6 +244,8 @@ CATEGORY_ENV = {
     "stock": "KLINE_SOURCE_STOCK",
     "index": "KLINE_SOURCE_INDEX",
     "fund": "KLINE_SOURCE_FUND",
+    "hk": "KLINE_SOURCE_HK",
+    "us": "KLINE_SOURCE_US",
 }
 
 # 券商/付费源优先, akshare 兜底。mairui 分钟实测数据窗口滞后,
@@ -238,9 +257,9 @@ DEFAULT_CHAINS = {
     "stock": "mairui,alphafeed,akshare",
     "index": "mairui,akshare",
     "fund": "alphafeed,akshare",
-    # 港/美股: 仅 AlphaFeed 可服务 (限频由 market 令牌桶 8/min 控制)
-    "hk": "alphafeed",
-    "us": "alphafeed",
+    # 港/美股: AlphaFeed 优先，akshare 日/周/月及分钟兜底
+    "hk": "alphafeed,akshare",
+    "us": "alphafeed,akshare",
 }
 
 _warned_names = set()

@@ -70,7 +70,7 @@ class SearchBadgeJsTest(unittest.TestCase):
             {"symbol": "09988.hk", "type": "stock"},
         ])
         self.assertEqual([o["type"] for o in out], ["hk", "hk"])
-        self.assertEqual([o["badge"] for o in out], ["港", "港"])
+        self.assertEqual([o["badge"] for o in out], ["港股", "港股"])
 
     def test_us_by_alnum_code(self):
         out = self._badges([
@@ -79,7 +79,7 @@ class SearchBadgeJsTest(unittest.TestCase):
             {"symbol": "BRK.B", "type": "stock"},
         ])
         self.assertEqual([o["type"] for o in out], ["us", "us", "us"])
-        self.assertEqual([o["badge"] for o in out], ["美", "美", "美"])
+        self.assertEqual([o["badge"] for o in out], ["美股", "美股", "美股"])
 
     def test_a_share_has_no_badge(self):
         out = self._badges([

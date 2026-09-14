@@ -15,6 +15,7 @@ from market import (
     _is_index_symbol,
     _load_pledge,
     _search_stocks,
+    _search_catalog_status,
     fetch_depth,
     fetch_quote,
     fetch_quotes,
@@ -122,7 +123,8 @@ def search():
     q = (request.args.get("q") or "").strip()
     if not q:
         return _json({"results": []})
-    return _json({"results": _search_stocks(q)})
+    results = _search_stocks(q)
+    return _json({"results": results, "catalog": _search_catalog_status()})
 
 
 @api_bp.route("/api/quote", methods=["GET"])

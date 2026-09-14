@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -287,8 +288,20 @@ def start_background_jobs():
                 fn()
             except Exception as e:
                 log.warning(f"{name} 预热失败: {e}")
+        try:
+            market._build_search_index()
+        except Exception as e:
+            log.warning(f"本地搜索索引构建失败，保留旧索引并回退列表搜索: {e}")
 
     threading.Thread(target=_warm_static_lists, daemon=True).start()
+    def _search_index_scheduler():
+        while True:
+            time.sleep(6 * 3600)
+            try:
+                market._build_search_index()
+            except Exception as e:
+                log.warning(f"定时搜索索引构建失败，继续使用旧索引: {e}")
+    threading.Thread(target=_search_index_scheduler, daemon=True).start()
     threading.Thread(target=market._pledge_scheduler, daemon=True).start()
 
     try:
