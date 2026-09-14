@@ -942,7 +942,10 @@ const STATE = {
   trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
   chips: null,           // 筹码分布 (/api/chips, 仅日K股票)
   premium: null,         // ETF 溢价 {symbol, period, map:{date:val}} (/api/kline/deferred)
-  _klineAbort: null,     // 在途 /api/kline 的 AbortController (换股即取消, 别占线程)
+  _klineAbort: null,     // 取消浏览器接收；服务端工作由后端并发上限约束
+  _requestSeq: 0,
+  _foregroundLoading: false,
+  _premiumTask: null,
   depth: null,           // 五档盘口 (/api/depth, 所有周期)
   stockInfo: null,
   _serverTradingDay: null,
@@ -1187,61 +1190,122 @@ function applyPremiumToKlines() {
 }
 
 function reapplyPremium() {
-  if (!applyPremiumToKlines()) return;
+  const changed = applyPremiumToKlines();
   // 工具条徽标在 updateInfo, 溢价曲线在 updateChart: 两处都要刷新
   if (STATE.klineData) updateInfo(STATE.klineData);
-  updateChart(false);
+  if (changed) updateChart(false);
 }
 
-/** 已在内存中的溢价直接回填 (切换 symbol 的整包替换会丢掉 bar 上的 premium) */
-function premiumInMemory(symbol, period) {
-  if (STATE.premium && STATE.premium.symbol === symbol && STATE.premium.period === period) {
-    reapplyPremium();
-    return true;
-  }
-  return false;
+/** 内存结果可立即回填，但只有未过期且覆盖当前末根才可跳过查询。 */
+function premiumInMemory(symbol, period, count) {
+  const p = STATE.premium, d = STATE.klineData;
+  if (!p || p.symbol !== symbol || p.period !== period) return false;
+  reapplyPremium();
+  const last = d && d.klines && d.klines[d.klines.length - 1];
+  return p.count === count && !p.stale && Date.now() < p.expiresAt && last
+    && Object.prototype.hasOwnProperty.call(p.map, String(last.date).slice(0, 10));
 }
 
-/** 拉溢价: 未就绪时退避重试 (ready:false 不是错误, 静默重试即可) */
-async function fetchPremium(symbol, period, count, fetchTs) {
+function cancelPremium() {
+  const task = STATE._premiumTask;
+  if (!task) return;
+  clearTimeout(task.timer);
+  task.controller.abort();
+  STATE._premiumTask = null;
+}
+
+/** 每个视图一个补齐任务。慢源持续低频查询，失败遵守服务端负缓存。 */
+async function fetchPremium(symbol, period, count, fetchTs, force = false) {
   const d = STATE.klineData;
   const want = d && d.symbol === symbol && d.period === period && d.meta
     && Array.isArray(d.meta.deferred) && d.meta.deferred.includes('premium');
-  if (!want || premiumInMemory(symbol, period)) return;
-  const delays = [400, 800, 1600, 3200, 3200];
-  for (let i = 0; i < delays.length; i++) {
-    const stale = () => STATE._fetchTs !== fetchTs || STATE.symbol !== symbol
-      || STATE.period !== period;
+  if (!want || STATE._fetchTs !== fetchTs) return;
+  if (STATE._premiumTask && STATE._premiumTask.fetchTs === fetchTs) return;
+  cancelPremium();
+  const task = { symbol, period, count, fetchTs, controller: new AbortController(),
+    timer: null, running: false, attempts: 0 };
+  STATE._premiumTask = task;
+  const stale = () => STATE._premiumTask !== task || STATE._fetchTs !== fetchTs
+    || STATE.symbol !== symbol || STATE.period !== period;
+  const schedule = (ms) => {
     if (stale()) return;
-    let prem = null;
-    try {
-      const r = await fetch(`/api/kline/deferred?symbol=${encodeURIComponent(symbol)}`
-        + `&period=${encodeURIComponent(period)}&count=${count}&fields=premium`);
-      if (r.ok) prem = (await r.json()).premium;
-    } catch (e) { /* 静默: 溢价缺席只是少一条曲线, 不影响 K 线 */ }
-    if (stale()) return;
-    if (prem && prem.ready && Array.isArray(prem.dates)) {
-      const map = {};
-      prem.dates.forEach((dt, idx) => {
-        map[String(dt).slice(0, 10)] = prem.values ? prem.values[idx] : null;
-      });
-      STATE.premium = { symbol, period, map };
-      reapplyPremium();
+    clearTimeout(task.timer);
+    task.timer = setTimeout(task.run, Math.max(400, ms));
+  };
+  task.run = async () => {
+    if (stale() || task.running) return;
+    if (document.hidden) return;  // visibilitychange 恢复，无后台忙轮询
+    if (!force && premiumInMemory(symbol, period, count)) {
+      schedule(Math.min(60000, STATE.premium.expiresAt - Date.now()));
       return;
     }
-    await new Promise((res) => setTimeout(res, delays[i]));
-  }
+    force = false;
+    task.running = true;
+    task.controller = new AbortController();
+    const timeout = setTimeout(() => task.controller.abort(), 15000);
+    let nextMs = Math.min(10000, 400 * 2 ** Math.min(task.attempts++, 5));
+    try {
+      const r = await fetch(`/api/kline/deferred?symbol=${encodeURIComponent(symbol)}`
+        + `&period=${encodeURIComponent(period)}&count=${count}&fields=premium`,
+        { signal: task.controller.signal });
+      const prem = r.ok ? (await r.json()).premium : null;
+      if (stale()) return;
+      if (prem && prem.ready && Array.isArray(prem.dates)) {
+        const map = Object.create(null);
+        prem.dates.forEach((dt, idx) => {
+          map[String(dt).slice(0, 10)] = prem.values && prem.values[idx] != null
+            ? prem.values[idx] : null;
+        });
+        STATE.premium = { symbol, period, count, map, stale: !!prem.stale,
+          generatedAt: prem.generated_at,
+          expiresAt: Date.now() + Math.max(0, Number(prem.max_age_sec) || 0) * 1000 };
+        reapplyPremium();
+        if (!prem.stale) {
+          task.attempts = 0;
+          nextMs = Math.max(1000, Math.min(60000, (Number(prem.max_age_sec) || 10) * 1000));
+        }
+      }
+      if (prem && (prem.status === 'failed' || prem.status === 'no_data')) {
+        if (prem.retry_after_sec == null) return;
+        nextMs = Math.max(1000, Number(prem.retry_after_sec) * 1000 || 300000);
+      } else if (prem && prem.status === 'pending') {
+        nextMs = Math.max(nextMs, Math.min(10000, (Number(prem.retry_after_sec) || 1) * 1000));
+      }
+    } catch (e) {
+      if (stale()) return;
+    } finally {
+      clearTimeout(timeout);
+      task.running = false;
+    }
+    schedule(nextMs);
+  };
+  await task.run();
 }
+
+function resumePremium() {
+  const task = STATE._premiumTask;
+  if (!task || document.hidden || task.running) return;
+  clearTimeout(task.timer);
+  task.run();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && STATE._premiumTask) clearTimeout(STATE._premiumTask.timer);
+  else resumePremium();
+});
 
 async function fetchData(opts) {
   const silent = !!(opts && opts.silent);
+  if (silent && STATE._foregroundLoading) return;
   const retainPanels = !!(opts && opts.retainPanels);
   const symbol = STATE.symbol;
   // 分时下请求K线 (如切换复权) → 统一收口到日K, 同步按钮/面板/URL
   if (STATE.period === 'intraday') { applyPeriodUI('1d'); syncSymbolUrl(true); }
   const period = STATE.period;
-  const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
-  STATE._lastBarAt = fetchTs;
+  const fetchTs = ++STATE._requestSeq; STATE._fetchTs = fetchTs;
+  STATE._lastBarAt = Date.now();
+  if (!silent) STATE._foregroundLoading = true;
+  cancelPremium();
   if (!silent && !retainPanels) { STATE.trades = null; STATE.chips = null; } // 仅换股清空，切周期保留当前侧栏/图表直到新数据就绪
   const cacheKey = `vk_${symbol}_${period}_${STATE.adjust}`;
   // SSE 快照流由 loadCurrent()/ensureQuoteStream() 统一管理, 此处不再随 fetchData 重启
@@ -1269,8 +1333,8 @@ async function fetchData(opts) {
   const adjParam = MINUTE_PERIODS.includes(period) ? '' : `&adjust=${STATE.adjust}`;
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
-  // 换股/切周期时取消上一次仍在途的 K 线请求: 仅靠 _fetchTs 丢弃响应不够,
-  // 请求本身还会占住 waitress 线程 (只有 8 个), 连续切换会互相排队放大等待。
+  // 换股/切周期取消浏览器在途请求，减少废弃响应的接收与解析。
+  // 不会自动终止 Flask 执行；后端另有实际工作数上限。
   // silent 后台刷新不取消前台请求。
   if (!silent) {
     if (STATE._klineAbort) STATE._klineAbort.abort();
@@ -1324,13 +1388,15 @@ async function fetchData(opts) {
     updateInfo(data);
     if (!silent) {
       await loadTrades(data.symbol, fetchTs);
+      if (STATE._fetchTs !== fetchTs) return;
       fetchChips(data.symbol);
     }
     if (retainPanels && isChipPeriod(period)) fetchChips(data.symbol);
     renderFetchedKline(data);
-    fetchPremium(data.symbol, data.period, count, fetchTs);  // 慢派生字段异步补齐
+    fetchPremium(data.symbol, data.period, count, fetchTs, !silent);  // 慢派生字段异步补齐
   } catch (e) {
     if (e && e.name === 'AbortError') return;  // 已被新的切换取消, 不是错误
+    if (STATE._fetchTs !== fetchTs) return;
     console.error('获取数据失败:', e);
     if (STATE._prevAdjust && STATE.adjust !== STATE._prevAdjust) {
       // 切换复权失败 (如后复权源不可用): 回退选项, 保持图表与选项一致
@@ -1342,6 +1408,7 @@ async function fetchData(opts) {
   } finally {
     // 仅当前请求负责收尾: 被取代的请求不得清掉新请求刚显示的加载态
     if (!silent && STATE._fetchTs === fetchTs) {
+      STATE._foregroundLoading = false;
       document.getElementById('btn-refresh')?.classList.remove('loading');
       if (STATE.chart) STATE.chart.hideLoading();
     }
@@ -1756,6 +1823,9 @@ function applyServerBars(bars) {
     }
     // d < lastDate: 过期 bar, 忽略
   }
+  const p = STATE.premium, last = klines[klines.length - 1];
+  if (changed && p && p.symbol === STATE.symbol && p.period === STATE.period
+      && !Object.prototype.hasOwnProperty.call(p.map, String(last.date).slice(0, 10))) resumePremium();
   return changed;
 }
 
@@ -2114,9 +2184,16 @@ function updateInfo(data) {
     if (last && last.premium != null) {
       const p = last.premium;
       const pcls = p >= 0 ? 'up' : 'down';
-      document.getElementById('info-premium').textContent = `溢价 ${p>=0?'+':''}${p.toFixed(2)}%`;
+      const cached = STATE.premium;
+      const matching = cached && cached.symbol === data.symbol && cached.period === data.period;
+      const stale = !matching || cached.stale || Date.now() >= cached.expiresAt;
+      document.getElementById('info-premium').textContent = `溢价${stale ? '（待更新）' : ''} ${p>=0?'+':''}${p.toFixed(2)}%`;
+      document.getElementById('info-premium').title = matching && cached.generatedAt
+        ? `计算时间：${new Date(cached.generatedAt * 1000).toLocaleString()}` : '';
       document.getElementById('info-premium').className = pcls;
       document.getElementById('info-premium').style.display = '';
+    } else {
+      document.getElementById('info-premium').style.display = 'none';
     }
   } else {
     premLabel.style.display = 'none';

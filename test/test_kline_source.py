@@ -420,7 +420,7 @@ class TestSourceTimeoutAndBreaker(KlineSourceTestBase):
             return _cn_daily_df()
 
         fake = _fake_akshare(stock_daily=_cn_daily_df())
-        with _no_kline_env(), \
+        with _no_kline_env(KLINE_SOURCE_STOCK="akshare,mairui"), \
              mock.patch.object(kline_source, "SOURCE_TIMEOUT_SEC", 0.1), \
              mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr, \
              mock.patch.object(kline_source.AkshareSource, "fetch", side_effect=_hang):
@@ -462,8 +462,8 @@ class TestSourceTimeoutAndBreaker(KlineSourceTestBase):
         self.assertFalse(kline_source._in_cooldown("alphafeed"),
                          "成功后应清零, 不该熔断")
 
-    def test_all_sources_in_cooldown_still_tries_first(self):
-        """全部冷却时破例重试链首, 不能让用户请求直接 404。"""
+    def test_all_sources_in_cooldown_does_not_bypass(self):
+        """全部冷却也不得无条件突破熔断。"""
         with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed,mairui"), \
              mock.patch.object(market, "_fetch_mr_kline", return_value=None), \
              mock.patch.object(market, "_fetch_af_kline",
@@ -477,9 +477,9 @@ class TestSourceTimeoutAndBreaker(KlineSourceTestBase):
             self.assertTrue(kline_source._in_cooldown("alphafeed"))
             self.assertTrue(kline_source._in_cooldown("mairui"))
             df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
-        self.assertEqual(src, "alphafeed")
-        self.assertIsNotNone(df)
-        af.assert_called_once()
+        self.assertIsNone(src)
+        self.assertIsNone(df)
+        af.assert_not_called()
 
 
 class TestMinuteStalenessGuard(KlineSourceTestBase):

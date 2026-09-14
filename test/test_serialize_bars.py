@@ -11,6 +11,7 @@ df.iterrows() 每行构造一个 Series (实测 1006 根约 86ms, 是指标计�
 from __future__ import annotations
 
 import os
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -22,10 +23,10 @@ _VISUAL_DIR = Path(__file__).resolve().parents[1]
 if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
-from api.kline import _BAR_FIELDS, _serialize_bar, serialize_bars  # noqa: E402
+from api.kline import _BAR_FIELDS, serialize_bars, _safe_float, _safe_int  # noqa: E402
 
 # 契约字段清单: 与重构前的 _serialize_bar 完全一致 (顺序无关, 集合必须相等)
-_EXPECTED_FIELDS = {
+_EXPECTED_ORDER = (
     "date", "open", "high", "low", "close", "volume", "amount",
     "ma5", "ma10", "ma20",
     "macd_dif", "macd_dea", "macd_hist",
@@ -34,12 +35,22 @@ _EXPECTED_FIELDS = {
     "obv", "maobv", "vol_ma5", "vol_ma10", "vol_ma20",
     "boll_mid", "boll_up", "boll_low", "wr14", "cci14",
     "bias6", "bias12", "bias24", "dmi_pdi", "dmi_mdi", "dmi_adx",
-}
+)
+_EXPECTED_FIELDS = set(_EXPECTED_ORDER)
 
 
 def _legacy_bars(df, period):
     """重构前的实现 (逐行 iterrows), 仅作等价性对照。"""
-    return [_serialize_bar(idx, row, period) for idx, row in df.iterrows()]
+    out = []
+    for idx, row in df.iterrows():
+        date = idx.strftime('%Y-%m-%d %H:%M' if period in ('1m', '5m', '15m', '30m', '60m')
+                            else '%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)
+        bar = {'date': date}
+        for name in _EXPECTED_ORDER[1:]:
+            convert = _safe_int if name in ('volume', 'impulse') else _safe_float
+            bar[name] = convert(row.get(name))
+        out.append(bar)
+    return out
 
 
 def _rich_df(n=40, minute=False):
@@ -80,6 +91,7 @@ class SerializeBarsEquivalence(unittest.TestCase):
     def _assert_same(self, df, period):
         got = serialize_bars(df, period)
         want = _legacy_bars(df, period)
+        self.assertEqual(json.dumps(got), json.dumps(want), 'JSON 字节/字段顺序不同')
         self.assertEqual(len(got), len(want))
         for i, (g, w) in enumerate(zip(got, want)):
             self.assertEqual(set(g.keys()), set(w.keys()),
@@ -102,7 +114,7 @@ class SerializeBarsEquivalence(unittest.TestCase):
         got = serialize_bars(_rich_df(), "1d")
         self.assertEqual(set(got[0].keys()), _EXPECTED_FIELDS)
         self.assertEqual([n for n, _ in _BAR_FIELDS],
-                         [n for n, _ in _BAR_FIELDS], "字段表需保持稳定顺序")
+                         list(_EXPECTED_ORDER[1:]), "字段表需保持稳定顺序")
         self.assertEqual({n for n, _ in _BAR_FIELDS} | {"date"}, _EXPECTED_FIELDS)
 
     def test_missing_columns_become_null_not_zero(self):

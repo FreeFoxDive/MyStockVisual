@@ -40,9 +40,33 @@ SOURCE_TIMEOUT_SEC = max(1.0, float(os.environ.get("KLINE_SOURCE_TIMEOUT_SEC", "
 # 源级熔断: 连续失败达阈值后, 冷却期内直接跳过该源 (不再重吃同一份超时)。
 SOURCE_FAIL_THRESHOLD = max(1, int(os.environ.get("KLINE_SOURCE_FAIL_THRESHOLD", "3")))
 SOURCE_COOLDOWN_SEC = max(1.0, float(os.environ.get("KLINE_SOURCE_COOLDOWN_SEC", "60")))
+SOURCE_MAX_INFLIGHT = max(1, int(os.environ.get("KLINE_SOURCE_MAX_INFLIGHT", "2")))
+SOURCE_MAX_TOTAL = max(1, int(os.environ.get("KLINE_SOURCE_MAX_TOTAL", "6")))
 
 _health_lock = threading.Lock()
 _health = {}   # name -> {"fails": 连续失败数, "until": 冷却截止 ts}
+_active = {}   # 实际存活的工作数; join 超时不能释放配额
+
+
+class SourceBusy(Exception):
+    """本地容量不足，不计作上游故障。"""
+
+
+def _admit(name):
+    with _health_lock:
+        ent = _health.setdefault(name, {"fails": 0, "until": 0.0,
+                                        "probe": False, "generation": 0})
+        if ent["until"] > time.monotonic() or ent["probe"]:
+            return None
+        if ent["until"]:
+            ent["probe"] = True
+        return ent, ent["generation"]
+
+
+def _current(name, token):
+    ent = _health.get(name)
+    return ent is not None and (token is None or
+        (ent is token[0] and ent["generation"] == token[1]))
 
 
 def reset_health():
@@ -54,24 +78,30 @@ def reset_health():
 def _in_cooldown(name):
     with _health_lock:
         ent = _health.get(name)
-    return bool(ent and ent["until"] > time.time())
+    return bool(ent and (ent["until"] > time.monotonic() or ent["probe"]))
 
 
-def _note_ok(name):
+def _note_ok(name, token=None):
     with _health_lock:
-        _health.pop(name, None)
+        if _current(name, token):
+            _health.pop(name, None)
 
 
-def _note_fail(name):
+def _note_fail(name, token=None):
     """连续失败计一次; 达阈值则进入冷却窗口。"""
-    now = time.time()
+    now = time.monotonic()
     entered = False
     with _health_lock:
-        ent = _health.setdefault(name, {"fails": 0, "until": 0.0})
+        if token is not None and not _current(name, token):
+            return
+        ent = _health.setdefault(name, {"fails": 0, "until": 0.0,
+                                        "probe": False, "generation": 0})
         ent["fails"] += 1
-        if ent["fails"] >= SOURCE_FAIL_THRESHOLD:
+        if ent["probe"] or ent["fails"] >= SOURCE_FAIL_THRESHOLD:
             ent["until"] = now + SOURCE_COOLDOWN_SEC
             ent["fails"] = 0
+            ent["probe"] = False
+            ent["generation"] += 1
             entered = True
     if entered:
         perf.bump(f"src_cooldown_{name}")
@@ -82,21 +112,36 @@ def _note_fail(name):
 def _fetch_bounded(src, symbol, period, count, adj, name):
     """在独立线程里跑单源取数并加硬超时, 返回 df; 源内异常原样抛出。
 
-    用「每次调用一个 daemon 线程 + join(timeout)」而非线程池: 池的队列会在
-    多个上游同时挂起时让后续任务"排队即超时", 反而把所有源一起废掉。超时后
-    工作线程无法强杀, 可能仍阻塞到上游返回, 故配合 _note_fail 的冷却把这类
-    线程数量限制在 (阈值 × 源数) 以内。
+    非阻塞获取每源/全局配额，无排队。超时只结束调用者等待，实际工作退出才
+    释放配额，故永久挂起也不会无界创建线程。
     """
     box = {}
+    with _health_lock:
+        if (_active.get(name, 0) >= SOURCE_MAX_INFLIGHT
+                or sum(_active.values()) >= SOURCE_MAX_TOTAL):
+            raise SourceBusy(name)
+        _active[name] = _active.get(name, 0) + 1
+
+    def _release():
+        with _health_lock:
+            _active[name] -= 1
+            if not _active[name]:
+                del _active[name]
 
     def _work():
         try:
             box["df"] = src.fetch(symbol, period, count, adj)
         except Exception as e:  # 交给调用方按原语义记 warning 并下沉
             box["err"] = e
+        finally:
+            _release()
 
     t = threading.Thread(target=_work, name=f"klinesrc-{name}", daemon=True)
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        _release()
+        raise
     t.join(SOURCE_TIMEOUT_SEC)
     if t.is_alive():
         perf.bump(f"src_timeout_{name}")
@@ -111,8 +156,17 @@ def _fetch_bounded(src, symbol, period, count, adj, name):
 def _try_source(name, symbol, period, count, adj, category, idx, chain):
     """单源尝试: 有界取数 + 新鲜度守卫 + 健康计数。返回 df 或 None。"""
     src = SOURCES[name]
+    token = _admit(name)
+    if token is None:
+        return None
     try:
         df = _fetch_bounded(src, symbol, period, count, adj, name)
+    except SourceBusy:
+        with _health_lock:
+            if _current(name, token):
+                token[0]["probe"] = False
+        perf.bump(f"src_busy_{name}")
+        return None
     except Exception as e:  # 单源异常不拖垮整条链
         log.warning("数据源 %s 获取 %s %s 异常: %s", name, symbol, period, e)
         df = None
@@ -122,14 +176,14 @@ def _try_source(name, symbol, period, count, adj, category, idx, chain):
         perf.bump(f"src_stale_{name}")
         df = None
     if df is not None:
-        _note_ok(name)
+        _note_ok(name, token)
         if idx > 0:
             perf.bump("fallback")
             log.info("%s %s 已回退到数据源 %s", symbol, period, name)
         return df
     # 该源本次未取到数据 (异常/空/过旧/超时): 计健康计数, 用于确认慢请求是否
     # 集中在个别坏源上 (回退链会把其耗时叠加到用户请求上)
-    _note_fail(name)
+    _note_fail(name, token)
     perf.bump(f"src_fail_{name}")
     if idx < len(chain) - 1:
         log.warning("数据源 %s 获取 %s %s 失败, 回退 %s",
@@ -427,27 +481,16 @@ def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD):
     """
     adj = normalize_adjust(adjust)
     chain = _chain(category)
-    skipped, tried = [], 0
     for i, name in enumerate(chain):
         src = SOURCES[name]
         if not src.supports(category, period, adj):
             continue
         if _in_cooldown(name):
             # 该源刚连续失败过: 冷却期内直接跳过, 不再重吃同一份超时
-            skipped.append(name)
             perf.bump(f"src_skip_cooldown_{name}")
             log.info("数据源 %s 冷却中, 跳过 %s %s", name, symbol, period)
             continue
-        tried += 1
         df = _try_source(name, symbol, period, count, adj, category, i, chain)
-        if df is not None:
-            return df, name
-    if skipped and not tried:
-        # 全部候选都在冷却中: 不能让用户请求直接 404, 对链首破例试一次
-        name = skipped[0]
-        perf.bump("cooldown_bypass")
-        log.warning("所有数据源均在冷却中, 破例重试 %s (%s %s)", name, symbol, period)
-        df = _try_source(name, symbol, period, count, adj, category, 0, chain)
         if df is not None:
             return df, name
     perf.bump("chain_exhausted")

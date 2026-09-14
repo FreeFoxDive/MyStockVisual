@@ -6,7 +6,7 @@ stale-while-revalidate (同 `market._load_pledge` 的写法):
 
 - `/api/kline` 只调 `request()` 预热, 立即返回占位 (`meta.deferred=["premium"]`);
 - 客户端随后拉 `/api/kline/deferred`, 未就绪返回 ready=False, 前端退避重试;
-- 后台单飞线程算完后长缓存 (NAV 日频, 盘中 30min / 盘后 6h 足够)。
+- NAV 长缓存，溢价盘中短周期刷新，返回计算时间；工作数量和等待预算有界。
 
 当日 bar 契约不受影响: 本模块只产出溢价值, 不参与任何 OHLCV/指标口径。
 """
@@ -25,15 +25,19 @@ from indicators import _safe_list
 
 log = logging.getLogger("premium")
 
-# 溢价长缓存: NAV 日频变化, 盘中 30min / 盘后 6h; 失败短负缓存避免反复打 akshare。
+# 历史结果可保留作 stale 回填；盘中有效期还受价格刷新间隔约束。
 PREMIUM_TTL_SEC = float(os.environ.get("PREMIUM_TTL_SEC", "1800"))
 PREMIUM_TTL_OFF_SEC = float(os.environ.get("PREMIUM_TTL_OFF_SEC", "21600"))
 PREMIUM_FAIL_TTL = 300.0
+PREMIUM_REFRESH_SEC = max(1.0, float(os.environ.get("PREMIUM_REFRESH_SEC", "60")))
+PREMIUM_TIMEOUT_SEC = max(1.0, float(os.environ.get("PREMIUM_TIMEOUT_SEC", "30")))
+PREMIUM_MAX_INFLIGHT = max(1, int(os.environ.get("PREMIUM_MAX_INFLIGHT", "4")))
 
 _lock = threading.Lock()
 _cache: dict = {}        # key -> (ts, payload)
-_fail_at: dict = {}      # key -> ts (失败负缓存)
-_inflight: set = set()   # key 单飞标记
+_fail_at: dict = {}      # key -> monotonic ts (失败负缓存)
+_inflight: dict = {}     # key -> monotonic 开始时间; 超时后仍占实际工作槽
+_fail_kind: dict = {}
 
 
 def _key(symbol, period, count):
@@ -41,7 +45,8 @@ def _key(symbol, period, count):
 
 
 def _ttl():
-    return PREMIUM_TTL_SEC if market_hours.in_session() else PREMIUM_TTL_OFF_SEC
+    # NAV 日频但价格不是日频；盘中更新 raw close，不改变旧溢价公式。
+    return min(PREMIUM_TTL_SEC, PREMIUM_REFRESH_SEC) if market_hours.in_session() else PREMIUM_TTL_OFF_SEC
 
 
 def _asof(series, targets):
@@ -85,6 +90,8 @@ def compute_premium(symbol, period, count, df=None):
         values = [None] * len(df_sorted)
     else:
         close_aligned = _asof(raw_close, df_sorted.index.normalize())
+        # 两个目标序列按位置对应，避免非午夜索引经 normalize 后被 pandas 再对齐。
+        close_aligned.index = nav_aligned.index
         prem = (close_aligned - nav_aligned) / nav_aligned * 100.0
         prem = prem.where(nav_aligned > 0)
         values = _safe_list(prem)
@@ -96,12 +103,11 @@ def compute_premium(symbol, period, count, df=None):
     }
 
 
-def _get_cached(key, ttl):
-    with _lock:
-        ent = _cache.get(key)
-    if ent and time.time() - ent[0] < ttl:
-        return ent[1]
-    return None
+def _fresh(ent):
+    phase = market_hours.session_phase()
+    return bool(ent and time.time() - ent[0] < _ttl()
+                and ent[1].get("generated_date") == market_hours.now().date().isoformat()
+                and ent[1].get("generated_phase", phase) == phase)
 
 
 def _schedule(key, symbol, period, count, df):
@@ -110,30 +116,51 @@ def _schedule(key, symbol, period, count, df):
         if key in _inflight:
             return
         ent = _cache.get(key)
-        if ent and time.time() - ent[0] < _ttl():
+        if _fresh(ent):
             return
         fail = _fail_at.get(key)
-        if fail and time.time() - fail < PREMIUM_FAIL_TTL:
+        if fail is not None and time.monotonic() - fail < PREMIUM_FAIL_TTL:
             return
-        _inflight.add(key)
+        if len(_inflight) >= PREMIUM_MAX_INFLIGHT:
+            return
+        started = time.monotonic()
+        generated_date = market_hours.now().date().isoformat()
+        generated_phase = market_hours.session_phase()
+        _inflight[key] = started
 
     def _worker():
         try:
             payload = compute_premium(symbol, period, count, df=df)
             with _lock:
-                if payload is None:
-                    _fail_at[key] = time.time()
+                if time.monotonic() - started >= PREMIUM_TIMEOUT_SEC:
+                    _fail_at[key] = time.monotonic()
+                    _fail_kind[key] = "failed"
+                elif payload is None:
+                    _fail_at[key] = time.monotonic()
+                    _fail_kind[key] = "no_data"
                 else:
-                    _cache[key] = (time.time(), payload)
+                    stamp = time.time()
+                    _cache[key] = (stamp, {**payload, "generated_at": stamp,
+                                          "generated_date": generated_date,
+                                          "generated_phase": generated_phase})
+                    _fail_at.pop(key, None)
+                    _fail_kind.pop(key, None)
         except Exception as e:
             log.warning(f"溢价计算失败 {symbol} {period}: {market._sanitize_error(e)}")
             with _lock:
-                _fail_at[key] = time.time()
+                _fail_at[key] = time.monotonic()
+                _fail_kind[key] = "failed"
         finally:
             with _lock:
-                _inflight.discard(key)
+                _inflight.pop(key, None)
 
-    threading.Thread(target=_worker, name="premium", daemon=True).start()
+    try:
+        threading.Thread(target=_worker, name="premium", daemon=True).start()
+    except Exception:
+        with _lock:
+            _inflight.pop(key, None)
+            _fail_at[key] = time.monotonic()
+            _fail_kind[key] = "failed"
 
 
 def request(symbol, period, count, df=None):
@@ -153,16 +180,35 @@ def get(symbol, period, count):
     (服务重启后无 request 预热也能自愈)。
     """
     key = _key(symbol, period, count)
-    cached = _get_cached(key, _ttl())
-    if cached is not None:
-        return {"ready": True, **cached}
+    if not market._is_etf(symbol) or period not in ("1d", "1w", "1M"):
+        return {"ready": False, "status": "no_data", "retry_after_sec": None}
     _schedule(key, symbol, period, count, None)
-    return {"ready": False}
+    with _lock:
+        ent = _cache.get(key)
+        fresh = _fresh(ent)
+        start = _inflight.get(key)
+        failed = _fail_at.get(key)
+        status, retry = "pending", 1.0
+        if start is not None and time.monotonic() - start >= PREMIUM_TIMEOUT_SEC:
+            status, retry = "failed", PREMIUM_FAIL_TTL
+        elif failed is not None and time.monotonic() - failed < PREMIUM_FAIL_TTL:
+            status = _fail_kind.get(key, "failed")
+            retry = max(1.0, PREMIUM_FAIL_TTL - (time.monotonic() - failed))
+        elif start is None and not fresh:
+            retry = 10.0  # 容量满，无队列，客户端稍后重试
+        if fresh:
+            status = "ready"
+        payload = dict(ent[1]) if ent else {}
+        # 客户端至多 60s 后重新确认；盘前长 TTL 不能延续到开盘/收盘后。
+        age_left = min(60.0, max(0.0, _ttl() - (time.time() - ent[0]))) if fresh else 0.0
+    return {**payload, "ready": ent is not None, "status": status,
+            "stale": ent is not None and not fresh, "max_age_sec": age_left,
+            "retry_after_sec": age_left if fresh else retry}
 
 
 def clear():
-    """测试用: 清空缓存与单飞状态。"""
+    """清空缓存；存活工作仍须保留容量占用。测试应等待其工作结束。"""
     with _lock:
         _cache.clear()
         _fail_at.clear()
-        _inflight.clear()
+        _fail_kind.clear()

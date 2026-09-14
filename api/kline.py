@@ -127,16 +127,12 @@ def serialize_bars(df, period):
         dates = [str(i) for i in idx]
     cols = {name: (df[name].tolist() if name in df.columns else None)
             for name, _ in _BAR_FIELDS}
-    present = [(name, conv, cols[name]) for name, conv in _BAR_FIELDS
-               if cols[name] is not None]
-    absent = [name for name, _ in _BAR_FIELDS if cols[name] is None]
+    fields = [(name, conv, cols[name]) for name, conv in _BAR_FIELDS]
     out = []
     for i in range(n):
         bar = {"date": dates[i]}
-        for name, conv, vals in present:
-            bar[name] = conv(vals[i])
-        for name in absent:
-            bar[name] = None
+        for name, conv, vals in fields:
+            bar[name] = conv(vals[i]) if vals is not None else None
         out.append(bar)
     return out
 
@@ -398,7 +394,7 @@ def kline_deferred():
     if "premium" not in fields:
         return _error("不支持的 fields", 400)
     try:
-        count = min(int(request.args.get("count") or str(DAILY_COUNT)), 1500)
+        count = max(1, min(int(request.args.get("count") or str(DAILY_COUNT)), 1500))
     except ValueError:
         count = DAILY_COUNT
     return _json({"symbol": symbol, "period": period,

@@ -501,7 +501,14 @@ class DiskCache:
             return None
         try:
             with gzip.open(fp, "rt", encoding="utf-8") as f:
-                return json.load(f)
+                payload = json.load(f)
+            if period == "1d":
+                # 旧缓存也按实际写入日期校验，防止跨日遗漏被剥离的昨日 bar。
+                written_day = payload.get("generated_date") or dt_mod.datetime.fromtimestamp(
+                    fp.stat().st_mtime, tz=dt_mod.timezone(dt_mod.timedelta(hours=8))).date().isoformat()
+                if written_day != market_hours.now().date().isoformat():
+                    return None
+            return payload
         except Exception:
             return None
 
@@ -849,6 +856,7 @@ def _is_etf(symbol):
 _ETF_NAV_TTL = float(os.environ.get("ETF_NAV_TTL", "21600"))
 _etf_nav_cache = {}   # symbol -> (ts, df)
 _etf_nav_lock = threading.Lock()
+_etf_nav_inflight = {}  # symbol -> Event; 由调用线程持有，不另建无界工作线程
 
 
 def _fetch_etf_nav(symbol):
@@ -858,11 +866,27 @@ def _fetch_etf_nav(symbol):
         ent = _etf_nav_cache.get(symbol)
         if ent and now - ent[0] < _ETF_NAV_TTL:
             return ent[1]
-    df = _fetch_etf_nav_uncached(symbol)
-    if df is not None and len(df) > 0:
+        event = _etf_nav_inflight.get(symbol)
+        owner = event is None
+        if owner:
+            event = threading.Event()
+            _etf_nav_inflight[symbol] = event
+    if not owner:
+        if not event.wait(kline_source.SOURCE_TIMEOUT_SEC):
+            raise TimeoutError("NAV fetch pending")
         with _etf_nav_lock:
-            _etf_nav_cache[symbol] = (time.time(), df)
-    return df
+            ent = _etf_nav_cache.get(symbol)
+            return ent[1] if ent else None
+    try:
+        df = _fetch_etf_nav_uncached(symbol)
+        if df is not None and len(df) > 0:
+            with _etf_nav_lock:
+                _etf_nav_cache[symbol] = (time.time(), df)
+        return df
+    finally:
+        with _etf_nav_lock:
+            _etf_nav_inflight.pop(symbol, None)
+            event.set()
 
 
 def _fetch_etf_nav_uncached(symbol):
@@ -1143,6 +1167,7 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
         elif out.columns[0] != "trade_date":
             out = out.rename(columns={out.columns[0]: "trade_date"})
         cache_data = {
+            "generated_date": now.date().isoformat(),
             "name": name or symbol,
             "source": source,
             "data": json.loads(out.to_json(orient="records", date_format="iso")),
