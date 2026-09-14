@@ -5,22 +5,21 @@ import logging
 import os
 import time
 
-import pandas as pd
 from flask import request
 
 import kline_source
 import market_hours
+import perf
+import premium
 from api import api_bp
 from api.common import _error, _json
 from chips import get_chips
-from indicators import compute_all_indicators, _safe_list
+from indicators import compute_all_indicators
 from logger import sanitize_error as _sanitize_error
 from market import (
     MINUTE_COUNTS,
     MINUTE_PERIODS,
     TTLCache,
-    _fetch_af_kline,
-    _fetch_etf_nav,
     _fetch_instrument_meta,
     _is_etf,
     _is_index_symbol,
@@ -38,6 +37,17 @@ log = logging.getLogger("api")
 
 # 日K: 3年可见 (3×252) + RSI 收敛 warmup 250
 DAILY_COUNT = 3 * 252 + 250  # 1006
+
+# 图表当日 bar 的快照新鲜度: 默认复用 quote_cache (TTL 1.25s), 不再每次强制一次
+# 实时行情往返 —— 实测该往返在 0~700ms 抖动, 是磁盘 TTL 抬高后热路径上仅剩的
+# 耗时来源。当日 bar 仍**完全由后端快照产出** (契约不变: 前端不派生 OHLCV),
+# 只是允许最多旧 1.25s; 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (10s,
+# 仍走强制新鲜快照) 持续纠正末根 bar。
+# 成交校验 (market.get_daily_bar) 不经过这里, 始终强制新鲜快照。
+# KLINE_TODAY_BAR_FRESH=1 → 恢复"每次强制拉新快照"的旧行为 (更实时, 但慢)。
+TODAY_BAR_QUOTE_FRESH = os.environ.get("KLINE_TODAY_BAR_FRESH", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 # 末根增量接口的短 TTL: 把多客户端/10s 轮询合并成受控的上游调用量
 KLINE_TAIL_TTL = max(5.0, float(os.environ.get("KLINE_TAIL_TTL", "10")))
@@ -61,53 +71,70 @@ def _attach_quote(resp, symbol):
         pass
 
 
-def _serialize_bar(idx, row, period):
-    """单根 bar → JSON entry (含全部指标)。/api/kline 与 /api/kline/tail 共用。"""
-    date_str = str(idx)
+# 单根 bar 的字段与转换器 (顺序即 JSON 字段顺序)。逐行与向量化序列化共用同一张
+# 表, 避免两处字段清单漂移 (漏字段会静默让前端某条指标曲线消失)。
+_BAR_FIELDS = (
+    ("open", _safe_float), ("high", _safe_float), ("low", _safe_float),
+    ("close", _safe_float), ("volume", _safe_int), ("amount", _safe_float),
+    ("ma5", _safe_float), ("ma10", _safe_float), ("ma20", _safe_float),
+    ("macd_dif", _safe_float), ("macd_dea", _safe_float), ("macd_hist", _safe_float),
+    ("rsi6", _safe_float), ("rsi12", _safe_float), ("rsi24", _safe_float),
+    ("kdj_k", _safe_float), ("kdj_d", _safe_float), ("kdj_j", _safe_float),
+    ("atr14", _safe_float), ("ema13", _safe_float), ("impulse", _safe_int),
+    ("obv", _safe_float), ("maobv", _safe_float),
+    ("vol_ma5", _safe_float), ("vol_ma10", _safe_float), ("vol_ma20", _safe_float),
+    ("boll_mid", _safe_float), ("boll_up", _safe_float), ("boll_low", _safe_float),
+    ("wr14", _safe_float), ("cci14", _safe_float),
+    ("bias6", _safe_float), ("bias12", _safe_float), ("bias24", _safe_float),
+    ("dmi_pdi", _safe_float), ("dmi_mdi", _safe_float), ("dmi_adx", _safe_float),
+)
+
+
+def _bar_date(idx, period):
+    """单根 bar 的日期文本 (分钟周期精确到分钟, 其余到日)。"""
     if hasattr(idx, "strftime"):
-        date_str = idx.strftime(
+        return idx.strftime(
             "%Y-%m-%d %H:%M" if period in MINUTE_PERIODS else "%Y-%m-%d"
         )
-    return {
-        "date": date_str,
-        "open": _safe_float(row.get("open")),
-        "high": _safe_float(row.get("high")),
-        "low": _safe_float(row.get("low")),
-        "close": _safe_float(row.get("close")),
-        "volume": _safe_int(row.get("volume")),
-        "amount": _safe_float(row.get("amount")),
-        "ma5": _safe_float(row.get("ma5")),
-        "ma10": _safe_float(row.get("ma10")),
-        "ma20": _safe_float(row.get("ma20")),
-        "macd_dif": _safe_float(row.get("macd_dif")),
-        "macd_dea": _safe_float(row.get("macd_dea")),
-        "macd_hist": _safe_float(row.get("macd_hist")),
-        "rsi6": _safe_float(row.get("rsi6")),
-        "rsi12": _safe_float(row.get("rsi12")),
-        "rsi24": _safe_float(row.get("rsi24")),
-        "kdj_k": _safe_float(row.get("kdj_k")),
-        "kdj_d": _safe_float(row.get("kdj_d")),
-        "kdj_j": _safe_float(row.get("kdj_j")),
-        "atr14": _safe_float(row.get("atr14")),
-        "ema13": _safe_float(row.get("ema13")),
-        "impulse": _safe_int(row.get("impulse")),
-        "obv": _safe_float(row.get("obv")),
-        "maobv": _safe_float(row.get("maobv")),
-        "vol_ma5": _safe_float(row.get("vol_ma5")),
-        "vol_ma10": _safe_float(row.get("vol_ma10")),
-        "vol_ma20": _safe_float(row.get("vol_ma20")),
-        "boll_mid": _safe_float(row.get("boll_mid")),
-        "boll_up": _safe_float(row.get("boll_up")),
-        "boll_low": _safe_float(row.get("boll_low")),
-        "wr14": _safe_float(row.get("wr14")),
-        "cci14": _safe_float(row.get("cci14")),
-        "bias6": _safe_float(row.get("bias6")),
-        "bias12": _safe_float(row.get("bias12")),
-        "bias24": _safe_float(row.get("bias24")),
-        "dmi_pdi": _safe_float(row.get("dmi_pdi")),
-        "dmi_mdi": _safe_float(row.get("dmi_mdi")),
-        "dmi_adx": _safe_float(row.get("dmi_adx")),
-    }
+    return str(idx)
+
+
+def _serialize_bar(idx, row, period):
+    """单根 bar → JSON entry (含全部指标)。保留供逐行/单根调用方与测试使用。"""
+    out = {"date": _bar_date(idx, period)}
+    for name, conv in _BAR_FIELDS:
+        out[name] = conv(row.get(name))
+    return out
+
+
+def serialize_bars(df, period):
+    """整段 K 线 → JSON entries (含全部指标)。
+
+    替代 `[_serialize_bar(i, r, period) for i, r in df.iterrows()]`: iterrows
+    每行构造一个 Series, 实测 1006 根约 86ms, 是指标计算 (约 29ms) 的 3 倍,
+    也是 /api/kline 最大的单项 CPU。这里按列 tolist() 一次成型 (numpy 标量 →
+    Python 原生类型, 与逐行取值口径一致), 再按行拼 dict。
+    """
+    n = len(df)
+    if n == 0:
+        return []
+    idx = df.index
+    if hasattr(idx, "strftime"):
+        dates = idx.strftime(
+            "%Y-%m-%d %H:%M" if period in MINUTE_PERIODS else "%Y-%m-%d"
+        )
+    else:
+        dates = [str(i) for i in idx]
+    cols = {name: (df[name].tolist() if name in df.columns else None)
+            for name, _ in _BAR_FIELDS}
+    fields = [(name, conv, cols[name]) for name, conv in _BAR_FIELDS]
+    out = []
+    for i in range(n):
+        bar = {"date": dates[i]}
+        for name, conv, vals in fields:
+            bar[name] = conv(vals[i]) if vals is not None else None
+        out.append(bar)
+    return out
 
 
 def _session_meta(now=None):
@@ -122,6 +149,29 @@ def _session_meta(now=None):
 
 @api_bp.route("/api/kline", methods=["GET"])
 def kline():
+    """K线 + 全部指标 (前端主图数据源)。
+
+    观测: KLINE_PERF_LOG=1 时打一条 kline_perf 日志, 分解磁盘命中 / 实际数据源 /
+    强制行情往返 / 指标计算 / 序列化耗时, 用于定位切换标的忽快忽慢的瓶颈。
+    关闭时直接走 _kline_body(None), 不在热路径上加任何计时。
+    """
+    if not perf.ENABLED:
+        return _kline_body(None)
+    timing = {}
+    t0 = time.perf_counter()
+    try:
+        return _kline_body(timing)
+    finally:
+        perf.add_ms(timing, "total_ms", (time.perf_counter() - t0) * 1000.0)
+        hot = {k: v for k, v in perf.counters().items() if v}
+        log.info("kline_perf %s counters=%s", perf.fmt(
+            timing,
+            symbol=request.args.get("symbol"),
+            period=request.args.get("period") or "1d",
+        ), hot or "-")
+
+
+def _kline_body(timing):
     symbol_raw = request.args.get("symbol")
     if not symbol_raw:
         return _error("缺少 symbol 参数")
@@ -155,14 +205,19 @@ def kline():
         cache = kline_cache
     cached = None if skip_1d_cache else cache.get(cache_key)
     if cached:
+        if timing is not None:
+            timing["disk"] = "mem"
         resp = cached.copy()
         resp["meta"] = dict(resp.get("meta") or {})
         resp["meta"].update(cached=True, **_session_meta())
-        _attach_quote(resp, symbol)
+        with perf.Span(timing, "attach_quote_ms"):
+            _attach_quote(resp, symbol)
         return _json(resp)
 
     try:
-        df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust)
+        df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
+                                         timing=timing,
+                                         quote_fresh=TODAY_BAR_QUOTE_FRESH)
     except Exception as e:
         log.warning("获取K线失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("获取K线失败，请稍后重试", 500)
@@ -175,7 +230,9 @@ def kline():
         adjust_fallback = True
         cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
         try:
-            df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust)
+            df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
+                                             timing=timing,
+                                             quote_fresh=TODAY_BAR_QUOTE_FRESH)
         except Exception as e:
             log.warning("复权回退获取失败 %s: %s", symbol, _sanitize_error(e))
         if df is None:
@@ -185,66 +242,24 @@ def kline():
         return _error(f"无法获取 {symbol} 的K线数据", 404)
 
     try:
-        df, indicators = compute_all_indicators(df, period)
+        with perf.Span(timing, "indicators_ms"):
+            df, indicators = compute_all_indicators(df, period)
     except Exception as e:
         log.warning("指标计算失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("指标计算失败", 500)
 
     # 主图已是前复权, impulse 直接用 compute_all_indicators 结果 (不再另拉 qfq)
 
-    premium_data = None
     is_etf = _is_etf(symbol)
+    deferred = []
+    # 溢价依赖 akshare 净值 (无缓存无超时), 原内联在此处会拖慢每次 ETF 切换。
+    # 改为只预热后台计算, 立即返回; 客户端用 /api/kline/deferred 取回 (见 premium.py)。
     if is_etf and period not in MINUTE_PERIODS:
-        nav_df = _fetch_etf_nav(symbol)
-        # 溢价必须用未复权 close 对齐单位净值 (前复权历史价与 NAV 不可比)
-        raw_df = None
-        try:
-            raw_df = _fetch_af_kline(symbol, "1d", count, adjust="none")
-        except Exception as e:
-            log.warning(f"ETF 溢价用未复权日K失败 {symbol}: {e}")
-        if nav_df is not None and len(nav_df) > 0:
-            df_sorted = df.sort_index()
-            raw_close = None
-            if raw_df is not None and len(raw_df) > 0:
-                raw_close = raw_df["close"].copy()
-                raw_close.index = pd.to_datetime(raw_close.index).normalize()
-            premiums = []
-            for idx in df_sorted.index:
-                nav_matches = nav_df[nav_df.index <= idx]
-                if len(nav_matches) == 0:
-                    premiums.append(None)
-                    continue
-                nav_val = float(nav_matches.iloc[-1]["nav"])
-                close_val = None
-                if raw_close is not None:
-                    idx_n = pd.Timestamp(idx).normalize()
-                    if idx_n in raw_close.index:
-                        close_val = float(raw_close.loc[idx_n])
-                    else:
-                        earlier = raw_close[raw_close.index <= idx_n]
-                        if len(earlier) > 0:
-                            close_val = float(earlier.iloc[-1])
-                if close_val is None:
-                    # 无未复权对齐时不拿前复权价硬算, 避免拆分前溢价失真
-                    premiums.append(None)
-                    continue
-                prem = (close_val - nav_val) / nav_val * 100 if nav_val > 0 else None
-                premiums.append(prem)
-            prem_series = pd.Series(premiums, index=df_sorted.index)
-            premium_data = {
-                "values": _safe_list(prem_series),
-                "params": {"source": "akshare fund_open_fund_info_em", "close": "raw"},
-            }
+        premium.request(symbol, period, count, df=df)
+        deferred.append("premium")
 
-    klines = [_serialize_bar(idx, row, period) for idx, row in df.iterrows()]
-
-    if premium_data:
-        prem_vals = premium_data["values"]
-        for i, k in enumerate(klines):
-            if i < len(prem_vals) and prem_vals[i] is not None:
-                k["premium"] = prem_vals[i]
-            else:
-                k["premium"] = None
+    with perf.Span(timing, "serialize_ms"):
+        klines = serialize_bars(df, period)
 
     inst_meta = _fetch_instrument_meta(symbol) or {}
     now = market_hours.now()
@@ -270,6 +285,8 @@ def kline():
             "source": source,
             "adjust": adjust,
             "adjust_fallback": adjust_fallback,
+            # 慢派生字段清单: 客户端据此拉 /api/kline/deferred 补齐 (现仅 ETF 溢价)
+            "deferred": deferred,
         },
     }
 
@@ -337,7 +354,7 @@ def build_kline_tail(symbol, period, count, adjust, n=2):
         log.warning("指标计算失败(tail) %s %s: %s", symbol, period, _sanitize_error(e))
         raise RuntimeError("指标计算失败") from e
 
-    bars = [_serialize_bar(idx, row, period) for idx, row in df.tail(n).iterrows()]
+    bars = serialize_bars(df.tail(n), period)
     now = market_hours.now()
     resp = {
         "symbol": symbol,
@@ -355,6 +372,33 @@ def build_kline_tail(symbol, period, count, adjust, n=2):
     }
     _tail_cache.set(cache_key, resp)
     return resp
+
+
+@api_bp.route("/api/kline/deferred", methods=["GET"])
+def kline_deferred():
+    """慢派生字段的补齐接口 (现仅 ETF 溢价 premium)。
+
+    溢价走 akshare 净值 (无缓存无超时), 若内联在 /api/kline 会拖慢每次 ETF 切换,
+    故 /api/kline 只预热并在 meta.deferred 里声明; 客户端随后拉这里补齐。
+
+    未就绪返回 200 + ready=false (不是错误): 前端退避重试, 不弹错误提示。
+    """
+    symbol_raw = request.args.get("symbol")
+    if not symbol_raw:
+        return _error("缺少 symbol 参数")
+    symbol = normalize_symbol(symbol_raw)
+    period = request.args.get("period") or "1d"
+    if period in MINUTE_PERIODS or period not in ("1d", "1w", "1M"):
+        return _error("deferred 仅支持 1d/1w/1M", 400)
+    fields = [f.strip() for f in (request.args.get("fields") or "premium").split(",")]
+    if "premium" not in fields:
+        return _error("不支持的 fields", 400)
+    try:
+        count = max(1, min(int(request.args.get("count") or str(DAILY_COUNT)), 1500))
+    except ValueError:
+        count = DAILY_COUNT
+    return _json({"symbol": symbol, "period": period,
+                  "premium": premium.get(symbol, period, count)})
 
 
 @api_bp.route("/api/chips", methods=["GET"])

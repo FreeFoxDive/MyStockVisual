@@ -1668,7 +1668,14 @@ class TestGetDailyBarTodayFallback(unittest.TestCase):
 
     def setUp(self):
         import market as market_mod
+        from datetime import datetime
         self.market = market_mod
+        # 本组验证收盘后快照回退；凌晨运行不应被真实盘前时钟改变测试语义。
+        fixed = datetime(2026, 9, 15, 15, 30)
+        for clock in (mock.patch('market_hours.now', return_value=fixed),
+                      mock.patch.object(trades, '_now', return_value=fixed)):
+            clock.start()
+            self.addCleanup(clock.stop)
 
     def _mock_quotes(self, symbol, quote):
         sym = self.market.normalize_symbol(symbol)

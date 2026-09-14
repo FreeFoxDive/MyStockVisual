@@ -17,6 +17,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 import types
 import unittest
 from unittest import mock
@@ -151,6 +152,9 @@ def _fake_akshare(stock_daily=None, fund_daily=None, index_daily=None,
 class KlineSourceTestBase(unittest.TestCase):
     def setUp(self):
         kline_source._warned_names.clear()
+        # 源级熔断是进程级状态: 用例里大量"连造失败"的场景会污染后续用例的源链
+        # (坏源进冷却就被跳过), 故每个用例前重置。
+        kline_source.reset_health()
         # 隔离外部环境: 全套跑时 app 会加载真实 .env, 泄漏 KLINE_SOURCE_*,
         # 使依赖「默认链」的用例串扰。此处临时清空, 用例内可再用 _no_kline_env 覆盖。
         env_guard = mock.patch.dict(os.environ)
@@ -404,6 +408,78 @@ class TestFailover(KlineSourceTestBase):
                 _df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 100)
         self.assertEqual(src, "mairui")
         self.assertTrue(any("bogus" in line for line in logs.output))
+
+
+class TestSourceTimeoutAndBreaker(KlineSourceTestBase):
+    """硬超时与源级熔断: 坏源不得把每次切换都拖住, 也不得让请求无谓 404。"""
+
+    def test_hanging_source_times_out_and_falls_through(self):
+        """akshare 无内建超时: 挂起时应按超时判失败并下沉, 而非一直等。"""
+        def _hang(*_a, **_k):
+            time.sleep(0.6)
+            return _cn_daily_df()
+
+        fake = _fake_akshare(stock_daily=_cn_daily_df())
+        with _no_kline_env(KLINE_SOURCE_STOCK="akshare,mairui"), \
+             mock.patch.object(kline_source, "SOURCE_TIMEOUT_SEC", 0.1), \
+             mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr, \
+             mock.patch.object(kline_source.AkshareSource, "fetch", side_effect=_hang):
+            t0 = time.monotonic()
+            df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
+            elapsed = time.monotonic() - t0
+        self.assertEqual(src, "mairui")
+        self.assertIsNotNone(df)
+        self.assertLess(elapsed, 0.5, "超时未生效: 请求被挂起源拖住")
+        mr.assert_called_once()
+
+    def test_breaker_skips_source_after_consecutive_failures(self):
+        """连续失败达阈值后进入冷却: 不再对该源发起请求。"""
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed,mairui"), \
+             mock.patch.object(kline_source, "SOURCE_FAIL_THRESHOLD", 2), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=None) as af, \
+             mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()):
+            for _ in range(2):
+                _df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
+                self.assertEqual(src, "mairui")
+            self.assertEqual(af.call_count, 2)
+            self.assertTrue(kline_source._in_cooldown("alphafeed"))
+            af.reset_mock()
+            # 第三次: alphafeed 在冷却中被跳过, 一次请求都不该发
+            _df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
+            self.assertEqual(src, "mairui")
+            af.assert_not_called()
+
+    def test_success_resets_failure_counter(self):
+        """成功一次即清零连续计数, 偶发抖动不该累积成熔断。"""
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed,mairui"), \
+             mock.patch.object(kline_source, "SOURCE_FAIL_THRESHOLD", 2), \
+             mock.patch.object(market, "_fetch_mr_kline", return_value=None), \
+             mock.patch.object(market, "_fetch_af_kline",
+                               side_effect=[None, _norm_df(), None]):
+            kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)  # af 失败
+            kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)  # af 成功 → 清零
+            kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)  # af 失败(计数=1)
+        self.assertFalse(kline_source._in_cooldown("alphafeed"),
+                         "成功后应清零, 不该熔断")
+
+    def test_all_sources_in_cooldown_does_not_bypass(self):
+        """全部冷却也不得无条件突破熔断。"""
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed,mairui"), \
+             mock.patch.object(market, "_fetch_mr_kline", return_value=None), \
+             mock.patch.object(market, "_fetch_af_kline",
+                               return_value=_norm_df()) as af:
+            kline_source._note_fail("alphafeed")
+            kline_source._note_fail("alphafeed")
+            kline_source._note_fail("alphafeed")
+            kline_source._note_fail("mairui")
+            kline_source._note_fail("mairui")
+            kline_source._note_fail("mairui")
+            self.assertTrue(kline_source._in_cooldown("alphafeed"))
+            self.assertTrue(kline_source._in_cooldown("mairui"))
+            df, src = kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
+        self.assertIsNone(src)
+        self.assertIsNone(df)
+        af.assert_not_called()
 
 
 class TestMinuteStalenessGuard(KlineSourceTestBase):

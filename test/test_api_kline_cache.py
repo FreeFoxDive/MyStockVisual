@@ -201,5 +201,57 @@ class KlineCacheTest(unittest.TestCase):
             self.assertIn(key, last)
 
 
+    def test_etf_kline_defers_premium(self):
+        """ETF 溢价不再内联在主路径: 只预热 + meta.deferred 声明, bar 不带 premium。
+
+        溢价依赖 akshare 净值 (无缓存无超时), 内联会让每次 ETF 切换都等它。
+        """
+        p1, p2, p3, p4 = self._patches(quotes=[{"last_price": 10.0}])
+        with p1, p2, p3, p4, \
+                mock.patch.object(self.api, "_is_etf", return_value=True), \
+                mock.patch.object(self.api.premium, "request") as req:
+            r = self._get()
+        b = r.get_json()
+        self.assertTrue(b["is_etf"])
+        self.assertEqual(b["meta"]["deferred"], ["premium"])
+        req.assert_called_once()
+        self.assertNotIn("premium", b["klines"][-1])
+
+    def test_non_etf_kline_has_no_deferred(self):
+        p1, p2, p3, p4 = self._patches(quotes=[{"last_price": 10.0}])
+        with p1, p2, p3, p4, \
+                mock.patch.object(self.api, "_is_etf", return_value=False), \
+                mock.patch.object(self.api.premium, "request") as req:
+            r = self._get()
+        self.assertEqual(r.get_json()["meta"]["deferred"], [])
+        req.assert_not_called()
+
+    def test_deferred_endpoint_returns_ready_payload(self):
+        ready = {"ready": True, "dates": ["2026-09-11"], "values": [1.25],
+                 "params": {"source": "akshare"}}
+        with mock.patch.object(self.api.premium, "get", return_value=ready) as pg:
+            r = self.client.get(
+                f"/api/kline/deferred?symbol={self.SYMBOL}&period=1d&fields=premium")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["premium"]["ready"])
+        self.assertEqual(r.get_json()["premium"]["values"], [1.25])
+        pg.assert_called_once()
+
+    def test_deferred_endpoint_not_ready_is_200(self):
+        """未就绪用标志表达而非错误码: 前端退避重试, 不弹错误提示。"""
+        with mock.patch.object(self.api.premium, "get", return_value={"ready": False}):
+            r = self.client.get(f"/api/kline/deferred?symbol={self.SYMBOL}&period=1d")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.get_json()["premium"]["ready"])
+
+    def test_deferred_endpoint_rejects_minute_period(self):
+        r = self.client.get(f"/api/kline/deferred?symbol={self.SYMBOL}&period=5m")
+        self.assertEqual(r.status_code, 400)
+
+    def test_deferred_endpoint_missing_symbol(self):
+        r = self.client.get("/api/kline/deferred")
+        self.assertEqual(r.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
