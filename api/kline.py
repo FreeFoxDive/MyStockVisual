@@ -310,8 +310,9 @@ def kline_tail():
 
     try:
         return _json(build_kline_tail(symbol, period, count, adjust, n))
-    except LookupError as e:
-        return _error(str(e), 404)
+    except LookupError:
+        # LookupError 的文本可能包含上游响应或内部路径，不应直接返回给客户端。
+        return _error("无法获取K线数据", 404)
     except Exception:
         return _error("指标更新失败", 500)
 
