@@ -5,7 +5,7 @@
 - _fetch_universe_rows: ext.type 映射 / 缺列回退 default_type / 空行跳过 / to_dataframe 传参
 - AF 套餐无 universe 权限 (403 / not available): 熔断置位, 后续调用不再触碰 AF
 - akshare 回退: _fetch_hk_list / _fetch_us_list 代码归一 (港股 zfill(5)+.HK, 美股取末段大写)
-- _load_universe: 24h 磁盘缓存命中零联网; 过期同步刷新并落盘; 失败保留旧数据并退避
+- _load_universe: 24h 磁盘缓存命中零联网; 过期后台刷新并落盘; 失败保留旧数据并退避
 
 运行:
     venv/Scripts/python.exe -u visual/test/test_universe_fetch.py
@@ -57,10 +57,12 @@ class UniverseFetchTest(unittest.TestCase):
     def setUp(self):
         self._orig = (
             market._hkus_universe_perm_denied,
+            market.AKSHARE_HKUS_LIST_ENABLED,
             market._HK_LIST_FILE, market._US_LIST_FILE,
             market._hk_cache, market._us_cache,
         )
         market._hkus_universe_perm_denied = False
+        market.AKSHARE_HKUS_LIST_ENABLED = True
         self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         # 缓存实例在构造时捕获 path, 故换文件必须重建实例 (隔离内存/磁盘状态)
         market._HK_LIST_FILE = Path(self._tmpdir.name) / "hk_list.json"
@@ -73,6 +75,7 @@ class UniverseFetchTest(unittest.TestCase):
 
     def _restore(self):
         (market._hkus_universe_perm_denied,
+         market.AKSHARE_HKUS_LIST_ENABLED,
          market._HK_LIST_FILE, market._US_LIST_FILE,
          market._hk_cache, market._us_cache) = self._orig
         self._tmpdir.cleanup()
@@ -178,8 +181,16 @@ class UniverseFetchTest(unittest.TestCase):
         market._HK_LIST_FILE.write_text(
             json.dumps({"rows": old, "ts": 0}), encoding="utf-8")
         with mock.patch.object(market, "_fetch_hk_list", return_value=fresh):
-            self.assertEqual(market._load_universe("hk"), fresh)
-        saved = json.loads(market._HK_LIST_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(market._load_universe("hk"), old)
+            saved = {}
+            for _ in range(50):
+                try:
+                    saved = json.loads(market._HK_LIST_FILE.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    saved = {}
+                if saved.get("rows") == fresh:
+                    break
+                time.sleep(0.01)
         self.assertEqual(saved["rows"], fresh)
         self.assertGreater(saved["ts"], 0)
 
