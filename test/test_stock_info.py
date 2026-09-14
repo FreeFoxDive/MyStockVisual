@@ -36,6 +36,7 @@ def _daily_df(closes, volumes):
 
 def _reset_caches():
     market._stock_info_cache.clear()
+    market._info_quote_bases.clear()
     market._roe_cache.update({"ts": 0.0, "data": None, "ok": False})
     market._mr_instrument_cache.clear()
     market._mr_industry_cache.clear()
@@ -100,6 +101,19 @@ class StockInfoTest(unittest.TestCase):
         self.assertEqual(info["amount"], 1e7)
         self.assertEqual(info["turnover_rate"], 1.5)
         self.assertEqual((info["trade_status"], info["trade_status_text"]), ("trading", "交易中"))
+
+    def test_quote_updates_derived_fields_without_refetching_history(self):
+        market._info_quote_bases["000001.SZ"] = {
+            "day": TODAY.date(), "closes": {3: 10, 5: 8, 10: 5}, "avg_volume": 100,
+        }
+        quote = {"last_price": 12, "volume": 1000}
+        with mock.patch.object(market.market_hours, "session_elapsed_minutes", return_value=120):
+            live = market._live_info_for_quote("000001.SZ", quote)
+        self.assertAlmostEqual(live["vol_ratio"], 20)
+        self.assertAlmostEqual(live["chg_3d"], 20)
+        self.assertAlmostEqual(live["chg_5d"], 50)
+        self.assertAlmostEqual(live["chg_10d"], 140)
+        self.assertEqual(quote, {"last_price": 12, "volume": 1000})
 
     def test_volume_ratio_last_session_when_not_today(self):
         # 收盘后/休市: 末根非今日 → 最近一个交易日全天口径 = 当日量 / 前5日均量

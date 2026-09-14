@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>📈 股票K线图 — Visual</title>
 <script src="/vendor/echarts-5.5.0.min.js"></script>
+<script src="/vendor/vue-3.5.13.global.prod.js"></script>
+<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
+<script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
 <link rel="stylesheet" href="/css/theme.css">
 <script src="/js/theme.js"></script>
 <script>
@@ -18,6 +21,8 @@
 })();
 </script>
 <script src="/js/api.js"></script>
+<script src="/js/live-market.js"></script>
+<script src="/js/market-store.js"></script>
 <script src="/js/gaps.js"></script>
 <script src="/js/chips.js"></script>
 <script src="/js/drawings.js"></script>
@@ -145,7 +150,22 @@ body {
   display: block;
 }
 
-/* 周期切换: TradingView 式分段控件 (1 个控件替代 9 个描边按钮) */
+/* 周期切换: 固定单行，左右箭头只滚动周期本身，不改变工具栏高度。 */
+#toolbar .period-nav { display: flex; align-items: center; flex: 0 0 auto; min-width: 0; }
+#toolbar .period-viewport {
+  width: 252px; /* 约五个常用周期 */
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+#toolbar .period-viewport::-webkit-scrollbar { display: none; }
+#toolbar .period-nav .period-scroll {
+  width: 24px; height: 28px; padding: 0;
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-secondary); font-size: 18px; line-height: 1; flex: 0 0 auto;
+}
+#toolbar .period-nav .period-scroll:disabled { opacity: .35; cursor: default; }
 #toolbar .period-group {
   display: flex;
   align-items: center;
@@ -154,6 +174,8 @@ body {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 8px;
+  width: max-content;
+  flex-wrap: nowrap;
 }
 #toolbar .period-group button {
   padding: 5px 10px;
@@ -310,21 +332,10 @@ body {
   font-weight: 600;
 }
 #indicator-bar label.dim { color: var(--text-secondary); }
-/* 低频项折叠: 周期组 1/5/15/30/60 分与指标栏 信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴, ▾ 展开 (状态持久化) */
-#toolbar .period-group .extra-period { display: none; }
-#toolbar .period-group.expanded .extra-period { display: inline-block; }
-#toolbar .period-group .more-btn { padding: 5px 7px; font-size: 12px; color: var(--text-secondary); }
+/* 低频指标折叠: 信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴。周期始终可滚动访问。 */
 /* 选股后台扫描: 主页入口脉冲动画 + 进度文字 */
 @keyframes scanning-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 #screener-entry.scanning { animation: scanning-pulse 1.2s ease-in-out infinite; color: var(--btn-active); font-variant-numeric: tabular-nums; }
-/* 周期组展开: 信息区折行收缩, 不隐藏/裁切行情 (展开周期不得丢 OHLC/成交额/时间) */
-#toolbar.periods-expanded .info-group {
-  flex-wrap: wrap; white-space: normal;
-  flex-shrink: 1; min-width: 0; row-gap: 2px;
-}
-#toolbar.periods-expanded #symbol-input { width: 130px; }
-#toolbar .period-group .more-btn.expanded::before { content: "▴ "; }
-#toolbar .period-group.expanded .more-btn { color: var(--btn-active); }
 #indicator-bar .extra-ind { display: none; }
 #indicator-bar.show-extra .extra-ind { display: inline-flex; }
 #indicator-bar .more-btn { border: 1px solid var(--border); }
@@ -473,17 +484,12 @@ body {
   /* 信息组允许换行收缩: 防止 nowrap 溢出视口被 body overflow:hidden 裁切 */
   #toolbar .info-group { flex-wrap: wrap; white-space: normal; flex-shrink: 1; min-width: 0; row-gap: 2px; }
   #toolbar .toolbar-right { margin-left: 0; justify-content: flex-start; min-width: 0; }
-  /* 周期按钮独立成行横向滚动, 避免折成多行挤压图表 */
-  #toolbar .period-group {
+  /* 周期按钮固定单行横向滚动, 避免折成多行挤压图表 */
+  #toolbar .period-nav {
     flex: 1 1 100%;
     order: 10;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 2px;
   }
-  #toolbar .period-group::-webkit-scrollbar { display: none; }
+  #toolbar .period-viewport { width: min(252px, calc(100vw - 68px)); }
   #toolbar .period-group button { flex-shrink: 0; }
 }
 @media (max-width: 768px) {
@@ -643,17 +649,22 @@ body {
              autocomplete="off">
       <div class="search-dropdown" id="search-dropdown"></div>
     </span>
-    <span class="period-group">
+    <span class="period-nav" aria-label="K线周期">
+      <button type="button" class="period-scroll" id="period-scroll-left" aria-label="向左滚动周期" title="向左滚动周期">‹</button>
+      <span class="period-viewport" id="period-viewport">
+      <span class="period-group">
       <button id="btn-1d" class="active" onclick="switchPeriod('1d')" title="日K (快捷键 1)">日K</button>
       <button id="btn-1w" onclick="switchPeriod('1w')" title="周K (快捷键 2)">周K</button>
       <button id="btn-1M" onclick="switchPeriod('1M')" title="月K (快捷键 3)">月K</button>
       <button id="btn-intraday" onclick="switchPeriod('intraday')" title="分时 (快捷键 4)">分时</button>
-      <button id="btn-1m" class="extra-period" onclick="switchPeriod('1m')" title="1分 (快捷键 5)">1分</button>
-      <button id="btn-5m" class="extra-period" onclick="switchPeriod('5m')" title="5分 (快捷键 6)">5分</button>
-      <button id="btn-15m" class="extra-period" onclick="switchPeriod('15m')" title="15分 (快捷键 7)">15分</button>
-      <button id="btn-30m" class="extra-period" onclick="switchPeriod('30m')" title="30分 (快捷键 8)">30分</button>
-      <button id="btn-60m" class="extra-period" onclick="switchPeriod('60m')" title="60分 (快捷键 9)">60分</button>
-      <button id="btn-period-more" class="more-btn" onclick="togglePeriodMore()" title="展开/收起更多周期">▾</button>
+      <button id="btn-1m" onclick="switchPeriod('1m')" title="1分 (快捷键 5)">1分</button>
+      <button id="btn-5m" onclick="switchPeriod('5m')" title="5分 (快捷键 6)">5分</button>
+      <button id="btn-15m" onclick="switchPeriod('15m')" title="15分 (快捷键 7)">15分</button>
+      <button id="btn-30m" onclick="switchPeriod('30m')" title="30分 (快捷键 8)">30分</button>
+      <button id="btn-60m" onclick="switchPeriod('60m')" title="60分 (快捷键 9)">60分</button>
+      </span>
+      </span>
+      <button type="button" class="period-scroll" id="period-scroll-right" aria-label="向右滚动周期" title="向右滚动周期">›</button>
     </span>
     <span class="separator"></span>
     <button id="btn-refresh" class="icon-text-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
@@ -927,6 +938,9 @@ const STATE = {
   trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
   chips: null,           // 筹码分布 (/api/chips, 仅日K股票)
   depth: null,           // 五档盘口 (/api/depth, 所有周期)
+  stockInfo: null,
+  _serverTradingDay: null,
+  _serverInSession: null,
   chart: null,
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
   _gridRects: null,      // cached grid pixel rects
@@ -963,18 +977,32 @@ const MINUTE_COUNTS = { '1m': 1200, '5m': 480, '15m': 320, '30m': 320, '60m': 10
 // 日K: 3年可见 (3×252) + RSI 收敛 warmup 250
 const DAILY_COUNT = 3 * 252 + 250; // 1006
 const ALL_PERIODS = ['1d', '1w', '1M', 'intraday', ...MINUTE_PERIODS];
-// 分钟K按周期刷新 (不再套用分时 60s); 分时仍 60s; 快照 10s
+// 分钟 K / 分时历史按数据源周期刷新；快照、五档、日周月指标由 LiveMarket 管理。
 const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3, '60m': 3600e3 };
 const INTRADAY_REFRESH_MS = 60e3;
-const QUOTE_REFRESH_MS = 10e3;
-const LAST_BAR_PATCH_MS = 3000;  // 日K末根图表增量绘制节流
-// 日K末根增量刷新: 只向后端要权威末 N 根 (含指标), 前端不再自己拼 bar
-const DAILY_TAIL_REFRESH_MS = 10e3;
-const DAILY_TAIL_N = 2;
-// SSE 正常 OPEN 时不再轮询快照; 仅"OPEN 但久无数据"(僵尸连接)用宽阈值兜底
-const SSE_STALE_FALLBACK_MS = 30e3;
-// SSE 被拒(429 → CLOSED, 浏览器不再自动重连)后的重建退避间隔
-const SSE_RETRY_MS = 60e3;
+const marketStore = VisualMarketStore.store;
+
+function inAshareSession() {
+  if (STATE._serverInSession !== null) return STATE._serverInSession;
+  const now = new Date();
+  const d = now.getDay();
+  if (d === 0 || d === 6) return false;
+  const t = now.getHours() * 60 + now.getMinutes();
+  return (t >= 9 * 60 + 30 && t <= 11 * 60 + 30) || (t >= 13 * 60 && t <= 15 * 60);
+}
+
+function canAutoRefresh() {
+  return !document.hidden && inAshareSession() && STATE._serverTradingDay !== false;
+}
+
+async function syncSessionFlag() {
+  try {
+    const r = await fetch('/api/ping');
+    const d = await r.json();
+    if (typeof d.is_trading_day === 'boolean') STATE._serverTradingDay = d.is_trading_day;
+    if (typeof d.in_session === 'boolean') STATE._serverInSession = d.in_session;
+  } catch (_) { /* ping failure falls back to browser clock */ }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // COLORS
@@ -1051,10 +1079,16 @@ function haltLabel(bar) {
   return ` <span style="color:${C().halt};font-weight:700">${text}</span>`;
 }
 
-/** TradingView 式最新价虚线: 末端虚线 + 轴端色块价格签, 涨红/跌绿随主题 */
-function buildLastPriceLine(bars) {
+/** TradingView 式最新价虚线: 末端虚线 + 轴端色块价格签, 涨红/跌绿随主题。
+ * 传入实时价时优先使用实时价；重绘图表时也自动读取当前 SSE 快照。 */
+function buildLastPriceLine(bars, livePrice) {
   if (!bars || !bars.length) return undefined;
-  const price = bars[bars.length - 1].close;
+  let price = livePrice;
+  if (price == null && typeof liveQuotes !== 'undefined') {
+    const q = liveQuotes.get(STATE.symbol);
+    if (q && q.last_price != null) price = q.last_price;
+  }
+  if (price == null) price = bars[bars.length - 1].close;
   if (price == null) return undefined;
   const prev = bars.length > 1 ? bars[bars.length - 2] : null;
   const rising = !prev || prev.close == null || price >= prev.close;
@@ -1113,15 +1147,31 @@ function onSystemThemeChange() {
 // ═══════════════════════════════════════════════════════════════
 // DATA FETCHING
 // ═══════════════════════════════════════════════════════════════
+/** 缓存命中后，服务端返回同一份 K 线时不再整图重绘一次。 */
+function klineRenderKey(data) {
+  const bars = (data && data.klines) || [];
+  return [data && data.symbol, data && data.period, STATE.adjust, bars.length,
+    ...bars.map(k => [k.date, k.open, k.high, k.low, k.close, k.volume, k.amount].join(','))].join('|');
+}
+function renderFetchedKline(data) {
+  const key = klineRenderKey(data);
+  if (key === STATE._fetchedKlineRenderKey) return false;
+  STATE._fetchedKlineRenderKey = key;
+  updateChart(false);
+  STATE._periodSwitching = false;
+  return true;
+}
+
 async function fetchData(opts) {
   const silent = !!(opts && opts.silent);
+  const retainPanels = !!(opts && opts.retainPanels);
   const symbol = STATE.symbol;
   // 分时下请求K线 (如切换复权) → 统一收口到日K, 同步按钮/面板/URL
   if (STATE.period === 'intraday') { applyPeriodUI('1d'); syncSymbolUrl(true); }
   const period = STATE.period;
   const fetchTs = Date.now(); STATE._fetchTs = fetchTs;
   STATE._lastBarAt = fetchTs;
-  if (!silent) { STATE.trades = null; STATE.chips = null; } // 切股/切周期先清空, 避免短暂显示上一只的买卖点/筹码
+  if (!silent && !retainPanels) { STATE.trades = null; STATE.chips = null; } // 仅换股清空，切周期保留当前侧栏/图表直到新数据就绪
   const cacheKey = `vk_${symbol}_${period}_${STATE.adjust}`;
   // SSE 快照流由 loadCurrent()/ensureQuoteStream() 统一管理, 此处不再随 fetchData 重启
 
@@ -1134,9 +1184,10 @@ async function fetchData(opts) {
       const ttl = MINUTE_PERIODS.includes(period) ? 60 : (period === '1d' ? 120 : 300);
       if (Date.now() - cached.ts < ttl * 1000 && cached.data) {
         STATE.klineData = cached.data;
+        reconcileLiveBars(cached.data);
         updateInfo(cached.data);
         syncAdjustMeta(cached.data);
-        updateChart(false);
+        renderFetchedKline(cached.data);
         cacheHit = true;
       }
     }
@@ -1146,7 +1197,7 @@ async function fetchData(opts) {
   const adjParam = MINUTE_PERIODS.includes(period) ? '' : `&adjust=${STATE.adjust}`;
   const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
-  if (!silent && !cacheHit && !sameView) {
+  if (!silent && !retainPanels && !cacheHit && !sameView) {
     document.getElementById('btn-refresh')?.classList.add('loading');
     if (STATE.chart) STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
   }
@@ -1162,8 +1213,10 @@ async function fetchData(opts) {
     }
     const data = await resp.json();
     if (STATE._fetchTs !== fetchTs) return; // 竞态: 已切到新股票, 丢弃旧响应
-    STATE.klineData = data;
     syncAdjustMeta(data);
+    ensureQuoteStream();
+    STATE.klineData = data;
+    reconcileLiveBars(data);
     document.getElementById('symbol-input').value = data.symbol; // 同步服务端标准化后的 symbol
     // 保存到 localStorage (限制 2MB 总大小)
     try {
@@ -1171,7 +1224,7 @@ async function fetchData(opts) {
       localStorage.setItem(cacheKey, entry);
       _cleanLocalStorage();
     } catch(e) { /* quota exceeded */ }
-    if (!silent) {
+    if (!silent && !retainPanels) {
       // 质押比例: 切股先隐藏, 响应回来做竞态防护 + 无数据时隐藏
       document.getElementById('info-pledge').style.display = 'none';
       fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
@@ -1193,7 +1246,8 @@ async function fetchData(opts) {
       await loadTrades(data.symbol, fetchTs);
       fetchChips(data.symbol);
     }
-    updateChart(false);
+    if (retainPanels && isChipPeriod(period)) fetchChips(data.symbol);
+    renderFetchedKline(data);
   } catch (e) {
     console.error('获取数据失败:', e);
     if (STATE._prevAdjust && STATE.adjust !== STATE._prevAdjust) {
@@ -1224,19 +1278,23 @@ async function loadTrades(symbol, fetchTs) {
   }
 }
 
-// ── 筹码分布: 日/周/月K 股票; 服务端东财算法 (日线口径, 窗口随周期加长), 本地 5 分钟缓存 ──
+// ── 筹码分布: 日/周/月K 股票; 日线口径, 盘中约 60s 重算一次 ──
 async function fetchChips(symbol) {
   if (!isChipPeriod(STATE.period)) return;
   if (!document.getElementById('chk-chip').checked) return;
   symbol = symbol || STATE.symbol;
   const period = STATE.period;
+  const pending = STATE._chipsPending;
+  if (pending && pending.symbol === symbol && pending.period === period) return;
+  STATE._chipsPending = { symbol, period };
+  STATE._lastChipsAt = Date.now();
   const key = `vc_${symbol}_${period}`;
   let hasLocal = false;
   try {
     const raw = localStorage.getItem(key);
     if (raw) {
       const cached = JSON.parse(raw);
-      if (Date.now() - cached.ts < 300000 && cached.data) {
+      if (Date.now() - cached.ts < 60000 && cached.data) {
         STATE.chips = cached.data.chips || null;
         hasLocal = true;
         if (STATE.symbol === symbol && STATE.period === period) updateChart(false);
@@ -1256,6 +1314,9 @@ async function fetchChips(symbol) {
     if (STATE.symbol === symbol && STATE.period === period) updateChart(false);
   } catch (e) {
     if (!hasLocal) STATE.chips = null; // 网络失败且无缓存: 不显示筹码
+  } finally {
+    if (STATE._chipsPending && STATE._chipsPending.symbol === symbol
+        && STATE._chipsPending.period === period) STATE._chipsPending = null;
   }
 }
 
@@ -1360,6 +1421,8 @@ function renderStockInfo(d) {
 
 async function fetchStockInfo(_retry) {
   const symbol = STATE.symbol;
+  const seq = (STATE._infoReqSeq || 0) + 1;
+  STATE._infoReqSeq = seq;
   STATE._lastInfoAt = Date.now();   // 定时刷新节流标记 (盘中约 60s)
   try {
     const resp = await fetch(`/api/stock-info?symbol=${encodeURIComponent(symbol)}`);
@@ -1371,9 +1434,10 @@ async function fetchStockInfo(_retry) {
       return;
     }
     const data = await resp.json();
-    if (STATE.symbol !== symbol) return; // 已切走
-    STATE.stockInfo = data;
-    renderStockInfo(data);
+    if (STATE.symbol !== symbol || STATE._infoReqSeq !== seq) return; // 已切走/旧响应
+    data._revision = seq;
+    marketStore.accept('info', symbol, data);
+    updateLiveStockInfo(marketStore.quotes[symbol], symbol);
   } catch (e) { /* 静默降级: 面板保留上次数据 */ }
 }
 
@@ -1400,25 +1464,22 @@ function renderDepth(depth) {
   body.innerHTML = html;
 }
 
-async function fetchDepth(_retry) {
-  const chk = document.getElementById('chk-depth');
-  if (!chk || !chk.checked) return;
+async function fetchDepth() {
+  ensureQuoteStream();
+  // 首帧直接处理响应，避免换股时 LiveMarket 的 symbols/epoch 切换把结果丢掉；
+  // 后续实时更新仍由 LiveMarket 的 SSE/轮询接管。
   const symbol = STATE.symbol;
+  const seq = (STATE._depthReqSeq || 0) + 1;
+  STATE._depthReqSeq = seq;
   try {
-    const resp = await fetch(`/api/depth?symbol=${encodeURIComponent(symbol)}`);
-    if (!resp.ok) {
-      // 429 限流: 短暂退避重试, 否则收盘后无定时器会让五档冻在旧股
-      if (resp.status === 429 && (_retry || 0) < 2) {
-        setTimeout(() => { if (STATE.symbol === symbol) fetchDepth((_retry || 0) + 1); }, 2000);
-      }
-      return;
-    }
-    const data = await resp.json();
-    if (STATE.symbol !== symbol) return; // 已切走
-    STATE.depth = data.depth || null;
-    renderDepth(STATE.depth);
-  } catch (e) { /* ignore */ }
+    const resp = await fetch('/api/depth?symbol=' + encodeURIComponent(symbol));
+    if (!resp.ok) return;
+    const body = await resp.json();
+    if (STATE.symbol !== symbol || STATE._depthReqSeq !== seq || !body || !body.depth) return;
+    liveQuotes.accept('depth', symbol, body.depth, 'poll');
+  } catch (_) { /* SSE/轮询后续重试 */ }
 }
+
 
 // 交易日期 → bar 索引 (升序 dates 里第一个 date >= d 的 bar; 日/周/月通用)
 function matchBarIndex(dates, d) {
@@ -1454,7 +1515,7 @@ function buildTradeMarkers(klines, dates) {
       symbolSize: 14,
       symbolOffset: [0, isBuy ? 8 : -8],
       name: isBuy ? '买入' : '卖出',
-      value: price + ' 元' + (qtyText ? ' · ' + qtyText : '') + ' (' + date + ')',
+      value: fmtPrice3(price) + ' 元' + (qtyText ? ' · ' + qtyText : '') + ' (' + date + ')',
       itemStyle: { color: isBuy ? C().up : C().down },
       label: {
         show: true,
@@ -1492,98 +1553,107 @@ function syncAdjustMeta(data) {
   }
 }
 
-async function fetchQuote() {
-  try {
-    STATE._lastQuoteAt = Date.now();
-    const resp = await fetch(`/api/quote?symbol=${encodeURIComponent(STATE.symbol)}`);
-    if (resp.ok) {
-      const q = await resp.json();
-      applyQuoteData(q);
+const liveQuotes = new VisualLive.LiveMarket({
+  active: () => typeof canAutoRefresh === 'function' && canAutoRefresh(),
+  onQuote: (symbol, q) => {
+    marketStore.accept('quote', symbol, q);
+  },
+  onBars: (symbol, data) => {
+    if (symbol !== STATE.symbol || data.period !== STATE.period || data.meta.adjust !== STATE.adjust) return;
+    if (!STATE.klineData || STATE.klineData.symbol !== symbol || STATE.klineData.period !== data.period) return;
+    if (applyServerBars(data.bars)) {
+      if (STATE.period === '1d') requestBarPatchDraw();
+      else updateChart(false);
     }
-  } catch (e) { /* ignore */ }
+  },
+  onDepth: (symbol, d) => {
+    marketStore.accept('depth', symbol, d);
+  },
+});
+
+VisualMarketStore.watch(() => marketStore.last, (change) => {
+  if (!change || change.symbol !== STATE.symbol) return;
+  if (change.kind === 'quote') {
+    const { symbol, value: q } = change;
+    STATE._lastQuoteAt = Date.now();
+    updateQuoteDisplay(q);
+    if (STATE.klineData && STATE.klineData.symbol === symbol) STATE.klineData.quote = q;
+    updateLiveStockInfo(q, symbol);
+    updateLivePriceLine(q, symbol);
+  } else if (change.kind === 'depth') {
+    STATE.depth = change.value;
+    renderDepth(change.value);
+  } else if (change.kind === 'info') {
+    STATE.stockInfo = change.value;
+    renderStockInfo(change.value);
+  }
+});
+
+/** 快照更新只需改最新价线，避免为每个 1.25s 快照重建整张图。 */
+function updateLivePriceLine(q, symbol = STATE.symbol) {
+  if (!q || symbol !== STATE.symbol || q.last_price == null || !STATE.chart) return;
+  const bars = STATE.period === 'intraday'
+    ? STATE.intradayData && STATE.intradayData.bars
+    : STATE.klineData && STATE.klineData.klines;
+  if (!bars || !bars.length) return;
+  const line = buildLastPriceLine(bars, q.last_price);
+  if (!line) return;
+  STATE.chart.setOption({ series: [{ name: 'K线', markLine: line }] },
+    { lazyUpdate: true, silent: true });
 }
 
-/** 快照落地 (轮询与 SSE 共用): 只更新行情展示与存档, 不碰 K 线数据。
- *  当日 bar 由后端 /api/kline/tail 权威下发 (见 fetchDailyTail), 前端不再合成。 */
+async function fetchQuote() { ensureQuoteStream(); liveQuotes.refresh(); }
 function applyQuoteData(q) {
-  if (!q || (q.symbol && q.symbol !== STATE.symbol)) return;
-  updateQuoteDisplay(q);
-  if (STATE.klineData) STATE.klineData.quote = q;
+  ensureQuoteStream();
+  return liveQuotes.accept('quote', STATE.symbol, q);
+}
+function reconcileLiveBars(data) {
+  ensureQuoteStream();
+  if (data._revision && data.klines) liveQuotes.accept('bars', data.symbol, {
+    symbol: data.symbol, period: data.period, meta: data.meta,
+    _revision: data._revision, bars: data.klines.slice(-2),
+  });
+  const latest = liveQuotes.get(data.symbol, 'bars');
+  if (latest && latest.period === STATE.period && latest.meta.adjust === STATE.adjust) applyServerBars(latest.bars);
+}
+function updateLiveStockInfo(q, symbol = STATE.symbol) {
+  if (!q || symbol !== STATE.symbol) return;
+  const d = { ...(STATE.stockInfo || { symbol: STATE.symbol }), ...(q._live_info || {}) };
+  for (const k of ['volume', 'amount', 'turnover_rate']) {
+    if (q[k] != null) d[k] = q[k];
+  }
+  if (q.vol_ratio != null && Number.isFinite(Number(q.vol_ratio))) d.vol_ratio = Number(q.vol_ratio);
+  // ETF 快照源有时不返回换手率；用实时成交量和 K 线返回的份额即时回算，
+  // 让基本信息面板不必等待下一次 /api/stock-info（换手率只作近似展示）。
+  if (q.turnover_rate == null && STATE.klineData && STATE.klineData.is_etf) {
+    const fs = Number(STATE.klineData.float_shares);
+    const vol = Number(q.volume);
+    if (Number.isFinite(fs) && fs > 0 && Number.isFinite(vol) && vol >= 0) {
+      const px = Number(q.last_price), amount = Number(q.amount);
+      const unit = Number.isFinite(px) && px > 0 && Number.isFinite(amount) && amount > 0
+        && vol > 0 && amount / (vol * px) > 10 ? 100 : 1;
+      d.turnover_rate = vol * unit / fs * 100;
+    }
+  }
+  d.timestamp = q.timestamp || d.timestamp;
+  // 基本信息与报价来自不同资源，不能复用报价 revision；否则价格先到时会
+  // 把稍后返回的行业/PE/涨跌停基础资料判成旧数据。
+  d._revision = Number(d._revision) || 0;
+  marketStore.accept('info', symbol, d);
 }
 
-/** 快照轮询判定: SSE 正常 OPEN 时不轮询; 僵尸连接(久无数据)兜底一次并重建。
- *  返回 'poll'(普通轮询) | 'poll_rotate'(兜底一次并断开重建) | null(不轮询)。 */
-function quotePollDecision(now, lastQuoteAt, sseOpen) {
-  const age = now - (lastQuoteAt || 0);
-  if (sseOpen) return age >= SSE_STALE_FALLBACK_MS ? 'poll_rotate' : null;
-  return age >= QUOTE_REFRESH_MS ? 'poll' : null;
-}
-
-/** SSE 重建判定: 仅在无 EventSource 对象(CLOSED 后置空)、可自动刷新且过退避期时重建。 */
-function quoteStreamRetryDue(now, esPresent, retryAt, retryMs, canRefresh) {
-  if (!canRefresh) return false;
-  if (esPresent) return false;
-  return now - (retryAt || 0) >= (retryMs || SSE_RETRY_MS);
-}
-
-/** 当前 SSE 是否处于 OPEN(老浏览器无 EventSource 时恒 false)。 */
-function quoteSseOpen() {
-  return !!(window.EventSource && STATE._quoteEs
-            && STATE._quoteEs.readyState === EventSource.OPEN);
-}
-
-/** 快照 SSE 推送: 一条长连接替代 10s 轮询 (断线/超限自动回退轮询) */
-function startQuoteStream() {
-  if (!window.EventSource) return; // 老浏览器回退轮询
-  try { if (STATE._quoteEs) STATE._quoteEs.close(); } catch (e) { /* ignore */ }
-  STATE._quoteEs = null;
-  const sym = STATE.symbol;
-  try {
-    const es = new EventSource(`/api/stream/quotes?symbols=${encodeURIComponent(sym)}`);
-    es.onmessage = (ev) => {
-      if (!ev.data || ev.data[0] !== "{") return;
-      try {
-        const quotes = JSON.parse(ev.data);
-        const q = quotes[sym] || quotes[STATE.symbol];
-        if (q) { STATE._lastQuoteAt = Date.now(); applyQuoteData(q); }
-      } catch (e) { /* ignore */ }
-    };
-    es.onerror = () => {
-      // readyState=CLOSED (如服务端 429 超限) → 不再重连, 回退轮询;
-      // CONNECTING 状态则是原生自动重连, 不干预
-      if (es.readyState === EventSource.CLOSED && STATE._quoteEs === es) {
-        STATE._quoteEs = null;
-      }
-    };
-    es.onopen = () => {
-      // 连接成功: 复位重建退避, 便于后续被拒时及时重试
-      STATE._quoteEsRetryAt = 0;
-      STATE._quoteEsRetryMs = 0;
-    };
-    STATE._quoteEs = es;
-  } catch (e) { /* 回退轮询 */ }
-}
-
-/** 快照流订阅当前标的: 标的未变复用连接, 变了(去抖)重连 */
 function ensureQuoteStream() {
-  if (STATE._quoteEsSym === STATE.symbol) return;
-  STATE._quoteEsSym = STATE.symbol;
-  scheduleQuoteStream();
+  const tail = ['1d', '1w', '1M'].includes(STATE.period)
+    ? { period: STATE.period, count: STATE.period === '1d' ? DAILY_COUNT : 300, adjust: STATE.adjust } : null;
+  liveQuotes.setSymbols([STATE.symbol], depthSecOn(), tail);
 }
-
-/** 去抖重连: 连续换股只保留最后一次, 避免瞬时占满服务端 SSE 并发槽 (429) */
-function scheduleQuoteStream() {
-  clearTimeout(STATE._quoteEsTimer);
-  try { if (STATE._quoteEs) STATE._quoteEs.close(); } catch (e) { /* ignore */ }
-  STATE._quoteEs = null;
-  STATE._quoteEsTimer = setTimeout(startQuoteStream, 500);
-}
+function scheduleQuoteStream() { ensureQuoteStream(); }
 
 /** 应用后端权威末根 bar (含指标): 按 date 合并/追加, 有变动返回 true。
  *  数据只来自服务端, 前端不派生 OHLCV。合并用 Object.assign 以保留服务端
  *  未提供的字段 (如 ETF premium)。旧于末根的 bar 忽略。 */
 function applyServerBars(bars) {
-  if (STATE.period !== '1d' || !STATE.klineData || !STATE.klineData.klines) return false;
+  if (!['1d', '1w', '1M'].includes(STATE.period) || !STATE.klineData || !STATE.klineData.klines) return false;
   if (!Array.isArray(bars) || !bars.length) return false;
   const klines = STATE.klineData.klines;
   if (!klines.length) return false;
@@ -1608,20 +1678,9 @@ function applyServerBars(bars) {
 
 /** 拉取后端权威末 N 根日K (含指标) 并增量应用; 非交易日/盘前后端不拼当日 bar。 */
 async function fetchDailyTail() {
-  if (STATE.period !== '1d' || !STATE.klineData) return;
-  const symbol = STATE.symbol;
-  const ts = Date.now();
-  STATE._lastDailyTailAt = ts;
-  const url = `/api/kline/tail?symbol=${encodeURIComponent(symbol)}&period=1d`
-    + `&count=${DAILY_COUNT}&n=${DAILY_TAIL_N}&adjust=${STATE.adjust}`;
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return; // 旧后端无此接口: 静默降级为"仅首屏更新", 不产生错 bar
-    const data = await resp.json();
-    if (STATE.symbol !== symbol || STATE.period !== '1d') return; // 已切股/切周期
-    if (applyServerBars(data.bars)) requestBarPatchDraw();
-  } catch (e) { /* ignore */ }
+  ensureQuoteStream();
 }
+
 
 function buildMacdHistPoint(k) {
   return {
@@ -1752,14 +1811,13 @@ function patchIndicatorLastPoints(seriesPatch, k, lastIdx, seriesByName, klines)
 }
 
 function requestBarPatchDraw() {
-  const now = Date.now();
-  if (now - (STATE._lastBarPatchDrawAt || 0) >= LAST_BAR_PATCH_MS) {
-    if (patchLastBarOnChart()) STATE._lastBarPatchDrawAt = now;
-    STATE._pendingBarPatch = false;
-  } else {
-    STATE._pendingBarPatch = true;
-  }
+  if (STATE._barPaint) return;
+  STATE._barPaint = requestAnimationFrame(() => {
+    STATE._barPaint = null;
+    if (patchLastBarOnChart()) STATE._lastBarPatchDrawAt = Date.now();
+  });
 }
+
 
 /** 增量更新末根 K 线/成交量/MA，不 chart.clear */
 function patchLastBarOnChart() {
@@ -1861,12 +1919,12 @@ function fmtCN(v) {
 
 // 价格: 三位小数并去掉尾随0 (1.50→1.5, 1.234→1.234)
 function fmtPrice3(v) {
-  return v == null ? '—' : Number(Number(v).toFixed(3)).toString();
+  return VisualLive.price(v);
 }
 
 // 换手 (股票) / 流值 (股票) / 份额 (ETF) / 成交额
 function updateFundInfo(q) {
-  const d = STATE.klineData || {};
+  const d = STATE.klineData && STATE.klineData.symbol === STATE.symbol ? STATE.klineData : {};
   const isEtf = !!d.is_etf;
   const isIndex = !!d.is_index;
   const fs = d.float_shares;
@@ -1875,10 +1933,20 @@ function updateFundInfo(q) {
   const turnoverEl = document.getElementById('info-turnover');
   const sharesEl = document.getElementById('info-shares');
   const amountEl = document.getElementById('info-amount');
+  let turnover = q && q.turnover_rate != null ? Number(q.turnover_rate) : null;
+  if (turnover == null && q && isEtf) {
+    const shares = Number(fs), vol = Number(q.volume), px = Number(q.last_price), amount = Number(q.amount);
+    if (Number.isFinite(shares) && shares > 0 && Number.isFinite(vol) && vol >= 0) {
+      // AF/Mairui may report volume as shares or hands; infer the unit from amount.
+      const unit = Number.isFinite(px) && px > 0 && Number.isFinite(amount) && amount > 0
+        && vol > 0 && amount / (vol * px) > 10 ? 100 : 1;
+      turnover = vol * unit / shares * 100;
+    }
+  }
 
-  // 换手率 (仅股票)
-  if (q && q.turnover_rate != null && !isEtf && !isIndex) {
-    turnoverEl.textContent = `换手 ${q.turnover_rate.toFixed(2)}%`;
+  // 换手率 (股票/ETF; 指数通常没有成交换手率)
+  if (turnover != null && Number.isFinite(turnover) && !isIndex) {
+    turnoverEl.textContent = `换手 ${turnover.toFixed(2)}%`;
     turnoverEl.style.display = '';
   } else {
     turnoverEl.style.display = 'none';
@@ -1926,6 +1994,8 @@ function updateInfo(data) {
     }
     gubaEl.style.display = _code6 ? '' : 'none';
   }
+  if (data.quote) applyQuoteData(data.quote);
+  data.quote = liveQuotes.get(STATE.symbol) || data.quote;
   const q = data.quote;
   const pf = fmtPrice3;
 
@@ -1976,6 +2046,8 @@ function updateInfo(data) {
     qf = { last_price: data.klines[data.klines.length - 1].close };
   }
   updateFundInfo(qf);
+  // K 线元数据（ETF 份额）到达后，重新用当前快照补齐基本信息的实时字段。
+  if (qf) updateLiveStockInfo(qf, data.symbol || STATE.symbol);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2193,7 +2265,6 @@ function buildConfig() {
     adjust: STATE.adjust,
     maPeriods: STATE.maPeriods,
     bollParams: STATE.bollParams,
-    periodMore: STATE._periodMore === true,
     indMore: STATE._indMore === true,
   };
 }
@@ -2277,12 +2348,7 @@ function applyConfig(cfg) {
       && Number.isFinite(cfg.bollParams.k) && cfg.bollParams.k > 0) {
     STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
   }
-  // 折叠状态恢复
-  if (cfg.periodMore === true) {
-    STATE._periodMore = true;
-    document.querySelector('.period-group').classList.add('expanded');
-    document.getElementById('toolbar').classList.add('periods-expanded');
-  }
+  // 旧版 periodMore 配置已废弃；周期改为固定单行滚动，不再改变工具栏高度。
   if (cfg.indMore === true) {
     STATE._indMore = true;
     document.getElementById('indicator-bar').classList.add('show-extra');
@@ -2347,7 +2413,7 @@ async function syncPanelConfigWithServer() {
 // ═══════════════════════════════════════════════════════════════
 // INTRADAY (分时图)
 // ═══════════════════════════════════════════════════════════════
-async function fetchIntraday() {
+async function fetchIntraday(opts) {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
   const fetchTs = Date.now(); STATE._intraFetchTs = fetchTs;
@@ -2371,20 +2437,23 @@ async function fetchIntraday() {
     } catch(e) { /* ignore */ }
   }
 
-  const loading = !cacheHit && !STATE.intradayData;
+  const loading = !cacheHit && !STATE.intradayData && !(opts && opts.retainChart);
   if (loading && STATE.chart) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
   try {
     const [idResp, qResp] = await Promise.all([
       fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
-      fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`)
+      // /api/quotes keeps an unavailable snapshot as an empty 200 response;
+      // a transient upstream miss must not produce a noisy 404 in the console.
+      fetch(`/api/quotes?symbols=${encodeURIComponent(symbol)}`)
     ]);
     const id = await idResp.json();
-    const quote = await qResp.json();
+    const quoteBody = await qResp.json();
+    const quote = quoteBody && quoteBody[symbol] || liveQuotes.get(symbol) || null;
     if (STATE._intraFetchTs !== fetchTs) return;
     if (!id.bars || id.bars.length === 0) { if (loading) showToast('暂无分时数据'); return; }
-    id.prev_close = quote.prev_close;
+    id.prev_close = (liveQuotes.get(symbol) || quote || {}).prev_close;
     STATE.intradayData = id;
-    updateQuoteDisplay(quote);
+    if (quote) applyQuoteData(quote);
     renderIntraday(STATE.intradayData);
     fetchDepth();  // 五档初始拉取
     // 保存到 localStorage
@@ -2540,8 +2609,8 @@ function renderIntraday(data) {
   };
   // 最后面板显示日期（setOption 之前设置）
   if (xAxes.length > 0) xAxes[xAxes.length - 1].show = true;
-  chart.clear();
-  chart.setOption(option, true);
+  // notMerge 会替换上一周期的坐标轴/系列，但不先清空 canvas，切换时旧图可保留到新图就绪。
+  chart.setOption(option, { notMerge: true, lazyUpdate: true, silent: true });
   // 分时面板名称标签 (graphic)
   const igraphics = [];
   const iLabels = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR' };
@@ -2594,16 +2663,6 @@ function onConfigChange() {
   onIndicatorChange();
 }
 
-/** 周期组折叠切换 (1/5/15/30/60 分) */
-function togglePeriodMore() {
-  const pg = document.querySelector('.period-group');
-  pg.classList.toggle('expanded');
-  const expanded = pg.classList.contains('expanded');
-  document.getElementById('toolbar').classList.toggle('periods-expanded', expanded);
-  STATE._periodMore = expanded;
-  saveConfig();
-}
-
 /** 指标栏低频项折叠切换 (信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴) */
 function toggleIndMore() {
   const bar = document.getElementById('indicator-bar');
@@ -2612,12 +2671,33 @@ function toggleIndMore() {
   saveConfig();
 }
 
-/** 折叠状态下选中了被折叠的周期 → 自动展开按钮组 */
+/** 将当前周期滚入固定宽度的可视区，不改变任何布局高度。 */
 function ensurePeriodVisible(period) {
   const btn = document.getElementById('btn-' + period);
-  if (btn && btn.classList.contains('extra-period') && !STATE._periodMore) {
-    togglePeriodMore();
+  const viewport = document.getElementById('period-viewport');
+  if (!btn || !viewport) return;
+  const left = btn.offsetLeft - viewport.offsetLeft;
+  const right = left + btn.offsetWidth;
+  if (left < viewport.scrollLeft || right > viewport.scrollLeft + viewport.clientWidth) {
+    viewport.scrollTo({ left: Math.max(0, left - (viewport.clientWidth - btn.offsetWidth) / 2), behavior: 'smooth' });
   }
+}
+
+function initPeriodScroller() {
+  const viewport = document.getElementById('period-viewport');
+  const left = document.getElementById('period-scroll-left');
+  const right = document.getElementById('period-scroll-right');
+  if (!viewport || !left || !right) return;
+  const sync = () => {
+    left.disabled = viewport.scrollLeft <= 1;
+    right.disabled = viewport.scrollLeft + viewport.clientWidth >= viewport.scrollWidth - 1;
+  };
+  const move = direction => viewport.scrollBy({ left: direction * Math.max(120, viewport.clientWidth * .8), behavior: 'smooth' });
+  left.addEventListener('click', () => move(-1));
+  right.addEventListener('click', () => move(1));
+  viewport.addEventListener('scroll', sync, { passive: true });
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(sync).observe(viewport);
+  sync();
 }
 
 /** 复权切换: 重新拉取 (分钟周期固定前复权, 由后端钳制) */
@@ -2693,9 +2773,12 @@ function initChart() {
   }
   STATE.chart = echarts.init(dom, null, { renderer: 'canvas' });
   // resize 时重渲染 (解决全屏/窗口变化后日期被截断)
-  let resizeTimer;
+  let resizeTimer, resizeFrame = 0;
   window.addEventListener('resize', () => {
-    STATE.chart.resize();
+    if (!resizeFrame) resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      STATE.chart.resize({ animation: { duration: 0 } });
+    });
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       if (STATE.period === 'intraday' && STATE.intradayData) renderIntraday(STATE.intradayData);
@@ -3398,7 +3481,7 @@ function updateChart(reTheme) {
   // ── Build option ──
   const option = {
     backgroundColor: C().bg,
-    animation: reTheme ? false : true,
+    animation: reTheme ? false : !STATE._periodSwitching,
     tooltip: tooltip,
     grid: grids,
     xAxis: xAxes,
@@ -3490,8 +3573,8 @@ function updateChart(reTheme) {
     }
   });
 
-  chart.clear();
-  chart.setOption(option, true);
+  // 保留旧 canvas 至新 option 原子替换，避免周期切换出现白屏闪烁。
+  chart.setOption(option, { notMerge: true, lazyUpdate: true, silent: true });
   if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
   // 缓存 grid 像素位置 (供 zrender mousemove 判断鼠标在哪个面板 + 画线层裁剪)
   // 注: ECharts grid 的 left/right 可能是百分比, 也可能是 panelGridLeft() 给的 '216px';
@@ -3584,7 +3667,7 @@ function updateChart(reTheme) {
   loadDrawings();            // 画线: 切代码/周期后从服务器同步 (_loadedKey 防重复拉取)
   redrawDrawings(graphics);  // 面板标签 + 画线层绘制到 overlay canvas
   // 首次渲染延迟 resize，解决底部日期轴被截断
-  if (!STATE._initResized) { STATE._initResized = true; setTimeout(() => chart.resize(), 100); }
+  if (!STATE._initResized) { STATE._initResized = true; setTimeout(() => chart.resize({ animation: { duration: 0 } }), 100); }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3621,17 +3704,16 @@ function applyPeriodUI(period) {
 }
 
 function switchPeriod(period) {
+  if (!ALL_PERIODS.includes(period) || period === STATE.period) return;
+  STATE._periodSwitching = true;
   applyPeriodUI(period);
   syncSymbolUrl(true); // 周期写入 URL: 刷新/分享/从监控中心跳转保持一致
+  ensureQuoteStream(); // 订阅跟随标的；切周期不重置基本信息/五档
   if (period === 'intraday') {
-    STATE.intradayData = null; // 清缓存，强制重新加载
-    if (STATE.chart) STATE.chart.clear();
-    fetchIntraday();
+    fetchIntraday({ retainChart: true });
   } else {
-    refresh();
+    fetchData({ retainPanels: true });
   }
-  fetchStockInfo();
-  if (depthSecOn()) fetchDepth(); // 五档所有周期可用, 切周期即时刷新
 }
 
 /** 筹码分布: 日/周/月K (分时不适用); 服务端始终按日线粒度算, 周/月K 窗口更长 */
@@ -3953,7 +4035,7 @@ function paintLegend(c2, dctx) {
   } catch (e) { /* 用最新 bar */ }
   const k = klines[endIdx];
   if (!k) return;
-  const fmt3 = (v) => (v == null || !Number.isFinite(v)) ? '—' : Number(v).toFixed(2);
+  const fmt3 = fmtPrice3;
   const hasVolume = document.getElementById('chk-volume').checked;
   const panels = getIndicatorPanels();
   const startGi = hasVolume ? 2 : 1;
@@ -4139,7 +4221,7 @@ function closeAlertsModal() {
 
 function condText(rule) {
   const METRIC = { price: "现价", change_pct: "涨跌幅%" };
-  return (rule || []).map(c => `${METRIC[c.metric] || c.metric} ${c.op === ">=" ? "≥" : "≤"} ${c.value}`).join(" 且 ");
+  return (rule || []).map(c => `${METRIC[c.metric] || c.metric} ${c.op === ">=" ? "≥" : "≤"} ${c.metric === "price" ? fmtPrice3(c.value) : c.value}`).join(" 且 ");
 }
 
 async function refreshAlerts() {
@@ -5059,6 +5141,7 @@ document.getElementById('dmi-name').addEventListener('keydown', (ev) => {
 // ═══════════════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
+  initPeriodScroller();
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();
@@ -5066,8 +5149,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // 左侧栏初始显隐 (基本信息 + 五档, 所有周期), 不等首根K线渲染
   showSidePanel(sidePanelOn());
   showDepthSection(depthSecOn());
-  if (depthSecOn()) fetchDepth();  // 五档初始拉取 (与周期无关)
-  if (infoPanelOn() && !STATE.stockInfo) fetchStockInfo();
 
   // ── 自动主题: 系统偏好 > 时间 ──
   if (STATE._themeAuto) {
@@ -5239,6 +5320,9 @@ document.addEventListener('DOMContentLoaded', () => {
   if (jumpSymbol) {
     document.getElementById('symbol-input').value = jumpSymbol;
     STATE.symbol = jumpSymbol;
+    // URL 参数在首个面板初始化请求之后才解析；此处必须立即为当前标的
+    // 重置盘口流，否则首屏只会请求默认的 000001.SH。
+    if (depthSecOn()) fetchDepth();
   }
   const jumpPeriod = bootParams.get('period');
   if (jumpPeriod && ALL_PERIODS.includes(jumpPeriod)) applyPeriodUI(jumpPeriod);
@@ -5317,41 +5401,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 盘中自动刷新: 快照 / 分时 / 分钟K 分开间隔; 午休、周末、节假日不拉
   STATE._lastQuoteAt = 0;
-  STATE._quoteEsRetryAt = 0;   // SSE 重建退避时间戳
-  STATE._quoteEsRetryMs = 0;   // SSE 重建退避间隔(含抖动)
   STATE._lastBarAt = 0;
   STATE._lastBarPatchDrawAt = 0;
-  STATE._lastDailyTailAt = 0;  // 日K末根增量刷新时间戳
-  STATE._pendingBarPatch = false;
-  STATE._serverTradingDay = null; // false = 节假日 (交易日历)
-  STATE._serverInSession = null;  // 服务端北京时间判定盘中 (含交易日历/午休)
-
-  function inAshareSession() {
-    // 服务端判定优先, 浏览器时区不再影响刷新启停;
-    // ping 未就绪/失败时才回退本地时钟 (仅 UTC+8 浏览器准确)
-    if (STATE._serverInSession !== null) return STATE._serverInSession;
-    const now = new Date();
-    const d = now.getDay();
-    if (d === 0 || d === 6) return false;
-    const t = now.getHours() * 60 + now.getMinutes();
-    return (t >= 9 * 60 + 30 && t <= 11 * 60 + 30) || (t >= 13 * 60 && t <= 15 * 60);
-  }
-
-  function canAutoRefresh() {
-    if (document.hidden) return false; // 后台标签页暂停轮询 (省电省流量), 切回自动恢复
-    if (!inAshareSession()) return false;
-    if (STATE._serverTradingDay === false) return false;
-    return true;
-  }
-
-  async function syncSessionFlag() {
-    try {
-      const r = await fetch('/api/ping');
-      const d = await r.json();
-      if (typeof d.is_trading_day === 'boolean') STATE._serverTradingDay = d.is_trading_day;
-      if (typeof d.in_session === 'boolean') STATE._serverInSession = d.in_session;
-    } catch (e) { /* 失败时仅用本地时段 */ }
-  }
   syncSessionFlag();
   setInterval(syncSessionFlag, 60e3);
 
@@ -5383,51 +5434,18 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(() => {
     if (!canAutoRefresh()) return;
     const now = Date.now();
-    // 快照轮询: SSE OPEN 时不轮询; 僵尸连接(OPEN 久无数据)兜底一次并断开重建
-    const decision = quotePollDecision(now, STATE._lastQuoteAt, quoteSseOpen());
-    if (decision) {
-      STATE._lastQuoteAt = now;
-      fetchQuote();
-      if (decision === 'poll_rotate') {
-        try { if (STATE._quoteEs) STATE._quoteEs.close(); } catch (e) { /* ignore */ }
-        STATE._quoteEs = null;
-        STATE._quoteEsRetryAt = 0;
-      }
-    }
-    // SSE 被拒(CLOSED 置空)后按退避重建, 避免永久降级为轮询
-    if (quoteStreamRetryDue(now, !!STATE._quoteEs, STATE._quoteEsRetryAt,
-                            STATE._quoteEsRetryMs, canAutoRefresh())) {
-      STATE._quoteEsRetryAt = now;
-      STATE._quoteEsRetryMs = SSE_RETRY_MS + Math.floor(Math.random() * 15000);
-      scheduleQuoteStream();
-    }
+    ensureQuoteStream();
     if (STATE.period === 'intraday') {
       if (now - (STATE._lastBarAt || 0) >= INTRADAY_REFRESH_MS) fetchIntraday();
     } else if (MINUTE_PERIODS.includes(STATE.period)) {
       const iv = MINUTE_REFRESH_MS[STATE.period] || 60e3;
       if (now - (STATE._lastBarAt || 0) >= iv) fetchData({ silent: true });
-    } else if (STATE.period === '1d') {
-      // 日K末根: 后端权威增量刷新 (不再由前端按快照拼 bar)
-      if (now - (STATE._lastDailyTailAt || 0) >= DAILY_TAIL_REFRESH_MS) fetchDailyTail();
     }
-    if (STATE._pendingBarPatch && STATE.period === '1d') {
-      if (now - (STATE._lastBarPatchDrawAt || 0) >= LAST_BAR_PATCH_MS) {
-        if (patchLastBarOnChart()) {
-          STATE._lastBarPatchDrawAt = now;
-          STATE._pendingBarPatch = false;
-        }
-      }
-    }
-    // 筹码分布: 盘中约 5 分钟重取一次
+    // 筹码分布: 盘中约 60s 重取一次; 成本分布不按 1.25s 快照逐笔重算
     if (isChipPeriod(STATE.period) && document.getElementById('chk-chip').checked
-        && now - (STATE._lastChipsAt || 0) >= 300e3) {
+        && now - (STATE._lastChipsAt || 0) >= 60e3) {
       STATE._lastChipsAt = now;
       fetchChips(STATE.symbol);
-    }
-    // 五档: 盘中约 3s 刷新 (20/min = 2/3 × 30); 所有周期
-    if (depthSecOn() && now - (STATE._lastDepthAt || 0) >= 3000) {
-      STATE._lastDepthAt = now;
-      fetchDepth();
     }
     // 基本信息: 盘中约 60s 刷新 (后端 60s 缓存); 成交额/换手/量比随行情变化
     if (infoPanelOn() && now - (STATE._lastInfoAt || 0) >= 60e3) {

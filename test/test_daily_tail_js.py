@@ -52,7 +52,7 @@ class DailyTailJsTest(unittest.TestCase):
         # 前端不得再从快照拼 bar, 也不得再本地重算指标
         for gone in ("patchTodayBarFromQuote", "recalcTailIndicators", "todayYMD"):
             self.assertNotIn(gone, self.src, f"index.html 仍含已废弃的 {gone}")
-        self.assertIn("/api/kline/tail", self.src, "index.html 未接后端 tail 接口")
+        self.assertIn("/api/kline/tail", (INDEX_HTML.parent / "js/live-market.js").read_text(encoding="utf-8"))
 
     def test_append_new_trading_day_bar(self):
         klines = [{"date": "2026-09-11", "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1000}]
@@ -101,9 +101,9 @@ class DailyTailJsTest(unittest.TestCase):
         self.assertFalse(self._run_apply(klines, [{"open": 1}])["changed"])
         self.assertFalse(self._run_apply(klines, None)["changed"])
 
-    def test_reject_non_1d(self):
+    def test_reject_minute_period(self):
         klines = [{"date": "2026-09-11", "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1000}]
-        out = self._run_apply(klines, [{"date": "2026-09-14", "close": 11}], period="1w")
+        out = self._run_apply(klines, [{"date": "2026-09-14", "close": 11}], period="5m")
         self.assertFalse(out["changed"])
 
 

@@ -63,6 +63,17 @@ class StaticAssetsTest(unittest.TestCase):
         self.assertEqual(hashlib.sha256(body).hexdigest(), want_sha)
         self.assertIn(b'version="5.5.0"', body)
 
+    def test_vendored_reactive_runtime_is_local_and_immutable(self):
+        for name in (
+            "vue-3.5.13.global.prod.js",
+            "vue-demi-0.14.10.iife.js",
+            "pinia-2.2.6.iife.prod.js",
+        ):
+            r = self._get(f"/vendor/{name}")
+            self.assertEqual(r.status_code, 200, name)
+            self.assertEqual(r.headers["Cache-Control"], "public, max-age=31536000, immutable")
+            self.assertIn(name, (VENDOR_DIR / "README.md").read_text(encoding="utf-8"))
+
     def test_app_js_still_no_store(self):
         r = self._get("/js/api.js")
         self.assertEqual(r.status_code, 200)

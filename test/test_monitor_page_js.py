@@ -202,7 +202,9 @@ class CondTextBehaviorTest(unittest.TestCase):
     def setUpClass(cls):
         src = MONITOR_HTML.read_text(encoding="utf-8")
         cls.script = (
-            _extract_const(src, "METRIC_LABELS") + "\n"
+            (MONITOR_HTML.parent / "js/live-market.js").read_text(encoding="utf-8") + "\n"
+            + _extract_fn(src, "fmt") + "\n"
+            + _extract_const(src, "METRIC_LABELS") + "\n"
             + _extract_fn(src, "condText") + "\n"
             + "process.stdout.write(condText(JSON.parse(process.argv[1])));"
         )

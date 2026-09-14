@@ -362,6 +362,8 @@ def _row_to_quote(row):
         "name": name,
         "change_pct": _to_float(change_pct),  # 官方是小数
         "turnover_rate": _to_float(_ext("turnover_rate")),  # 官方是小数
+        "vol_ratio": _to_float(_ext("vol_ratio") if _ext("vol_ratio") is not None
+                                else _ext("volume_ratio")),
         "amplitude": _to_float(_ext("amplitude")),          # 官方是小数
         "change_amount": _to_float(_ext("change_amount")),
         "type": _ext("type"),

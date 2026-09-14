@@ -232,6 +232,11 @@ td.sym a:hover { color: var(--btn-active); }
 </div>
 
 <script src="/js/api.js"></script>
+<script src="/js/live-market.js"></script>
+<script src="/vendor/vue-3.5.13.global.prod.js"></script>
+<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
+<script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
+<script src="/js/market-store.js"></script>
 <script>
 const ALERT_LABELS = {
   sl_breached: "止损触发", tp_reached: "止盈达成", breakeven_hit: "保本命中",
@@ -247,7 +252,7 @@ const METRIC_LABELS = { price: "现价", change_pct: "涨跌幅%" };
 /** 条件预警规则 → 可读文案, 如「现价 ≥ 10.5 且 涨跌幅% ≤ -3」。 */
 function condText(rule) {
   return (rule || []).map(c =>
-    `${METRIC_LABELS[c.metric] || c.metric} ${c.op === ">=" ? "≥" : "≤"} ${c.value}`
+    `${METRIC_LABELS[c.metric] || c.metric} ${c.op === ">=" ? "≥" : "≤"} ${c.metric === "price" ? fmt(c.value) : c.value}`
   ).join(" 且 ");
 }
 
@@ -257,8 +262,8 @@ function api(path, options = {}) {
   });
 }
 
-function fmt(v, d = 2) {
-  return (v == null || isNaN(v)) ? "—" : Number(v).toFixed(d);
+function fmt(v) {
+  return VisualLive.price(v);
 }
 function pctStr(v) {
   return (v == null || isNaN(v)) ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
@@ -524,26 +529,27 @@ async function deletePriceAlert(btn) {
   }
 }
 
+function inAshareSession() {
+  const now = new Date();
+  const day = now.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return (mins >= 570 && mins <= 690) || (mins >= 780 && mins <= 900);
+}
+
+const liveQuotes = new VisualLive.LiveMarket({
+  active: () => inAshareSession(),
+  onQuote: (symbol, q) => {
+    VisualMarketStore.store.accept('quote', symbol, q);
+  },
+});
+VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
+  if (!change || change.kind !== 'quote') return;
+  STATE.quotes[change.symbol] = change.value;
+  renderPositions((STATE.overview || {}).positions || []);
+});
 async function loadQuotes(positions) {
-  const symbols = [...new Set(positions.map(p => p.symbol))].slice(0, 50);
-  if (!symbols.length) return;
-  try {
-    const quotes = await api("/api/quotes?symbols=" + encodeURIComponent(symbols.join(",")));
-    STATE.quotes = quotes || {};
-    // 只更新现价单元格, 不重建整表 (保留悬停状态)
-    positions.forEach(p => {
-      const q = STATE.quotes[p.symbol];
-      if (!q) return;
-      const lastEl = document.getElementById("q-last-" + cssEsc(p.symbol));
-      const chgEl = document.getElementById("q-chg-" + cssEsc(p.symbol));
-      if (lastEl) lastEl.textContent = fmt(q.last_price);
-      if (chgEl) {
-        chgEl.textContent = q.change_pct == null ? "—" : pctStr(q.change_pct);
-        chgEl.className = (q.change_pct >= 0 ? "pos" : "neg");
-        chgEl.style.fontSize = "11px";
-      }
-    });
-  } catch (e) { /* 快照失败保持上次值 */ }
+  liveQuotes.setSymbols(positions.map(p => p.symbol));
 }
 
 function cssEsc(s) { return (s || "").replace(/([^a-zA-Z0-9_-])/g, "\\$1"); }

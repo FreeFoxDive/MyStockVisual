@@ -63,41 +63,44 @@ class QuotePollJsTest(unittest.TestCase):
         self.assertIsNotNone(m, f"index.html 中未找到函数 {name}")
         return m.group(0)
 
-    def test_source_has_sse_guards(self):
-        for needle in ("EventSource.OPEN", "quotePollDecision", "quoteStreamRetryDue",
-                       "SSE_STALE_FALLBACK_MS", "SSE_RETRY_MS"):
-            self.assertIn(needle, self.src, f"index.html 缺少 {needle}")
+    def test_shared_transport_loaded(self):
+        self.assertIn('/js/live-market.js', self.src)
+        self.assertIn('/js/market-store.js', self.src)
+        self.assertIn('new VisualLive.LiveMarket', self.src)
 
-    def test_decision_matrix(self):
-        js = (
-            "const SSE_STALE_FALLBACK_MS=30000;\n"
-            "const QUOTE_REFRESH_MS=10000;\n"
-            "const SSE_RETRY_MS=60000;\n"
-            + self._extract("quotePollDecision") + "\n"
-            + self._extract("quoteStreamRetryDue") + "\n"
-            + """
-const out = [];
-const now = 1000000;
-out.push(quotePollDecision(now, now - 5000, true));    // SSE OPEN 5s -> 不轮询
-out.push(quotePollDecision(now, now - 40000, true));   // SSE OPEN 40s(僵尸) -> 兜底并重建
-out.push(quotePollDecision(now, now - 15000, false));  // 非 OPEN 15s -> 轮询
-out.push(quotePollDecision(now, now - 5000, false));   // 非 OPEN 5s -> 不轮询
-out.push(quoteStreamRetryDue(now, true, 0, 0, true));                  // 有 es -> 不重建
-out.push(quoteStreamRetryDue(now, false, now - 70000, 60000, true));   // 过退避 -> 重建
-out.push(quoteStreamRetryDue(now, false, now - 10000, 60000, true));   // 未过退避 -> 不重建
-out.push(quoteStreamRetryDue(now, false, 0, 0, false));                // 不可刷新 -> 不重建
-process.stdout.write(JSON.stringify(out));
-"""
-        )
-        got = json.loads(run_node(js))
-        self.assertEqual(
-            got,
-            [None, "poll_rotate", "poll", None, False, True, False, False],
-        )
+    def test_main_stream_gate_is_global(self):
+        # LiveMarket is constructed before DOMContentLoaded; its active predicate must
+        # see the session gate instead of a callback-local declaration.
+        gate = self.src.index('function canAutoRefresh()')
+        dom_ready = self.src.index("document.addEventListener('DOMContentLoaded'")
+        self.assertLess(gate, dom_ready)
+        self.assertIn('active: () => typeof canAutoRefresh', self.src)
+
+    def test_period_switch_keeps_panels_and_chart_until_data_arrives(self):
+        switch = self._extract("switchPeriod")
+        self.assertIn("fetchData({ retainPanels: true })", switch)
+        self.assertNotIn("chart.clear", switch)
+        self.assertNotIn("fetchStockInfo", switch)
+        self.assertNotIn("fetchDepth", switch)
+        self.assertIn("function renderFetchedKline", self.src)
+        self.assertIn("if (key === STATE._fetchedKlineRenderKey) return false", self.src)
+
+    def test_period_selector_is_fixed_single_row_scroller(self):
+        self.assertIn('id="period-viewport"', self.src)
+        self.assertIn('id="period-scroll-left"', self.src)
+        self.assertIn('id="period-scroll-right"', self.src)
+        self.assertIn('function initPeriodScroller()', self.src)
+        self.assertNotIn('togglePeriodMore()', self.src)
+        self.assertNotIn('class="extra-period"', self.src)
+
+    def test_chart_replace_does_not_clear_canvas_first(self):
+        self.assertNotIn('chart.clear()', self.src)
+        self.assertGreaterEqual(self.src.count('setOption(option, { notMerge: true, lazyUpdate: true, silent: true })'), 2)
 
     def test_inline_scripts_parse(self):
         parser = _InlineScriptParser()
-        parser.feed(self.src)
+        for name in ("index.html", "monitor.html", "trades.html", "screener.html"):
+            parser.feed((INDEX_HTML.parent / name).read_text(encoding="utf-8"))
         blocks = parser.blocks
         self.assertTrue(blocks, "未找到 inline script")
         for i, body in enumerate(blocks):

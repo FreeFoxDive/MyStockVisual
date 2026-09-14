@@ -25,6 +25,7 @@ import datetime as dt_mod
 import decimal as dec_mod
 import feed
 import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_source 惰性反向引用本模块)
+import market_hours  # noqa: E402
 
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
@@ -508,11 +509,12 @@ class TTLCache:
                 del self._cache[key]
         return None
 
-    def set(self, key, data):
+    def set(self, key, data, fetched_at=None):
+        at = time.time() if fetched_at is None else fetched_at
         with self._lock:
             # 如果已存在, 更新并移到末尾
             if key in self._cache:
-                self._cache[key] = {"data": data, "time": time.time()}
+                self._cache[key] = {"data": data, "time": at}
                 self._cache.move_to_end(key)
                 return
             # 超过上限: 淘汰最旧的 (OrderedDict popitem(last=False))
@@ -521,7 +523,7 @@ class TTLCache:
                     self._cache.popitem(last=False)
                 except KeyError:
                     pass
-            self._cache[key] = {"data": data, "time": time.time()}
+            self._cache[key] = {"data": data, "time": at}
 
     def clear(self):
         with self._lock:
@@ -532,11 +534,36 @@ class TTLCache:
 MINUTE_PERIODS = frozenset({"1m", "5m", "15m", "30m", "60m"})
 MINUTE_COUNTS = {"1m": 1200, "5m": 480, "15m": 320, "30m": 320, "60m": 1000}
 
-# 缓存: 日K 120s, 分钟K 60s, 周/月K 300s, 快照 30s, 上限 500 条目
+# 缓存: 日K 120s, 分钟K 60s, 周/月K 300s, 快照 1.25s, 上限 500 条目
 kline_cache = TTLCache(ttl_seconds=120)
 kline_cache_minute = TTLCache(ttl_seconds=60)
 kline_cache_long = TTLCache(ttl_seconds=300)
-quote_cache = TTLCache(ttl_seconds=30)
+# Shared across page connections; 60/min package, reserve 1/5 for other work.
+from live_budget import PacedBudget
+QUOTE_RATE_PER_MIN = 48
+_quote_budget = PacedBudget(QUOTE_RATE_PER_MIN)
+_quote_fetch_lock = threading.Lock()
+_quote_interest_lock = threading.Lock()
+_quote_interests = {}
+_quote_cursor = 0
+quote_cache = TTLCache(ttl_seconds=1.25)
+
+
+def register_quote_interest(token, symbols):
+    with _quote_interest_lock:
+        _quote_interests[token] = tuple(symbols)
+
+
+def unregister_quote_interest(token):
+    with _quote_interest_lock:
+        _quote_interests.pop(token, None)
+
+
+class _QuoteResult(dict):
+    """Budget deferral is not an upstream failure: do not fan out to backup APIs."""
+    def __init__(self):
+        super().__init__()
+        self.deferred = set()
 
 
 # ── 质押数据缓存 ──
@@ -1032,6 +1059,7 @@ def fetch_kline_ex(symbol, period, count, adjust="forward"):
 def _mr_quote_to_std(q, symbol):
     """把麦蕊实时行情 dict 转成标准 quote dict"""
     return {
+        "symbol": symbol,
         "last_price": _safe_float(q.get("p")),
         "prev_close": _safe_float(q.get("yc")),
         "open": _safe_float(q.get("o")),
@@ -1041,7 +1069,9 @@ def _mr_quote_to_std(q, symbol):
         "amount": _safe_float(q.get("cje")),
         "change_pct": _safe_float(q.get("pc")),    # 麦蕊实时 pc = 涨跌幅%
         "amplitude": _safe_float(q.get("zf")),     # zf = 振幅%
-        "turnover_rate": _safe_float(q.get("tr")),  # tr = 换手率% (ETF/指数无此字段)
+        # 基金/股票实时接口通常用 hs，部分接口才提供 tr；两者均为百分数。
+        "turnover_rate": _safe_float(q.get("tr") if q.get("tr") is not None else q.get("hs")),
+        "vol_ratio": _safe_float(q.get("lb")),  # 量比 (实时接口)
         "timestamp": _safe_epoch(q.get("t")),  # 快照更新时间 (epoch 秒, 无则 None)
         "name": _lookup_name(symbol),
     }
@@ -1069,6 +1099,7 @@ def _af_pct(v):
 def _af_quote_to_std(q, symbol):
     """把 AlphaFeed quote dict 转成标准 quote dict（与 _mr_quote_to_std 字段一致）。"""
     return {
+        "symbol": symbol,
         "last_price": _safe_float(q.get("last_price")),
         "prev_close": _safe_float(q.get("prev_close")),
         "open": _safe_float(q.get("open")),
@@ -1079,6 +1110,7 @@ def _af_quote_to_std(q, symbol):
         "change_pct": _safe_float(q.get("change_pct")),
         "amplitude": _af_pct(q.get("amplitude")),        # 小数 → %
         "turnover_rate": _af_pct(q.get("turnover_rate")),  # 小数 → %
+        "vol_ratio": _safe_float(q.get("vol_ratio")),
         "timestamp": _safe_epoch(q.get("timestamp")),  # epoch 秒 (交易所时间)
         "name": q.get("name") or _lookup_name(symbol),
     }
@@ -1124,6 +1156,7 @@ def _fetch_instrument_meta(symbol):
 
 def _fetch_af_quotes(symbols):
     """批量拉 AlphaFeed 快照；失败或缺 OHLCV 的 symbol 不出现在返回中。"""
+    global _quote_cursor
     if not AF_API_KEY:
         return {}
     symbols = list(dict.fromkeys(s for s in symbols if s))
@@ -1133,8 +1166,12 @@ def _fetch_af_quotes(symbols):
 
     try:
         af = get_af()
-        out = {}
+        out = _QuoteResult()
         for batch in _chunks(symbols, QUOTES_BATCH):
+            if not _quote_budget.try_acquire():
+                out.deferred.update(s for s in symbols if s not in out)
+                break
+            _quote_cursor += len(batch)
             df = af.quotes.get(symbols=batch, to_dataframe=True)
             if df is None or getattr(df, "empty", True):
                 continue
@@ -1142,7 +1179,14 @@ def _fetch_af_quotes(symbols):
                 q = _row_to_quote(row)
                 if not q or not q.get("symbol"):
                     continue
-                sym = q["symbol"]
+                # SDK responses may omit the exchange suffix or vary casing;
+                # map back to the normalized request symbol before caching.
+                sym_raw = q["symbol"]
+                sym = normalize_symbol(sym_raw)
+                if sym not in symbols:
+                    code = str(sym_raw).split(".", 1)[0]
+                    sym = next((x for x in symbols if x.split(".", 1)[0] == code), sym)
+                q["symbol"] = sym
                 if _af_quote_valid(q):
                     out[sym] = q
         return out
@@ -1152,10 +1196,30 @@ def _fetch_af_quotes(symbols):
 
 
 def fetch_quotes(symbols, fresh=False):
+    global _quote_cursor
+    symbols = list(dict.fromkeys(normalize_symbol(s) for s in symbols if s))
+    # A concurrent HTTP fallback cannot start a second fetch or overwrite its result.
+    if not _quote_fetch_lock.acquire(blocking=False):
+        return {s: q for s in symbols if (q := quote_cache.get(s)) is not None}
+    try:
+        with _quote_interest_lock:
+            watched = {s for group in _quote_interests.values() for s in group}
+        # One symbol query can serve every connected page (never a universes query).
+        combined = sorted(watched.union(symbols))
+        if combined:
+            offset = _quote_cursor % len(combined)
+            combined = combined[offset:] + combined[:offset]
+        result = _fetch_quotes_locked(combined, fresh=fresh)
+        return {s: result[s] for s in symbols if s in result}
+    finally:
+        _quote_fetch_lock.release()
+
+
+def _fetch_quotes_locked(symbols, fresh=False):
     """批量获取实时快照：AlphaFeed quotes.get 优先，未命中按类型回退麦蕊。
 
     麦蕊回退：指数 index_real_time、ETF fund_real_time、股票 ssjy_more 批量。
-    fresh=True 时跳过缓存强刷，失败/空数据回退到缓存（缓存超 30s 的 get() 返回 None）。
+    fresh=True 时跳过缓存强刷，失败/空数据回退到缓存（缓存到期的 get() 返回 None）。
     返回 {symbol: quote}；未取到的 symbol 不出现在返回字典中。
     """
     symbols = [normalize_symbol(s) for s in symbols if s]
@@ -1163,6 +1227,7 @@ def fetch_quotes(symbols, fresh=False):
     if not symbols:
         return {}
 
+    fetched_at = time.time()
     result = {}
     if not fresh:
         # 缓存优先：命中直接返回，只抓缺失的
@@ -1178,11 +1243,15 @@ def fetch_quotes(symbols, fresh=False):
 
     def _emit_mr(s, q):
         result[s] = _mr_quote_to_std(q, s)
-        quote_cache.set(s, result[s])
+        result[s]["_live_info"] = _live_info_for_quote(s, result[s])
+        result[s]["_revision"] = time.time_ns() // 1000
+        quote_cache.set(s, result[s], fetched_at=fetched_at)
 
     def _emit_af(s, q):
         result[s] = _af_quote_to_std(q, s)
-        quote_cache.set(s, result[s])
+        result[s]["_live_info"] = _live_info_for_quote(s, result[s])
+        result[s]["_revision"] = time.time_ns() // 1000
+        quote_cache.set(s, result[s], fetched_at=fetched_at)
 
     # AlphaFeed 优先（指数 / ETF / 股票统一）
     af_set = list(to_fetch)
@@ -1191,13 +1260,13 @@ def fetch_quotes(symbols, fresh=False):
         with _hkus_lock:
             if not _hkus_quote_bucket.try_acquire():
                 af_set = []
-    for s, q in _fetch_af_quotes(af_set).items():
-        if s in af_set:
-            _emit_af(s, q)
+    af_result = _fetch_af_quotes(af_set)
+    for s, q in af_result.items():
         if s in to_fetch:
             _emit_af(s, q)
 
-    remaining = [s for s in to_fetch if s not in result]
+    deferred = getattr(af_result, "deferred", set())
+    remaining = [s for s in to_fetch if s not in result and s not in deferred]
     if not remaining:
         for s in to_fetch:
             if s not in result:
@@ -1293,12 +1362,67 @@ def _normalize(df, prefer_time=False):
 
 # ── 五档盘口 (分时用) ──
 # AF depth 限额 30/min (实测 429: "Rate limit exceeded (30/min)");
-# 取 2/3 = 20/min 令牌桶, 给监控/其它调用留余量。
+# 取 4/5 = 24/min，滚动窗口无突发限速，给其它调用留余量。
 AF_DEPTH_LIMIT_PER_MIN = float(os.environ.get("AF_DEPTH_RATE_PER_MIN", "30") or "30")
-DEPTH_RATE_PER_MIN = max(1.0, AF_DEPTH_LIMIT_PER_MIN * 2.0 / 3.0)
-_depth_cache = TTLCache(ttl_seconds=2)   # 短 TTL 去重 (同秒多客户端)
+DEPTH_RATE_PER_MIN = max(1.0, AF_DEPTH_LIMIT_PER_MIN * 4.0 / 5.0)
+_depth_cache = TTLCache(ttl_seconds=60.0 / DEPTH_RATE_PER_MIN)
+_depth_fetch_lock = threading.Lock()
 _depth_bucket = None
 _depth_bucket_lock = threading.Lock()
+_mr_depth_bucket = PacedBudget(int(DEPTH_RATE_PER_MIN))
+_depth_day_cache = {}
+_depth_day_cache_date = None
+_depth_day_cache_lock = threading.Lock()
+_DEPTH_DAY_CACHE_FILE = SCRIPT_DIR / ".cache" / "depth_day.json"
+
+
+def _depth_trade_date():
+    """用交易日历的北京时间取得当天日期；周末/假期返回 None。"""
+    now = market_hours.now()
+    return now.strftime("%Y-%m-%d") if market_hours.is_trading_day(now) else None
+
+
+def _depth_day_get(symbol):
+    """盘后/周末读最后交易日五档；进入下一交易日即失效。"""
+    global _depth_day_cache_date
+    with _depth_day_cache_lock:
+        today = _depth_trade_date()
+        if _depth_day_cache_date is not None:
+            if today and _depth_day_cache_date != today:
+                _depth_day_cache.clear()
+                _depth_day_cache_date = None
+                return None
+            return _depth_day_cache.get(symbol)
+        try:
+            raw = json.loads(_DEPTH_DAY_CACHE_FILE.read_text(encoding="utf-8"))
+            cache_date = raw.get("trade_date")
+            if isinstance(cache_date, str) and isinstance(raw.get("rows"), dict):
+                if today and cache_date != today:
+                    return None
+                _depth_day_cache_date = cache_date
+                _depth_day_cache.update(raw["rows"])
+                return _depth_day_cache.get(symbol)
+        except Exception:
+            pass
+    return None
+
+
+def _depth_day_set(symbol, trade_date, value):
+    if not trade_date:
+        return
+    global _depth_day_cache_date
+    with _depth_day_cache_lock:
+        if _depth_day_cache_date != trade_date:
+            _depth_day_cache.clear()
+        _depth_day_cache_date = trade_date
+        _depth_day_cache[symbol] = value
+        try:
+            _DEPTH_DAY_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _DEPTH_DAY_CACHE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"trade_date": trade_date, "rows": _depth_day_cache}, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_DEPTH_DAY_CACHE_FILE)
+        except Exception as e:
+            log.warning("写入当日五档缓存失败: %s", _sanitize_error(e))
 
 
 def _depth_token_bucket():
@@ -1306,40 +1430,87 @@ def _depth_token_bucket():
     if _depth_bucket is None:
         with _depth_bucket_lock:
             if _depth_bucket is None:
-                from feed import TokenBucket
-                _depth_bucket = TokenBucket(int(round(DEPTH_RATE_PER_MIN)))
+                _depth_bucket = PacedBudget(int(DEPTH_RATE_PER_MIN))
     return _depth_bucket
 
 
 def fetch_depth(symbol):
-    """获取五档盘口 (独立令牌桶 2/3 限额 + 2s 缓存); 失败/限流返回 None。
+    if not _depth_fetch_lock.acquire(blocking=False):
+        return _depth_cache.get(normalize_symbol(symbol))
+    try:
+        return _fetch_depth_locked(symbol)
+    finally:
+        _depth_fetch_lock.release()
+
+
+def _fetch_depth_locked(symbol):
+    """获取五档盘口 (独立滚动预算 4/5 限额 + 请求起点计时缓存); 失败/限流返回 None。
 
     返回 {symbol, timestamp, bid_prices, bid_volumes, ask_prices, ask_volumes}。
     """
-    if not AF_API_KEY:
-        return None
     symbol = normalize_symbol(symbol)
     cached = _depth_cache.get(symbol)
     if cached is not None:
         return cached
-    if not _depth_token_bucket().try_acquire(1):
-        return None  # 令牌不足, 本轮跳过 (不缓存, 下次再试)
-    try:
-        d = get_af().depth.get(symbol)
-    except Exception as e:
-        log.warning(f"获取五档失败 {symbol}: {_sanitize_error(e)}")
+    trade_date = _depth_trade_date()
+    # 收盘/午休/盘前不再请求供应商，展示当天盘中最后一份五档。
+    if not market_hours.in_session() or not market_hours.is_trading_day():
+        day_cached = _depth_day_get(symbol)
+        if day_cached is not None:
+            return day_cached
+    # AlphaFeed 优先；无 AF key、AF 限流或返回空时回退麦蕊五档。
+    if AF_API_KEY and _depth_token_bucket().try_acquire(1):
+        fetched_at = time.time()
+        try:
+            d = get_af().depth.get(symbol)
+            # 兼容旧版 SDK 可能返回 {data: {...}} 的包装格式。
+            if isinstance(d, dict) and isinstance(d.get("data"), dict):
+                d = d["data"]
+            if isinstance(d, dict) and d.get("bid_prices"):
+                out = {
+                    "symbol": symbol,
+                    "timestamp": d.get("timestamp"),
+                    "bid_prices": d.get("bid_prices") or [],
+                    "bid_volumes": d.get("bid_volumes") or [],
+                    "ask_prices": d.get("ask_prices") or [],
+                    "ask_volumes": d.get("ask_volumes") or [],
+                }
+                out["_revision"] = time.time_ns() // 1000
+                _depth_cache.set(symbol, out, fetched_at=fetched_at)
+                if market_hours.in_session():
+                    _depth_day_set(symbol, trade_date, out)
+                return out
+        except Exception as e:
+            log.warning(f"AlphaFeed 获取五档失败 {symbol}: {_sanitize_error(e)}")
+
+    if not MAIRUI_API_KEY or not _mr_depth_bucket.try_acquire(1):
         return None
-    if not isinstance(d, dict) or not d.get("bid_prices"):
+    try:
+        raw = get_mr().stock_real_five(symbol.split(".")[0])
+    except Exception as e:
+        log.warning(f"麦蕊获取五档失败 {symbol}: {_sanitize_error(e)}")
+        return None
+    row = raw[0] if isinstance(raw, list) and raw else raw if isinstance(raw, dict) else None
+    if not isinstance(row, dict):
+        return None
+    bids = [_safe_float(row.get(f"pb{i}") if row.get(f"pb{i}") is not None else row.get("pb")) for i in range(1, 6)]
+    bid_volumes = [_safe_float(row.get(f"vb{i}") if row.get(f"vb{i}") is not None else row.get("vb")) for i in range(1, 6)]
+    asks = [_safe_float(row.get(f"ps{i}") if row.get(f"ps{i}") is not None else row.get("ps")) for i in range(1, 6)]
+    ask_volumes = [_safe_float(row.get(f"vs{i}") if row.get(f"vs{i}") is not None else row.get("vs")) for i in range(1, 6)]
+    if not any(v is not None for v in bids + asks):
         return None
     out = {
         "symbol": symbol,
-        "timestamp": d.get("timestamp"),
-        "bid_prices": d.get("bid_prices") or [],
-        "bid_volumes": d.get("bid_volumes") or [],
-        "ask_prices": d.get("ask_prices") or [],
-        "ask_volumes": d.get("ask_volumes") or [],
+        "timestamp": _safe_epoch(row.get("t")) or time.time(),
+        "bid_prices": bids,
+        "bid_volumes": bid_volumes,
+        "ask_prices": asks,
+        "ask_volumes": ask_volumes,
+        "_revision": time.time_ns() // 1000,
     }
     _depth_cache.set(symbol, out)
+    if market_hours.in_session():
+        _depth_day_set(symbol, trade_date, out)
     return out
 
 
@@ -2055,6 +2226,37 @@ def _trade_status(quote):
 
 
 _STOCK_INFO_TTL = 60.0
+_info_quote_bases = {}
+
+
+def _live_info_for_quote(symbol, quote):
+    """Update quote-dependent info without refetching instruments/history per tick."""
+    code, label = _trade_status(quote)
+    out = {"trade_status": code, "trade_status_text": label}
+    # Mairui fund/stock snapshots may already carry lb (量比); preserve it when
+    # there is no daily-history basis yet, so the first live frame is useful.
+    raw_ratio = _safe_float((quote or {}).get("vol_ratio"))
+    if raw_ratio is not None:
+        out["vol_ratio"] = raw_ratio
+    with _stock_info_lock:
+        basis = _info_quote_bases.get(symbol)
+    if not basis:
+        return out
+    day = market_hours.now().date()
+    if basis["day"] != day:
+        return out
+    price = quote.get("last_price")
+    for n, base in basis["closes"].items():
+        if price is not None and base and base > 0:
+            out[f"chg_{n}d"] = (price / base - 1) * 100
+    elapsed = market_hours.session_elapsed_minutes()
+    avg = basis["avg_volume"]
+    volume = quote.get("volume")
+    if avg and avg > 0 and volume is not None and elapsed > 0:
+        out["vol_ratio"] = (volume / elapsed) / (avg / 240.0)
+    return out
+
+
 _stock_info_cache: dict = {}
 _stock_info_lock = threading.Lock()
 
@@ -2145,6 +2347,12 @@ def fetch_stock_info(symbol, force=False):
         "limit_estimated": estimated,
     }
     with _stock_info_lock:
+        if df is not None and len(df) >= 6:
+            _info_quote_bases[symbol] = {
+                "day": _last_bar_date(df),
+                "closes": {n: closes[-n - 1] for n in (3, 5, 10) if len(closes) > n},
+                "avg_volume": _safe_float(df["volume"].iloc[-6:-1].mean()),
+            }
         _stock_info_cache[symbol] = (now, info)
     return info
 

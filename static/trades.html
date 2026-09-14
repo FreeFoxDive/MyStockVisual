@@ -300,6 +300,11 @@ td.neg { color: var(--down-text); font-weight: 600; }
 })();
 </script>
 <script src="/js/api.js"></script>
+<script src="/js/live-market.js"></script>
+<script src="/vendor/vue-3.5.13.global.prod.js"></script>
+<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
+<script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
+<script src="/js/market-store.js"></script>
 </head>
 <body>
 
@@ -464,7 +469,7 @@ td.neg { color: var(--down-text); font-weight: 600; }
         <div class="grid">
           <div>
             <label>买入价 <span style="color:var(--up-text)">*</span></label>
-            <input type="number" id="t-entry-price" min="0" step="0.01" placeholder="如 10.50">
+            <input type="number" id="t-entry-price" min="0" step="0.001" placeholder="如 10.50">
           </div>
           <div>
             <label>买入日期 <span style="color:var(--up-text)">*</span></label>
@@ -485,7 +490,7 @@ td.neg { color: var(--down-text); font-weight: 600; }
         <div class="grid">
           <div>
             <label>退出价 <span style="color:var(--up-text)">*</span></label>
-            <input type="number" id="t-exit-price" min="0" step="0.01" placeholder="如 12.00">
+            <input type="number" id="t-exit-price" min="0" step="0.001" placeholder="如 12.00">
           </div>
           <div>
             <label>卖出日期 <span style="color:var(--up-text)">*</span></label>
@@ -516,15 +521,15 @@ td.neg { color: var(--down-text); font-weight: 600; }
       <div class="grid">
         <div>
           <label>止盈价</label>
-          <input type="number" id="t-take-profit" min="0" step="0.01" placeholder="最高，须 &gt; 保本">
+          <input type="number" id="t-take-profit" min="0" step="0.001" placeholder="最高，须 &gt; 保本">
         </div>
         <div>
           <label>保本价</label>
-          <input type="number" id="t-breakeven" min="0" step="0.01" placeholder="中间，止盈 &gt; 保本 &gt; 止损">
+          <input type="number" id="t-breakeven" min="0" step="0.001" placeholder="中间，止盈 &gt; 保本 &gt; 止损">
         </div>
         <div>
           <label>止损价</label>
-          <input type="number" id="t-stop-loss" min="0" step="0.01" placeholder="最低，须 &lt; 保本">
+          <input type="number" id="t-stop-loss" min="0" step="0.001" placeholder="最低，须 &lt; 保本">
         </div>
       </div>
     </fieldset>
@@ -1036,33 +1041,33 @@ async function loadStats() {
 }
 
 // 现价：持仓优先全量 + 当前页平仓 (受筛选/分页影响), 失败保留旧值, 仅首次就失败的记 null
+const liveQuotes = new VisualLive.LiveMarket({
+  active: () => !!state.user && inAshareSession(),
+  onQuote: (symbol, q) => {
+    VisualMarketStore.store.accept('quote', symbol, q);
+  },
+});
+VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
+  if (!change || change.kind !== 'quote') return;
+  state.quotes[change.symbol] = change.value;
+  if (state._quotePaint) return;
+  state._quotePaint = requestAnimationFrame(() => {
+    state._quotePaint = null;
+    if (!state.stats) return;
+    renderStatCards(state.stats.summary);
+    renderTable();
+    renderHoldChart();
+    renderHoldModelTable();
+  });
+});
 async function refreshQuotes(fresh) {
   if (!state.stats) return;
-  const openSyms = (state.stats.open_positions || []).map(p => p.symbol);
-  const closedSyms = (state.trades || []).filter(t => t.status === 'closed').map(t => t.symbol);
-  const symbols = [...new Set([...openSyms, ...closedSyms])];
-  if (!symbols.length) return;
-  try {
-    const data = await api(`/api/quotes?symbols=${encodeURIComponent(symbols.join(','))}&fresh=${fresh ? 1 : 0}`);
-    for (const s of symbols) {
-      const q = data[s];
-      if (q && q.last_price != null) {
-        state.quotes[s] = q;                              // 成功 → 更新
-      } else if (state.quotes[s] === undefined) {
-        state.quotes[s] = null;                           // 从未取到过 → 记 null 显示 —
-      }
-      // 已有旧值但本次没取到 → 保留旧值, 不打断显示
-    }
-  } catch (e) {
-    for (const s of symbols) {
-      if (state.quotes[s] === undefined) state.quotes[s] = null;
-    }
-  }
-  renderStatCards(state.stats.summary);
-  renderTable();
-  renderHoldChart();
-  renderHoldModelTable();
+  const symbols = [...(state.stats.open_positions || []).map(p => p.symbol),
+    ...(state.trades || []).filter(t => t.status === 'closed').map(t => t.symbol)];
+  liveQuotes.setSymbols(symbols);
+  if (fresh) liveQuotes.refresh();
 }
+
 
 // 持仓聚合 (仅未平仓): 市值 = Σ现价×数量, 浮盈亏 = Σ(现价-买入价)×数量
 function openPositionAggregates() {
@@ -1088,10 +1093,7 @@ function fmtMoney(v, signed = false) {
 
 // 股价：最多三位小数，去掉尾部无意义 0（1.760 → 1.76）
 function fmtPrice(v) {
-  if (v === null || v === undefined) return '—';
-  const n = Number(v);
-  if (!Number.isFinite(n)) return '—';
-  return Number(n.toFixed(3)).toString();
+  return VisualLive.price(v);
 }
 
 // 金额缩写: 达到万位显示 n.xx万, 千位显示 n.xx千, 否则原值 (两位小数); signed 时正数带 +
@@ -1136,7 +1138,7 @@ function formatRiskPrices(t, curPrice) {
     ['保本', t.breakeven],
     ['止损', t.stop_loss],
   ].map(([label, val]) => {
-    const px = val == null ? '—' : val;
+    const px = fmtPrice(val);
     return `<span class="k">${label}</span>${px}${fmtGapPct(val, last)}`;
   });
   return { html: rows.join('<br>'), warn: status === 'warn' };
@@ -1890,8 +1892,8 @@ function renderTable() {
         <td class="sym" data-label="代码"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
         <td data-label="状态">${badge}</td>
         <td data-label="模型">${escHtml(modelLabel(t.model_id))}</td>
-        <td data-label="${isBatch ? '成本价' : '买入价'}">${isBatch ? (t.status === 'closed' ? (t.cost_price != null ? t.cost_price : '—') : t.entry_price) : t.entry_price}</td>
-        <td class="${exitCls}" data-label="退出价">${t.exit_price === null ? '—' : t.exit_price}</td>
+        <td data-label="${isBatch ? '成本价' : '买入价'}">${fmtPrice(isBatch && t.status === 'closed' ? t.cost_price : t.entry_price)}</td>
+        <td class="${exitCls}" data-label="退出价">${fmtPrice(t.exit_price)}</td>
         <td class="${curCls}" data-label="现价">${fmtPrice(curPrice)}</td>
         <td data-label="${isBatch ? (t.status === 'closed' ? '总股数' : '净持仓') : '数量'}">${isBatch ? (t.status === 'closed' ? (t.total_buy_qty != null ? t.total_buy_qty : t.quantity) : t.quantity) : t.quantity}</td>
         <td class="risk-mini${risk.warn ? ' warn' : ''}" data-label="止盈/保本/止损">${risk.html}</td>
@@ -2255,7 +2257,7 @@ function legRowHtml(leg, idx) {
       </div>
       <div>
         <label>价格 <span style="color:var(--up-text)">*</span></label>
-        <input type="number" min="0" step="0.01" data-leg-field="price" value="${leg.price}" placeholder="如 10.50" oninput="setLegField(${idx},'price',this.value)">
+        <input type="number" min="0" step="0.001" data-leg-field="price" value="${leg.price}" placeholder="如 10.50" oninput="setLegField(${idx},'price',this.value)">
       </div>
       <div>
         <label>数量 <span style="color:var(--up-text)">*</span></label>
@@ -2530,11 +2532,7 @@ function inAshareSession() {
          (mins >= 13 * 60 && mins <= 15 * 60);
 }
 
-setInterval(() => {
-  if (!state.user) return;
-  if (!inAshareSession()) return;
-  refreshQuotes(false);
-}, 30000);
+// Quotes are maintained by LiveMarket, including fallback and recovery.
 </script>
 </body>
 </html>

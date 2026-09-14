@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import pandas as pd
 from flask import request
@@ -39,7 +40,7 @@ log = logging.getLogger("api")
 DAILY_COUNT = 3 * 252 + 250  # 1006
 
 # 末根增量接口的短 TTL: 把多客户端/10s 轮询合并成受控的上游调用量
-KLINE_TAIL_TTL = max(1.0, float(os.environ.get("KLINE_TAIL_TTL", "8")))
+KLINE_TAIL_TTL = max(5.0, float(os.environ.get("KLINE_TAIL_TTL", "10")))
 _tail_cache = TTLCache(KLINE_TAIL_TTL)
 
 
@@ -141,6 +142,7 @@ def kline():
     except ValueError:
         count = default_count
 
+    revision = time.time_ns() // 1000
     cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
     skip_1d_cache = period == "1d" and market_hours.is_trading_day(
         market_hours.now().date().isoformat()
@@ -251,6 +253,7 @@ def kline():
         "name": name,
         "period": period,
         "count": len(klines),
+        "_revision": revision,
         "is_etf": is_etf,
         "is_index": _is_index_symbol(symbol),
         "float_shares": inst_meta.get("float_shares"),
@@ -305,28 +308,39 @@ def kline_tail():
     except ValueError:
         n = 1
 
+    try:
+        return _json(build_kline_tail(symbol, period, count, adjust, n))
+    except LookupError as e:
+        return _error(str(e), 404)
+    except Exception:
+        return _error("指标更新失败", 500)
+
+
+def build_kline_tail(symbol, period, count, adjust, n=2):
     cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}:{n}"
     cached = _tail_cache.get(cache_key)
     if cached is not None:
-        return _json(cached)
+        return cached
 
+    revision = time.time_ns() // 1000
     try:
         df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust)
     except Exception as e:
         log.warning("获取K线失败(tail) %s %s: %s", symbol, period, _sanitize_error(e))
-        return _error("获取K线失败，请稍后重试", 500)
+        raise RuntimeError("获取K线失败") from e
     if df is None:
-        return _error(f"无法获取 {symbol} 的K线数据", 404)
+        raise LookupError(f"无法获取 {symbol} 的K线数据")
     try:
         df, _ind = compute_all_indicators(df, period)
     except Exception as e:
         log.warning("指标计算失败(tail) %s %s: %s", symbol, period, _sanitize_error(e))
-        return _error("指标计算失败", 500)
+        raise RuntimeError("指标计算失败") from e
 
     bars = [_serialize_bar(idx, row, period) for idx, row in df.tail(n).iterrows()]
     now = market_hours.now()
     resp = {
         "symbol": symbol,
+        "_revision": revision,
         "name": name or symbol,
         "period": period,
         "count": len(bars),
@@ -339,7 +353,7 @@ def kline_tail():
         },
     }
     _tail_cache.set(cache_key, resp)
-    return _json(resp)
+    return resp
 
 
 @api_bp.route("/api/chips", methods=["GET"])

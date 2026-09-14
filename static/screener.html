@@ -71,12 +71,17 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
   </div>
   <div class="table-wrap" id="result-wrap" style="display:none">
     <table>
-      <thead><tr><th>代码</th><th>名称</th><th>现价</th><th>5日涨幅</th><th>筹码获利盘</th></tr></thead>
+      <thead><tr><th>代码</th><th>名称</th><th>现价</th><th title="扫描时计算的筛选指标">5日涨幅</th><th title="扫描时计算的筛选指标">筹码获利盘</th></tr></thead>
       <tbody id="result-tbody"></tbody>
     </table>
   </div>
 </div>
 <script src="/js/api.js"></script>
+<script src="/js/live-market.js"></script>
+<script src="/vendor/vue-3.5.13.global.prod.js"></script>
+<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
+<script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
+<script src="/js/market-store.js"></script>
 <script>
 const METRIC_LABELS = {
   macd_cross_up: "MACD 金叉", above_ma20: "收盘站上 MA20",
@@ -132,6 +137,19 @@ function setStopBtn(on) {
   document.getElementById("btn-stop").style.display = on ? "" : "none";
 }
 
+const liveQuotes = new VisualLive.LiveMarket({
+  onQuote: (symbol, q) => {
+    VisualMarketStore.store.accept('quote', symbol, q);
+  },
+});
+VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
+  if (!change || change.kind !== 'quote') return;
+  const { symbol, value: q } = change;
+    document.querySelectorAll('[data-live-price]').forEach(el => {
+      if (el.dataset.livePrice === symbol) el.textContent = VisualLive.price(q.last_price);
+    });
+});
+
 // 页面加载: 恢复进行中的扫描或最近一次结果 (与后台任务解耦, 关页不中断)
 (async function initResume() {
   try {
@@ -165,6 +183,7 @@ async function pollStatus() {
   } catch (e) { scanning = false; }
 }
 function renderResults(results) {
+  liveQuotes.setSymbols(results.map(r => r.symbol));
   const wrap = document.getElementById("result-wrap");
   if (!results.length) {
     wrap.style.display = "block";
@@ -174,7 +193,7 @@ function renderResults(results) {
   wrap.style.display = "block";
   document.getElementById("result-tbody").innerHTML = results.map(r => `<tr>
     <td class="sym"><a href="/?symbol=${encodeURIComponent(r.symbol)}">${esc(r.symbol)}</a></td>
-    <td>${esc(r.name)}</td><td>${r.close == null ? "—" : r.close.toFixed(2)}</td>
+    <td>${esc(r.name)}</td><td data-live-price="${esc(r.symbol)}">${VisualLive.price(liveQuotes.get(r.symbol)?.last_price ?? r.close)}</td>
     <td class="${(r.change_pct || 0) >= 0 ? "pos" : "neg"}">${r.change_pct == null ? "—" : r.change_pct.toFixed(2) + "%"}</td>
     <td>${r.chip_profit == null ? "—" : r.chip_profit.toFixed(1) + "%"}</td></tr>`).join("");
 }

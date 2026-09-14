@@ -174,9 +174,17 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertIn("_lastInfoAt", self.src)
         self.assertGreaterEqual(self.src.count("fetchStockInfo()"), 3)
 
-    def test_poll_uses_depth_sec_on(self):
-        idx = self.src.index("五档: 盘中约 3s 刷新")
-        self.assertIn("depthSecOn()", self.src[idx:idx + 160])
+    def test_stream_uses_depth_sec_on(self):
+        self.assertIn("depthSecOn()", _extract_fn(self.src, "ensureQuoteStream"))
+
+    def test_live_quote_patches_price_line_for_all_views(self):
+        on_quote = _extract_fn(self.src, "updateLivePriceLine")
+        self.assertIn("STATE.period === 'intraday'", on_quote)
+        self.assertIn("STATE.klineData", on_quote)
+        self.assertIn("setOption", on_quote)
+        # SSE quote callback must invoke the lightweight line patch without
+        # rebuilding the whole chart on every 1.25s snapshot.
+        self.assertIn("updateLivePriceLine(q, symbol)", self.src)
 
     def test_grid_uses_panel_grid_left(self):
         self.assertIn("panelGridLeft()", self.src)

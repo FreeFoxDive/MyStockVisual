@@ -55,7 +55,7 @@ STATIC_DIR = SCRIPT_DIR / "static"
 
 # 版本化第三方库 (文件名带版本号 → URL 变则内容变): 可长缓存; 其余静态一律 no-store
 # (HTML / 无版本 JS 改了必须立刻生效, 否则用户拿到旧 JS 与后端口径不一致)
-_IMMUTABLE_VENDOR = re.compile(r"^vendor/[\w.-]+-\d[\w.]*\.min\.(?:js|css)$")
+_IMMUTABLE_VENDOR = re.compile(r"^vendor/[\w.-]+-\d[\w.]*\.(?:js|css)$")
 _VENDOR_CACHE = "public, max-age=31536000, immutable"
 
 

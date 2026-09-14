@@ -117,6 +117,22 @@ class QuoteSseTest(unittest.TestCase):
         self.assertEqual(payload[SYM]["last_price"], 10.5, "注入标志不得丢失原字段")
         self.assertNotIn("is_trading_day", quotes[SYM], "不得原地改写 fetch_quotes 的返回条目")
 
+    def test_depth_named_event_and_cleanup(self):
+        depth = {"symbol": SYM, "bid_prices": [10], "ask_prices": [11], "_revision": 1}
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}), \
+             mock.patch.object(self.stream.market, "fetch_depth", return_value=depth):
+            _, frames = self._frames(f"/api/stream/quotes?symbols={SYM}&depth=1", n=3)
+        self.assertTrue(frames[2].startswith("event: depth\ndata: "))
+        self.assertFalse(self.stream.market._quote_interests)
+
+    def test_indicators_named_event(self):
+        payload = {"symbol": SYM, "bars": [{"date": "2026-09-14", "close": 10}], "_revision": 2}
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}), \
+             mock.patch("api.kline.build_kline_tail", return_value=payload) as build:
+            _, frames = self._frames(f"/api/stream/quotes?symbols={SYM}&tail=1d&count=1006&adjust=none", n=3)
+        self.assertTrue(frames[2].startswith("event: bars\ndata: "))
+        build.assert_called_once_with(SYM, "1d", 1006, "none")
+
     def test_symbols_truncated_to_max(self):
         fetch = mock.Mock(return_value={})
         syms = ",".join(f"60000{i}.SH" for i in range(self.stream.QUOTE_SSE_MAX_SYMBOLS + 10))

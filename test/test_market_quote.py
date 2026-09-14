@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from datetime import datetime
 from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -90,12 +91,15 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
 
     def test_etf_fallback_mairui_when_af_empty(self):
         api = mock.Mock()
-        api.fund_real_time.return_value = _mr_row()
+        api.fund_real_time.return_value = _mr_row(hs=0.42, lb=1.35)
         with mock.patch.object(market_mod, "_fetch_af_quotes", return_value={}):
             with mock.patch.object(market_mod, "get_mr", return_value=api):
                 out = market_mod.fetch_quotes(["510300.SH"], fresh=True)
         api.fund_real_time.assert_called_once_with("510300")
         self.assertEqual(out["510300.SH"]["last_price"], 10.5)
+        self.assertEqual(out["510300.SH"]["symbol"], "510300.SH")
+        self.assertAlmostEqual(out["510300.SH"]["turnover_rate"], 0.42)
+        self.assertAlmostEqual(out["510300.SH"]["vol_ratio"], 1.35)
 
     def test_stock_fallback_mairui_when_af_empty(self):
         api = mock.Mock()
@@ -229,6 +233,24 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
              mock.patch.object(market_mod, "get_af", return_value=af):
             self.assertIsNone(market_mod.fetch_depth("600519.SH"))
 
+    def test_fetch_depth_falls_back_to_mairui_five(self):
+        market_mod._depth_cache._cache.clear()
+        market_mod._depth_bucket = None
+        market_mod._mr_depth_bucket = market_mod.PacedBudget(24)
+        mr = mock.Mock()
+        mr.stock_real_five.return_value = [{
+            "t": "2026-09-14 10:00:00",
+            "pb1": 10.0, "vb1": 100, "pb2": 9.9, "vb2": 90,
+            "ps1": 10.1, "vs1": 120, "ps2": 10.2, "vs2": 130,
+        }]
+        with mock.patch.object(market_mod, "AF_API_KEY", ""), \
+             mock.patch.object(market_mod, "MAIRUI_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_mr", return_value=mr):
+            out = market_mod.fetch_depth("600519.SH")
+        self.assertEqual(out["bid_prices"][:2], [10.0, 9.9])
+        self.assertEqual(out["ask_volumes"][:2], [120, 130])
+        mr.stock_real_five.assert_called_once_with("600519")
+
     def test_quote_cache_skips_af(self):
         api = mock.Mock()
         with mock.patch.object(market_mod, "_fetch_af_quotes") as fetch_af:
@@ -239,6 +261,63 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
         self.assertEqual(first["600519.SH"]["last_price"], 10.5)
         self.assertEqual(second["600519.SH"]["last_price"], 10.5)
         fetch_af.assert_called_once()
+
+
+class DepthDayCacheTest(unittest.TestCase):
+    def setUp(self):
+        market_mod._depth_cache._cache.clear()
+        market_mod._depth_day_cache.clear()
+        market_mod._depth_day_cache_date = None
+        market_mod._depth_bucket = None
+        fake_file = mock.Mock()
+        fake_file.read_text.side_effect = FileNotFoundError()
+        self.file_patch = mock.patch.object(
+            market_mod, "_DEPTH_DAY_CACHE_FILE", fake_file
+        )
+        self.file_patch.start()
+        self.addCleanup(self.file_patch.stop)
+
+    def _af(self):
+        af = mock.Mock()
+        af.depth.get.return_value = {
+            "symbol": "002472.SZ", "timestamp": 1,
+            "bid_prices": [10], "bid_volumes": [100],
+            "ask_prices": [11], "ask_volumes": [200],
+        }
+        return af
+
+    def test_closed_and_weekend_keep_last_trading_day_depth(self):
+        af = self._af()
+        friday = datetime(2026, 9, 11, 14, 30)
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod.market_hours, "now", return_value=friday), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
+             mock.patch.object(market_mod.market_hours, "in_session", return_value=True):
+            first = market_mod.fetch_depth("002472.SZ")
+        market_mod._depth_cache._cache.clear()
+        saturday = datetime(2026, 9, 12, 12, 0)
+        with mock.patch.object(market_mod.market_hours, "now", return_value=saturday), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=False), \
+             mock.patch.object(market_mod.market_hours, "in_session", return_value=False):
+            self.assertEqual(market_mod.fetch_depth("002472.SZ"), first)
+        af.depth.get.assert_called_once()
+
+    def test_next_trading_day_expires_previous_depth(self):
+        af = self._af()
+        friday = datetime(2026, 9, 11, 14, 30)
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod.market_hours, "now", return_value=friday), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
+             mock.patch.object(market_mod.market_hours, "in_session", return_value=True):
+            market_mod.fetch_depth("002472.SZ")
+        market_mod._depth_cache._cache.clear()
+        monday = datetime(2026, 9, 14, 9, 0)
+        with mock.patch.object(market_mod.market_hours, "now", return_value=monday), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
+             mock.patch.object(market_mod.market_hours, "in_session", return_value=False):
+            self.assertIsNone(market_mod._depth_day_get("002472.SZ"))
 
 
 if __name__ == "__main__":
