@@ -237,6 +237,66 @@
 若所在网络放行 push2his，则自动恢复全量历史，无需改配置；降级提示只在回退时出现。
 
 
+## 5. change_pct 单位不一致 → 「当日涨跌幅%」预警两条路径都失效
+
+**状态**：已修复（2026-09-15，AF 官方文档确认 `ext.change_pct` 为小数，如 0.01 表示 1%）。
+
+### 现象
+
+价格预警中「当日涨跌幅」条件（如 `<= -2` 表示跌 2%）从不触发；而页头涨跌幅显示正常 —— 该 bug
+因此长期未被发现。
+
+### 根因
+
+标准 quote 约定 `change_pct` 为百分数（麦蕊 `pc` 即百分数），但 AlphaFeed 官方返回**小数**。
+`feed._row_to_quote` 作为 AF 行情唯一出口原样透传小数，而 `_af_quote_to_std` 只对
+amplitude/turnover_rate 做了 ×100（`_af_pct`），唯独漏了 change_pct。后果按路径分：
+
+| 路径 | change_pct 实际值 | 预警比较 | 结果 |
+|---|---|---|---|
+| AF 主路径（monitor `RestFeed.quotes`） | 小数：跌 5% 时为 `-0.05` | `-0.05 <= -2` 恒 False | 永不触发 |
+| 麦蕊回退路径 | 原实现刻意置 `None`（"避免差 100 倍"） | `val is None` 条件不满足 | 同样不触发 |
+
+前端主显示不受影响：`updateQuoteDisplay` 用 `last_price/prev_close` 重算覆盖了原始值；
+但初次 K 线加载时 `index.html` 曾直读原始值，会闪现 100 倍偏差。
+
+### 修复
+
+- `feed._row_to_quote`：在唯一出口把 `ext.change_pct` ×100 统一为百分数（None 保持 None），
+  monitor 与 market 两条路径同时修正；
+- `feed.RestFeed._fallback`：回退源 `market.fetch_quotes` 输出已是百分数，直接透传，不再置 None；
+- `market._af_quote_to_std`：直通保持（入口已统一），amplitude/turnover_rate 的 `_af_pct` 不动。
+
+- 测试：`test_market_quote.py::test_row_to_quote_change_pct_decimal_to_pct`（单位契约 + None 透传）、
+  `test_af_chain_percent_end_to_end`（AF 原始行 → std 全线百分数）、
+  `test_monitor.py::test_quotes_parses_dataframe`（监控路径 0.05 → 5.0）、
+  `test_monitor_trendline.py`（回退路径透传断言更新）。
+
+
+## 6. 健壮性批量修复（2026-09-15 review）
+
+| # | 问题 | 修复 | 测试 |
+|---|---|---|---|
+| 1 | 麦蕊快照回退无主动限速：AF 未配置/故障时 1.25s 轮询把免费额度在几分钟内打光，只剩被动 429 退避 | `_mr_quote_budget`（`MR_QUOTE_RATE_PER_MIN`，默认 20/min），计数粒度=麦蕊 HTTP 调用，桶空本轮沿用缓存 | `test_market_quote.py::test_mairui_fallback_budget_exhausted_skips` / `test_mairui_fallback_budget_bounds_calls` |
+| 2 | kline 磁盘缓存 `DiskCache.set` 直写终态路径，并发写/崩溃留截断 `.json.gz` | 唯一临时文件（`.tmp-<pid>-<hex>`）+ `os.replace`；`screener_last.json` 同模式 | `test_market_caches.py::DiskCacheAtomicWriteTest` |
+| 3 | 磁盘缓存清理（24h/50MB）只在进程启动执行，常驻容器永不清理 | 6h `_search_index_scheduler` 循环顺带 `cleanup()`；并清理 `.cache` 根下 >24h 的空 `tmp*` 目录（`cleanup_cache_tmp_dirs`）与 klines 下 >1h 的 `.tmp-*` 残留 | `test_market_caches.py::CleanupTmpDirsTest` |
+| 4 | `monitor_alerts` 表 append-only 无限增长 | `prune_monitor_alerts()`（`MONITOR_ALERT_RETENTION_DAYS=365`），monitor 每日首轮调用 | `test_trades.py::test_prune_monitor_alerts_retention` / `test_prune_monitor_alerts_custom_days` |
+| 5 | `api/cn_data` 失败无负缓存：上游挂掉时每请求阻塞 3 次重试 ~2.4s | 失败记 `_fail_ts`，`FAIL_TTL=300s` 窗口内直接回退旧数据或报错 | `test_cn_data_api.py::test_negative_cache_skips_retry_within_fail_ttl` / `test_negative_cache_expires_after_fail_ttl` |
+| 6 | AF 预算中断时 deferred 集合误伤已请求未返回的标的（典型指数），跳过麦蕊回退一轮 | 只 defer 尚未请求的批次 | `test_market_quote.py`（回退用例回归覆盖） |
+| 7 | `sessions` 过期行只在原 token 复现时删除，被遗弃登录无限累积 | `create_session` 顺带 `DELETE FROM sessions WHERE expires_at < ?` | `test_trades.py::test_create_session_sweeps_expired_rows` |
+| 8 | 前端 `pctLabel` 等不归一负零，`-0.004` 渲染成 `▼ -0.00%` | 新增 `normPct`（\|v\|<0.005 → 0），应用于 pctLabel/股票信息/溢价/tooltip/canvas 各格式化点 | — |
+| 9 | ETF 换手回算在 `amount` 缺失时默认按"股"猜单位，可能差 100 倍 | `amount` 缺失时不回算不显示（单位自证） | — |
+| 10 | `quote_cache` TTL 从抓取开始计时，慢上游（~1s）时缓存有效期只剩 ~0.25s | emit 时取当前时间作 TTL 起点 | — |
+
+### 已知取舍（本次不修）
+
+- 港/美股 AF 令牌桶耗尽会清空整轮抓取集（`market.py` `_fetch_quotes_locked` 的 `af_set = []`），
+  拖累 A 股快照走麦蕊回退 —— 港/美股功能暂缓，只要盯盘集合不含港/美标的即不触发；
+- 港/美股量比沿用 A 股 240 分钟会话折算，数值仅近似；
+- 会话令牌明文存 SQLite（见 README 安全节，库文件泄露风险自担）；
+- `compute_stats` 全量加载 + 批次交易逐条开连接（个人规模无感）。
+
+
 ## L2 数据（十档/逐笔）获取方式调研
 
 - 结论：**网页版扫码登录方案不可行**。扫码只能获得网页会话，L2 十档/逐笔走的是各平台（东财/同花顺/富途）非公开 WebSocket 协议且绑定付费会员账号——需要逆向私有协议、维持易失效会话，稳定性差且有合规风险。

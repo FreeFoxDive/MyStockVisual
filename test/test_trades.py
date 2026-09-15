@@ -249,6 +249,23 @@ class TestAuth(TradesTestCase):
                          (token,))
         self.assertIsNone(trades.get_session(token))
 
+    def test_create_session_sweeps_expired_rows(self):
+        """新建会话时顺带清扫全部过期行 (原 token 不再复现的被遗弃登录)。"""
+        uid = self._make_user("sweeper", "secret123")
+        token, _ = trades.create_session(uid)
+        with trades.get_conn() as conn:
+            conn.execute("UPDATE sessions SET expires_at='2000-01-01T00:00:00' WHERE token=?",
+                         (token,))
+            conn.commit()
+            n = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()["c"]
+            self.assertEqual(n, 1, "过期行此时仍在 (get_session 才惰性删)")
+        token2, _ = trades.create_session(uid)
+        with trades.get_conn() as conn:
+            rows = conn.execute("SELECT token FROM sessions").fetchall()
+        self.assertEqual(len(rows), 1, "过期行应被顺带清扫")
+        self.assertEqual(rows[0]["token"], token2)
+        self.assertIsNotNone(trades.get_session(token2))
+
 
 # ---------------------------------------------------------------------------
 # 4. 用户管理
@@ -1173,6 +1190,40 @@ class TestRiskPricesAndMonitorAuth(TradesTestCase):
         self.assertEqual(last["trade_date"], "2026-08-19")
         rows = trades.list_monitor_alerts(uid)
         self.assertEqual(len(rows), 1)
+
+    def test_prune_monitor_alerts_retention(self):
+        uid = self._make_user()
+        t = trades.create_trade(uid, self._open(take_profit=240, stop_loss=180, breakeven=200))
+        trades.insert_monitor_alert(uid, t["id"], t["symbol"], "accel_down", "2026-08-19")
+        trades.insert_monitor_alert(uid, t["id"], t["symbol"], "hold_expire", "2026-09-01")
+        # 第一条 fired_at 改到保留期之外
+        old_iso = (trades._now() - timedelta(days=trades.MONITOR_ALERT_RETENTION_DAYS + 5)
+                   ).isoformat(timespec="seconds")
+        conn = trades.get_conn()
+        try:
+            conn.execute(
+                "UPDATE monitor_alerts SET fired_at=? WHERE alert_type='accel_down'",
+                (old_iso,))
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(trades.prune_monitor_alerts(), 1)
+        rows = trades.list_monitor_alerts(uid)
+        self.assertEqual([r["alert_type"] for r in rows], ["hold_expire"])
+
+    def test_prune_monitor_alerts_custom_days(self):
+        uid = self._make_user()
+        t = trades.create_trade(uid, self._open())
+        trades.insert_monitor_alert(uid, t["id"], t["symbol"], "accel_down", "2026-08-19")
+        old_iso = (trades._now() - timedelta(days=10)).isoformat(timespec="seconds")
+        conn = trades.get_conn()
+        try:
+            conn.execute("UPDATE monitor_alerts SET fired_at=?", (old_iso,))
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(trades.prune_monitor_alerts(retention_days=30), 0)
+        self.assertEqual(trades.prune_monitor_alerts(retention_days=5), 1)
 
 
 # ---------------------------------------------------------------------------

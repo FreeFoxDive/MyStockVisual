@@ -277,6 +277,11 @@ def start_background_jobs():
     except Exception:
         pass
 
+    try:
+        market.cleanup_cache_tmp_dirs()
+    except Exception:
+        pass
+
     # 静态列表预热: 走后台线程, 避免"24h 后第一次取用"落在用户请求上同步刷新
     # (指数/股票走麦蕊, 港美股走 AF/akshare, 冷启动或上游慢时不阻塞搜索)
     def _warm_static_lists():
@@ -301,6 +306,16 @@ def start_background_jobs():
                 market._build_search_index()
             except Exception as e:
                 log.warning(f"定时搜索索引构建失败，继续使用旧索引: {e}")
+            # 顺带周期清理: 磁盘缓存过期/配额与 .cache 残留 (此前仅启动时执行一次,
+            # 常驻数月的容器会同时违反 24h/50MB 规则)
+            try:
+                market._disk_cache.cleanup()
+            except Exception as e:
+                log.warning(f"磁盘缓存定期清理失败: {e}")
+            try:
+                market.cleanup_cache_tmp_dirs()
+            except Exception as e:
+                log.warning(f".cache 临时目录清理失败: {e}")
     threading.Thread(target=_search_index_scheduler, daemon=True).start()
     threading.Thread(target=market._pledge_scheduler, daemon=True).start()
 

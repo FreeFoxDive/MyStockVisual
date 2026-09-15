@@ -940,6 +940,23 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     return fired
 
 
+_alert_prune_state = {"last_date": None}
+
+
+def _prune_alerts_daily(now_dt):
+    """每日首轮: 清理超过保留期的 monitor_alerts (表 append-only, 防无限膨胀)。"""
+    day = now_dt.date().isoformat()
+    if _alert_prune_state["last_date"] == day:
+        return
+    _alert_prune_state["last_date"] = day
+    try:
+        n = trades.prune_monitor_alerts()
+        if n:
+            log.info(f"monitor_alerts 清理 {n} 条 (> {trades.MONITOR_ALERT_RETENTION_DAYS} 天)")
+    except Exception as e:
+        log.warning(f"monitor_alerts 清理失败: {e}")
+
+
 def _loop(get_af, fallback_quotes):
     global _feed
     _load_env()
@@ -963,6 +980,7 @@ def _loop(get_af, fallback_quotes):
                 time.sleep(5)
                 continue
             _poll_once(_feed, now_dt=now)
+            _prune_alerts_daily(now)
             time.sleep(interval)
         except Exception as e:
             _set_status(last_error=str(e))

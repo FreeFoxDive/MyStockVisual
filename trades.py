@@ -40,6 +40,7 @@ def _now():
 
 PBKDF2_ITERATIONS = 200_000      # PBKDF2-SHA256 迭代次数
 SESSION_TTL_DAYS = 30            # 会话有效期 (天)
+MONITOR_ALERT_RETENTION_DAYS = 365   # 监控告警保留期 (天), 超期由 monitor 每日清理
 
 # ── 预设理由分类 (参考券商/交易社区常用口径) ──
 ENTRY_REASONS = [
@@ -597,6 +598,10 @@ def create_session(user_id):
     expires = now + timedelta(days=SESSION_TTL_DAYS)
     conn = get_conn()
     try:
+        # 顺带清扫: 过期 session 只有原 token 复现时才会被 get_session 删除,
+        # 被遗弃的登录行会无限累积, 每次新建会话时一次性清掉
+        conn.execute("DELETE FROM sessions WHERE expires_at < ?",
+                     (now.isoformat(timespec="seconds"),))
         conn.execute(
             "INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?)",
             (token, user_id, now.isoformat(timespec="seconds"),
@@ -2406,6 +2411,22 @@ def insert_monitor_alert(user_id, trade_id, symbol, alert_type, trade_date,
         )
         conn.commit()
         return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def prune_monitor_alerts(retention_days=None):
+    """删除超过保留期的监控告警 (表 append-only, 防止多年累积膨胀)。
+
+    fired_at 为北京墙钟 ISO 字符串 (秒精度), 字典序即时间序。返回删除行数。
+    """
+    days = MONITOR_ALERT_RETENTION_DAYS if retention_days is None else int(retention_days)
+    cutoff = (_now() - timedelta(days=days)).isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM monitor_alerts WHERE fired_at < ?", (cutoff,))
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 

@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 
 from flask import request
 
@@ -40,13 +41,18 @@ _scan_bucket = feed.TokenBucket(rate_per_min=int(os.environ.get("SCREENER_KLINE_
 
 
 def _persist_job():
-    """完成的扫描落盘 (重启后仍可查看最近一次结果)。"""
+    """完成的扫描落盘 (重启后仍可查看最近一次结果)。原子写避免并发/崩溃截断。"""
+    tmp = _last_file.with_name(_last_file.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
         snap = {k: _job.get(k) for k in ("results", "conditions", "done_at", "stopped")}
         snap["saved_at"] = time.time()
-        _last_file.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, _last_file)
     except Exception:
-        pass
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _load_last_job():

@@ -149,7 +149,8 @@ class RestFeed:
         """按代码拉快照, 返回 {symbol: quote_dict}。
 
         quote_dict: last_price, prev_close, open, high, low, volume, amount,
-                    timestamp (epoch seconds, 交易所时间), name, change_pct (小数)。
+                    timestamp (epoch seconds, 交易所时间), name,
+                    change_pct (百分数, 官方小数已在此 ×100)。
         令牌不足时跳过本轮 (返回 {}); 失败回退 fallback_quotes;
         AF 批量成功但个别标的无数据 (典型: 指数) 时, 缺失部分走 fallback
         (market.fetch_quotes 内含麦蕊 指数/ETF/股票 逐类回退), 否则这些标的
@@ -217,7 +218,8 @@ class RestFeed:
                 "amount": q.get("amount"),
                 "timestamp": now_ts,
                 "name": q.get("name"),
-                "change_pct": None,  # 麦蕊是百分数, 不用, 避免差 100 倍
+                # 回退源 market.fetch_quotes 输出 change_pct 已是百分数, 直接透传
+                "change_pct": _to_float(q.get("change_pct")),
             }
         return out
 
@@ -340,7 +342,11 @@ def _row_to_quote(row):
         return ext.get(key) if v is None else v
 
     name = _ext("name")
-    change_pct = _ext("change_pct")
+    # ext.change_pct 官方是小数 (0.01 表示 1%); 在唯一出口统一转百分数,
+    # 与麦蕊 pc 口径一致, 消费方 (monitor 涨跌幅预警 / 前端) 不再区分数据源。
+    change_pct = _to_float(_ext("change_pct"))
+    if change_pct is not None:
+        change_pct *= 100.0
     ts = data.get("timestamp")
     ts_sec = None
     if ts is not None:
@@ -360,7 +366,7 @@ def _row_to_quote(row):
         "amount": _to_float(data.get("amount")),
         "timestamp": ts_sec,
         "name": name,
-        "change_pct": _to_float(change_pct),  # 官方是小数
+        "change_pct": change_pct,  # 百分数 (官方小数已 ×100)
         "turnover_rate": _to_float(_ext("turnover_rate")),  # 官方是小数
         "vol_ratio": _to_float(_ext("vol_ratio") if _ext("vol_ratio") is not None
                                 else _ext("volume_ratio")),

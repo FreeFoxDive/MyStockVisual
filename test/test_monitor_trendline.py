@@ -407,13 +407,15 @@ class FeedFallbackTest(unittest.TestCase):
             assert "000001.SH" in symbols, f"回退应只收缺失标的, 实收 {symbols}"
             return {"000001.SH": {"last_price": 3000.0, "prev_close": 2990.0,
                                   "open": 2995.0, "high": 3010.0, "low": 2985.0,
-                                  "volume": 2, "amount": 3.0, "name": "上证指数"}}
+                                  "volume": 2, "amount": 3.0, "name": "上证指数",
+                                  "change_pct": 0.33}}
 
         f = RestFeed(lambda: _AF(), fallback_quotes=fallback)
         out = f.quotes(["600519.SH", "000001.SH"])
         self.assertAlmostEqual(out["600519.SH"]["last_price"], 100.0)
         self.assertAlmostEqual(out["000001.SH"]["last_price"], 3000.0)
-        self.assertIsNone(out["000001.SH"]["change_pct"])  # 麦蕊百分数不透传
+        # 回退源 market.fetch_quotes 输出已是百分数, 直接透传 (预警依赖该值)
+        self.assertAlmostEqual(out["000001.SH"]["change_pct"], 0.33)
         self.assertEqual(out["000001.SH"]["name"], "上证指数")
 
     def test_no_fallback_when_all_present(self):

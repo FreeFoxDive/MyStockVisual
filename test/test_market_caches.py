@@ -125,5 +125,72 @@ class NameMapRefreshTest(unittest.TestCase):
             self.assertEqual(market._lookup_name("600000.SH"), "浦发银行")
 
 
+class DiskCacheAtomicWriteTest(unittest.TestCase):
+    """DiskCache.set 原子写: 成功无 .tmp 残留; 写失败不破坏旧文件且清理临时文件。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig_cache_dir = market.CACHE_DIR
+        market.CACHE_DIR = Path(self._tmp.name)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        market.CACHE_DIR = self._orig_cache_dir
+
+    def test_set_get_roundtrip_no_tmp_leftover(self):
+        cache = market.DiskCache()
+        cache.set("600519.SH", "1d", 100, {"rows": [1, 2, 3]})
+        out = cache.get("600519.SH", "1d", 100, ttl_seconds=300)
+        self.assertEqual(out, {"rows": [1, 2, 3]})
+        self.assertEqual(list(Path(self._tmp.name).glob("*.tmp-*")), [])
+
+    def test_set_failure_keeps_old_file_and_no_tmp(self):
+        cache = market.DiskCache()
+        cache.set("600519.SH", "1d", 100, {"good": True})
+        fp = list(Path(self._tmp.name).glob("600519*.json.gz"))[0]
+        before = fp.read_bytes()
+        with mock.patch.object(market, "json") as j:
+            j.dump.side_effect = OSError("disk full")
+            cache.set("600519.SH", "1d", 100, {"bad": True})
+        self.assertEqual(fp.read_bytes(), before)
+        self.assertEqual(list(Path(self._tmp.name).glob("*.tmp-*")), [])
+
+
+class CleanupTmpDirsTest(unittest.TestCase):
+    """cleanup_cache_tmp_dirs: 只删 .cache 根下超龄的空 tmp 目录, 其他一律不碰。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig_script_dir = market.SCRIPT_DIR
+        market.SCRIPT_DIR = Path(self._tmp.name)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        market.SCRIPT_DIR = self._orig_script_dir
+
+    def _mk(self, name, age_sec=0, empty=True):
+        p = Path(self._tmp.name) / ".cache" / name
+        p.mkdir(parents=True, exist_ok=True)
+        if not empty:
+            (p / "x.txt").write_text("x", encoding="utf-8")
+        old = time.time() - age_sec
+        os.utime(p, (old, old))
+        return p
+
+    def test_removes_old_empty_tmp_dir(self):
+        old = self._mk("tmpabc", age_sec=90000)
+        self.assertEqual(market.cleanup_cache_tmp_dirs(), 1)
+        self.assertFalse(old.exists())
+
+    def test_keeps_fresh_or_nonempty_or_nontmp(self):
+        fresh = self._mk("tmpfresh", age_sec=100)
+        nonempty = self._mk("tmpfull", age_sec=90000, empty=False)
+        nontmp = self._mk("keepme", age_sec=90000)
+        self.assertEqual(market.cleanup_cache_tmp_dirs(), 0)
+        self.assertTrue(fresh.exists() and nonempty.exists() and nontmp.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

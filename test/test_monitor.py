@@ -991,6 +991,8 @@ class TestRestFeedMock(unittest.TestCase):
         self.assertEqual(q["last_price"], 10.5)
         self.assertAlmostEqual(q["timestamp"], 1_700_000_000.0)
         self.assertEqual(q["name"], "浦发")
+        # 单位契约: AF 官方小数 0.05 → 百分数 5.0 (monitor 涨跌幅预警依赖此口径)
+        self.assertAlmostEqual(q["change_pct"], 5.0)
 
     def test_depth_uses_get_not_batch(self):
         af = mock.Mock()

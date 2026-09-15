@@ -51,10 +51,15 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
         self.p_etf = mock.patch.object(market_mod, "_is_etf", side_effect=_is_etf)
         self.p_index.start()
         self.p_etf.start()
+        # 麦蕊回退预算: 默认换成大额度新桶, 避免用例间互相占用
+        self.p_mr_budget = mock.patch.object(
+            market_mod, "_mr_quote_budget", market_mod.PacedBudget(1000))
+        self.p_mr_budget.start()
 
     def tearDown(self):
         self.p_index.stop()
         self.p_etf.stop()
+        self.p_mr_budget.stop()
 
     def test_index_uses_af_not_mairui(self):
         api = mock.Mock()
@@ -110,6 +115,33 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
         api.stock_ssjy_more.assert_called_once()
         self.assertEqual(out["600519.SH"]["last_price"], 10.5)
 
+    def test_mairui_fallback_budget_exhausted_skips(self):
+        """麦蕊回退预算耗尽时不再打麦蕊, 无缓存则该标的缺失 (保护免费额度)。"""
+        api = mock.Mock()
+        api.index_real_time.return_value = _mr_row()
+        with mock.patch.object(market_mod, "_fetch_af_quotes", return_value={}):
+            with mock.patch.object(market_mod, "get_mr", return_value=api):
+                with mock.patch.object(market_mod, "_mr_quote_budget",
+                                       market_mod.PacedBudget(1)):
+                    market_mod._mr_quote_budget.try_acquire()  # 预支唯一令牌
+                    out = market_mod.fetch_quotes(["000001.SH"], fresh=True)
+        api.index_real_time.assert_not_called()
+        self.assertNotIn("000001.SH", out)
+
+    def test_mairui_fallback_budget_bounds_calls(self):
+        """预算 1/min: 多标的回退只发 1 次麦蕊调用, 其余跳过。"""
+        api = mock.Mock()
+        api.index_real_time.return_value = _mr_row()
+        with mock.patch.object(market_mod, "_fetch_af_quotes", return_value={}):
+            with mock.patch.object(market_mod, "get_mr", return_value=api):
+                with mock.patch.object(market_mod, "_mr_quote_budget",
+                                       market_mod.PacedBudget(1)):
+                    out = market_mod.fetch_quotes(
+                        ["000001.SH", "000012.SH"], fresh=True)
+        api.index_real_time.assert_called_once_with("000001.SH")
+        self.assertIn("000001.SH", out)
+        self.assertNotIn("000012.SH", out)
+
     def test_af_missing_high_low_falls_back(self):
         api = mock.Mock()
         api.index_real_time.return_value = _mr_row()
@@ -153,16 +185,50 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
         self.assertIsNone(out["amplitude"])
 
     def test_af_quote_to_std_maps_fields(self):
-        raw = _af_row("600519.SH", name="茅台", change_pct=0.05)
+        # _af_row 模拟 _row_to_quote 输出 (change_pct 已是百分数)
+        raw = _af_row("600519.SH", name="茅台", change_pct=5.0)
         with mock.patch.object(market_mod, "_lookup_name", return_value="备用名"):
             out = market_mod._af_quote_to_std(raw, "600519.SH")
         self.assertEqual(out["last_price"], 10.5)
         self.assertEqual(out["name"], "茅台")
-        self.assertEqual(out["change_pct"], 0.05)
+        self.assertEqual(out["change_pct"], 5.0)
         raw2 = _af_row("600519.SH", name=None)
         with mock.patch.object(market_mod, "_lookup_name", return_value="备用名"):
             out2 = market_mod._af_quote_to_std(raw2, "600519.SH")
         self.assertEqual(out2["name"], "备用名")
+
+    def test_row_to_quote_change_pct_decimal_to_pct(self):
+        """单位契约: AF ext.change_pct 官方是小数 (0.01=1%), 唯一出口 _row_to_quote
+        统一转百分数, 保证 monitor 涨跌幅预警与前端拿到同一口径。"""
+        from feed import _row_to_quote
+        row = {
+            "symbol": "600519.SH", "last_price": 10.5, "prev_close": 10.0,
+            "open": 10.1, "high": 10.6, "low": 10.0, "volume": 1000,
+            "amount": 10500.0, "timestamp": 1_700_000_000_000,
+            "ext.name": "茅台", "ext.change_pct": 0.05,
+            "ext.turnover_rate": 0.015, "ext.amplitude": 0.02,
+        }
+        q = _row_to_quote(row)
+        self.assertAlmostEqual(q["change_pct"], 5.0)
+        # None 保持 None, 不产生 0 值假涨跌
+        row2 = dict(row, **{"ext.change_pct": None})
+        self.assertIsNone(_row_to_quote(row2)["change_pct"])
+
+    def test_af_chain_percent_end_to_end(self):
+        """AF 原始行 → _row_to_quote → _af_quote_to_std 全线百分数。"""
+        import pandas as pd
+        from feed import _row_to_quote
+        df = pd.DataFrame([{
+            "symbol": "600519.SH", "last_price": 10.5, "prev_close": 10.0,
+            "open": 10.1, "high": 10.6, "low": 10.0, "volume": 1000,
+            "amount": 10500.0, "timestamp": 1_700_000_000_000,
+            "ext.change_pct": -0.0234, "ext.turnover_rate": 0.015,
+            "ext.amplitude": 0.02,
+        }])
+        q = market_mod._af_quote_to_std(_row_to_quote(df.iloc[0]), "600519.SH")
+        self.assertAlmostEqual(q["change_pct"], -2.34)
+        self.assertAlmostEqual(q["turnover_rate"], 1.5)
+        self.assertAlmostEqual(q["amplitude"], 2.0)
 
     def test_af_quote_to_std_carries_epoch_timestamp(self):
         raw = _af_row("600519.SH", timestamp=1789056000)

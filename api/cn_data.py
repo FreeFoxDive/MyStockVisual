@@ -21,7 +21,9 @@ from logger import redact_message
 log = logging.getLogger("api")
 
 CACHE_TTL = 900  # 15 分钟
+FAIL_TTL = 300   # 失败负缓存: 上游挂掉时窗口内不再重试 (3 次重试阻塞 ~2.4s/请求)
 _cache = {}
+_fail_ts = {}    # key -> 最近一次失败时刻 (负缓存)
 _cache_lock = threading.Lock()
 
 
@@ -39,16 +41,27 @@ def _retry(fetcher, attempts=3, delay=0.8):
 
 
 def _cached(key, fetcher, ttl=CACHE_TTL):
+    now = time.time()
     hit = _cache.get(key)
-    if hit and time.time() - hit[0] < ttl:
+    if hit and now - hit[0] < ttl:
         return hit[1]
+    with _cache_lock:
+        last_fail = _fail_ts.get(key, 0.0)
+    if now - last_fail < FAIL_TTL:
+        # 负缓存窗口内: 直接回退旧数据或报错, 不再阻塞重试打挂掉的上游
+        if hit:
+            return hit[1]
+        return {"error": "数据源暂时不可用"}
     try:
         data = _retry(fetcher)
         with _cache_lock:
             _cache[key] = (time.time(), data)
+            _fail_ts.pop(key, None)
         return data
     except Exception as e:
         log.warning(f"cn 数据拉取失败 {key}: {redact_message(str(e))}")
+        with _cache_lock:
+            _fail_ts[key] = time.time()
         if hit:
             return hit[1]  # 过期回退
         return {"error": "数据源暂时不可用"}

@@ -115,6 +115,8 @@ class CnRouteTest(unittest.TestCase):
         self.cd = cn_data
         cn_data._cache.clear()
         self.addCleanup(cn_data._cache.clear)
+        cn_data._fail_ts.clear()
+        self.addCleanup(cn_data._fail_ts.clear)
         self.client = self.app.test_client()
         token, _ = trades.create_session(self.uid)
         self.client.set_cookie("session", token)
@@ -264,6 +266,28 @@ class CnRouteTest(unittest.TestCase):
         with mock.patch.object(self.cd, "_fetch_fund_flow", fetch):
             again = self.client.get("/api/cn/fund-flow?symbol=600000.SH").get_json()
         self.assertEqual(again, first, "过期后拉取失败应回退旧缓存")
+
+    def test_negative_cache_skips_retry_within_fail_ttl(self):
+        """失败后负缓存窗口内: 同 key 请求不再重试 (保护挂掉的上游), 直接报错。"""
+        fetch = mock.Mock(side_effect=RuntimeError("RemoteDisconnected"))
+        with mock.patch.dict(sys.modules, {"akshare": _fake_ak(stock_lhb_detail_em=fetch)}):
+            first = self.client.get("/api/cn/lhb?symbol=600000.SH").get_json()
+            self.assertIn("error", first)
+            self.assertEqual(fetch.call_count, 3, "首次失败应重试 3 次")
+            again = self.client.get("/api/cn/lhb?symbol=600000.SH").get_json()
+        self.assertIn("error", again)
+        self.assertEqual(fetch.call_count, 3, "负缓存窗口内不应再次发起重试")
+
+    def test_negative_cache_expires_after_fail_ttl(self):
+        """负缓存窗口过后恢复正常重试。"""
+        fetch = mock.Mock(side_effect=RuntimeError("boom"))
+        with mock.patch.dict(sys.modules, {"akshare": _fake_ak(stock_lhb_detail_em=fetch)}):
+            self.client.get("/api/cn/lhb?symbol=600000.SH").get_json()
+            self.assertEqual(fetch.call_count, 3)
+            # 把失败时间戳拨回 FAIL_TTL 之前
+            self.cd._fail_ts["lhb:600000.SH"] = time.time() - self.cd.FAIL_TTL - 1
+            self.client.get("/api/cn/lhb?symbol=600000.SH").get_json()
+        self.assertEqual(fetch.call_count, 6, "窗口过后应重新重试")
 
 
 if __name__ == "__main__":

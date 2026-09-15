@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -515,14 +516,20 @@ class DiskCache:
 
     def set(self, symbol, period, count, data, adjust="forward", chain_tag=""):
         fp = self._key(symbol, period, count, adjust, chain_tag)
+        # 原子写: 先写唯一临时文件再 replace, 避免并发写/崩溃留下截断的 .json.gz
+        tmp = fp.with_name(fp.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
         try:
-            with gzip.open(fp, "wt", encoding="utf-8") as f:
+            with gzip.open(tmp, "wt", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, cls=NumpyEncoder)
+            os.replace(tmp, fp)
         except Exception:
-            pass
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def cleanup(self):
-        """删除过期文件和超出配额的最旧文件"""
+        """删除过期文件和超出配额的最旧文件; 顺带清理原子写残留的 .tmp-* 文件"""
         now = time.time()
         files = sorted(CACHE_DIR.glob("*.json.gz"), key=lambda f: f.stat().st_mtime)
         total_size = 0
@@ -542,6 +549,37 @@ class DiskCache:
                 break
             fp.unlink(missing_ok=True)
             total_size -= size
+        # 原子写中断留下的 .tmp-* 文件: 超过 1h 视为残留
+        for fp in CACHE_DIR.glob("*.tmp-*"):
+            try:
+                if now - fp.stat().st_mtime > 3600:
+                    fp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def cleanup_cache_tmp_dirs(max_age_sec=86400):
+    """清理 .cache 根下历史遗留的空 tmp 目录 (>max_age_sec), 不触碰其他文件。"""
+    root = SCRIPT_DIR / ".cache"
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    now = time.time()
+    removed = 0
+    for p in entries:
+        if not p.name.startswith("tmp") or not p.is_dir():
+            continue
+        try:
+            if now - p.stat().st_mtime < max_age_sec or any(p.iterdir()):
+                continue
+            p.rmdir()
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        log.info(f"清理 .cache 临时目录残留 {removed} 项")
+    return removed
 
 
 _disk_cache = DiskCache()
@@ -611,6 +649,11 @@ kline_cache_long = TTLCache(ttl_seconds=300)
 from live_budget import PacedBudget
 QUOTE_RATE_PER_MIN = 48
 _quote_budget = PacedBudget(QUOTE_RATE_PER_MIN)
+# 麦蕊快照回退预算: AF 未配置/故障时兜底路径也要限速, 否则 1.25s 轮询会把
+# 免费/低套餐额度 (甚至 500/day) 在几分钟内打光, 只剩被动的 429 退避。
+# 计数粒度 = 麦蕊 HTTP 调用次数 (指数/ETF 单只 1 次, 股票批量 20 只 1 次)。
+MR_QUOTE_RATE_PER_MIN = max(1, int(os.environ.get("MR_QUOTE_RATE_PER_MIN", "20")))
+_mr_quote_budget = PacedBudget(MR_QUOTE_RATE_PER_MIN)
 _quote_fetch_lock = threading.Lock()
 _quote_fetch_condition = threading.Condition()
 _quote_fetch_inflight = False
@@ -1235,6 +1278,7 @@ def _af_quote_to_std(q, symbol):
         "low": _safe_float(q.get("low")),
         "volume": _safe_int(q.get("volume")),
         "amount": _safe_float(q.get("amount")),
+        # change_pct: _row_to_quote 已统一为百分数 (官方小数 ×100), 直通
         "change_pct": _safe_float(q.get("change_pct")),
         "amplitude": _af_pct(q.get("amplitude")),        # 小数 → %
         "turnover_rate": _af_pct(q.get("turnover_rate")),  # 小数 → %
@@ -1299,9 +1343,13 @@ def _fetch_af_quotes(symbols):
     try:
         af = get_af()
         out = _QuoteResult()
-        for batch in _chunks(symbols, QUOTES_BATCH):
+        batches = list(_chunks(symbols, QUOTES_BATCH))
+        for bi, batch in enumerate(batches):
             if not _quote_budget.try_acquire():
-                out.deferred.update(s for s in symbols if s not in out)
+                # 只 defer 尚未请求的批次; 此前批次 AF 已请求但未返回的标的
+                # (典型: 指数) 不算 deferred, 让本轮麦蕊回退正常接管
+                out.deferred.update(
+                    s for b in batches[bi:] for s in b if s not in out)
                 break
             _quote_cursor += len(batch)
             df = af.quotes.get(symbols=batch, to_dataframe=True)
@@ -1400,7 +1448,6 @@ def _fetch_quotes_locked(symbols, fresh=False):
     if not symbols:
         return {}
 
-    fetched_at = time.time()
     result = {}
     if not fresh:
         # 缓存优先：命中直接返回，只抓缺失的
@@ -1418,13 +1465,14 @@ def _fetch_quotes_locked(symbols, fresh=False):
         result[s] = _mr_quote_to_std(q, s)
         result[s]["_live_info"] = _live_info_for_quote(s, result[s])
         result[s]["_revision"] = time.time_ns() // 1000
-        quote_cache.set(s, result[s], fetched_at=fetched_at)
+        # emit 时取当前时间: TTL 从数据可用起算, 慢上游不吃掉缓存有效期
+        quote_cache.set(s, result[s])
 
     def _emit_af(s, q):
         result[s] = _af_quote_to_std(q, s)
         result[s]["_live_info"] = _live_info_for_quote(s, result[s])
         result[s]["_revision"] = time.time_ns() // 1000
-        quote_cache.set(s, result[s], fetched_at=fetched_at)
+        quote_cache.set(s, result[s])  # emit 时取当前时间 (同 _emit_mr)
 
     # AlphaFeed 优先（指数 / ETF / 股票统一）
     af_set = list(to_fetch)
@@ -1448,7 +1496,8 @@ def _fetch_quotes_locked(symbols, fresh=False):
                     result[s] = cached
         return result
 
-    # 按类型分组麦蕊回退
+    # 按类型分组麦蕊回退 (预算受限, 计数粒度 = 麦蕊 HTTP 调用次数;
+    # 桶空则跳过本轮沿用缓存, 与 AF 路径的 48/min 预算对称)
     index_codes, stock_codes, etf_codes = [], [], []
     for s in remaining:
         if _is_index_symbol(s):
@@ -1460,6 +1509,8 @@ def _fetch_quotes_locked(symbols, fresh=False):
 
     # 1) 指数 (单只 index_real_time)
     for s in index_codes:
+        if not _mr_quote_budget.try_acquire():
+            break
         try:
             q = api.index_real_time(s)
             if isinstance(q, dict) and not q.get("error"):
@@ -1469,6 +1520,8 @@ def _fetch_quotes_locked(symbols, fresh=False):
 
     # 2) ETF/基金 (单只 fund_real_time, code 6 位无后缀)
     for s in etf_codes:
+        if not _mr_quote_budget.try_acquire():
+            break
         try:
             q = api.fund_real_time(s.split(".")[0])
             if isinstance(q, dict) and not q.get("error"):
@@ -1478,6 +1531,8 @@ def _fetch_quotes_locked(symbols, fresh=False):
 
     # 3) 股票 (批量 ssjy_more, 最多 20/次)
     for i in range(0, len(stock_codes), MR_QUOTE_BATCH):
+        if not _mr_quote_budget.try_acquire():
+            break
         batch = stock_codes[i:i + MR_QUOTE_BATCH]
         try:
             rows = api.stock_ssjy_more([c.split(".")[0] for c in batch])

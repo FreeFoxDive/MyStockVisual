@@ -1591,6 +1591,7 @@ function renderStockInfo(d) {
   const gray = 'var(--text-secondary)';
   const pct = (v) => {
     if (v == null || isNaN(v)) return '—';
+    v = normPct(v);
     return `<span style="color:${v >= 0 ? up : down}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
   };
   const fixed = (v) => (v == null || isNaN(v) ? '—' : Number(v).toFixed(2));
@@ -1841,10 +1842,12 @@ function updateLiveStockInfo(q, symbol = STATE.symbol) {
   if (q.turnover_rate == null && STATE.klineData && STATE.klineData.is_etf) {
     const fs = Number(STATE.klineData.float_shares);
     const vol = Number(q.volume);
-    if (Number.isFinite(fs) && fs > 0 && Number.isFinite(vol) && vol >= 0) {
-      const px = Number(q.last_price), amount = Number(q.amount);
-      const unit = Number.isFinite(px) && px > 0 && Number.isFinite(amount) && amount > 0
-        && vol > 0 && amount / (vol * px) > 10 ? 100 : 1;
+    // 单位自证: 只在 amount 可用时由 amount/(vol*px) 推断 volume 是股还是手;
+    // amount 缺失时不猜 (猜错差 100 倍), 宁可不显示
+    const px = Number(q.last_price), amount = Number(q.amount);
+    if (Number.isFinite(fs) && fs > 0 && Number.isFinite(vol) && vol > 0
+        && Number.isFinite(px) && px > 0 && Number.isFinite(amount) && amount > 0) {
+      const unit = amount / (vol * px) > 10 ? 100 : 1;
       d.turnover_rate = vol * unit / fs * 100;
     }
   }
@@ -2152,10 +2155,11 @@ function updateFundInfo(q) {
   let turnover = q && q.turnover_rate != null ? Number(q.turnover_rate) : null;
   if (turnover == null && q && isEtf) {
     const shares = Number(fs), vol = Number(q.volume), px = Number(q.last_price), amount = Number(q.amount);
-    if (Number.isFinite(shares) && shares > 0 && Number.isFinite(vol) && vol >= 0) {
-      // AF/Mairui may report volume as shares or hands; infer the unit from amount.
-      const unit = Number.isFinite(px) && px > 0 && Number.isFinite(amount) && amount > 0
-        && vol > 0 && amount / (vol * px) > 10 ? 100 : 1;
+    // 单位自证: 只在 amount 可用时由 amount/(vol*px) 推断 volume 是股还是手;
+    // amount 缺失时不猜 (volume 单位未知, 猜错差 100 倍), 宁可不显示
+    if (Number.isFinite(px) && px > 0 && Number.isFinite(amount) && amount > 0
+        && Number.isFinite(shares) && shares > 0 && Number.isFinite(vol) && vol > 0) {
+      const unit = amount / (vol * px) > 10 ? 100 : 1;
       turnover = vol * unit / shares * 100;
     }
   }
@@ -2245,7 +2249,7 @@ function updateInfo(data) {
     premLabel.style.display = '';
     const last = data.klines[data.klines.length - 1];
     if (last && last.premium != null) {
-      const p = last.premium;
+      const p = normPct(last.premium);
       const pcls = p >= 0 ? 'up' : 'down';
       const cached = STATE.premium;
       const matching = cached && cached.symbol === data.symbol && cached.period === data.period;
@@ -2975,8 +2979,14 @@ function buildGapMarkArea(klines, dates) {
 // ═══════════════════════════════════════════════════════════════
 // SHARED QUOTE DISPLAY
 // ═══════════════════════════════════════════════════════════════
+/** 百分数归一: |v|<0.005 按 0 处理, 避免 "▼ -0.00%" (箭头向下数值为零) */
+function normPct(v) {
+  return (typeof v === 'number' && v !== 0 && Math.abs(v) < 0.005) ? 0 : v;
+}
+
 /** 涨跌幅文本: 颜色之外附加 ▲/▼ 形状冗余 (色盲友好) */
 function pctLabel(v) {
+  v = normPct(v);
   return (v >= 0 ? '▲ +' : '▼ ') + v.toFixed(2) + '%';
 }
 
@@ -3661,7 +3671,7 @@ function updateChart(reTheme) {
           extras.push(`<span style="color:${C().atr}">ATR</span> ${k.atr14?.toFixed(3)||'—'}`);
         }
         if (extras.length > 0) html += `<div>${extras.join(' | ')}</div>`;
-        if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?C().up:C().down}">${k.premium>=0?'+':''}${k.premium.toFixed(2)}%</span></div>`;
+        if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?C().up:C().down}">${k.premium>=0?'+':''}${normPct(k.premium).toFixed(2)}%</span></div>`;
         // 十字线落在未回补缺口灰区内时追加缺口信息（markArea 与 axis tooltip 冲突，走此注入）
         if (typeof GapScanner !== 'undefined' && STATE._gaps && STATE._gaps.length) {
           const hit = GapScanner.findGapAt(STATE._gaps, idx, STATE._pointerPrice);
@@ -3719,7 +3729,7 @@ function updateChart(reTheme) {
           + `<div><span style="color:${C().obv}">OBV</span> ${fmtVolume(k.obv)} <span style="color:${C().maobv}">MAOBV</span> ${fmtVolume(k.maobv)}</div>`;
       }
       if (panel === 'premium') {
-        return hdr + `<div>溢价率 <span style="color:${(k.premium||0)>=0?C().up:C().down}">${k.premium!=null?(k.premium>=0?'+':'')+k.premium.toFixed(2)+'%':'—'}</span></div>`;
+        return hdr + `<div>溢价率 <span style="color:${(k.premium||0)>=0?C().up:C().down}">${k.premium!=null?(k.premium>=0?'+':'')+normPct(k.premium).toFixed(2)+'%':'—'}</span></div>`;
       }
 
       // fallback
@@ -4166,7 +4176,7 @@ function drawingCrossTooltipHtml(idx, close) {
     if (val == null || !Number.isFinite(val)) return;
     let pctHtml = '';
     if (close) {
-      const pct = (close - val) / Math.abs(close) * 100;
+      const pct = normPct((close - val) / Math.abs(close) * 100);
       const clr = pct >= 0 ? C().up : C().down;
       pctHtml = ` <span style="color:${clr};font-weight:700">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>`;
     }
@@ -4740,7 +4750,7 @@ function paintDraft(c2, P, ctx) {
         const st = Drawings.measureStats(ctx.dateMap.dates, Math.round(a.idx), Math.round(b.idx), a.price, b.price);
         c2.font = '12px monospace';
         c2.fillStyle = st.dp >= 0 ? C().up : C().down;
-        c2.fillText((st.dp >= 0 ? '+' : '') + st.pct.toFixed(2) + '%', Math.max(x1, x2) + 6, Math.min(y1, y2) + 4);
+        c2.fillText((st.dp >= 0 ? '+' : '') + normPct(st.pct).toFixed(2) + '%', Math.max(x1, x2) + 6, Math.min(y1, y2) + 4);
         c2.fillText(st.bars + ' 根 / ' + Math.abs(st.days) + ' 天', Math.max(x1, x2) + 6, Math.min(y1, y2) + 20);
       }
     }
