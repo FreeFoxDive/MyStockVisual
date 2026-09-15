@@ -1066,6 +1066,17 @@ async function refreshQuotes(fresh) {
     ...(state.trades || []).filter(t => t.status === 'closed').map(t => t.symbol)];
   liveQuotes.setSymbols(symbols);
   if (fresh) liveQuotes.refresh();
+  await fetchQuoteSnapshot(symbols);
+}
+
+// 非连续竞价时段 LiveMarket 停摆 (active 门控), 直连拉一次缓存快照兜底:
+// 盘后/午休/翻页后都能立刻显示现价; 走统一 accept 通道, 失败保留旧值
+async function fetchQuoteSnapshot(symbols) {
+  if (!symbols.length) return;
+  try {
+    const data = await api('/api/quotes?symbols=' + encodeURIComponent(symbols.join(',')));
+    for (const [s, q] of Object.entries(data || {})) liveQuotes.accept('quote', s, q, 'embedded');
+  } catch (e) { /* 失败显示 — 或保留旧值 */ }
 }
 
 
@@ -1803,6 +1814,7 @@ async function loadTrades() {
   state.trades = data.trades;
   state.total = data.total;
   renderTable();
+  await refreshQuotes();  // 翻页/筛选后当前页(含平仓)标的重订阅 + 快照兜底
 }
 
 function renderTable() {

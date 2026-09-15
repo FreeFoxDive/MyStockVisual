@@ -549,7 +549,16 @@ VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
   renderPositions((STATE.overview || {}).positions || []);
 });
 async function loadQuotes(positions) {
-  liveQuotes.setSymbols(positions.map(p => p.symbol));
+  const symbols = positions.map(p => p.symbol);
+  liveQuotes.setSymbols(symbols);
+  // 非连续竞价时段 LiveMarket 停摆 (active 门控), 直连拉一次缓存快照兜底,
+  // 盘后/午休也能显示持仓现价; 走统一 accept 通道, 失败保留旧值
+  if (symbols.length) {
+    try {
+      const data = await api("/api/quotes?symbols=" + encodeURIComponent(symbols.join(",")));
+      for (const [s, q] of Object.entries(data || {})) liveQuotes.accept("quote", s, q, "embedded");
+    } catch (e) { /* 失败显示 — 或保留旧值 */ }
+  }
 }
 
 function cssEsc(s) { return (s || "").replace(/([^a-zA-Z0-9_-])/g, "\\$1"); }
