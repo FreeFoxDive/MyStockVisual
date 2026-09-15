@@ -174,6 +174,15 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertIn("_lastInfoAt", self.src)
         self.assertGreaterEqual(self.src.count("fetchStockInfo()"), 3)
 
+    def test_stock_info_shows_and_live_updates_last_price(self):
+        render = _extract_fn(self.src, "renderStockInfo")
+        self.assertIn("row('现价'", render)
+        self.assertIn("d.last_price", render)
+        self.assertIn("priceColor", render)
+        live = _extract_fn(self.src, "updateLiveStockInfo")
+        self.assertIn("d.last_price = Number(q.last_price)", live)
+        self.assertIn("d.prev_close = Number(q.prev_close)", live)
+
     def test_stream_uses_depth_sec_on(self):
         self.assertIn("depthSecOn()", _extract_fn(self.src, "ensureQuoteStream"))
 

@@ -1531,7 +1531,7 @@ function panelGridLeft() {
   return (w + 12 + AXIS_LABEL_RESERVE) + 'px';
 }
 
-// ── 基本信息面板 (行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态) ──
+// ── 基本信息面板 (现价/行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态) ──
 function fmtLots(v) {
   if (v == null) return '—';
   return Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(2) + '万手' : Math.round(v) + '手';
@@ -1552,7 +1552,13 @@ function renderStockInfo(d) {
     `<div class="sp-row"><span class="sp-label">${label}</span><span class="sp-val">${val}</span></div>`;
   const statusColor = d.trade_status === 'trading' ? up
     : (d.trade_status === 'halt' ? 'var(--chart-halt)' : gray);
+  const lastPrice = Number(d.last_price);
+  const prevClose = Number(d.prev_close);
+  const priceColor = Number.isFinite(lastPrice)
+    ? (lastPrice > prevClose ? up : (lastPrice < prevClose ? down : gray))
+    : gray;
   body.innerHTML = [
+    row('现价', d.last_price == null ? '—' : `<span style="color:${priceColor}">${fmtPrice3(d.last_price)}</span>`),
     row('行业', escHtml(d.industry || '—')),
     row('总手', fmtLots(d.volume)),
     row('成交额', d.amount == null ? '—' : fmtCN(d.amount)),
@@ -1769,6 +1775,8 @@ function reconcileLiveBars(data) {
 function updateLiveStockInfo(q, symbol = STATE.symbol) {
   if (!q || symbol !== STATE.symbol) return;
   const d = { ...(STATE.stockInfo || { symbol: STATE.symbol }), ...(q._live_info || {}) };
+  if (q.last_price != null && Number.isFinite(Number(q.last_price))) d.last_price = Number(q.last_price);
+  if (q.prev_close != null && Number.isFinite(Number(q.prev_close))) d.prev_close = Number(q.prev_close);
   for (const k of ['volume', 'amount', 'turnover_rate']) {
     if (q[k] != null) d[k] = q[k];
   }
