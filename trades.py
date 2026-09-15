@@ -1984,6 +1984,15 @@ def _insert_legs(conn, trade_id, legs):
     )
 
 
+def validate_trade(data, existing=None):
+    """交易字段校验: 返回错误文案 (无错为 None)。
+
+    文案由 _clean 的固定规则产生, 不含异常原文。API 先取文案再入库,
+    避免把异常文本回传到响应 (CodeQL py/stack-trace-exposure)。
+    """
+    return _clean(data, existing)[1]
+
+
 def create_trade(user_id, data):
     clean, err = _clean(data)
     if err:
