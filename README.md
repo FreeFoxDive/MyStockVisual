@@ -1,18 +1,5 @@
 # Visual — 本地股票K线可视化
 
-## 提交与推送
-
-Visual 在主仓库中以 subtree 形式同步到独立仓库。常规流程在项目根目录执行；默认只推送 Visual，不推送主仓库：
-
-```powershell
-git add visual
-git commit -m "feat(visual): ..."
-git subtree split --prefix=visual --branch=visual-split
-git push visual-origin visual-split:master --force
-```
-
-独立仓库的远端分支以本地 `visual/` 为准，远端独立提交不保留。主仓库需要发布时，再显式执行 `git push origin master`。
-
 [![Tests](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-test.yml/badge.svg?branch=master)](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-test.yml)
 [![Docker Build](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-docker.yml/badge.svg?branch=master)](https://github.com/FreeFoxDive/MyStockVisual/actions/workflows/visual-docker.yml)
 
