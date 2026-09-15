@@ -13,6 +13,12 @@ from logger import sanitize_error as _sanitize_error
 log = logging.getLogger("api")
 
 
+def _trade_validation_error(exc):
+    """交易字段校验由 trades._clean 产生，文案可安全回显到录入表单。"""
+    message = str(exc).strip()
+    return _error(message or "交易数据无效", 400)
+
+
 @api_bp.route("/api/trade-reasons", methods=["GET"])
 def trade_reasons():
     return _json({"entry": trades.ENTRY_REASONS, "exit": trades.EXIT_REASONS})
@@ -68,7 +74,7 @@ def trades_create():
         trade = trades.create_trade(user["id"], body)
     except ValueError as e:
         log.warning("创建交易失败: %s", _sanitize_error(e))
-        return _error("交易数据无效", 400)
+        return _trade_validation_error(e)
     return _json({"trade": trade}, 201)
 
 
@@ -84,7 +90,7 @@ def trades_update(tid):
         trade = trades.update_trade(user["id"], tid, body)
     except ValueError as e:
         log.warning("更新交易失败 id=%s: %s", tid, _sanitize_error(e))
-        return _error("交易数据无效", 400)
+        return _trade_validation_error(e)
     if trade is None:
         return _error("记录不存在", 404)
     return _json({"trade": trade})

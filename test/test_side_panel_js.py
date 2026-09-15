@@ -183,6 +183,20 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertIn("d.last_price = Number(q.last_price)", live)
         self.assertIn("d.prev_close = Number(q.prev_close)", live)
 
+    def test_stock_info_loads_core_before_enrichment(self):
+        body = _extract_fn(self.src, "fetchStockInfo")
+        self.assertIn("&core=1", body)
+        self.assertIn("fetchStockInfo(true)", body)
+        self.assertIn("resp.status === 429 ? 2000 : 4000", body)
+
+    def test_trade_close_defaults_exit_date_and_validates_fields(self):
+        src = (INDEX_HTML.parent / "trades.html").read_text(encoding="utf-8")
+        status = _extract_fn(src, "onStatusChange")
+        submit = _extract_fn(src, "saveTrade")
+        self.assertIn("exitDate.value = todayISO()", status)
+        for message in ("请填写有效的退出价", "请填写卖出日期", "请选择卖出理由"):
+            self.assertIn(message, submit)
+
     def test_stream_uses_depth_sec_on(self):
         self.assertIn("depthSecOn()", _extract_fn(self.src, "ensureQuoteStream"))
 

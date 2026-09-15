@@ -187,8 +187,11 @@ def stock_info():
     if not symbol_raw:
         return _error("缺少 symbol 参数")
     symbol = normalize_symbol(symbol_raw)
+    # 首屏先取不依赖麦蕊特色资料的核心行情，量比和 N 日涨幅不应等待
+    # ROE 榜、行业及涨跌停等慢请求。未传 core 时保持完整资料的 API 语义。
+    core_only = (request.args.get("core") or "").lower() in ("1", "true", "yes")
     try:
-        return _json(fetch_stock_info(symbol))
+        return _json(fetch_stock_info(symbol, include_enrichment=not core_only))
     except Exception as e:
         log.warning("获取基本信息失败 %s: %s", symbol, _sanitize_error(e))
         return _error("获取基本信息失败，请稍后重试", 500)

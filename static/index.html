@@ -1575,17 +1575,20 @@ function renderStockInfo(d) {
   ].join('');
 }
 
-async function fetchStockInfo(_retry) {
+async function fetchStockInfo(enrich = false, retry = 0) {
   const symbol = STATE.symbol;
   const seq = (STATE._infoReqSeq || 0) + 1;
   STATE._infoReqSeq = seq;
   STATE._lastInfoAt = Date.now();   // 定时刷新节流标记 (盘中约 60s)
   try {
-    const resp = await fetch(`/api/stock-info?symbol=${encodeURIComponent(symbol)}`);
+    // 核心包不等行业/PE/PB/涨跌停等慢资料，优先显示量比和 3/5/10 日涨幅。
+    const suffix = enrich ? '' : '&core=1';
+    const resp = await fetch(`/api/stock-info?symbol=${encodeURIComponent(symbol)}${suffix}`);
     if (!resp.ok) {
-      // 429 限流: 短暂退避重试, 否则收盘后无定时器会让面板冻在旧股
-      if (resp.status === 429 && (_retry || 0) < 2) {
-        setTimeout(() => { if (STATE.symbol === symbol) fetchStockInfo((_retry || 0) + 1); }, 2000);
+      // 补充资料的上游超时/临时故障也要重试；否则行业等字段会一直停在核心包。
+      if (retry < 2) {
+        const delay = resp.status === 429 ? 2000 : 4000;
+        setTimeout(() => { if (STATE.symbol === symbol) fetchStockInfo(enrich, retry + 1); }, delay);
       }
       return;
     }
@@ -1594,7 +1597,13 @@ async function fetchStockInfo(_retry) {
     data._revision = seq;
     marketStore.accept('info', symbol, data);
     updateLiveStockInfo(marketStore.quotes[symbol], symbol);
-  } catch (e) { /* 静默降级: 面板保留上次数据 */ }
+    // 完整资料延后请求；它慢或失败时，已显示的核心行情仍然保留。
+    if (!enrich && STATE.symbol === symbol) fetchStockInfo(true);
+  } catch (e) {
+    if (retry < 2) setTimeout(() => {
+      if (STATE.symbol === symbol) fetchStockInfo(enrich, retry + 1);
+    }, 4000);
+  }
 }
 
 function renderDepth(depth) {

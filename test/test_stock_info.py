@@ -36,6 +36,7 @@ def _daily_df(closes, volumes):
 
 def _reset_caches():
     market._stock_info_cache.clear()
+    market._stock_info_enrichment_cache.clear()
     market._info_quote_bases.clear()
     market._roe_cache.update({"ts": 0.0, "data": None, "ok": False})
     market._mr_instrument_cache.clear()
@@ -114,6 +115,23 @@ class StockInfoTest(unittest.TestCase):
         self.assertAlmostEqual(live["chg_5d"], 50)
         self.assertAlmostEqual(live["chg_10d"], 140)
         self.assertEqual(quote, {"last_price": 12, "volume": 1000})
+
+    def test_core_info_does_not_wait_for_enrichment(self):
+        """量比和 N 日涨幅首包不能被 ROE/行业/涨跌停查询拖慢。"""
+        df = _daily_df([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], [100] * 11)
+        mr = mock.Mock()
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote()), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(df, "x", "mairui")) as kline:
+            info = market.fetch_stock_info("002714.SZ", include_enrichment=False)
+        self.assertIsNotNone(info["vol_ratio"])
+        self.assertIsNotNone(info["chg_3d"])
+        self.assertIsNotNone(info["chg_5d"])
+        self.assertIsNotNone(info["chg_10d"])
+        kline.assert_called_once_with("002714.SZ", "1d", 12, quote_fresh=False)
+        mr.hsdc_himk_roe.assert_not_called()
+        mr.concepts_of_stock.assert_not_called()
+        mr.stock_instrument.assert_not_called()
 
     def test_volume_ratio_last_session_when_not_today(self):
         # 收盘后/休市: 末根非今日 → 最近一个交易日全天口径 = 当日量 / 前5日均量

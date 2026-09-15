@@ -1122,6 +1122,8 @@ def _validate_price_on_bar(symbol, date_str, price, side_label, leg_prefix=""):
     """校验价在当日振幅内且成交量>0。返回错误文案或 None。
 
     side_label: '买入' / '卖出'；leg_prefix: '第N笔 '（可空）。
+    当天优先由实时快照生成 OHLC；历史日期也必须有日 K，避免把非交易日
+    或错价静默写入。
     """
     try:
         from market import get_daily_bar

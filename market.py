@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -611,6 +612,9 @@ from live_budget import PacedBudget
 QUOTE_RATE_PER_MIN = 48
 _quote_budget = PacedBudget(QUOTE_RATE_PER_MIN)
 _quote_fetch_lock = threading.Lock()
+_quote_fetch_condition = threading.Condition()
+_quote_fetch_inflight = False
+_quote_fetch_symbols: set[str] = set()
 _quote_interest_lock = threading.Lock()
 _quote_interests = {}
 _quote_cursor = 0
@@ -1319,12 +1323,23 @@ def _fetch_af_quotes(symbols):
         return {}
 
 
-def fetch_quotes(symbols, fresh=False):
+def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0):
+    """批量获取实时快照。
+
+    ``wait_for_lock`` 仅供成交校验等强一致性调用使用：常规 UI 轮询继续
+    非阻塞地复用缓存；但提交交易时，不能因另一条快照请求恰好在飞行中而
+    把当天交易日误判为「无日 K」。
+    """
     global _quote_cursor
     symbols = list(dict.fromkeys(normalize_symbol(s) for s in symbols if s))
     # A concurrent HTTP fallback cannot start a second fetch or overwrite its result.
-    if not _quote_fetch_lock.acquire(blocking=False):
+    if wait_for_lock:
+        acquired = _quote_fetch_lock.acquire(timeout=float(wait_for_lock))
+    else:
+        acquired = _quote_fetch_lock.acquire(blocking=False)
+    if not acquired:
         return {s: q for s in symbols if (q := quote_cache.get(s)) is not None}
+    combined = []
     try:
         with _quote_interest_lock:
             watched = {s for group in _quote_interests.values() for s in group}
@@ -1333,10 +1348,40 @@ def fetch_quotes(symbols, fresh=False):
         if combined:
             offset = _quote_cursor % len(combined)
             combined = combined[offset:] + combined[:offset]
+        with _quote_fetch_condition:
+            global _quote_fetch_inflight, _quote_fetch_symbols
+            _quote_fetch_inflight = True
+            _quote_fetch_symbols = set(combined)
         result = _fetch_quotes_locked(combined, fresh=fresh)
         return {s: result[s] for s in symbols if s in result}
     finally:
+        with _quote_fetch_condition:
+            _quote_fetch_inflight = False
+            _quote_fetch_symbols = set()
+            _quote_fetch_condition.notify_all()
         _quote_fetch_lock.release()
+
+
+def fetch_trade_quote(symbol, timeout=5.0):
+    """供成交校验使用的强一致实时快照。
+
+    与 SSE 共用上游与缓存，但不把其锁竞争当成空数据：若有在飞行快照且
+    包含标的，等待并消费结果；若不包含，完成后为该标的单独强刷。
+    """
+    symbol = normalize_symbol(symbol)
+    deadline = time.monotonic() + max(float(timeout), 0.0)
+    with _quote_fetch_condition:
+        inflight_for_symbol = _quote_fetch_inflight and symbol in _quote_fetch_symbols
+        if _quote_fetch_inflight:
+            remaining = max(0.0, deadline - time.monotonic())
+            _quote_fetch_condition.wait_for(lambda: not _quote_fetch_inflight, timeout=remaining)
+        if inflight_for_symbol:
+            quote = quote_cache.get(symbol)
+            if quote:
+                return quote
+
+    remaining = max(0.0, deadline - time.monotonic())
+    return fetch_quotes([symbol], fresh=True, wait_for_lock=remaining).get(symbol)
 
 
 def _fetch_quotes_locked(symbols, fresh=False):
@@ -2123,7 +2168,7 @@ def _maybe_append_today_bar(symbol, df, timing=None, fresh=True):
     return _apply_quote_bar_to_df(df, quote_bar)
 
 
-def _daily_bar_from_quote(symbol, target, timing=None, fresh=True):
+def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=False):
     """历史日K尚无当天 bar 时, 用实时快照拼一根 (仅今天 + 交易日 + 成交量>0)。
 
     fresh=False 复用 quote_cache (TTL 1.25s), 不再每次强制走网络: 图表路径用,
@@ -2145,7 +2190,8 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True):
         return None
     # 观测: 该往返的耗时即 quote_ms, 是 /api/kline 关键路径上的网络成本
     with perf.Span(timing, "quote_ms"):
-        q = fetch_quotes([symbol], fresh=fresh).get(normalize_symbol(symbol))
+        q = (fetch_trade_quote(symbol) if for_trade
+             else fetch_quotes([symbol], fresh=fresh).get(normalize_symbol(symbol)))
     if not q:
         return None
     # 快照自带交易所时间戳时校验日期: 挡住盘前/停牌等陈旧快照被当今日
@@ -2204,7 +2250,7 @@ def get_daily_bar(symbol, date_str):
     # 滞后 low/high (曾致 601058.SH 买入价 14.20 被 [14.30, 14.64] 误拒)。
     # 故当日一律以实时快照为准, 快照失败再退回历史 bar。
     if target == today:
-        quote_bar = _daily_bar_from_quote(symbol, target)
+        quote_bar = _daily_bar_from_quote(symbol, target, for_trade=True)
         if quote_bar is not None:
             return quote_bar
 
@@ -2438,6 +2484,7 @@ def _trade_status(quote):
 
 _STOCK_INFO_TTL = 60.0
 _info_quote_bases = {}
+_stock_info_enrichment_cache: dict = {}
 
 
 def _live_info_for_quote(symbol, quote):
@@ -2472,14 +2519,63 @@ _stock_info_cache: dict = {}
 _stock_info_lock = threading.Lock()
 
 
-def fetch_stock_info(symbol, force=False):
+def fetch_stock_info(symbol, force=False, include_enrichment=True):
     """侧栏「基本信息」数据: 行业/总手/成交额/换手/量比/涨跌停/3-5-10日涨幅/PE/PB/交易状态。
 
-    60s 进程内缓存。港股/美股跳过麦蕊专属字段 (行业/涨跌停/PE/PB 置 None)。
-    上游失败静默降级 (字段 None), 不抛异常。
+    核心行情字段（量比和 N 日涨幅）先由 ``include_enrichment=False`` 返回，
+    以免被行业/估值/涨跌停等麦蕊补充请求阻塞。完整资料会在第二次调用合并。
+    两类结果各自 60s 缓存。港股/美股跳过麦蕊专属字段。
     """
     symbol = normalize_symbol(symbol)
     now = time.time()
+    if include_enrichment:
+        # 先复用（或取得）快速核心包。这样前端可以先画出量比/涨幅，后续的
+        # 行业、PE/PB 和涨跌停即使慢也不会拖住它们。
+        core = fetch_stock_info(symbol, force=force, include_enrichment=False)
+        if not force:
+            with _stock_info_lock:
+                ent = _stock_info_enrichment_cache.get(symbol)
+                if ent and now - ent[0] < _STOCK_INFO_TTL:
+                    return {**core, **ent[1]}
+
+        market = _symbol_market(symbol)
+        is_cn = market == "cn"
+        plain = not _is_etf(symbol) and not _is_index_symbol(symbol)
+        extra = {"industry": None, "limit_up": None, "limit_down": None,
+                 "pe": None, "pb": None, "limit_estimated": False}
+        if is_cn and plain:
+            code = symbol.split(".")[0]
+            # 三项来自互不依赖的上游。并发取数可将首包后的等待从三段
+            # 累加缩短为最慢的一段，且不会影响已先返回的行情核心包。
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="stock-info") as pool:
+                roe_task = pool.submit(_mr_roe_map)
+                industry_task = pool.submit(_mr_industry, code)
+                instrument_task = pool.submit(_mr_instrument, symbol)
+                roe = roe_task.result().get(code)
+                ind = industry_task.result()
+                inst = instrument_task.result()
+            if roe:
+                extra.update(pe=roe.get("pe"), pb=roe.get("pb"),
+                             industry=roe.get("industry"))
+            if ind:
+                extra["industry"] = ind
+            if inst:
+                extra["limit_up"] = inst.get("limit_up")
+                extra["limit_down"] = inst.get("limit_down")
+
+            # 涨停/跌停回退: 前收 ±10% (不区分 ST / 创业板 / 科创板)
+            prev_close = _safe_float(core.get("prev_close"))
+            if prev_close:
+                if extra["limit_up"] is None:
+                    extra["limit_up"] = round(prev_close * 1.1, 2)
+                    extra["limit_estimated"] = True
+                if extra["limit_down"] is None:
+                    extra["limit_down"] = round(prev_close * 0.9, 2)
+                    extra["limit_estimated"] = True
+        with _stock_info_lock:
+            _stock_info_enrichment_cache[symbol] = (now, extra)
+        return {**core, **extra}
+
     if not force:
         with _stock_info_lock:
             ent = _stock_info_cache.get(symbol)
@@ -2499,39 +2595,14 @@ def fetch_stock_info(symbol, force=False):
 
     df = None
     try:
-        df, _name, _src = fetch_kline_ex(symbol, "1d", 12)
+        # 行情刚取过一次；日 K 只需补齐历史和今日 bar，勿再强刷快照。
+        df, _name, _src = fetch_kline_ex(symbol, "1d", 12, quote_fresh=False)
     except Exception as e:
         log.warning(f"基本信息日K失败 {symbol}: {_sanitize_error(e)}")
 
     closes = []
     if df is not None and len(df) > 0:
         closes = [c for c in (_safe_float(x) for x in df["close"].tolist()) if c is not None]
-
-    industry = None
-    limit_up = limit_down = None
-    pe = pb = None
-    estimated = False
-
-    if is_cn and plain:
-        roe = _mr_roe_map().get(code)
-        if roe:
-            pe, pb = roe.get("pe"), roe.get("pb")
-            industry = roe.get("industry")
-        ind = _mr_industry(code)
-        if ind:
-            industry = ind
-        inst = _mr_instrument(symbol)
-        if inst:
-            limit_up = inst.get("limit_up")
-            limit_down = inst.get("limit_down")
-
-    # 涨停/跌停回退: 前收 ±10% (仅 A 股个股; 不区分 ST / 创业板 / 科创板)
-    prev_close = _safe_float((quote or {}).get("prev_close"))
-    if prev_close and is_cn and plain:
-        if limit_up is None:
-            limit_up, estimated = round(prev_close * 1.1, 2), True
-        if limit_down is None:
-            limit_down, estimated = round(prev_close * 0.9, 2), True
 
     if is_cn:
         status_code, status_text = _trade_status(quote)
@@ -2541,21 +2612,17 @@ def fetch_stock_info(symbol, force=False):
     info = {
         "symbol": symbol,
         "name": (quote or {}).get("name") or _lookup_name(symbol),
-        "industry": industry,
+        "last_price": _safe_float((quote or {}).get("last_price")),
+        "prev_close": _safe_float((quote or {}).get("prev_close")),
         "volume": _safe_float((quote or {}).get("volume")),
         "amount": _safe_float((quote or {}).get("amount")),
         "turnover_rate": _safe_float((quote or {}).get("turnover_rate")),
         "vol_ratio": _volume_ratio_from_df(df),
-        "limit_up": limit_up,
-        "limit_down": limit_down,
         "chg_3d": _n_day_change(closes, 3),
         "chg_5d": _n_day_change(closes, 5),
         "chg_10d": _n_day_change(closes, 10),
-        "pe": pe,
-        "pb": pb,
         "trade_status": status_code,
         "trade_status_text": status_text,
-        "limit_estimated": estimated,
     }
     with _stock_info_lock:
         if df is not None and len(df) >= 6:

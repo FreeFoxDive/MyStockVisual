@@ -2055,6 +2055,9 @@ function onStatusChange() {
   const closed = document.getElementById('t-status').value === 'closed';
   document.getElementById('sell-panel').style.display = closed ? '' : 'none';
   document.getElementById('trade-panels').classList.toggle('single', !closed);
+  // 平仓通常就是当日成交；预填日期避免只输入卖出价后被后端以空日期拒绝。
+  const exitDate = document.getElementById('t-exit-date');
+  if (closed && exitDate && !exitDate.value) exitDate.value = todayISO();
 }
 
 function onTypeChange() {
@@ -2427,6 +2430,11 @@ async function saveTrade() {
       body.exit_date = document.getElementById('t-exit-date').value;
       body.exit_reason = document.getElementById('t-exit-reason').value;
       body.exit_note = document.getElementById('t-exit-note').value.trim();
+      if (!Number.isFinite(body.exit_price) || body.exit_price <= 0) {
+        err('请填写有效的退出价'); return;
+      }
+      if (!body.exit_date) { err('请填写卖出日期'); return; }
+      if (!body.exit_reason) { err('请选择卖出理由'); return; }
       const futExit = rejectFutureLocal(body.exit_date, '卖出日期');
       if (futExit) { err(futExit); return; }
     }

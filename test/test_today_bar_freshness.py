@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -164,6 +166,59 @@ class TestFreshnessPolicy(_Harness):
         self.assertIsNotNone(bar)
         self.assertEqual(len(self.af_calls), before + 1,
                          "成交校验必须忽略缓存, 强制拉新快照")
+
+    def test_trade_validation_waits_for_inflight_quote_fetch(self):
+        """锁竞争不能把交易日误报为无日 K。"""
+        market_mod._quote_fetch_lock.acquire()
+        released = threading.Event()
+
+        def release_lock():
+            time.sleep(0.02)
+            market_mod._quote_fetch_lock.release()
+            released.set()
+
+        worker = threading.Thread(target=release_lock)
+        worker.start()
+        try:
+            with mock.patch.object(market_mod, "fetch_kline",
+                                   return_value=(_df_ending_yesterday(), "测试标的")):
+                bar = market_mod.get_daily_bar(SYM, TODAY.isoformat())
+        finally:
+            worker.join(timeout=1)
+            if not released.is_set() and market_mod._quote_fetch_lock.locked():
+                market_mod._quote_fetch_lock.release()
+        self.assertTrue(released.is_set())
+        self.assertIsNotNone(bar)
+        self.assertEqual(bar["high"], 12.0)
+
+    def test_trade_quote_consumes_matching_inflight_snapshot(self):
+        """交易入口应消费 SSE 正在取得的同标的快照，而非再发一次请求。"""
+        market_mod.quote_cache.clear()
+        with market_mod._quote_fetch_condition:
+            market_mod._quote_fetch_inflight = True
+            market_mod._quote_fetch_symbols = {SYM}
+
+        def finish_snapshot():
+            time.sleep(0.02)
+            market_mod.quote_cache.set(SYM, _af_quote())
+            with market_mod._quote_fetch_condition:
+                market_mod._quote_fetch_inflight = False
+                market_mod._quote_fetch_symbols = set()
+                market_mod._quote_fetch_condition.notify_all()
+
+        worker = threading.Thread(target=finish_snapshot)
+        worker.start()
+        try:
+            with mock.patch.object(market_mod, "fetch_quotes") as fallback:
+                quote = market_mod.fetch_trade_quote(SYM)
+        finally:
+            worker.join(timeout=1)
+            with market_mod._quote_fetch_condition:
+                market_mod._quote_fetch_inflight = False
+                market_mod._quote_fetch_symbols = set()
+                market_mod._quote_fetch_condition.notify_all()
+        self.assertEqual(quote["high"], 12.0)
+        fallback.assert_not_called()
 
     def test_endpoint_forwards_policy_constant(self):
         """/api/kline 必须按 TODAY_BAR_QUOTE_FRESH 透传 (开关才算真正接线)。"""

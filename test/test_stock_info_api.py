@@ -73,6 +73,13 @@ class StockInfoRouteTest(unittest.TestCase):
         self.assertEqual(data["pe"], 4.43)
         f.assert_called_once()
 
+    def test_core_skips_enrichment(self):
+        payload = {"symbol": "002714.SZ", "chg_3d": 1.0, "vol_ratio": 1.2}
+        with mock.patch("api.market.fetch_stock_info", return_value=payload) as f:
+            data = self.client.get("/api/stock-info?symbol=002714.SZ&core=1").get_json()
+        self.assertEqual(data["chg_3d"], 1.0)
+        f.assert_called_once_with("002714.SZ", include_enrichment=False)
+
     def test_upstream_error_sanitized(self):
         with mock.patch("api.market.fetch_stock_info",
                         side_effect=RuntimeError("licence 66D8-9F96 dead")):
