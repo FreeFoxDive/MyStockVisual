@@ -19,7 +19,8 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date as _date, timedelta
+from contextlib import contextmanager
+from datetime import date as _date, datetime, timedelta, timezone
 from unittest import mock
 
 # visual/ 不是包（无 __init__.py），把其目录加入 sys.path 后直接 import trades
@@ -1951,6 +1952,632 @@ class TestDateCanonicalization(TradesTestCase):
         self.assertEqual(stats["series"]["week"],
                          [{"label": "2026-W32", "pnl": 300.0,
                            "count": 1, "win_rate": 100.0}])
+
+
+# ---------------------------------------------------------------------------
+# 时段 × 交易操作矩阵
+#
+# 交易日/非交易日 × 盘中/午休/盘后/盘前 × 单次/平仓/加仓/做T/批次。
+# A 组走真实 market.get_daily_bar (只 mock 底层 fetch_trade_quote / fetch_kline
+# 与时钟), 验证时段对成交校验的影响; B 组直接 mock market.get_daily_bar, 隔离
+# 交易层本身 (查询次数/短路/文案/边界/批次分支)。
+# ---------------------------------------------------------------------------
+
+_SESSION_SYM = "600000.SH"
+_CST = timezone(timedelta(hours=8))
+_TODAY = "2026-09-15"          # 周二 (交易日)
+_HIST = "2026-08-03"           # 历史交易日 (由 mock K 线提供)
+_FUTURE = "2026-09-16"
+_NOW_TRADING = datetime(2026, 9, 15, 10, 30)
+_NOW_BREAK = datetime(2026, 9, 15, 12, 0)
+_NOW_CLOSED = datetime(2026, 9, 15, 15, 30)
+_NOW_PRE = datetime(2026, 9, 15, 9, 0)
+_NOW_NON_TRADING = datetime(2026, 9, 19, 10, 30)   # 周六
+
+
+def _cst_ts(now):
+    return now.replace(tzinfo=_CST).timestamp()
+
+
+def _mk_quote(now=_NOW_TRADING, high=11.0, low=9.0, volume=1000,
+              last=10.0, ts="auto"):
+    """AlphaFeed 口径快照 (get_daily_bar 当日路径经 fetch_trade_quote 读取)。"""
+    return {
+        "symbol": _SESSION_SYM, "open": 10.0, "high": high, "low": low,
+        "last_price": last, "volume": volume,
+        "timestamp": _cst_ts(now) if ts == "auto" else ts,
+    }
+
+
+def _mk_kline(dates, high=11.0, low=9.0, volume=1000.0):
+    import pandas as pd
+    dates = list(dates)
+    idx = pd.to_datetime(dates)
+    n = len(idx)
+    vols = list(volume) if isinstance(volume, (list, tuple)) else [volume] * n
+    return pd.DataFrame(
+        {"open": [10.0] * n, "high": [high] * n, "low": [low] * n,
+         "close": [10.0] * n, "volume": vols},
+        index=idx,
+    )
+
+
+def _ui_legs(*legs_first_to_last):
+    """笔数序第1…第N → API 数组 (最新在上, 与编辑器 collectLegs 一致)。"""
+    return list(reversed(legs_first_to_last))
+
+
+def _batch_payload(legs, symbol=_SESSION_SYM, name="测试标的", **extra):
+    d = {"type": "batch", "symbol": symbol, "name": name, "legs": legs}
+    d.update(extra)
+    return d
+
+
+class _SessionCase(TradesTestCase):
+    """真实 get_daily_bar + mock 底层源/时钟。"""
+
+    def setUp(self):
+        super().setUp()
+        self._bar_patch.stop()  # 用真实 market.get_daily_bar
+
+    @contextmanager
+    def _session(self, now, phase, trading=True, quote=None, kline=None):
+        with mock.patch("market_hours.now", return_value=now), \
+             mock.patch.object(trades, "_now", return_value=now), \
+             mock.patch("market_hours.is_trading_day", return_value=trading), \
+             mock.patch("market_hours.session_phase", return_value=phase), \
+             mock.patch("market_hours.in_session", return_value=(phase == "trading")), \
+             mock.patch("market.fetch_trade_quote", return_value=quote), \
+             mock.patch("market.fetch_kline", return_value=(kline, "测试标的")):
+            yield
+
+    def _open_sym(self, **kw):
+        kw.setdefault("symbol", _SESSION_SYM)
+        kw.setdefault("name", "测试标的")
+        return self._open(**kw)
+
+    def _closed_sym(self, **kw):
+        kw.setdefault("symbol", _SESSION_SYM)
+        kw.setdefault("name", "测试标的")
+        return self._closed(**kw)
+
+
+class TestSimpleOpenSessionStates(_SessionCase):
+    """单次开仓: 今日 entry_date 在五种时段下的校验结果。"""
+
+    def test_trading_today_quote_bar_passes(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST])):
+            t = trades.create_trade(uid, self._open_sym(entry=10.5, entry_date=_TODAY))
+        self.assertEqual(t["entry_price"], 10.5)
+        self.assertEqual(t["entry_date"], _TODAY)
+
+    def test_trading_today_out_of_range_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST])):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=12.0, entry_date=_TODAY),
+                sub="不在当日振幅")
+
+    def test_break_today_quote_bar_passes(self):
+        # 午休 in_session=False 但当日 bar 已成型 (BAR_READY_PHASES 含 break)
+        uid = self._make_user()
+        with self._session(_NOW_BREAK, "break",
+                           quote=_mk_quote(now=_NOW_BREAK, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST])):
+            t = trades.create_trade(uid, self._open_sym(entry=10.5, entry_date=_TODAY))
+        self.assertEqual(t["entry_price"], 10.5)
+
+    def test_closed_today_quote_bar_passes(self):
+        uid = self._make_user()
+        with self._session(_NOW_CLOSED, "closed",
+                           quote=_mk_quote(now=_NOW_CLOSED, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST])):
+            t = trades.create_trade(uid, self._open_sym(entry=10.5, entry_date=_TODAY))
+        self.assertEqual(t["entry_price"], 10.5)
+
+    def test_pre_today_no_bar_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_PRE, "pre",
+                           quote=_mk_quote(now=_NOW_PRE, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST])):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=10.5, entry_date=_TODAY),
+                sub="无日K数据")
+
+    def test_non_trading_day_rejected(self):
+        uid = self._make_user()
+        today = _NOW_NON_TRADING.date().isoformat()
+        with self._session(_NOW_NON_TRADING, "non_trading", trading=False,
+                           quote=_mk_quote(now=_NOW_NON_TRADING, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST])):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=10.5, entry_date=today),
+                sub="无日K数据")
+
+
+class TestTodayBarGuardsTradeLevel(_SessionCase):
+    """当日快照守卫在交易层的表现 (停牌/陈旧时间戳/缺高低)。"""
+
+    def test_suspended_volume_zero_rejected(self):
+        uid = self._make_user()
+        # 快照 volume=0 时不拼当日 bar, 回退日 K; 日 K 当日 volume=0 → 停牌文案
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(volume=0),
+                           kline=_mk_kline([_HIST, _TODAY], volume=[1000.0, 0.0])):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=10.5, entry_date=_TODAY),
+                sub="成交量为0")
+
+    def test_stale_quote_timestamp_rejected(self):
+        uid = self._make_user()
+        stale = _cst_ts(datetime(2026, 9, 14, 10, 0))
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(ts=stale),
+                           kline=_mk_kline([_HIST])):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=10.5, entry_date=_TODAY),
+                sub="无日K数据")
+
+    def test_missing_high_low_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=None, low=None),
+                           kline=_mk_kline([_HIST])):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=10.5, entry_date=_TODAY),
+                sub="无日K数据")
+
+
+class TestHistoricalDates(_SessionCase):
+    """历史日期只走日 K (与时段无关)。"""
+
+    def test_historical_trading_day_passes(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading", quote=_mk_quote(),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            t = trades.create_trade(uid, self._open_sym(entry=10.5, entry_date=_HIST))
+        self.assertEqual(t["entry_date"], _HIST)
+
+    def test_historical_out_of_range_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading", quote=_mk_quote(),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=12.0, entry_date=_HIST),
+                sub="不在当日振幅")
+
+    def test_historical_missing_bar_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading", quote=_mk_quote(),
+                           kline=_mk_kline(["2026-07-01"])):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=10.5, entry_date=_HIST),
+                sub="无日K数据")
+
+
+class TestSimpleCloseOperations(_SessionCase):
+    """单次平仓: exit_date 在各时段/日期下的校验。"""
+
+    def test_close_exit_today_closed_session_passes(self):
+        uid = self._make_user()
+        with self._session(_NOW_CLOSED, "closed",
+                           quote=_mk_quote(now=_NOW_CLOSED, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            t = trades.create_trade(uid, self._closed_sym(
+                entry=10.0, exit_=10.5, entry_date=_HIST, exit_date=_TODAY))
+        self.assertEqual(t["status"], "closed")
+        self.assertEqual(t["exit_date"], _TODAY)
+
+    def test_close_exit_today_pre_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_PRE, "pre",
+                           quote=_mk_quote(now=_NOW_PRE, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._closed_sym(entry=10.0, exit_=10.5,
+                                 entry_date=_HIST, exit_date=_TODAY),
+                sub="无日K数据")
+
+    def test_close_exit_historical_passes(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading", quote=_mk_quote(),
+                           kline=_mk_kline([_HIST, "2026-08-10"], high=11.0, low=9.0)):
+            t = trades.create_trade(uid, self._closed_sym(
+                entry=10.0, exit_=10.5, entry_date=_HIST, exit_date="2026-08-10"))
+        self.assertEqual(t["exit_date"], "2026-08-10")
+
+    def test_close_exit_non_trading_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_TRADING, "trading", quote=_mk_quote(),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._closed_sym(entry=10.0, exit_=10.5,
+                                 entry_date=_HIST, exit_date="2026-08-08"),
+                sub="无日K数据")
+
+    def test_close_exit_future_rejected(self):
+        uid = self._make_user()
+        with self._session(_NOW_CLOSED, "closed",
+                           quote=_mk_quote(now=_NOW_CLOSED, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._closed_sym(entry=10.0, exit_=10.5,
+                                 entry_date=_HIST, exit_date=_FUTURE),
+                sub="不能晚于今天")
+
+
+class TestUpdateCloseOperations(_SessionCase):
+    """已开仓单次记录通过 update 平仓时的时段校验。"""
+
+    def _open_then_update(self, uid, phase, now):
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            t = trades.create_trade(uid, self._open_sym(entry=10.0, entry_date=_HIST))
+        with self._session(now, phase,
+                           quote=_mk_quote(now=now, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            return trades.update_trade(uid, t["id"], {
+                "status": "closed", "exit_price": 10.5, "exit_date": _TODAY,
+                "exit_reason": "止盈(达到目标价)"})
+
+    def test_update_close_today_closed_session_passes(self):
+        uid = self._make_user()
+        upd = self._open_then_update(uid, "closed", _NOW_CLOSED)
+        self.assertEqual(upd["status"], "closed")
+        self.assertEqual(upd["exit_date"], _TODAY)
+
+    def test_update_close_today_pre_rejected(self):
+        uid = self._make_user()
+        with self.assertRaises(ValueError) as cm:
+            self._open_then_update(uid, "pre", _NOW_PRE)
+        self.assertIn("无日K数据", str(cm.exception))
+
+
+class TestAddPosition(_SessionCase):
+    """批次加仓: 追加买腿 (历史 + 今日) 的合并与时段校验。"""
+
+    def test_batch_add_historical_and_today(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST, "time": "09:30"},
+            {"side": "buy", "price": 11.0, "quantity": 500, "date": _TODAY, "time": "14:00"},
+        )
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=12.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=12.0, low=9.0)):
+            t = trades.create_trade(uid, _batch_payload(legs))
+        self.assertEqual(t["status"], "open")
+        self.assertEqual(t["quantity"], 1500)
+        self.assertAlmostEqual(t["entry_price"], 15500 / 1500, places=4)
+
+    def test_update_batch_append_buy_today(self):
+        uid = self._make_user()
+        first = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST, "time": "09:30"},
+        )
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=12.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=12.0, low=9.0)):
+            t = trades.create_trade(uid, _batch_payload(first))
+            added = _ui_legs(
+                {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST, "time": "09:30"},
+                {"side": "buy", "price": 11.0, "quantity": 500, "date": _TODAY, "time": "14:00"},
+            )
+            upd = trades.update_trade(uid, t["id"], {"type": "batch", "legs": added})
+        self.assertEqual(upd["quantity"], 1500)
+        self.assertEqual(len(upd["legs"]), 2)
+
+    def test_add_leg_future_rejected(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST},
+            {"side": "buy", "price": 10.0, "quantity": 500, "date": _FUTURE},
+        )
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=12.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=12.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid, _batch_payload(legs),
+                sub="不能晚于今天")
+
+
+class TestIntradayT(_SessionCase):
+    """批次做T: 同日先买后卖 (正T) / 先卖后买 (反T) 在今日盘后。"""
+
+    def test_positive_t_today_closed_session(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _TODAY, "time": "09:30"},
+            {"side": "sell", "price": 10.5, "quantity": 500, "date": _TODAY, "time": "14:00"},
+        )
+        with self._session(_NOW_CLOSED, "closed",
+                           quote=_mk_quote(now=_NOW_CLOSED, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            t = trades.create_trade(uid, _batch_payload(legs))
+        self.assertEqual(t["t_stats"]["count"], 1)
+        self.assertEqual(t["t_stats"]["positive"], 1)
+        self.assertEqual(t["status"], "open")   # 净 500 未平
+
+    def test_reverse_t_today_closed_session(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST, "time": "09:30"},
+            {"side": "sell", "price": 11.0, "quantity": 500, "date": _TODAY, "time": "09:30"},
+            {"side": "buy", "price": 10.8, "quantity": 300, "date": _TODAY, "time": "14:00"},
+        )
+        with self._session(_NOW_CLOSED, "closed",
+                           quote=_mk_quote(now=_NOW_CLOSED, high=11.5, low=10.0),
+                           kline=_mk_kline([_HIST], high=11.5, low=9.0)):
+            t = trades.create_trade(uid, _batch_payload(legs))
+        self.assertEqual(t["t_stats"]["count"], 1)
+        self.assertEqual(t["t_stats"]["reverse"], 1)
+
+    def test_t_leg_non_trading_rejected(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST},
+            {"side": "sell", "price": 10.5, "quantity": 500, "date": "2026-08-08"},
+        )
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid, _batch_payload(legs),
+                sub="无日K数据")
+
+    def test_t_leg_future_rejected(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST},
+            {"side": "sell", "price": 10.5, "quantity": 500, "date": _FUTURE},
+        )
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid, _batch_payload(legs),
+                sub="不能晚于今天")
+
+
+class TestBatchClose(_SessionCase):
+    """批次平仓: 今日卖出腿净 0 自动平仓 / 卖出腿缺 bar。"""
+
+    def test_batch_close_net_zero_today(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST, "time": "09:30"},
+            {"side": "sell", "price": 10.5, "quantity": 1000, "date": _TODAY, "time": "14:00"},
+        )
+        with self._session(_NOW_CLOSED, "closed",
+                           quote=_mk_quote(now=_NOW_CLOSED, high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            t = trades.create_trade(uid, _batch_payload(legs))
+        self.assertEqual(t["status"], "closed")
+        self.assertEqual(t["exit_date"], _TODAY)
+        self.assertEqual(t["quantity"], 0)
+
+    def test_batch_sell_leg_missing_bar_rejected(self):
+        uid = self._make_user()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": _HIST},
+            {"side": "sell", "price": 10.5, "quantity": 1000, "date": "2026-08-09"},
+        )
+        with self._session(_NOW_TRADING, "trading",
+                           quote=_mk_quote(high=11.0, low=9.0),
+                           kline=_mk_kline([_HIST], high=11.0, low=9.0)):
+            self._assert_value_error(
+                trades.create_trade, uid, _batch_payload(legs),
+                sub="无日K数据")
+
+
+class TestOperationBarLookupMock(TradesTestCase):
+    """直接 mock market.get_daily_bar: 交易层查询次数/短路/文案/边界。"""
+
+    def setUp(self):
+        super().setUp()
+        self._bar_patch.stop()
+
+    @staticmethod
+    def _bar(symbol, date_str):
+        return dict(_PERMISSIVE_BAR, date=str(date_str)[:10])
+
+    def _open_sym(self, **kw):
+        kw.setdefault("symbol", _SESSION_SYM)
+        kw.setdefault("name", "测试标的")
+        return self._open(**kw)
+
+    def _closed_sym(self, **kw):
+        kw.setdefault("symbol", _SESSION_SYM)
+        kw.setdefault("name", "测试标的")
+        return self._closed(**kw)
+
+    def test_simple_open_looks_up_entry_bar_only(self):
+        uid = self._make_user()
+        with mock.patch("market.get_daily_bar", return_value=self._bar(_SESSION_SYM, _HIST)) as gb:
+            trades.create_trade(uid, self._open_sym(entry_date=_HIST))
+        gb.assert_called_once_with(_SESSION_SYM, _HIST)
+
+    def test_simple_close_looks_up_entry_and_exit(self):
+        uid = self._make_user()
+        calls = []
+
+        def bar(symbol, date_str):
+            calls.append((symbol, date_str))
+            return self._bar(symbol, date_str)
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            trades.create_trade(uid, self._closed_sym(entry_date=_HIST, exit_date="2026-08-10"))
+        self.assertEqual(calls, [(_SESSION_SYM, _HIST), (_SESSION_SYM, "2026-08-10")])
+
+    def test_batch_looks_up_each_leg(self):
+        uid = self._make_user()
+        calls = []
+
+        def bar(symbol, date_str):
+            calls.append(date_str)
+            return self._bar(symbol, date_str)
+
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-08-03", "time": "09:30"},
+            {"side": "sell", "price": 10.5, "quantity": 500, "date": "2026-08-10", "time": "14:00"},
+        )
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            trades.create_trade(uid, _batch_payload(legs))
+        self.assertEqual(sorted(calls), ["2026-08-03", "2026-08-10"])
+
+    def test_future_entry_skips_bar_lookup(self):
+        uid = self._make_user()
+        future = (trades._now().date() + timedelta(days=3)).isoformat()
+        with mock.patch("market.get_daily_bar") as gb:
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry_date=future), sub="不能晚于今天")
+        gb.assert_not_called()
+
+    def test_future_exit_skips_exit_bar_lookup(self):
+        uid = self._make_user()
+        future = (trades._now().date() + timedelta(days=3)).isoformat()
+        with mock.patch("market.get_daily_bar", return_value=self._bar(_SESSION_SYM, _HIST)) as gb:
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._closed_sym(entry_date=_HIST, exit_date=future),
+                sub="不能晚于今天")
+        gb.assert_called_once_with(_SESSION_SYM, _HIST)
+
+    def test_future_leg_skips_bar_lookup(self):
+        uid = self._make_user()
+        future = (trades._now().date() + timedelta(days=3)).isoformat()
+        legs = _ui_legs(
+            {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-08-03"},
+            {"side": "buy", "price": 10.0, "quantity": 100, "date": future},
+        )
+        with mock.patch("market.get_daily_bar", return_value=self._bar(_SESSION_SYM, _HIST)) as gb:
+            self._assert_value_error(
+                trades.create_trade, uid, _batch_payload(legs), sub="不能晚于今天")
+        gb.assert_not_called()
+
+    def test_none_bar_messages(self):
+        uid = self._make_user()
+        with mock.patch("market.get_daily_bar", return_value=None):
+            with self.assertRaises(ValueError) as cm:
+                trades.create_trade(uid, self._open_sym(entry_date=_HIST))
+        self.assertIn("无日K数据", str(cm.exception))
+        with mock.patch("market.get_daily_bar",
+                        side_effect=[self._bar(_SESSION_SYM, _HIST), None]):
+            with self.assertRaises(ValueError) as cm:
+                trades.create_trade(uid, self._closed_sym(
+                    entry_date=_HIST, exit_date="2026-08-10"))
+        self.assertIn("无日K数据", str(cm.exception))
+
+    def test_price_boundary_inclusive(self):
+        uid = self._make_user()
+
+        def bar(symbol, date_str):
+            return {"date": str(date_str)[:10], "high": 11.0, "low": 10.0,
+                    "volume": 1000, "open": 10.0, "close": 10.0}
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            self.assertEqual(
+                trades.create_trade(uid, self._open_sym(entry=10.0, entry_date=_HIST))["entry_price"],
+                10.0)
+            self.assertEqual(
+                trades.create_trade(uid, self._open_sym(entry=11.0, entry_date=_HIST))["entry_price"],
+                11.0)
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=9.99, entry_date=_HIST), sub="不在当日振幅")
+            self._assert_value_error(
+                trades.create_trade, uid,
+                self._open_sym(entry=11.01, entry_date=_HIST), sub="不在当日振幅")
+
+
+class TestBatchValidationEdges(TradesTestCase):
+    """批次字段校验分支 (现有用例未覆盖的部分)。"""
+
+    def test_empty_legs_rejected(self):
+        uid = self._make_user()
+        self._assert_value_error(trades.create_trade, uid, _batch_payload([]),
+                                 sub="批次交易至少需要一笔")
+
+    def test_leg_not_dict_rejected(self):
+        uid = self._make_user()
+        self._assert_value_error(trades.create_trade, uid, _batch_payload(["x"]),
+                                 sub="第1笔格式无效")
+
+    def test_leg_side_invalid(self):
+        uid = self._make_user()
+        self._assert_value_error(
+            trades.create_trade, uid,
+            _batch_payload([{"side": "hold", "price": 10.0, "quantity": 100, "date": "2026-08-03"}]),
+            sub="第1笔方向必须为买入或卖出")
+
+    def test_leg_price_invalid_and_non_positive(self):
+        uid = self._make_user()
+        base = {"side": "buy", "quantity": 100, "date": "2026-08-03"}
+        self._assert_value_error(trades.create_trade, uid,
+                                 _batch_payload([dict(base, price="x")]),
+                                 sub="第1笔价格无效")
+        self._assert_value_error(trades.create_trade, uid,
+                                 _batch_payload([dict(base, price=0)]),
+                                 sub="第1笔价格必须大于 0")
+
+    def test_leg_quantity_invalid_and_non_positive(self):
+        uid = self._make_user()
+        base = {"side": "buy", "price": 10.0, "date": "2026-08-03"}
+        self._assert_value_error(trades.create_trade, uid,
+                                 _batch_payload([dict(base, quantity="x")]),
+                                 sub="第1笔数量无效")
+        self._assert_value_error(trades.create_trade, uid,
+                                 _batch_payload([dict(base, quantity=0)]),
+                                 sub="第1笔数量必须大于 0")
+
+    def test_leg_date_invalid(self):
+        uid = self._make_user()
+        self._assert_value_error(
+            trades.create_trade, uid,
+            _batch_payload([{"side": "buy", "price": 10.0, "quantity": 100, "date": "bad"}]),
+            sub="第1笔日期无效")
+
+    def test_leg_time_invalid(self):
+        uid = self._make_user()
+        self._assert_value_error(
+            trades.create_trade, uid,
+            _batch_payload([{"side": "buy", "price": 10.0, "quantity": 100,
+                             "date": "2026-08-03", "time": "9-30"}]),
+            sub="第1笔时间无效")
+
+    def test_missing_name_rejected(self):
+        uid = self._make_user()
+        self._assert_value_error(
+            trades.create_trade, uid,
+            _batch_payload([{"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-08-03"}],
+                           name=""),
+            sub="缺少股票名称")
+
+    def test_model_invalid_and_missing(self):
+        uid = self._make_user()
+        legs = [{"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-08-03"}]
+        self._assert_value_error(trades.create_trade, uid,
+                                 _batch_payload(legs, model_id="abc"), sub="模型无效")
+        self._assert_value_error(trades.create_trade, uid,
+                                 _batch_payload(legs, model_id=999), sub="模型不存在")
 
 
 if __name__ == "__main__":
