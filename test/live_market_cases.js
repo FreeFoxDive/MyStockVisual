@@ -22,6 +22,7 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), context);
 const { LiveMarket, price } = context.VisualLive;
 const q = (price, rev, timestamp = rev) => ({ symbol: 'A', last_price: price, _revision: rev, timestamp });
+const qs = (sym, price, rev, timestamp = rev) => ({ symbol: sym, last_price: price, _revision: rev, timestamp });
 const finish = async (r, data) => {
   r.resolve({ ok: true, json: async () => data });
   await new Promise(resolve => setImmediate(resolve));
@@ -98,5 +99,21 @@ const finish = async (r, data) => {
   context.document.hidden = false; resources.visibility();
   assert.ok(streams.at(-1) !== resourceStream, 'visible page resubscribes');
   resources.dispose();
+  // 超出 SSE 覆盖范围(前 50)的标的必须始终保留 HTTP 轮询回退。
+  const wide = new LiveMarket({ onQuote: () => {} });
+  const wideSyms = Array.from({ length: 60 }, (_, i) => '6000' + String(i).padStart(2, '0') + '.SH');
+  wide.setSymbols(wideSyms);
+  const wideStream = streams.at(-1);
+  for (const r of requests.slice()) await finish(r, {}); // 清掉引导轮询, 解除 pending 节流
+  const covered = {};
+  for (const s of wideSyms.slice(0, 50)) covered[s] = qs(s, 10, 100);
+  wideStream.emit(covered);
+  const beforeWide = requests.length;
+  now += 3000;
+  wide.tick();
+  const wideUrls = requests.slice(beforeWide).map(r => r.url);
+  assert.ok(wideUrls.some(u => u.includes('600050.SH')), 'symbols beyond the SSE-covered 50 still poll');
+  assert.ok(!wideUrls.some(u => u.includes('600000.SH')), 'healthy SSE-covered symbols stop polling');
+  wide.dispose();
   console.log('live-market boundary cases passed');
 })().catch(e => { console.error(e); process.exitCode = 1; });

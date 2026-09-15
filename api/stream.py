@@ -132,8 +132,6 @@ def stream_quotes():
 
 def _json_error_out_of_session():
     """EventSource 无法读取错误 body，仍返回机器可识别的 HTTP 状态和重试时间。"""
-    import json
-    from flask import Response
     resp = Response(json.dumps({
         "ok": False,
         "code": "SSE_OUT_OF_SESSION",

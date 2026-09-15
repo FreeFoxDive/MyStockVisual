@@ -138,6 +138,7 @@ function setStopBtn(on) {
 }
 
 const liveQuotes = new VisualLive.LiveMarket({
+  streamStatus: true,
   onQuote: (symbol, q) => {
     VisualMarketStore.store.accept('quote', symbol, q);
   },

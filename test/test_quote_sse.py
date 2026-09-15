@@ -55,6 +55,10 @@ class QuoteSseTest(unittest.TestCase):
         stream.QUOTE_SSE_TICK = 0.0  # 测试内不真实等待, 断连后立即归还槽位
         stream.QUOTE_SSE_MAX_LIFETIME = 3600.0  # 默认不在用例内到期
         self.addCleanup(self._restore)
+        # 路由现在只允许盘中建立 SSE；测试需固定为交易时段，避免盘外全量 425。
+        self._in_session = mock.patch.object(stream.market_hours, "in_session", return_value=True)
+        self._in_session.start()
+        self.addCleanup(self._in_session.stop)
         self.client = self.app.test_client()
         token, _ = trades.create_session(self.uid)
         self.client.set_cookie("session", token)

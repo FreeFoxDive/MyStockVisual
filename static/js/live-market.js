@@ -13,7 +13,6 @@
   class LiveMarket {
     constructor(options = {}) {
       this.options = options;
-      this.inSession = true;
       this.symbols = [];
       this.values = new Map();
       this.health = new Map();
@@ -212,8 +211,9 @@
       }
       this.connect();
       // Stable batches keep at most one HTTP request in flight per resource.
-      // SSE 正在建立或已连接时暂停报价轮询，避免两条链路反复切换。
-      if ((!this.es && !this.sseConnecting) || !this.symbols.slice(0, 50).some(s => this.healthy('quote', s))) for (let i = 0; i < this.symbols.length; i += 50) {
+      // Per-batch health check already skips symbols SSE keeps fresh; batches
+      // beyond the SSE-covered first 50 always retain HTTP fallback.
+      for (let i = 0; i < this.symbols.length; i += 50) {
         const batch = this.symbols.slice(i, i + 50);
         if (batch.some(s => !this.healthy('quote', s))) this.poll('quote', batch);
       }

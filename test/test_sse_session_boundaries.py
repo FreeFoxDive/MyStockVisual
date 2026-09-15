@@ -52,8 +52,8 @@ class FrontendSseSessionTest(unittest.TestCase):
         js = (VISUAL / 'static' / 'js' / 'live-market.js').read_text(encoding='utf-8')
         self.assertIn('streamStatus: true', src)
         self.assertIn("fetch('/api/stream/status'", js)
+        # connect() 用 sseConnecting 阻止重复建立连接 (轮询锁)。
         self.assertIn('this.sseConnecting', js)
-        self.assertIn('!this.sseConnecting', js)
 
     def test_status_probe_is_before_eventsource(self):
         js = (VISUAL / 'static' / 'js' / 'live-market.js').read_text(encoding='utf-8')
