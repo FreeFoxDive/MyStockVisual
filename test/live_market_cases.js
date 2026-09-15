@@ -115,5 +115,15 @@ const finish = async (r, data) => {
   assert.ok(wideUrls.some(u => u.includes('600050.SH')), 'symbols beyond the SSE-covered 50 still poll');
   assert.ok(!wideUrls.some(u => u.includes('600000.SH')), 'healthy SSE-covered symbols stop polling');
   wide.dispose();
+  // onQuote 抛异常不得毒化去重: 下一帧仍须重试回调 (否则页面必须刷新才恢复)。
+  let boom = true, seen = 0;
+  const throwing = new LiveMarket({ onQuote: (s, v) => { if (boom) throw new Error('render boom'); seen = v.last_price; } });
+  throwing.setSymbols(['A']);
+  assert.throws(() => throwing.accept('quote', 'A', q(10, 100)), /render boom/);
+  boom = false;
+  throwing.accept('quote', 'A', q(10, 100));
+  assert.equal(seen, 10, 'callback retried after a throwing render');
+  assert.equal(throwing.get('A').last_price, 10, 'value cached after successful callback');
+  throwing.dispose();
   console.log('live-market boundary cases passed');
 })().catch(e => { console.error(e); process.exitCode = 1; });

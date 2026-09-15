@@ -98,9 +98,11 @@
         }
       }
       if (old && JSON.stringify(old) === JSON.stringify(q)) return true;
-      this.values.set(key, q);
       const callback = kind === 'quote' ? this.options.onQuote : kind === 'bars' ? this.options.onBars : this.options.onDepth;
+      // 先回调再落值: 回调抛异常时不缓存该帧, 下一帧仍会重试回调, 避免一次渲染
+      // 异常把该标的的后续更新永久去重掉 (页面必须刷新才恢复)。
       if (callback) callback(symbol, q);
+      this.values.set(key, q);
       return true;
     }
     healthy(kind, symbol) {

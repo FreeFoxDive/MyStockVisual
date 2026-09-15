@@ -179,6 +179,7 @@ class RestFeed:
             missing = [s for s in symbols if s not in out]
             if missing:
                 out.update(self._fallback(missing))
+            self._publish_snapshot(out)
             return out
         except Exception as e:
             wait = _retry_after_ms(e)
@@ -187,6 +188,21 @@ class RestFeed:
                 raise RateLimited(str(e), retry_after_ms=wait) from e
             log.warning(f"quotes 失败, 尝试回退: {e}")
             return self._fallback(symbols)
+
+    @staticmethod
+    def _publish_snapshot(out):
+        """把 AF 快照写入 market 的盘后长 TTL 缓存 (盘中最后一次轮询即收盘价)。
+
+        仅写快照, 不碰 1.25s 实时缓存; 任何异常都不能拖垮监控轮询。
+        """
+        if not out:
+            return
+        try:
+            import market
+            for sym, q in out.items():
+                market.publish_quote_snapshot(sym, q)
+        except Exception as e:
+            log.warning(f"快照入缓存失败: {e}")
 
     def _fallback(self, symbols):
         if not self._fallback_quotes:

@@ -669,6 +669,12 @@ _quote_interest_lock = threading.Lock()
 _quote_interests = {}
 _quote_cursor = 0
 quote_cache = TTLCache(ttl_seconds=1.25)
+# 盘后"最后快照": quote_cache 只有 1.25s, 页面跳转必然过期, 且盘后撞上预算/抓取锁
+# 时只回退已过期缓存会返回 {}。这里另存一份长 TTL 快照, 盘后页面加载直接命中,
+# 不再发上游、也不再忽快忽慢。TTL 必须覆盖整个非交易时段 (过期即删), 故默认 12h;
+# 盘中会被持续覆盖, 长 TTL 无副作用。读取一律由 in_session() 门控, 盘中零影响。
+QUOTE_SNAPSHOT_TTL_SEC = int(float(os.environ.get("QUOTE_SNAPSHOT_TTL_SEC", "43200")))
+quote_snapshot_cache = TTLCache(ttl_seconds=QUOTE_SNAPSHOT_TTL_SEC)
 
 
 def register_quote_interest(token, symbols):
@@ -1382,6 +1388,29 @@ def _fetch_af_quotes(symbols):
         return {}
 
 
+def _quote_cache_lookup(symbol, off_session):
+    """快照读取: 盘中只认 1.25s 实时缓存; 盘后 miss 时回退长 TTL 最后快照。"""
+    q = quote_cache.get(symbol)
+    if q is None and off_session:
+        q = quote_snapshot_cache.get(symbol)
+    return q
+
+
+def publish_quote_snapshot(symbol, quote):
+    """把外部源 (monitor 的 RestFeed) 快照写入盘后长 TTL 缓存。
+
+    quote 为 ``feed._row_to_quote`` 口径 (与 ``_af_quote_to_std`` 入参一致)。
+    仅写长 TTL 快照, 不碰 1.25s 实时缓存 (后者由页面/SSE 链路维护), 保证盘后
+    即使没有页面打开, 监控线程最后一次轮询也能把收盘价留在快照里。
+    """
+    sym = normalize_symbol(symbol)
+    std = _af_quote_to_std(quote, sym)
+    if not _af_quote_valid(std):
+        return
+    std["_revision"] = time.time_ns() // 1000
+    quote_snapshot_cache.set(sym, std)
+
+
 def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0):
     """批量获取实时快照。
 
@@ -1391,13 +1420,16 @@ def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0):
     """
     global _quote_cursor
     symbols = list(dict.fromkeys(normalize_symbol(s) for s in symbols if s))
+    # 盘后读长 TTL 最后快照, 避免撞上预算/抓取锁时返回 {} (页面跳转忽快忽慢)。
+    off_session = not market_hours.in_session()
     # A concurrent HTTP fallback cannot start a second fetch or overwrite its result.
     if wait_for_lock:
         acquired = _quote_fetch_lock.acquire(timeout=float(wait_for_lock))
     else:
         acquired = _quote_fetch_lock.acquire(blocking=False)
     if not acquired:
-        return {s: q for s in symbols if (q := quote_cache.get(s)) is not None}
+        return {s: q for s in symbols
+                if (q := _quote_cache_lookup(s, off_session)) is not None}
     combined = []
     try:
         with _quote_interest_lock:
@@ -1455,11 +1487,13 @@ def _fetch_quotes_locked(symbols, fresh=False):
     if not symbols:
         return {}
 
+    # 盘后 miss 回退长 TTL 最后快照 (盘中 off_session=False, 行为不变)
+    off_session = not market_hours.in_session()
     result = {}
     if not fresh:
         # 缓存优先：命中直接返回，只抓缺失的
         for s in symbols:
-            cached = quote_cache.get(s)
+            cached = _quote_cache_lookup(s, off_session)
             if cached:
                 result[s] = cached
     to_fetch = [s for s in symbols if s not in result]
@@ -1474,12 +1508,14 @@ def _fetch_quotes_locked(symbols, fresh=False):
         result[s]["_revision"] = time.time_ns() // 1000
         # emit 时取当前时间: TTL 从数据可用起算, 慢上游不吃掉缓存有效期
         quote_cache.set(s, result[s])
+        quote_snapshot_cache.set(s, result[s])  # 盘后长 TTL 最后快照
 
     def _emit_af(s, q):
         result[s] = _af_quote_to_std(q, s)
         result[s]["_live_info"] = _live_info_for_quote(s, result[s])
         result[s]["_revision"] = time.time_ns() // 1000
         quote_cache.set(s, result[s])  # emit 时取当前时间 (同 _emit_mr)
+        quote_snapshot_cache.set(s, result[s])
 
     # AlphaFeed 优先（指数 / ETF / 股票统一）
     af_set = list(to_fetch)
@@ -1498,7 +1534,7 @@ def _fetch_quotes_locked(symbols, fresh=False):
     if not remaining:
         for s in to_fetch:
             if s not in result:
-                cached = quote_cache.get(s)
+                cached = _quote_cache_lookup(s, off_session)
                 if cached:
                     result[s] = cached
         return result
@@ -1557,7 +1593,7 @@ def _fetch_quotes_locked(symbols, fresh=False):
     # 未取到的回退缓存 (fresh 模式此前跳过了缓存优先读取)
     for s in to_fetch:
         if s not in result:
-            cached = quote_cache.get(s)
+            cached = _quote_cache_lookup(s, off_session)
             if cached:
                 result[s] = cached
 

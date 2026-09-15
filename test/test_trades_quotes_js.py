@@ -198,6 +198,55 @@ const results = {};
         self.assertEqual(m["setSymbols"], [["600519.SH"], []])
         self.assertEqual(m["accepts"], [["600519.SH", "embedded"]])
 
+    def test_monitor_load_quotes_retries_when_empty(self):
+        """盘后首帧为空 (预算/锁抖动) 时短重试, 有数据即返回; 全空最多 3 次。"""
+        script = """
+const results = {};
+global.setTimeout = (fn) => { fn(); return 0; };
+(async () => {
+  {
+    const rec = { apiPaths: [], accepts: [] };
+    let calls = 0;
+    const liveQuotes = { setSymbols: () => {}, accept: (k, s, q, src) => rec.accepts.push([s, src]) };
+    const api = async path => { rec.apiPaths.push(path); calls += 1;
+      return calls === 1 ? {} : { '600519.SH': { last_price: 1700 } }; };
+    %(monitor_load)s
+    await loadQuotes([{ symbol: '600519.SH' }]);
+    results.retry = rec;
+  }
+  {
+    const rec = { apiPaths: [], accepts: [] };
+    const liveQuotes = { setSymbols: () => {}, accept: (k, s, q, src) => rec.accepts.push([s, src]) };
+    const api = async path => { rec.apiPaths.push(path); return {}; };
+    %(monitor_load)s
+    await loadQuotes([{ symbol: '600519.SH' }]);
+    results.empty = rec;
+  }
+  {
+    const rec = { apiPaths: [], setSymbols: [] };
+    const liveQuotes = { setSymbols: s => rec.setSymbols.push(s), accept: () => {} };
+    const api = async path => { rec.apiPaths.push(path); return {}; };
+    %(monitor_load)s
+    await loadQuotes([]);
+    results.emptyList = rec;
+  }
+})().then(() => console.log(JSON.stringify(results)))
+  .catch(e => { console.error(e && e.stack || e); process.exit(1); });
+""" % {"monitor_load": _extract_fn(self.monitor, "loadQuotes")}
+        data = json.loads(run_node(script))
+
+        r = data["retry"]
+        self.assertEqual(len(r["apiPaths"]), 2, "首帧空 → 重试一次后拿到数据")
+        self.assertEqual(r["accepts"], [["600519.SH", "embedded"]])
+
+        e = data["empty"]
+        self.assertEqual(len(e["apiPaths"]), 3, "持续为空最多重试 3 次")
+        self.assertEqual(e["accepts"], [])
+
+        el = data["emptyList"]
+        self.assertEqual(el["apiPaths"], [], "空持仓不发请求")
+        self.assertEqual(el["setSymbols"], [[]])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

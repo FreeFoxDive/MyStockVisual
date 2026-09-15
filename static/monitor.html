@@ -529,7 +529,9 @@ async function deletePriceAlert(btn) {
   }
 }
 
+let _serverInSession = null;
 function inAshareSession() {
+  if (_serverInSession !== null) return _serverInSession;
   const now = new Date();
   const day = now.getDay();
   if (day === 0 || day === 6) return false;
@@ -551,13 +553,20 @@ VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
 async function loadQuotes(positions) {
   const symbols = positions.map(p => p.symbol);
   liveQuotes.setSymbols(symbols);
-  // 非连续竞价时段 LiveMarket 停摆 (active 门控), 直连拉一次缓存快照兜底,
-  // 盘后/午休也能显示持仓现价; 走统一 accept 通道, 失败保留旧值
-  if (symbols.length) {
+  if (!symbols.length) return;
+  const url = "/api/quotes?symbols=" + encodeURIComponent(symbols.join(","));
+  // 盘后靠一次快照兜底: 上游/预算抖动可能返回空, 短重试避免整列 — 直到 15s 后
+  // 的 loadOverview 才恢复; 有数据即返回, 全部为空才重试 (最多 3 次)。
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const data = await api("/api/quotes?symbols=" + encodeURIComponent(symbols.join(",")));
-      for (const [s, q] of Object.entries(data || {})) liveQuotes.accept("quote", s, q, "embedded");
-    } catch (e) { /* 失败显示 — 或保留旧值 */ }
+      const data = await api(url);
+      const rows = Object.entries(data || {});
+      if (rows.length) {
+        for (const [s, q] of rows) liveQuotes.accept("quote", s, q, "embedded");
+        return;
+      }
+    } catch (e) { /* 失败保留旧值, 下轮重试 */ }
+    if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
   }
 }
 
@@ -605,6 +614,11 @@ async function init() {
     STATE.me = await api("/api/auth/me");
     document.getElementById("main-view").style.display = "";
   } catch (e) { return; /* 未登录已跳转 */ }
+  // 盘中门控以服务端为准 (与 trades/index 一致), 避免浏览器时区/时钟偏差
+  try {
+    const ping = await api("/api/ping");
+    if (typeof ping.in_session === "boolean") _serverInSession = ping.in_session;
+  } catch (e) { /* 取不到回落本地时间门控 */ }
   await loadOverview();
   setInterval(() => { if (!document.hidden) loadOverview(); }, 15000);
 }
