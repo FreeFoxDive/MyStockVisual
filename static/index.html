@@ -1340,6 +1340,32 @@ document.addEventListener('visibilitychange', () => {
   else resumePremium();
 });
 
+/** K线请求有界重试: 冷启动/上游抖动会让源链单次耗尽 (404), 短退避重试避免
+ *  图表黑屏到手动刷新; 换股/切周期 (_fetchTs 变化) 或请求被取消时立即中止。 */
+async function fetchKlineWithRetry(url, signal, fetchTs, attempts = 3) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    if (i) await new Promise(r => setTimeout(r, 1000 * i));
+    if (STATE._fetchTs !== fetchTs) break;
+    try {
+      const resp = await fetch(url, signal ? { signal } : undefined);
+      if (!resp.ok) {
+        let msg = 'HTTP ' + resp.status;
+        try {
+          const err = await resp.json();
+          if (err && err.error) msg = err.error;
+        } catch (_) { /* 网关 502 等可能返回 HTML */ }
+        throw new Error(msg);
+      }
+      return await resp.json();
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw e;
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('请求已被新操作取代');
+}
+
 async function fetchData(opts) {
   const silent = !!(opts && opts.silent);
   if (silent && STATE._foregroundLoading) return;
@@ -1391,17 +1417,10 @@ async function fetchData(opts) {
     if (STATE.chart) STATE.chart.showLoading({ text: '加载中...', color: C().text, textColor: C().text, maskColor: 'rgba(0,0,0,0.15)' });
   }
   try {
-    const resp = await fetch(url, STATE._klineAbort ? { signal: STATE._klineAbort.signal } : undefined);
-    if (!resp.ok) {
-      let msg = 'HTTP ' + resp.status;
-      try {
-        const err = await resp.json();
-        if (err && err.error) msg = err.error;
-      } catch (_) { /* 网关 502 等可能返回 HTML */ }
-      throw new Error(msg);
-    }
-    const data = await resp.json();
+    const data = await fetchKlineWithRetry(
+      url, STATE._klineAbort ? STATE._klineAbort.signal : null, fetchTs);
     if (STATE._fetchTs !== fetchTs) return; // 竞态: 已切到新股票, 丢弃旧响应
+    STATE._klineRecoverFails = 0;
     syncAdjustMeta(data);
     ensureQuoteStream();
     STATE.klineData = data;
@@ -1443,6 +1462,7 @@ async function fetchData(opts) {
   } catch (e) {
     if (e && e.name === 'AbortError') return;  // 已被新的切换取消, 不是错误
     if (STATE._fetchTs !== fetchTs) return;
+    STATE._klineRecoverFails = (STATE._klineRecoverFails || 0) + 1;
     console.error('获取数据失败:', e);
     if (STATE._prevAdjust && STATE.adjust !== STATE._prevAdjust) {
       // 切换复权失败 (如后复权源不可用): 回退选项, 保持图表与选项一致
@@ -1765,6 +1785,18 @@ function syncAdjustMeta(data) {
   }
 }
 
+// 初始 /api/kline 失败后的自动恢复: tail 轮询仍在成功时借道补拉整图,
+// 让图表自愈而不必手动刷新。15s 冷却 (tail 每 10s 一帧), 连续失败 5 次后
+// 停止自动重试 (对已退市/无数据标的不再空转), 交还手动刷新/重试按钮。
+let _klineRecoverAt = 0;
+function scheduleKlineRecovery() {
+  const now = Date.now();
+  if (now < _klineRecoverAt || (STATE._klineRecoverFails || 0) >= 5) return;
+  _klineRecoverAt = now + 15000;
+  console.warn('K线初始加载失败, tail 正常, 自动补拉整图');
+  loadCurrent();
+}
+
 const liveQuotes = new VisualLive.LiveMarket({
   active: () => typeof canAutoRefresh === 'function' && canAutoRefresh(),
   onQuote: (symbol, q) => {
@@ -1772,7 +1804,10 @@ const liveQuotes = new VisualLive.LiveMarket({
   },
   onBars: (symbol, data) => {
     if (symbol !== STATE.symbol || data.period !== STATE.period || data.meta.adjust !== STATE.adjust) return;
-    if (!STATE.klineData || STATE.klineData.symbol !== symbol || STATE.klineData.period !== data.period) return;
+    if (!STATE.klineData || STATE.klineData.symbol !== symbol || STATE.klineData.period !== data.period) {
+      if (Array.isArray(data.bars) && data.bars.length) scheduleKlineRecovery();
+      return;
+    }
     if (applyServerBars(data.bars)) {
       if (STATE.period === '1d') requestBarPatchDraw();
       else updateChart(false);
