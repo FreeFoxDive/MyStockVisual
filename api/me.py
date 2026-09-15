@@ -1,6 +1,8 @@
 """Flask 路由: 当前用户域 (/api/me/search-history、/api/monitor/status)。"""
 from __future__ import annotations
 
+from flask import request
+
 import trades
 from api import api_bp
 from api.common import _error, _json, _monitor_error_label, _read_json_body, _require_user
@@ -26,6 +28,22 @@ def search_history_put():
         user["id"], body.get("history") or [], allow_clear=False,
     )
     return _json({"ok": True, "history": history})
+
+
+@api_bp.route("/api/me/search-history", methods=["DELETE"])
+def search_history_delete():
+    """删除单条搜索历史 (?symbol=000001.SZ)。
+
+    走独立接口而非 PUT 短列表: PUT 有意拒绝清空 (防本地缓存被清后误抹账号历史)，
+    而用户显式删除最后一条时必须能落库，否则下次同步又合并回来。
+    """
+    user = _require_user()
+    if not user:
+        return _error("未登录", 401)
+    symbol = (request.args.get("symbol") or "").strip()
+    if not symbol:
+        return _error("缺少 symbol 参数", 400)
+    return _json({"ok": True, "history": trades.delete_search_history(user["id"], symbol)})
 
 
 @api_bp.route("/api/me/panel-config", methods=["GET"])

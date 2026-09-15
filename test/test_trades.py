@@ -1548,6 +1548,49 @@ class TestSearchHistory(TradesTestCase):
         self.assertEqual(saved[1]["symbol"], "NULL.SZ")
         self.assertNotIn("ts", saved[1])
 
+    def test_delete_one_keeps_order(self):
+        uid = self._make_user()
+        trades.set_search_history(uid, [
+            {"symbol": "000001.SZ", "name": "平安银行", "ts": 300},
+            {"symbol": "600000.SH", "name": "浦发银行", "ts": 200},
+            {"symbol": "000636.SZ", "name": "风华高科", "ts": 100},
+        ])
+        left = trades.delete_search_history(uid, "600000.SH")
+        self.assertEqual([h["symbol"] for h in left], ["000001.SZ", "000636.SZ"],
+                         "删除中间一条后其余顺序不变")
+        self.assertEqual(trades.get_search_history(uid), left, "删除需落库")
+
+    def test_delete_last_one_may_empty(self):
+        """显式删除最后一条必须能清空 (PUT [] 被 guard 拒绝, 见上一条用例)。"""
+        uid = self._make_user()
+        trades.set_search_history(uid, [{"symbol": "000001.SZ", "name": "平安银行", "ts": 1}])
+        self.assertEqual(trades.delete_search_history(uid, "000001.SZ"), [])
+        self.assertEqual(trades.get_search_history(uid), [])
+
+    def test_delete_unknown_symbol_is_noop(self):
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [{"symbol": "000001.SZ", "name": "平安银行", "ts": 1}])
+        self.assertEqual(trades.delete_search_history(uid, "999999.SZ"), saved)
+
+    def test_delete_blank_symbol_keeps_all(self):
+        """空 symbol 不得被当成"删全部"。"""
+        uid = self._make_user()
+        saved = trades.set_search_history(uid, [{"symbol": "000001.SZ", "name": "平安银行", "ts": 1}])
+        for blank in ("", None, "   "):
+            self.assertEqual(trades.delete_search_history(uid, blank), saved)
+        self.assertEqual(len(trades.get_search_history(uid)), 1)
+
+    def test_delete_isolated_between_users(self):
+        a = self._make_user("alice", "secret123")
+        b = self._make_user("bob", "secret123")
+        for u in (a, b):
+            trades.set_search_history(u, [{"symbol": "000001.SZ", "name": "平安银行", "ts": 1}])
+        self.assertEqual(trades.delete_search_history(a, "000001.SZ"), [])
+        self.assertEqual(len(trades.get_search_history(b)), 1, "不得删到别的账号")
+
+    def test_delete_unknown_user_noop(self):
+        self.assertEqual(trades.delete_search_history(999999, "000001.SZ"), [])
+
     def test_unknown_user_get_empty(self):
         self.assertEqual(trades.get_search_history(999999), [])
 

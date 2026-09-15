@@ -259,7 +259,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 14px;
+  /* 顶部多留: 删除角标有一半悬在标签上边缘外 */
+  padding: 8px 14px 6px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -267,10 +268,12 @@ body {
 }
 #history-tags {
   display: flex;
-  gap: 4px;
+  /* 间距留大: 角标悬在标签右上角外, 太小会蹭到相邻标签 */
+  gap: 10px 12px;
   flex-wrap: wrap;
 }
 .history-tag {
+  position: relative;
   padding: 2px 8px;
   border: 1px solid var(--input-border);
   border-radius: 3px;
@@ -288,6 +291,45 @@ body {
   border-color: var(--btn-active);
 }
 .history-tag .sym { color: var(--text-secondary); font-size: 11px; margin-left: 2px; }
+/* 右上角圆形删除角标: 一半压在标签角外, 16px 桌面 / 20px 触控 (见 pointer:coarse);
+ * 桌面悬停标签才浮现 (见下方 hover:hover 块), 触屏无悬停保持常显 */
+.history-tag .tag-del {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  color: var(--bg-panel);
+  border: 1px solid var(--bg-panel);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+.history-tag .tag-del:hover {
+  background: var(--up-text);
+  color: var(--btn-active-text);
+}
+/* 有悬停能力的设备(桌面): 默认隐藏, 悬停标签浮现; 触屏(hover:none)不匹配, 保持常显 */
+@media (hover: hover) {
+  .history-tag .tag-del {
+    opacity: 0;
+    pointer-events: none; /* 隐形时不可点, 防止角上幽灵点击 */
+  }
+  /* 悬出标签外的一半也要保持可点: 从标签滑向角标时 :hover 不断链 */
+  .history-tag:hover .tag-del,
+  .tag-del:hover {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
 .type-badge {
   display: inline-block; padding: 0 5px; margin-right: 4px; border-radius: 3px;
   font-size: 10px; font-weight: 700; line-height: 16px; vertical-align: 1px;
@@ -503,7 +545,7 @@ body {
 @media (max-width: 640px) {
   #toolbar { padding: 6px 10px; }
   #toolbar input[type="text"] { width: 120px; }
-  #history-bar { padding: 4px 10px; }
+  #history-bar { padding: 8px 10px 6px; }
   /* 指标配置栏改横向滚动, 不再占多行; label 保持单行 */
   #indicator-bar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
   #indicator-bar label { white-space: nowrap; flex-shrink: 0; }
@@ -523,6 +565,10 @@ body {
   #toolbar button, #toolbar select { min-height: 38px; padding: 8px 14px; }
   #toolbar input[type="text"] { min-height: 38px; font-size: 16px; }
   .history-tag { padding: 6px 10px; font-size: 13px; }
+  #history-tags { gap: 12px 14px; }
+  .history-tag .tag-del { top: -9px; right: -9px; width: 20px; height: 20px; font-size: 13px; }
+  /* 顶部内边距需 >= 角标悬出的 9px (桌面 8px 会被顶出栏顶边框 1px) */
+  #history-bar { padding-top: 10px; }
   #indicator-bar label { padding: 4px 12px; }
   #indicator-bar input[type="checkbox"] { width: 14px; height: 14px; }
 }
@@ -2401,11 +2447,31 @@ function renderHistoryTags() {
   const tags = document.getElementById('history-tags');
   if (!list.length) { bar.style.display = 'none'; return; }
   bar.style.display = 'flex';
-  tags.innerHTML = list.map(h =>
+  // 角标按下标传参 (同 screener.html delCond(i)): 不把 symbol 插进内联 JS
+  tags.innerHTML = list.map((h, i) =>
     `<span class="history-tag" onclick="switchToHistory('${esc(h.symbol)}')" title="${esc(h.symbol)}">
       ${typeBadge(h.type)}${esc(h.name)}
+      <span class="tag-del" title="删除" onclick="event.stopPropagation();delHistoryTag(${i})">✕</span>
     </span>`
   ).join('');
+}
+
+/** 删除单条搜索历史。下标对应 renderHistoryTags 的顺序 (同样 loadHistory → sortHistory)。 */
+function delHistoryTag(idx) {
+  const list = loadHistory();
+  if (!(idx >= 0) || idx >= list.length) return;
+  const symbol = list[idx].symbol;
+  list.splice(idx, 1);
+  saveHistory(list);
+  deleteHistoryOnServer(symbol);
+  renderHistoryTags();
+}
+
+/** 服务端跟删: 否则下次 syncHistoryWithServer 会把删掉的标签合并回来。
+ *  失败静默 (同 pushHistoryToServer): 离线删除会在下次加载时复活。 */
+function deleteHistoryOnServer(symbol) {
+  fetch('/api/me/search-history?symbol=' + encodeURIComponent(symbol), { method: 'DELETE' })
+    .catch(() => {});
 }
 
 function switchToHistory(symbol) {

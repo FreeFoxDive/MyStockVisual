@@ -36,7 +36,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 跳空缺口 | 60m/日/周/月：前端扫描未回补缺口（最近 2 个），主图灰色 markArea；十字线落在灰区时提示价差；部分回补收缩；日K 随快照重算；默认开启 |
 | 自适应提示框 | 鼠标在不同面板显示对应数据；MACD跟随面板开关，RSI/KDJ/ATR 独立提示框开关 |
 | 股票搜索 | 模糊匹配代码/名称，实时下拉 + 键盘↑↓导航 |
-| 搜索历史 | 跟账号持久化（兼浏览器本地），刷新不丢失 |
+| 搜索历史 | 跟账号持久化（兼浏览器本地），刷新不丢失；悬停标签在右上角显示 ✕ 可单条删除（触屏常显） |
 | 配置持久化 | 面板开关/指标参数/提示框选项跟账号服务器同步（`users.panel_config`），主题走本地共享键 |
 | 主题 | 共享 `visual-theme`（`/css/theme.css` + `/js/theme.js`），亮/暗同步各页 |
 | 实时刷新 | 交易时段每30秒自动拉取快照 |
@@ -74,7 +74,7 @@ visual/
 │   ├── trades.py      # /api/trades*|fees|trade-reasons|repo-maturity
 │   ├── models.py      # /api/models*
 │   ├── admin.py       # /api/admin/users*
-│   ├── me.py          # /api/me/search-history、/api/me/panel-config、/api/monitor/status
+│   ├── me.py          # /api/me/search-history (GET/PUT/DELETE)、/api/me/panel-config、/api/monitor/status
 │   └── drawings.py    # /api/drawings 画线同步 (用户+代码+周期)
 ├── security.py        # CSP / 限流 / 登录锁定 / 会话 Cookie / CSRF
 ├── market.py          # 行情代理、缓存、质押等数据层
@@ -253,7 +253,7 @@ KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复�
 ### 配置持久化
 - 面板设置（面板开关/指标参数/提示框/复权/折叠状态）：服务端跟账号存（`users.panel_config`，`/api/me/panel-config`），默认开启、跨设备恢复；`localStorage` key `visual_chart_config` 为本地镜像与离线兜底
 - 主题：本地共享键 `visual-theme`（`/js/theme.js`），亮/暗跨页同步，不做账号同步
-- 搜索历史：服务端跟账号存（`users.search_history`），前端可与本地合并同步
+- 搜索历史：服务端跟账号存（`users.search_history`），前端可与本地合并同步；单条删除走 `DELETE /api/me/search-history?symbol=` （PUT 有意拒绝空列表以防误抹账号历史，故删除最后一条必须走 DELETE）
 
 ## 依赖
 

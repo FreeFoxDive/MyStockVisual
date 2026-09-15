@@ -741,6 +741,23 @@ def set_search_history(user_id, history, *, allow_clear=True):
     return cleaned
 
 
+def delete_search_history(user_id, symbol):
+    """删除单条搜索历史，返回删除后的列表。
+
+    这是用户显式删除，与 set_search_history 的 allow_clear=False 保护相反：
+    允许删到空列表，否则最后一条永远删不掉，下次前端同步会把它合并回来。
+    symbol 精确匹配（与前端 h.symbol !== symbol 一致）；未命中则不写库。
+    """
+    key = str(symbol or "").strip()[:32]
+    existing = get_search_history(user_id)
+    if not key:
+        return existing
+    left = [h for h in existing if h["symbol"] != key]
+    if len(left) == len(existing):
+        return existing
+    return set_search_history(user_id, left, allow_clear=True)
+
+
 # ── 图表面板设置 (跟账号同步) ──
 # 白名单与前端 saveConfig() 对齐; 未知键一律丢弃, 避免把任意 JSON 存进账号。
 PANEL_CONFIG_BOOL_KEYS = (
