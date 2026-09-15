@@ -43,6 +43,7 @@ def _reset_caches():
     market._mr_industry_cache.clear()
     market._mr_market_cache.clear()
     market._mr_company_cache.clear()
+    market._instrument_meta_cache.clear()
 
 
 class StockInfoTest(unittest.TestCase):
@@ -53,6 +54,8 @@ class StockInfoTest(unittest.TestCase):
             mock.patch.object(market, "MAIRUI_API_KEY", "TESTKEY"),
             mock.patch.object(market, "_is_etf", return_value=False),
             mock.patch.object(market, "_is_index_symbol", return_value=False),
+            # 涨跌停价首选 AlphaFeed 元数据; 默认置空, 让各用例显式选择要走的分支。
+            mock.patch.object(market, "_fetch_instrument_meta", return_value=None),
             mock.patch.object(market.market_hours, "is_trading_day", return_value=True),
             mock.patch.object(market.market_hours, "now", return_value=TODAY),
             mock.patch.object(market.market_hours, "session_elapsed_minutes", return_value=120.0),
@@ -171,10 +174,104 @@ class StockInfoTest(unittest.TestCase):
         self.assertIsNone(info["pe"])
         self.assertIsNone(info["industry"])
 
+    def test_etf_limits_come_from_alphafeed_not_mairui(self):
+        """ETF 涨跌停价走 AlphaFeed 元数据; 麦蕊 /hsstock/ 是股票接口, 不应被调用。
+
+        回归: ETF 曾因 plain 门禁整段跳过涨跌停查询, 侧栏一直显示「—」。
+        """
+        df = _daily_df([10] * 8, [100] * 8)
+        mr = mock.Mock()
+        meta = {"type": "etf", "limit_up": 5.007, "limit_down": 4.097}
+        with mock.patch.object(market, "_is_etf", return_value=True), \
+             mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "_fetch_instrument_meta", return_value=meta), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote(prev_close=4.552)), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(df, "沪深300ETF", "alphafeed")):
+            info = market.fetch_stock_info("510300.SH")
+        self.assertEqual(info["limit_up"], 5.007)
+        self.assertEqual(info["limit_down"], 4.097)
+        self.assertFalse(info["limit_estimated"], "AlphaFeed 真实值不应标记为估算")
+        # 行业/PE/PB 仍只对个股有意义
+        self.assertIsNone(info["industry"])
+        self.assertIsNone(info["pe"])
+        mr.stock_instrument.assert_not_called()
+        mr.hsdc_himk_roe.assert_not_called()
+
+    def test_etf_without_limits_stays_none_not_estimated(self):
+        """ETF 取不到涨跌停时保持 None (前端显示「—」), 不用前收估算冒充限制。"""
+        df = _daily_df([10] * 8, [100] * 8)
+        mr = mock.Mock()
+        meta = {"type": "etf", "limit_up": None, "limit_down": None}
+        with mock.patch.object(market, "_is_etf", return_value=True), \
+             mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "_fetch_instrument_meta", return_value=meta), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote(prev_close=4.552)), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(df, "x", "alphafeed")):
+            info = market.fetch_stock_info("510300.SH")
+        self.assertIsNone(info["limit_up"])
+        self.assertIsNone(info["limit_down"])
+        self.assertFalse(info["limit_estimated"], "ETF 永不回退 ±10% 估算")
+        mr.stock_instrument.assert_not_called()
+
+    def test_stock_alphafeed_limits_win_over_mairui(self):
+        """个股: AlphaFeed 真实涨跌停优先于麦蕊, 麦蕊仅在缺失时兜底。"""
+        df = _daily_df([10] * 8, [100] * 8)
+        meta = {"type": "stock", "limit_up": 12.34, "limit_down": 8.06}
+        mr = self._fake_mr(
+            hsdc_himk_roe=lambda: [{"dm": "000001", "syld": 4.43, "sjl": 0.49}],
+            concepts_of_stock=lambda code: [],
+            stock_instrument=lambda s: {"up": 13.04, "dp": 10.67, "pc": 10.2},
+        )
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "_fetch_instrument_meta", return_value=meta), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote(prev_close=10.2)), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(df, "x", "mairui")):
+            info = market.fetch_stock_info("000001.SZ")
+        self.assertEqual(info["limit_up"], 12.34)
+        self.assertEqual(info["limit_down"], 8.06)
+        self.assertFalse(info["limit_estimated"])
+
+    def test_stock_alphafeed_partial_limits_fall_back_to_mairui(self):
+        """个股: AlphaFeed 只给出一边时, 另一边由麦蕊补齐 (不整体丢弃)。"""
+        df = _daily_df([10] * 8, [100] * 8)
+        meta = {"type": "stock", "limit_up": None, "limit_down": 10.67}
+        mr = self._fake_mr(
+            hsdc_himk_roe=lambda: [],
+            concepts_of_stock=lambda code: [],
+            stock_instrument=lambda s: {"up": 13.04, "dp": 10.67, "pc": 11.85},
+        )
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "_fetch_instrument_meta", return_value=meta), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote(prev_close=11.85)), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(df, "x", "mairui")):
+            info = market.fetch_stock_info("000001.SZ")
+        self.assertEqual(info["limit_up"], 13.04, "缺失的一边由麦蕊补齐")
+        self.assertEqual(info["limit_down"], 10.67, "AlphaFeed 值不被麦蕊覆盖")
+        self.assertFalse(info["limit_estimated"])
+
+    def test_index_skips_limit_sources(self):
+        """指数无涨跌停, 也不该为此发起 AlphaFeed 或麦蕊请求。"""
+        df = _daily_df([10] * 8, [100] * 8)
+        mr = mock.Mock()
+        meta = mock.Mock(return_value={"limit_up": 1.0, "limit_down": 0.9})
+        with mock.patch.object(market, "_is_index_symbol", return_value=True), \
+             mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "_fetch_instrument_meta", meta), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote()), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(df, "x", "mairui")):
+            info = market.fetch_stock_info("000001.SH")
+        self.assertIsNone(info["limit_up"])
+        self.assertIsNone(info["limit_down"])
+        self.assertFalse(info["limit_estimated"])
+        meta.assert_not_called()
+        mr.stock_instrument.assert_not_called()
+
     def test_non_cn_skips_mairui(self):
         df = _daily_df([10] * 8, [100] * 8)
         mr = mock.Mock()
+        meta = mock.Mock(return_value={"limit_up": 1.0, "limit_down": 0.9})
         with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "_fetch_instrument_meta", meta), \
              mock.patch.object(market, "fetch_quote", return_value=self._quote(prev_close=20.0)), \
              mock.patch.object(market, "fetch_kline_ex", return_value=(df, "x", "alphafeed")):
             info = market.fetch_stock_info("AAPL")
@@ -183,6 +280,7 @@ class StockInfoTest(unittest.TestCase):
         self.assertIsNone(info["pb"])
         self.assertIsNone(info["limit_up"], "港股/美股无涨跌停, 甚至不回退")
         self.assertEqual(info["trade_status_text"], "—")
+        meta.assert_not_called()
         mr.hsdc_himk_roe.assert_not_called()
         mr.stock_instrument.assert_not_called()
 

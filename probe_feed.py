@@ -34,6 +34,12 @@ for env_dir in (SCRIPT_DIR, SCRIPT_DIR.parent):
         break
 
 PROBE_SYMBOLS = ["600519.SH", "000001.SZ", "000001.SH", "510300.SH"]
+# 涨跌停价探测: 股票 / 10% ETF / 20cm ETF / 跨境 ETF (无涨跌幅限制) / 货币 ETF (无)
+PROBE_LIMIT_SYMBOLS = ["600519.SH", "300750.SZ", "688111.SH",
+                       "510300.SH", "159915.SZ", "512880.SH",
+                       "513100.SH", "511990.SH"]
+# 第 5b 节港/美股探测用 (此前漏定义, 该节一直抛 NameError 静默失效)
+PROBE_HKUS_SYMBOLS = ["00700.HK", "AAPL.US"]
 
 
 def _ok(name, ok, extra=""):
@@ -73,7 +79,7 @@ def main():
 
     print("=== 2. instruments.batch (limit_up) ===", flush=True)
     try:
-        insts = af.instruments.batch(PROBE_SYMBOLS)
+        insts = af.instruments.batch(PROBE_LIMIT_SYMBOLS)
         has_up = False
         sample = None
         for it in insts or []:
@@ -83,6 +89,20 @@ def main():
                 sample = (it.get("symbol"), ext.get("limit_up"), ext.get("limit_down"))
                 break
         _ok("instruments.batch", bool(insts), f"n={len(insts or [])} limit_up={has_up} sample={sample}")
+        # 逐标的列出, 用于判断 ETF 是否也有涨跌停价 (不能只看第一只有值的)
+        by_sym = {it.get("symbol"): it for it in (insts or []) if isinstance(it, dict)}
+        print(f"       {'symbol':<12} {'name':<12} {'type':<7} {'ext.type':<10} "
+              f"{'limit_up':>9} {'limit_down':>10}", flush=True)
+        for sym in PROBE_LIMIT_SYMBOLS:
+            it = by_sym.get(sym)
+            if not it:
+                print(f"       {sym:<12} (未返回)", flush=True)
+                continue
+            ext = it.get("ext") or {}
+            name = str(it.get("name") or "")[:10]
+            print(f"       {sym:<12} {name:<12} {str(it.get('type')):<7} "
+                  f"{str(ext.get('type')):<10} {str(ext.get('limit_up')):>9} "
+                  f"{str(ext.get('limit_down')):>10}", flush=True)
     except Exception as e:
         _ok("instruments.batch", False, str(e))
 

@@ -1244,16 +1244,18 @@ def _af_quote_to_std(q, symbol):
     }
 
 
-# ── 标的元数据 (AlphaFeed instruments): 流通/总股本/类型 ──
+# ── 标的元数据 (AlphaFeed instruments): 流通/总股本/类型/涨跌停 ──
 _instrument_meta_cache = {}      # symbol -> (ts, meta|None)
 _instrument_meta_lock = threading.Lock()
-INSTRUMENT_META_TTL = 24 * 3600  # 股本/类型变化缓慢, 24h 足够
+INSTRUMENT_META_TTL = 24 * 3600  # 股本/类型/涨跌停变化缓慢, 24h 足够
 
 
 def _fetch_instrument_meta(symbol):
-    """AlphaFeed 标的元数据 (float_shares/total_shares/type), 24h 内存缓存。
+    """AlphaFeed 标的元数据 (float_shares/total_shares/type/limit_up/limit_down), 24h 内存缓存。
 
-    失败返回 None (静默降级: 前端隐藏流值/份额, 不影响 K 线)。
+    涨跌停价对股票和 ETF 都返回真实值, 且已按板块区分 10% / 20% 限制,
+    故优于前收 ±10% 的估算。失败返回 None (静默降级: 前端隐藏流值/份额/涨跌停,
+    不影响 K 线)。
     """
     if not AF_API_KEY:
         return None
@@ -1276,6 +1278,8 @@ def _fetch_instrument_meta(symbol):
         "float_shares": _safe_float(ext.get("float_shares")),
         "total_shares": _safe_float(ext.get("total_shares")),
         "listing_date": ext.get("listing_date"),
+        "limit_up": _safe_float(ext.get("limit_up")),
+        "limit_down": _safe_float(ext.get("limit_down")),
     }
     with _instrument_meta_lock:
         _instrument_meta_cache[symbol] = (now, meta)
@@ -2540,38 +2544,54 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
 
         market = _symbol_market(symbol)
         is_cn = market == "cn"
-        plain = not _is_etf(symbol) and not _is_index_symbol(symbol)
+        is_index = _is_index_symbol(symbol)
+        # 麦蕊资料 (行业/PE/PB) 确实只对个股有意义; ETF/指数跳过以免浪费额度。
+        # 涨跌停价不受此门禁限制 —— AlphaFeed 对 ETF 也返回真实值 (见下)。
+        plain = not _is_etf(symbol) and not is_index
         extra = {"industry": None, "limit_up": None, "limit_down": None,
                  "pe": None, "pb": None, "limit_estimated": False}
-        if is_cn and plain:
+        if is_cn and not is_index:
             code = symbol.split(".")[0]
-            # 三项来自互不依赖的上游。并发取数可将首包后的等待从三段
+            # 四项来自互不依赖的上游。并发取数可将首包后的等待从四段
             # 累加缩短为最慢的一段，且不会影响已先返回的行情核心包。
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="stock-info") as pool:
-                roe_task = pool.submit(_mr_roe_map)
-                industry_task = pool.submit(_mr_industry, code)
-                instrument_task = pool.submit(_mr_instrument, symbol)
-                roe = roe_task.result().get(code)
-                ind = industry_task.result()
-                inst = instrument_task.result()
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="stock-info") as pool:
+                meta_task = pool.submit(_fetch_instrument_meta, symbol)
+                roe_task = pool.submit(_mr_roe_map) if plain else None
+                industry_task = pool.submit(_mr_industry, code) if plain else None
+                instrument_task = pool.submit(_mr_instrument, symbol) if plain else None
+                meta = meta_task.result()
+                roe = roe_task.result().get(code) if roe_task else None
+                ind = industry_task.result() if industry_task else None
+                inst = instrument_task.result() if instrument_task else None
+
+            # 涨跌停价优先取 AlphaFeed 标的元数据: 股票与 ETF 均有值, 且已按板块
+            # 区分 10% / 20% 限制 (ETF 最小变动价位 0.001, 显示为 3 位小数)。
+            # 麦蕊 /hsstock/ 是股票接口, 仅作个股回退。
+            if meta:
+                extra["limit_up"] = meta.get("limit_up")
+                extra["limit_down"] = meta.get("limit_down")
             if roe:
                 extra.update(pe=roe.get("pe"), pb=roe.get("pb"),
                              industry=roe.get("industry"))
             if ind:
                 extra["industry"] = ind
             if inst:
-                extra["limit_up"] = inst.get("limit_up")
-                extra["limit_down"] = inst.get("limit_down")
-
-            # 涨停/跌停回退: 前收 ±10% (不区分 ST / 创业板 / 科创板)
-            prev_close = _safe_float(core.get("prev_close"))
-            if prev_close:
                 if extra["limit_up"] is None:
-                    extra["limit_up"] = round(prev_close * 1.1, 2)
-                    extra["limit_estimated"] = True
+                    extra["limit_up"] = inst.get("limit_up")
                 if extra["limit_down"] is None:
-                    extra["limit_down"] = round(prev_close * 0.9, 2)
-                    extra["limit_estimated"] = True
+                    extra["limit_down"] = inst.get("limit_down")
+
+            # 涨停/跌停回退: 前收 ±10% (不区分 ST / 创业板 / 科创板), 仅个股。
+            # ETF 一律不估算 —— 取不到就显示「—」, 不用规则值冒充真实限制。
+            if plain:
+                prev_close = _safe_float(core.get("prev_close"))
+                if prev_close:
+                    if extra["limit_up"] is None:
+                        extra["limit_up"] = round(prev_close * 1.1, 2)
+                        extra["limit_estimated"] = True
+                    if extra["limit_down"] is None:
+                        extra["limit_down"] = round(prev_close * 0.9, 2)
+                        extra["limit_estimated"] = True
         with _stock_info_lock:
             _stock_info_enrichment_cache[symbol] = (now, extra)
         return {**core, **extra}
