@@ -13,6 +13,7 @@
   class LiveMarket {
     constructor(options = {}) {
       this.options = options;
+      this.inSession = true;
       this.symbols = [];
       this.values = new Map();
       this.health = new Map();
@@ -22,6 +23,8 @@
       this.epoch = 0;
       this.retryAt = 0;
       this.es = null;
+      this.sseConnecting = false;
+      this.sseProbe = null;
       this.timer = setInterval(() => this.tick(), 250);
       this.visibility = () => {
         if (document.hidden) this.suspend();
@@ -58,6 +61,8 @@
       this.epoch++;
       if (this.es) this.es.close();
       this.es = null;
+      this.sseConnecting = false;
+      if (this.sseProbe) { this.sseProbe.abort(); this.sseProbe = null; }
       for (const p of this.pending.values()) p.abort.abort();
       this.pending.clear();
       this.health.clear();
@@ -104,7 +109,7 @@
       return !!h && Date.now() - h.at < (this.options.staleMs || 15000);
     }
     connect() {
-      if (!global.EventSource || this.es || Date.now() < this.retryAt || !this.symbols.length) return;
+      if (!global.EventSource || this.es || this.sseConnecting || Date.now() < this.retryAt || !this.symbols.length) return;
       const epoch = this.epoch;
       this.retryAt = Date.now() + 5000;
       // Server permits 50 symbols per stream. Remaining symbols retain HTTP fallback.
@@ -112,9 +117,36 @@
         + (this.depth ? '&depth=1' : '')
         + (this.tail ? '&tail=' + encodeURIComponent(this.tail.period) + '&count=' + this.tail.count
           + '&adjust=' + encodeURIComponent(this.tail.adjust) : '');
-      try {
+      // 生产页面开启 status 预检；保留无预检模式供嵌入调用和旧客户端兼容。
+      if (this.options.streamStatus !== true) {
+        this._openSSE(url, epoch);
+        return;
+      }
+      this.sseConnecting = true;
+      const probeAbort = new AbortController();
+      this.sseProbe = probeAbort;
+      fetch('/api/stream/status', { signal: probeAbort.signal, cache: 'no-store' }).then(r => {
+        if (!r.ok) throw new Error('stream status ' + r.status);
+        return r.json();
+      }).then(status => {
+        if (this.epoch !== epoch || !status.sse_allowed) {
+          this.sseConnecting = false; this.sseProbe = null;
+          this.retryAt = Date.now() + Math.max(5000, Number(status.retry_after || 30) * 1000);
+          return;
+        }
+        if (this.es || this.epoch !== epoch) return;
+        this._openSSE(url, epoch);
+      }).catch(() => {
+        if (this.epoch !== epoch) return;
+        this.sseConnecting = false; this.sseProbe = null;
+        this.retryAt = Date.now() + 10000;
+        this.tick();
+      });
+    }
+    _openSSE(url, epoch) {
         const es = new global.EventSource(url);
         this.es = es;
+        this.sseConnecting = false; this.sseProbe = null;
         const receive = (kind, ev) => {
           if (this.es !== es || this.epoch !== epoch) return;
           try {
@@ -131,11 +163,11 @@
           this.health.clear();
           this.lastPoll.clear();
           es.close(); this.es = null;
+          this.sseConnecting = false;
           this.retryAt = Date.now() + 5000;
           this.tick();
         };
         this.connectedAt = Date.now();
-      } catch (_) { this.es = null; }
     }
     async poll(kind, symbols, force = false) {
       if (!symbols.length) return;
@@ -180,7 +212,8 @@
       }
       this.connect();
       // Stable batches keep at most one HTTP request in flight per resource.
-      for (let i = 0; i < this.symbols.length; i += 50) {
+      // SSE 正在建立或已连接时暂停报价轮询，避免两条链路反复切换。
+      if ((!this.es && !this.sseConnecting) || !this.symbols.slice(0, 50).some(s => this.healthy('quote', s))) for (let i = 0; i < this.symbols.length; i += 50) {
         const batch = this.symbols.slice(i, i + 50);
         if (batch.some(s => !this.healthy('quote', s))) this.poll('quote', batch);
       }

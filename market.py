@@ -419,7 +419,7 @@ def _index_rows_to_cache(rows):
     return (symbols, names) if symbols else (None, None)
 
 
-def _load_index_cache():
+def _load_index_cache(nonblocking=False):
     """沪深指数列表 (symbol 集合 + symbol→名称)。
 
     底层 _index_cache 是 24h 磁盘缓存: 正常重启零联网, 过期才同步刷新一次。
@@ -428,6 +428,13 @@ def _load_index_cache():
     固化会让进程内所有指数都被当股票路由 (index_history → stock_history)。
     """
     global _index_symbols, _index_names, _index_derived_ts
+    # 请求路径只需要一个尽力而为的指数判断；冷启动无磁盘缓存时不要同步等待
+    # AkShare 港股指数重试（可能几十秒），改为后台刷新，当前请求按普通标的继续。
+    if nonblocking and _index_cache._data is None:
+        rows, disk_ts = _index_cache._cached()
+        if not rows:
+            _index_cache._schedule_refresh()
+            return _index_symbols if _index_symbols is not None else set()
     rows = _index_cache.get()
     ts = _index_cache.ts
     if rows and ts != _index_derived_ts:
@@ -442,7 +449,7 @@ def _load_index_cache():
 
 def _is_index_symbol(symbol):
     """判断 symbol 是否为沪深指数 (如 000001.SH 上证指数)"""
-    return symbol in _load_index_cache()
+    return symbol in _load_index_cache(nonblocking=True)
 
 
 def _lookup_name(symbol):

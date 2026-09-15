@@ -19,7 +19,7 @@ from flask import Response, request
 import market
 import market_hours
 from api import api_bp
-from api.common import _error, _require_user
+from api.common import _error, _json, _require_user
 
 QUOTE_SSE_INTERVAL = max(1.25, float(os.environ.get("QUOTE_SSE_INTERVAL", "1.25")))
 INDICATOR_SSE_INTERVAL = max(5.0, float(os.environ.get("INDICATOR_SSE_INTERVAL", "10")))
@@ -40,6 +40,9 @@ def stream_quotes():
     user = _require_user()
     if not user:
         return _error("未登录", 401)
+    # SSE 只允许在交易日盘中建立；盘外由前端 status 探测并保持普通轮询。
+    if not market_hours.in_session():
+        return _json_error_out_of_session()
     symbols_raw = request.args.get("symbols") or ""
     symbols = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()]
     if not symbols:
@@ -79,6 +82,12 @@ def stream_quotes():
                 if now - last_push >= QUOTE_SSE_INTERVAL:
                     last_push = now
                     try:
+                        # SSE 连接可跨时段保持，但盘外不请求上游；前端 active 门控会在
+                        # 盘外主动关闭，服务端也做第二道保护避免误拉行情。
+                        if not market_hours.in_session():
+                            yield ": out-of-session\n\n"
+                            time.sleep(QUOTE_SSE_TICK)
+                            continue
                         quotes = market.fetch_quotes(symbols)
                         # 每条快照附交易日标志: 前端据此拦截非交易日用残留快照补当日 bar
                         td = market_hours.is_trading_day()
@@ -92,7 +101,7 @@ def stream_quotes():
                         yield ": tick\n\n"
                 else:
                     yield ": keepalive\n\n"
-                if with_depth and now - last_depth >= DEPTH_SSE_INTERVAL:
+                if with_depth and market_hours.in_session() and now - last_depth >= DEPTH_SSE_INTERVAL:
                     last_depth = now
                     try:
                         depths = {s: d for s in symbols if (d := market.fetch_depth(s)) is not None}
@@ -101,7 +110,7 @@ def stream_quotes():
                             yield f"event: depth\ndata: {payload}\n\n"
                     except Exception:
                         yield ": depth unavailable\n\n"
-                if tail_period and now - last_tail >= INDICATOR_SSE_INTERVAL:
+                if tail_period and market_hours.in_session() and now - last_tail >= INDICATOR_SSE_INTERVAL:
                     last_tail = now
                     try:
                         from api.kline import build_kline_tail
@@ -119,3 +128,35 @@ def stream_quotes():
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["X-Accel-Buffering"] = "no"
     return resp
+
+
+def _json_error_out_of_session():
+    """EventSource 无法读取错误 body，仍返回机器可识别的 HTTP 状态和重试时间。"""
+    import json
+    from flask import Response
+    resp = Response(json.dumps({
+        "ok": False,
+        "code": "SSE_OUT_OF_SESSION",
+        "error": "非交易时段不提供实时 SSE",
+        "in_session": False,
+        "retry_after": 30,
+    }, ensure_ascii=False), mimetype="application/json")
+    resp.status_code = 425
+    resp.headers["Retry-After"] = "30"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@api_bp.route("/api/stream/status", methods=["GET"])
+def stream_status():
+    """前端建立 EventSource 前的轻量探测，避免盘外触发 EventSource 自动重连。"""
+    user = _require_user()
+    if not user:
+        return _error("未登录", 401)
+    active = market_hours.in_session()
+    return _json({
+        "ok": True,
+        "sse_allowed": active,
+        "in_session": active,
+        "retry_after": 5 if active else 30,
+    })
