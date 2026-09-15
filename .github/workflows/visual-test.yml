@@ -17,12 +17,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      # 业务及测试均以北京时间判断交易日；GitHub runner 默认使用 UTC。
-      TZ: Asia/Shanghai
+      TZ: ${{ matrix.timezone }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.14"]
+        timezone: ["UTC", "Asia/Shanghai"]
     steps:
       - uses: actions/checkout@v5
 

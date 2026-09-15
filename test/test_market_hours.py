@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +17,17 @@ if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
 import market_hours  # noqa: E402
+
+
+class MarketClockTest(unittest.TestCase):
+    def test_utc_previous_day_becomes_shanghai_today(self):
+        instant = datetime(2026, 9, 14, 17, 14, tzinfo=timezone.utc)
+        with mock.patch.object(market_hours, "datetime") as clock:
+            clock.now.side_effect = lambda tz: instant.astimezone(tz)
+            actual = market_hours.now()
+        self.assertEqual(actual, datetime(2026, 9, 15, 1, 14))
+        self.assertIsNone(actual.tzinfo)  # existing naive Shanghai wall-clock contract
+        clock.now.assert_called_once_with(market_hours._CST)
 
 
 class SessionPhaseTest(unittest.TestCase):
