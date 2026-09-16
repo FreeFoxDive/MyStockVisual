@@ -243,16 +243,28 @@ body {
 .info-group .up { color: var(--up-text); }
 .info-group .down { color: var(--down-text); }
 .info-group .oh { font-size: 13px; font-weight: 500; white-space: nowrap; }
-#info-guba {
+/* 持仓中标识 (与交易记录页徽章同一观感): 风控数值不占工具栏, 只在代码/名称旁标状态。
+   点击徽章弹明细 (触屏无 hover 也能看到风控价), 所以指针/手型由 JS 打开。 */
+.info-group .hold-badge {
+  padding: 1px 7px;
+  border-radius: 10px;
   font-size: 12px;
-  color: var(--text-secondary);
-  text-decoration: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 7px;
-  line-height: 1.4;
+  font-weight: 600;
+  line-height: 1.5;
+  background: rgba(var(--up-rgb), 0.12);
+  color: var(--up-text);
 }
-#info-guba:hover { color: var(--text); border-color: var(--text-secondary); }
+/* 代码·名称整体是股吧链接: 默认观感与改动前一致, 悬停只给名称加下划线提示可点。
+   点代码仍是复制 (它有自己的 title), 点名称才跳股吧 —— 所以下划线只画在名称上。
+   只在真有 href 时才有下划线/指针: 无股吧地址的标的 (.log 取不到代码) 不暗示可点。 */
+.info-group .sym-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+.info-group .sym-link[href]:hover .name { text-decoration: underline; text-underline-offset: 2px; }
 
 /* ═══════════════ History bar ═══════════ */
 #history-bar {
@@ -539,8 +551,8 @@ body {
   #toolbar .period-group button { flex-shrink: 0; }
 }
 @media (max-width: 768px) {
-  /* 次要行情信息收进图表 tooltip, 信息行只留核心字段 */
-  #toolbar .oh, #toolbar #info-time, #toolbar #info-guba { display: none; }
+  /* 次要行情信息收进图表 tooltip, 信息行只留核心字段 (代码·名称是股吧入口, 不隐藏) */
+  #toolbar .oh, #toolbar #info-time { display: none; }
 }
 @media (max-width: 640px) {
   #toolbar { padding: 6px 10px; }
@@ -675,9 +687,9 @@ body {
     </svg>
   </a>
   <div class="info-group">
-    <span id="info-code"></span>
-    <span class="name" id="info-name">—</span>
-    <a id="info-guba" href="#" target="_blank" rel="noopener noreferrer" style="display:none" title="东财股吧">股吧 ↗</a>
+    <a id="info-sym" class="sym-link" target="_blank" rel="noopener noreferrer"><span id="info-code" title="点击复制代码"></span>
+    <span class="name" id="info-name">—</span></a>
+    <span id="info-holding" class="hold-badge" style="display:none">持仓中</span>
     <span id="info-turnover" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-pledge" style="font-size:12px;color:var(--text-secondary);display:none"></span>
@@ -748,6 +760,7 @@ body {
   <label title="ATR 平均真实波幅"><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label title="OBV 能量潮 (成交量累计); 数值随加载窗口变化, 比较看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
+  <label id="lbl-risk" style="display:none" title="持仓风控: 主图止盈/保本/止损虚线 + 名称标签 (数值看代码旁的「持仓中」徽章)"><input type="checkbox" id="chk-risk" checked onchange="onConfigChange()">风控线</label>
   <span>复权:</span>
   <select id="adj-select" onchange="onAdjustChange(this.value)" title="复权方式 (分钟周期固定前复权)">
     <option value="forward">前复权</option>
@@ -986,6 +999,12 @@ const STATE = {
   theme: 'light',
   klineData: null,       // raw JSON from server
   trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
+  risk: null,            // 当前持仓的止盈/保本/止损 (由 STATE.trades 派生; syncPosition 维护)
+  position: null,        // 当前 symbol 的最新持仓 (徽章/悬停文案用; syncPosition 维护)
+  _tradesSeq: 0,         // 交易记录请求序号 (迟到响应不得覆盖新股票的持仓)
+  _tagSlots: null,       // 现价/风控签的槽位 {key: {position,distance} | {dropped}} (layoutPriceTagSlots)
+  _tagKeys: '',          // 签位签名: 变了才重推 markLine / 重绘画线层
+  _tagRefreshPending: false, // 建图后签位重排已排队 (rendered 事件 + 延时兜底)
   chips: null,           // 筹码分布 (/api/chips, 仅日K股票)
   premium: null,         // ETF 溢价 {symbol, period, map:{date:val}} (/api/kline/deferred)
   _klineAbort: null,     // 取消浏览器接收；服务端工作由后端并发上限约束
@@ -1024,6 +1043,8 @@ const STATE = {
     _autoKey: null,
     _labels: [],         // updateChart 的面板标签 graphic (重绘时合并)
     _raf: false,
+    _rafAgain: false,    // rAF 排期期间又被请求重绘 (不能吞掉这一帧之后的请求)
+    _retry: 0,           // 连续补绘帧数 (投影未就绪时重排, 有上限)
   },
 };
 
@@ -1084,6 +1105,7 @@ const CHART_VAR_MAP = {
   zeroLine: '--chart-cross',
   predictFill: '--chart-predict-fill', predictBorder: '--chart-predict-border',
   tipBg: '--chart-tip-bg', tipBorder: '--chart-tip-border', tipText: '--text',
+  riskTp: '--risk-tp', riskBe: '--risk-be', riskSl: '--risk-sl', riskFg: '--risk-fg',
 };
 let _chartColorsCache = { theme: null, colors: null };
 
@@ -1134,31 +1156,380 @@ function haltLabel(bar) {
   return ` <span style="color:${C().halt};font-weight:700">${text}</span>`;
 }
 
-/** TradingView 式最新价虚线: 末端虚线 + 轴端色块价格签, 涨红/跌绿随主题。
- * 传入实时价时优先使用实时价；重绘图表时也自动读取当前 SSE 快照。 */
-function buildLastPriceLine(bars, livePrice) {
-  if (!bars || !bars.length) return undefined;
+// ═══════════════════════════════════════════════════════════════
+// 贴线标签避让 — 现价签/风控签/画线框签同列纵向错开
+// ═══════════════════════════════════════════════════════════════
+// 同一列里的贴线标签只有"自己那条线的 y"一个自由度, ECharts 不做避让,
+// 两条线间距小于标签高度就必然重叠 (现价每 1.25s 随快照移动, 扫过保本/止损时必现)。
+// 这里统一做一次"最小位移"错位: 标签尽量贴着自己的线, 实在挤不下就让位/不写字。
+const TAG_PITCH = 20;      // 同列标签最小中心间距 (标签盒高约 14~17px, 留余量)
+const TAG_HUG = 13;        // 标签盒中心与自己线的默认距离 (盒高 14/2 + 5px 间隙)
+const TAG_MAX_SHIFT = 60;  // 为避让允许的最大位移; 超过则不画该签文字 (数值仍在工具栏)
+const TAG_BOX_H = 14;      // 标签盒高 (fontSize 10 + padding [2,4], SSR 实测 SVG 盒高 14)
+
+/** 同列贴线标签纵向错开 (纯函数, 无 DOM/ECharts 依赖)。
+ *  items: [{ key, y, lineY, priority }] —— y 为标签盒中心的真实像素 y, priority 越小越优先;
+ *  bounds: { top, bottom } 列可用像素范围; fixed: 已占位的中心 y (不可移动的东西, 如现价签)。
+ *  返回 [{ key, y, shift, dropped }] (y 为调整后的盒中心, 保持最小位移)。 */
+function stackTags(items, bounds, fixed) {
+  const top = (bounds && Number.isFinite(bounds.top)) ? bounds.top : -Infinity;
+  const bottom = (bounds && Number.isFinite(bounds.bottom)) ? bounds.bottom : Infinity;
+  const lo = top + TAG_BOX_H / 2, hi = bottom - TAG_BOX_H / 2;
+  const clamp = (v) => Math.min(Math.max(v, lo), hi);
+  const placed = (fixed || []).filter(Number.isFinite).slice();
+  const fits = (y, lineY) => {
+    if (y < lo - 0.01 || y > hi + 0.01) return false;
+    if (lineY !== null && Math.abs(y - lineY) < TAG_HUG) return false;  // 太贴自己的线 → 压线
+    return !placed.some(p => Math.abs(p - y) < TAG_PITCH - 0.01);
+  };
+  return (items || []).slice()
+    .sort((a, b) => (a.priority - b.priority) || (a.y - b.y))
+    .map(it => {
+      const base = clamp(it.y);
+      const lineY = Number.isFinite(it.lineY) ? it.lineY : null;
+      // 候选槽位 = 自己的位置 + 自己线的两侧最小合法位 + 每个已占位上下各一个 pitch。
+      // 前两类缺一不可: 线的两侧位用于"标签被推到网格上/下缘时原地换边" —— 否则
+      // base 被 clamp 到边界后离自己的线不足 TAG_HUG, 又没有任何占位可贴, 只好丢签。
+      const cands = [base];
+      if (lineY !== null) cands.push(lineY - TAG_HUG, lineY + TAG_HUG);
+      placed.forEach(p => { cands.push(p - TAG_PITCH, p + TAG_PITCH); });
+      cands.sort((a, b) => Math.abs(a - it.y) - Math.abs(b - it.y));
+      let slot = null;
+      for (const y of cands) {
+        if (fits(y, lineY)) { slot = y; break; }
+      }
+      const ok = slot !== null && Math.abs(slot - it.y) <= TAG_MAX_SHIFT + 0.01;
+      const y = ok ? slot : base;
+      if (ok) placed.push(y);
+      return { key: it.key, y, shift: ok ? y - it.y : 0, dropped: !ok };
+    });
+}
+
+/** 标签盒中心 → markLine 的 label 位置。
+ *  已核对 ECharts 5.5.0 源码与 SSR 实测: insideStartTop 盒底对齐 (线 y − distance[1]),
+ *  insideStartBottom 盒顶对齐 (线 y + distance[1]), distance[0] 是横向缩进, 盒高 14px。 */
+function tagLabelPos(lineY, centerY) {
+  const above = centerY <= lineY;
+  const d = above ? lineY - centerY - TAG_BOX_H / 2 : centerY - lineY - TAG_BOX_H / 2;
+  return {
+    position: above ? 'insideStartTop' : 'insideStartBottom',
+    distance: [2, Math.max(1, Math.round(d * 100) / 100)],
+  };
+}
+
+/** 标签样式: 有槽位用槽位 (避免重叠), 没算过则退回默认 (与错位前完全一致) */
+function priceLineLabel(fallbackPos, key) {
+  const s = STATE._tagSlots && STATE._tagSlots[key];
+  if (!s) return { show: true, position: fallbackPos, distance: 5 };
+  if (s.dropped) return { show: false };   // 挤不下: 只留虚线不留字 (数值在徽章悬停里)
+  return { show: true, position: s.position, distance: s.distance };
+}
+
+/** 主图水平标注 (markLine 的 data 项): 线型与标签写在每一项上, 才能把风控线与现价线
+ *  合并进同一个 markLine —— ECharts 5 的 series.markLine 只接受单个对象, 传数组会被
+ *  整段忽略 (实测 5.5.0 一条线都不画)。 */
+function priceLineItem(price, color, text, fallbackPos, tagKey, fg) {
+  const label = priceLineLabel(fallbackPos, tagKey);
+  return {
+    yAxis: price,
+    lineStyle: { color, type: 'dashed', width: 1, opacity: 0.9 },
+    label: Object.assign(label, {
+      formatter: text,
+      fontSize: 10, fontFamily: 'monospace', color: fg || '#fff',
+      backgroundColor: color, padding: [2, 4], borderRadius: 2,
+    }),
+  };
+}
+
+/** 现价线的取价口径 (实时价 > SSE 快照 > 末根收盘), 建线与签位共用一份 */
+function resolveLastPrice(bars, livePrice) {
+  if (!bars || !bars.length) return null;
   let price = livePrice;
   if (price == null && typeof liveQuotes !== 'undefined') {
     const q = liveQuotes.get(STATE.symbol);
     if (q && q.last_price != null) price = q.last_price;
   }
   if (price == null) price = bars[bars.length - 1].close;
+  return price == null ? null : price;
+}
+
+/** TradingView 式最新价虚线: 末端虚线 + 轴端色块价格签, 涨红/跌绿随主题。
+ *  签上带「现价」前缀: 四条签都自带名称后, 避让把谁推开十几像素也能一眼对上。
+ * 传入实时价时优先使用实时价；重绘图表时也自动读取当前 SSE 快照。 */
+function buildLastPriceLine(bars, livePrice) {
+  if (!bars || !bars.length) return undefined;
+  const price = resolveLastPrice(bars, livePrice);
   if (price == null) return undefined;
   const prev = bars.length > 1 ? bars[bars.length - 2] : null;
   const rising = !prev || prev.close == null || price >= prev.close;
-  const clr = rising ? C().up : C().down;
+  const item = priceLineItem(price, rising ? C().up : C().down, '现价 ' + fmtPrice3(price),
+    'insideStartTop', 'last');
   return {
     silent: true, symbol: 'none', animation: false,
-    lineStyle: { color: clr, type: 'dashed', width: 1, opacity: 0.9 },
-    label: {
-      show: true, position: 'insideStartTop',  // 左端: 避免盖住最右侧的最新K线
-      formatter: fmtPrice3(price),
-      fontSize: 10, fontFamily: 'monospace', color: '#fff',
-      backgroundColor: clr, padding: [2, 4], borderRadius: 2,
-    },
-    data: [{ yAxis: price }],
+    lineStyle: item.lineStyle, label: item.label,
+    data: [item],
   };
+}
+
+// ── 持仓风控 (止盈/保本/止损): 主图三条虚线 + 名称标签; 配色见 theme.css --risk-* ──
+const RISK_ITEMS = [
+  { key: 'take_profit', label: '止盈', colorKey: 'riskTp' },
+  { key: 'breakeven',   label: '保本', colorKey: 'riskBe' },
+  { key: 'stop_loss',   label: '止损', colorKey: 'riskSl' },
+];
+
+function riskOn() {
+  const chk = document.getElementById('chk-risk');
+  return !chk || chk.checked;
+}
+
+/** 当前 symbol 的持仓 (排除已平仓与逆回购 —— 逆回购 DB status 恒为 open),
+ *  按买入日倒序, 同日按 id 倒序 (最新一笔在前)。 */
+function openPositions(trades) {
+  return (trades || [])
+    .filter(t => t && t.status !== 'closed' && t.type !== 'reverse_repo')
+    .sort((a, b) => String(b.entry_date || '').localeCompare(String(a.entry_date || ''))
+      || (Number(b.id) || 0) - (Number(a.id) || 0));
+}
+
+/** 最新一笔持仓 (给「持仓中」徽章用; 不要求填了风控价) */
+function pickOpenPosition(trades) {
+  const rows = openPositions(trades);
+  return rows.length ? rows[0] : null;
+}
+
+/** 持仓风控价: 取「有风控价的最新一笔持仓」—— 与监控页 list_monitored_positions 同一
+ *  取数口径。多笔持仓只用一笔, 不跨交易把不同仓位的价位拼成三条线。无则返回 null。 */
+function pickOpenRiskPrices(trades) {
+  const t = openPositions(trades)
+    .find(r => r.take_profit != null || r.breakeven != null || r.stop_loss != null);
+  if (!t) return null;
+  const out = {};
+  RISK_ITEMS.forEach(it => {
+    const v = Number(t[it.key]);
+    if (t[it.key] != null && Number.isFinite(v) && v > 0) out[it.key] = v;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+/** 徽章悬停文案: 把不占工具栏的信息放这里。全部取自徽章对应的那一笔持仓,
+ *  不跨交易拼 (多笔持仓时另说都是误导)。 */
+function holdingTip(pos) {
+  if (!pos) return '';
+  const parts = ['持仓中'];
+  const avg = Number(pos.cost_price != null ? pos.cost_price : pos.entry_price);
+  if (Number.isFinite(avg) && avg > 0) parts.push('买入均价 ' + fmtPrice3(avg));
+  const qty = Number(pos.quantity);
+  if (Number.isFinite(qty) && qty > 0) parts.push(qty + ' 股');
+  // hold_days 是模型建议的持仓交易日数 (不是已持有天数); 未关联模型时后端返回 null,
+  // 不能落进 Number(null)===0 的坑里显示"持有 0 天"
+  const days = Number(pos.hold_days);
+  if (pos.hold_days != null && Number.isFinite(days) && days > 0) {
+    parts.push('建议持有 ' + days + ' 交易日');
+  }
+  RISK_ITEMS.forEach(it => {
+    const v = Number(pos[it.key]);
+    if (pos[it.key] != null && Number.isFinite(v) && v > 0) parts.push(it.label + ' ' + fmtPrice3(v));
+  });
+  return parts.join(' · ');
+}
+
+/** 持仓状态同步: STATE.position/STATE.risk + 「持仓中」徽章 + 「风控线」开关显隐
+ *  (交易记录到位、配置变更时调用)。
+ *  非持仓不显示风控线勾选框: 它对没有持仓的标的没有意义, 不必占面板栏位置。 */
+function syncPosition() {
+  const pos = pickOpenPosition(STATE.trades);
+  const risk = pickOpenRiskPrices(STATE.trades);
+  STATE.position = pos;
+  STATE.risk = risk;
+  const badge = document.getElementById('info-holding');
+  if (badge) {
+    badge.style.display = pos ? '' : 'none';
+    badge.title = holdingTip(pos);
+  }
+  const lbl = document.getElementById('lbl-risk');
+  if (lbl) lbl.style.display = risk ? '' : 'none';
+}
+
+/** 交易记录统一入口: 写入后立即刷新持仓状态/风控显示 */
+function setTrades(list) {
+  STATE.trades = list;
+  syncPosition();
+}
+
+/** 风控线的 markLine data 项 (只取填了值的档位): 与现价线同款虚线+标签, 独立配色
+ *  并带上名称; 标签挂在线下方 (insideStartBottom) 避让现价签, 实际位置由签位槽给定。
+ *  价格不在当前可见区间时 ECharts 本就不渲染该线 (markLine 也不参与主轴范围计算)。 */
+function buildRiskLineItems() {
+  const risk = STATE.risk;
+  if (!riskOn() || !risk) return [];
+  return RISK_ITEMS.filter(it => risk[it.key] != null).map(it => {
+    const price = risk[it.key];
+    return priceLineItem(price, C()[it.colorKey], it.label + ' ' + fmtPrice3(price),
+      'insideStartBottom', it.key, C().riskFg);
+  });
+}
+
+/** K 线主图 markLine: 有持仓时把风控线与现价线合并进同一个 markLine 的 data
+ *  (现价线放最后, 画在风控线之上); 无持仓时与改动前一致, 只画现价线。
+ *  全量建图与增量 setOption 都走它, 保证 data 项顺序与 index 一致。 */
+function buildKlineMarkLines(bars, livePrice) {
+  const risk = buildRiskLineItems();
+  const last = buildLastPriceLine(bars, livePrice);
+  if (!risk.length) return last;
+  const data = risk.slice();
+  if (last) data.push(last.data[0]);
+  const base = last || risk[0];
+  return {
+    silent: true, symbol: 'none', animation: false,
+    lineStyle: base.lineStyle, label: base.label, data,
+  };
+}
+
+/** grid 边距 → 像素。ECharts grid 的 top/left/height 多为百分比, 也可能是
+ *  panelGridLeft() 给的 '216px'; fromEnd 表示 right/bottom 这类从右/下量起的边距。 */
+function spanPx(v, total, fromEnd) {
+  const s = String(v);
+  const n = parseFloat(s);
+  if (!isFinite(n)) return fromEnd ? total : 0;
+  const px = s.trim().endsWith('px') ? n : n / 100 * total;
+  return fromEnd ? total - px : px;
+}
+
+/** 缓存 grid 像素矩形 (供 zrender mousemove 判断鼠标在哪个面板、画线层裁剪、贴线标签列边界)。
+ *  单位换算统一走 spanPx, 否则侧栏展开时 left 会算成 2000+ px, 画线命中/裁剪全失效。 */
+function cacheGridRects(grids) {
+  const chart = STATE.chart;
+  if (!chart || !grids) return;
+  const cw = chart.getWidth(), ch = chart.getHeight();
+  STATE._gridRects = grids.map(g => {
+    const top = spanPx(g.top, ch, false);
+    return {
+      top: top,
+      bottom: top + spanPx(g.height, ch, false),
+      left: spanPx(g.left, cw, false),
+      right: spanPx(g.right, cw, true),
+    };
+  });
+}
+
+/** 价格 → 像素 y 的投影 (签位与画线层共用)。
+ *  线性轴沿用 0/1 两点探针; **对数轴**不能这么探: price=0 无定义, convertToPixel 会返回
+ *  `[x, null]`, 于是整个投影失效 (标签退回固定位置、画线层干脆不重绘)。对数轴改用末根的
+ *  low/high 在对数空间插值。
+ *  取不到有效投影 (坐标轴未就绪 / 退化) 返回 null, 调用方跳过本次绘制。 */
+function priceYMapper(bars) {
+  const chart = STATE.chart;
+  if (!chart || !bars || !bars.length) return null;
+  const bar = bars[bars.length - 1];
+  const lo = Number(bar.low), hi = Number(bar.high);
+  if (STATE.logScale && Number.isFinite(lo) && lo > 0 && Number.isFinite(hi) && hi > lo) {
+    const a = chart.convertToPixel({ gridIndex: 0 }, [bars.length - 1, lo]);
+    const b = chart.convertToPixel({ gridIndex: 0 }, [bars.length - 1, hi]);
+    if (!a || !b || !Number.isFinite(a[1]) || !Number.isFinite(b[1]) || a[1] === b[1]) return null;
+    const l0 = Math.log(lo), l1 = Math.log(hi);
+    return {
+      yOf: (p) => (p > 0 ? a[1] + (Math.log(p) - l0) / (l1 - l0) * (b[1] - a[1]) : NaN),
+      // 逆变换: ln p = l0 + (y - y_lo) / (y_hi - y_lo) * (l1 - l0)
+      priceAt: (y) => Math.exp(l0 + (y - a[1]) / (b[1] - a[1]) * (l1 - l0)),
+    };
+  }
+  const p0 = chart.convertToPixel({ gridIndex: 0 }, [bars.length - 1, 0]);
+  const p1 = chart.convertToPixel({ gridIndex: 0 }, [bars.length - 1, 1]);
+  if (!p0 || !p1 || !Number.isFinite(p0[1]) || !Number.isFinite(p1[1]) || p0[1] === p1[1]) return null;
+  return {
+    yOf: (p) => p0[1] + p * (p1[1] - p0[1]),
+    priceAt: (y) => (y - p0[1]) / (p1[1] - p0[1]),
+  };
+}
+
+/** 主图签列可用范围 + 价格→像素 y 的投影 (取不到返回 null, 调用方跳过本次布局) */
+function tagColumnCtx() {
+  const chart = STATE.chart;
+  const bars = tagBars();
+  if (!chart || !bars || !bars.length) return null;
+  const map = priceYMapper(bars);
+  if (!map) return null;
+  const gr = (STATE._gridRects && STATE._gridRects[0]) || null;
+  return {
+    n: bars.length,
+    top: gr ? gr.top : 0,
+    bottom: gr ? gr.bottom : chart.getHeight(),
+    yOf: map.yOf,
+  };
+}
+
+/** 当前主图数据 (分时用分时 bars), 供签位计算 */
+function tagBars() {
+  return STATE.period === 'intraday'
+    ? (STATE.intradayData && STATE.intradayData.bars)
+    : (STATE.klineData && STATE.klineData.klines);
+}
+
+/** 算现价签 + 风控签的槽位: 用当前投影拿每条线的像素 y, 同列错开后可达到最小位移。
+ *  现价每 1.25s 随快照移动, 重叠关系随之变化 —— 所以每次快照/建图/缩放都要重算。
+ *  返回是否真的算出槽位 (投影未就绪返回 false)。 */
+function layoutPriceTagSlots(bars, livePrice) {
+  const c = tagColumnCtx();
+  if (!c) return false;
+  const src = bars && bars.length ? bars : tagBars();
+  const items = [];
+  const last = resolveLastPrice(src, livePrice);
+  if (last != null) {
+    const lineY = c.yOf(last);
+    if (lineY >= c.top && lineY <= c.bottom) {
+      items.push({ key: 'last', y: lineY - TAG_HUG, lineY, priority: 0, price: last });
+    }
+  }
+  // 风控档位: 优先级 止损 > 保本 > 止盈 (盘中盯止损), 区间外的线 ECharts 本来就不画。
+  // 面板栏「风控线」关掉时不出线, 也就不该占位 —— 否则画线层的框签会被看不见的签推开。
+  const riskPriority = { stop_loss: 1, breakeven: 2, take_profit: 3 };
+  if (riskOn()) RISK_ITEMS.forEach(it => {
+    const price = STATE.risk ? STATE.risk[it.key] : null;
+    if (price == null) return;
+    const lineY = c.yOf(price);
+    if (lineY < c.top || lineY > c.bottom) return;
+    items.push({ key: it.key, y: lineY + TAG_HUG, lineY, price, priority: riskPriority[it.key] || 4 });
+  });
+  if (!items.length) { STATE._tagSlots = null; STATE._tagKeys = ''; return true; }
+  const byKey = {};
+  items.forEach(it => { byKey[it.key] = it; });
+  const slots = {};
+  stackTags(items, { top: c.top, bottom: c.bottom }).forEach(r => {
+    const src = byKey[r.key];
+    slots[r.key] = Object.assign({ lineY: src.lineY, price: src.price },
+      r.dropped ? { dropped: true } : Object.assign(tagLabelPos(src.lineY, r.y), { centerY: r.y }));
+  });
+  STATE._tagSlots = slots;
+  STATE._tagKeys = Object.keys(slots).sort()
+    .map(k => k + ':' + (slots[k].dropped ? 'x' : slots[k].position + '/' + slots[k].distance[1])).join('|');
+  return true;
+}
+
+/** 建图/缩放后按新刻度重排签位并只推一次 markLine。
+ *  setOption 用 lazyUpdate 提交, 提交完 convertToPixel 拿到的还是"旧刻度", 所以要等这一帧
+ *  真正渲染完 (rendered 事件) 再算; 另留一个延时兜底, 防事件不来时签位停在上一次的状态。 */
+function refreshPriceTagLayout() {
+  const chart = STATE.chart;
+  if (!chart || STATE._tagRefreshPending) return;
+  STATE._tagRefreshPending = true;
+  let done = false;
+  const run = () => {
+    if (done) return;
+    done = true;
+    STATE._tagRefreshPending = false;
+    try { chart.off('rendered', run); } catch (e) { /* 图表已销毁 */ }
+    if (!STATE.chart || !tagBars()) return;
+    const before = STATE._tagKeys;
+    if (!layoutPriceTagSlots()) return;
+    const line = buildKlineMarkLines(tagBars());
+    if (!line) return;
+    STATE.chart.setOption({ series: [{ name: 'K线', markLine: line }] },
+      { lazyUpdate: true, silent: true });
+    if (STATE._tagKeys !== before) redrawDrawings();
+  };
+  try { chart.on('rendered', run); } catch (e) { /* ignore */ }
+  setTimeout(run, 80);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1378,7 +1749,7 @@ async function fetchData(opts) {
   STATE._lastBarAt = Date.now();
   if (!silent) STATE._foregroundLoading = true;
   cancelPremium();
-  if (!silent && !retainPanels) { STATE.trades = null; STATE.chips = null; } // 仅换股清空，切周期保留当前侧栏/图表直到新数据就绪
+  if (!silent && !retainPanels) { setTrades(null); STATE.chips = null; } // 仅换股清空，切周期保留当前侧栏/图表直到新数据就绪
   const cacheKey = `vk_${symbol}_${period}_${STATE.adjust}`;
   // SSE 快照流由 loadCurrent()/ensureQuoteStream() 统一管理, 此处不再随 fetchData 重启
 
@@ -1452,8 +1823,11 @@ async function fetchData(opts) {
     }
     updateInfo(data);
     if (!silent) {
-      await loadTrades(data.symbol, fetchTs);
+      await loadTrades(data.symbol);
       if (STATE._fetchTs !== fetchTs) return;
+      // 缓存命中时上面已渲染过 (renderFetchedKline 见同 key 直接返回), 这里拿到交易记录后
+      // 需要补一次重绘, 否则买卖点与持仓风控线要等下一次刷新才出现
+      if (STATE.klineData && klineRenderKey(STATE.klineData) === STATE._fetchedKlineRenderKey) updateChart(false);
       fetchChips(data.symbol);
     }
     if (retainPanels && isChipPeriod(period)) fetchChips(data.symbol);
@@ -1481,16 +1855,23 @@ async function fetchData(opts) {
   }
 }
 
-// ── 交易记录: 拉取当前 symbol 的买卖点 (仅登录用户, 未登录由服务端 401 拦截跳登录) ──
-async function loadTrades(symbol, fetchTs) {
+// ── 交易记录: 拉取当前 symbol 的买卖点与持仓 (仅登录用户, 未登录由服务端 401 拦截跳登录) ──
+// 守卫用自增序号 + symbol 比对, 不绑前台 K 线请求: 分时路径也要拉 (否则换股后「持仓中」
+// 徽章与图上风控线还是上一只的), 而分时用的是另一个请求序号。序号守卫同时保证
+// 失败/401 的迟到响应不会清掉新股票刚拿到的持仓。
+async function loadTrades(symbol) {
+  const seq = ++STATE._tradesSeq;
+  const stale = () => seq !== STATE._tradesSeq || STATE.symbol !== symbol;
   try {
     const resp = await fetch(`/api/trades?symbol=${encodeURIComponent(symbol)}&limit=500`);
-    if (!resp.ok) { STATE.trades = null; return; }
+    if (stale()) return;
+    if (!resp.ok) { setTrades(null); return; }
     const data = await resp.json();
-    if (STATE._fetchTs !== fetchTs || STATE.symbol !== symbol) return; // 已切到新股票
-    STATE.trades = data.trades || [];
+    if (stale()) return; // 已切到新股票 / 已被更新的请求取代
+    setTrades(data.trades || []);
   } catch (e) {
-    STATE.trades = null; // 静默降级: 无买卖点, 不影响 K 线
+    if (stale()) return;
+    setTrades(null); // 静默降级: 无买卖点与持仓, 不影响 K 线
   }
 }
 
@@ -1837,17 +2218,22 @@ VisualMarketStore.watch(() => marketStore.last, (change) => {
   }
 });
 
-/** 快照更新只需改最新价线，避免为每个 1.25s 快照重建整张图。 */
+/** 快照更新只需改最新价线，避免为每个 1.25s 快照重建整张图。
+ *  签位先算后建: 现价每 tick 都在动, 与风控签的重叠关系随之变化, 一次 setOption 同时
+ *  更新线和位置 (画线层框签同列避让, 也跟随重绘)。 */
 function updateLivePriceLine(q, symbol = STATE.symbol) {
   if (!q || symbol !== STATE.symbol || q.last_price == null || !STATE.chart) return;
   const bars = STATE.period === 'intraday'
     ? STATE.intradayData && STATE.intradayData.bars
     : STATE.klineData && STATE.klineData.klines;
   if (!bars || !bars.length) return;
-  const line = buildLastPriceLine(bars, q.last_price);
+  const before = STATE._tagKeys;
+  layoutPriceTagSlots(bars, q.last_price);
+  const line = buildKlineMarkLines(bars, q.last_price);
   if (!line) return;
   STATE.chart.setOption({ series: [{ name: 'K线', markLine: line }] },
     { lazyUpdate: true, silent: true });
+  if (STATE._tagKeys !== before) redrawDrawings();
 }
 
 async function fetchQuote() { ensureQuoteStream(); liveQuotes.refresh(); }
@@ -2103,7 +2489,8 @@ function patchLastBarOnChart() {
     const klinePatch = { name: 'K线', data: klines.map((kk) => buildOhlcPoint(kk, impulseOn)) };
     const gapMark = buildGapMarkArea(klines, dates);
     klinePatch.markArea = gapMark || { data: [] };
-    klinePatch.markLine = buildLastPriceLine(klines);
+    layoutPriceTagSlots(klines);
+    klinePatch.markLine = buildKlineMarkLines(klines);
     const eff = effectiveMaBoll(klines);
     const seriesPatch = [
       klinePatch,
@@ -2232,24 +2619,35 @@ function updateFundInfo(q) {
   }
 }
 
+/** 东财股吧地址: 指数 zs+市场前缀, ETF 小写市场前缀, 个股裸 6 位代码。
+ *  取不到代码 (非 .SH/.SZ/.BJ 结尾或空) 返回 '' —— 调用方据此把链接摘掉。 */
+function gubaUrl(symbol, isIndex, isEtf) {
+  const m = String(symbol || '').match(/\.(SH|SZ|BJ)$/);
+  const code6 = String(symbol || '').replace(/\.(SH|SZ|BJ)$/, '');
+  if (!code6) return '';
+  if (isIndex) return 'https://guba.eastmoney.com/list,' + (m && m[1] === 'SZ' ? 'zssz' : 'zssh') + code6 + '.html';
+  if (isEtf && m) return 'https://guba.eastmoney.com/list,' + m[1].toLowerCase() + code6 + '.html';
+  return 'https://guba.eastmoney.com/list,' + code6 + '.html';
+}
+
+/** 代码·名称链接的股吧地址 (点名称跳股吧; 点代码仍是复制, 见 DOMContentLoaded 里的处理器) */
+function updateSymbolLink(data) {
+  const el = document.getElementById('info-sym');
+  if (!el) return;
+  const url = gubaUrl(data && data.symbol, !!(data && data.is_index), !!(data && data.is_etf));
+  if (url) {
+    el.href = url;
+    el.title = '去股吧';
+  } else {
+    el.removeAttribute('href');   // 无股吧页: 名称不可点、无指针、无提示
+    el.removeAttribute('title');
+  }
+}
+
 function updateInfo(data) {
   document.getElementById('info-code').textContent = (data.symbol || '').replace(/\.(SH|SZ|BJ)$/, '');
   document.getElementById('info-name').textContent = data.name || data.symbol;
-  // 东财股吧跳转: 指数 zs+market; ETF 小写市场前缀; 个股裸代码
-  const gubaEl = document.getElementById('info-guba');
-  if (gubaEl) {
-    const _m = (data.symbol || '').match(/\.(SH|SZ|BJ)$/);
-    const _code6 = (data.symbol || '').replace(/\.(SH|SZ|BJ)$/, '');
-    const _mkt = _m ? _m[1] : '';
-    if (data.is_index) {
-      gubaEl.href = 'https://guba.eastmoney.com/list,' + (_mkt === 'SZ' ? 'zssz' : 'zssh') + _code6 + '.html';
-    } else if (data.is_etf && _mkt) {
-      gubaEl.href = 'https://guba.eastmoney.com/list,' + _mkt.toLowerCase() + _code6 + '.html';
-    } else {
-      gubaEl.href = 'https://guba.eastmoney.com/list,' + _code6 + '.html';
-    }
-    gubaEl.style.display = _code6 ? '' : 'none';
-  }
+  updateSymbolLink(data);
   if (data.quote) applyQuoteData(data.quote);
   data.quote = liveQuotes.get(STATE.symbol) || data.quote;
   const q = data.quote;
@@ -2550,6 +2948,7 @@ function buildConfig() {
     dmi: document.getElementById('chk-dmi').checked,
     cross: document.getElementById('chk-cross').checked,
     patterns: document.getElementById('chk-patterns').checked,
+    risk: document.getElementById('chk-risk').checked,
     logScale: document.getElementById('chk-log').checked,
     adjust: STATE.adjust,
     maPeriods: STATE.maPeriods,
@@ -2625,6 +3024,7 @@ function applyConfig(cfg) {
   document.getElementById('chk-dmi').checked = !!cfg.dmi;
   document.getElementById('chk-cross').checked = cfg.cross !== false; // 默认开启
   document.getElementById('chk-patterns').checked = cfg.patterns !== false; // 默认开启
+  document.getElementById('chk-risk').checked = cfg.risk !== false; // 默认开启
   document.getElementById('chk-log').checked = !!cfg.logScale;
   STATE.logScale = !!cfg.logScale;
   STATE.adjust = ['forward', 'hfq', 'none'].includes(cfg.adjust) ? cfg.adjust : 'forward';
@@ -2733,7 +3133,9 @@ async function fetchIntraday(opts) {
       fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
       // /api/quotes keeps an unavailable snapshot as an empty 200 response;
       // a transient upstream miss must not produce a noisy 404 in the console.
-      fetch(`/api/quotes?symbols=${encodeURIComponent(symbol)}`)
+      fetch(`/api/quotes?symbols=${encodeURIComponent(symbol)}`),
+      // 分时图也画持仓风控线/显示「持仓中」徽章, 交易记录要跟 K 线一样随后台请求走
+      loadTrades(symbol),
     ]);
     const id = await idResp.json();
     const quoteBody = await qResp.json();
@@ -2789,7 +3191,7 @@ function renderIntraday(data) {
   const series = [
     { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
       itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
-      markLine: buildLastPriceLine(bars) },
+      markLine: buildKlineMarkLines(bars) },
   ];
   const zoomIndices = [0];
   let gi = 1;
@@ -2923,6 +3325,8 @@ function renderIntraday(data) {
     });
   }
   chart.setOption({ graphic: igraphics });
+  cacheGridRects(grids);
+  refreshPriceTagLayout(); // 分时也要按新刻度重排现价/风控签位
   // 分时视图无画线层: 清空 overlay, 避免 K 线周期的画线残留
   const ov = document.getElementById('draw-overlay');
   if (ov && ov.width) {
@@ -2949,6 +3353,7 @@ function onConfigChange() {
   showDepthSection(depthSecOn());
   if (depthSecOn()) fetchDepth();
   if (sidePanelOn() && !STATE.stockInfo) fetchStockInfo();
+  syncPosition(); // 持仓徽章 + 风控线开关显隐 (线条由下方 onIndicatorChange 重建)
   onIndicatorChange();
 }
 
@@ -3122,6 +3527,7 @@ function initChart() {
       STATE._chipSyncPending = false;
       if (STATE._chip) syncChipAxis();
       redrawDrawings();
+      refreshPriceTagLayout();   // 缩放改变可见价格区间 → 签位要重排
     });
   });
   initDrawEvents();
@@ -3413,7 +3819,7 @@ function updateChart(reTheme) {
   };
   const gapMark = buildGapMarkArea(klines, dates);
   klineSeries.markArea = gapMark || { data: [] };
-  klineSeries.markLine = buildLastPriceLine(klines);
+  klineSeries.markLine = buildKlineMarkLines(klines);
   if (!gapMark) STATE._gaps = [];
 
   series.push(klineSeries);
@@ -3871,27 +4277,9 @@ function updateChart(reTheme) {
   // 保留旧 canvas 至新 option 原子替换，避免周期切换出现白屏闪烁。
   chart.setOption(option, { notMerge: true, lazyUpdate: true, silent: true });
   if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
-  // 缓存 grid 像素位置 (供 zrender mousemove 判断鼠标在哪个面板 + 画线层裁剪)
-  // 注: ECharts grid 的 left/right 可能是百分比, 也可能是 panelGridLeft() 给的 '216px';
-  // 一律按单位换算成像素, 否则侧栏展开时 left 会算成 2000+ px, 画线命中/裁剪全失效。
-  const cw = chart.getWidth(), ch = chart.getHeight();
-  const spanPx = (v, total, fromEnd) => {
-    const s = String(v);
-    const n = parseFloat(s);
-    if (!isFinite(n)) return fromEnd ? total : 0;
-    const px = s.trim().endsWith('px') ? n : n / 100 * total;
-    return fromEnd ? total - px : px;
-  };
-  STATE._gridRects = grids.map(g => {
-    const top = spanPx(g.top, ch, false);
-    return {
-      top: top,
-      bottom: top + spanPx(g.height, ch, false),
-      left: spanPx(g.left, cw, false),
-      right: spanPx(g.right, cw, true),
-    };
-  });
-
+  cacheGridRects(grids);
+  refreshPriceTagLayout(); // 布局后按新刻度重排现价/风控签位 (建图前拿不到新刻度)
+  const cw = chart.getWidth(), ch = chart.getHeight(); // 面板标签/筹码摘要按像素定位
   // 每个指标面板左上角放名称标签 (graphic)
   const PANEL_LABELS = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR', obv: 'OBV', premium: '溢价%' };
   const LABEL_COLORS = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().macdDif, obv: C().obv, premium: C().macdDif };
@@ -4059,6 +4447,7 @@ function resetSidePanelData() {
   STATE.depth = null;
   STATE._lastInfoAt = 0;
   STATE._lastDepthAt = 0;
+  setTrades(null);   // 持仓/风控线同属"上一只股票的数据", 换股先作废 (两条加载路径各自会重新拉)
 }
 
 function loadCurrent() {
@@ -4138,22 +4527,32 @@ function drawCtx() {
   };
 }
 
-/** 像素投影 P: x(idx)/y(price) 线性外推 (支持未来bar越界换算), grid=主图像素矩形 */
+/** 像素投影 P: x(idx)/y(price) 外推 (支持未来bar越界换算), grid=主图像素矩形。
+ *  坐标轴未就绪时 (setOption 以 lazyUpdate 提交, 下一帧才 flush) convertToPixel 返回
+ *  undefined —— 此时返回 null 让调用方跳过本次绘制, 不要拿它硬算。
+ *  x 探针的价格: 对数轴下 price=0 非法 (会拿到 [x, null]), 改用末根 low 当参照。 */
 function drawMapper() {
-  const chart = STATE.chart, n = STATE.klineData.klines.length;
-  const pxLast = chart.convertToPixel({ gridIndex: 0 }, [n - 1, 0])[0];
-  const pxPrev = n >= 2 ? chart.convertToPixel({ gridIndex: 0 }, [n - 2, 0])[0] : pxLast - 10;
+  const chart = STATE.chart;
+  const bars = STATE.klineData && STATE.klineData.klines;
+  if (!chart || !bars || !bars.length) return null;
+  const n = bars.length;
+  const yMap = priceYMapper(bars);
+  if (!yMap) return null;
+  const barLow = Number(bars[n - 1].low);
+  const xRef = (STATE.logScale && Number.isFinite(barLow) && barLow > 0) ? barLow : 0;
+  const pLast = chart.convertToPixel({ gridIndex: 0 }, [n - 1, xRef]);
+  if (!pLast || !Number.isFinite(pLast[0])) return null;
+  const pxLast = pLast[0];
+  const pPrev = n >= 2 ? chart.convertToPixel({ gridIndex: 0 }, [n - 2, xRef]) : null;
+  const pxPrev = (pPrev && Number.isFinite(pPrev[0])) ? pPrev[0] : pxLast - 10;
   const xStep = (n >= 2 && pxLast !== pxPrev) ? pxLast - pxPrev : 10;
-  const py0 = chart.convertToPixel({ gridIndex: 0 }, [n - 1, 0])[1];
-  const py1 = chart.convertToPixel({ gridIndex: 0 }, [n - 1, 1])[1];
-  const yStep = py1 - py0; // price=1 处像素 (线性轴)
   const gr = (STATE._gridRects && STATE._gridRects[0]) || { left: 0, right: chart.getWidth(), top: 0, bottom: chart.getHeight() };
   return {
     W: chart.getWidth(), H: chart.getHeight(), grid: gr,
     x: (idx) => pxLast + (idx - (n - 1)) * xStep,
-    y: (price) => py0 + price * yStep,
+    y: yMap.yOf,
     idxAt: (px) => (n - 1) + (px - pxLast) / xStep,
-    priceAt: (py) => (py - py0) / yStep,
+    priceAt: yMap.priceAt,
   };
 }
 
@@ -4240,12 +4639,26 @@ function drawingCrossTooltipHtml(idx, close) {
 // 画线层不进 ECharts graphic (其增量合并对新增元素不可靠且静默失败),
 // 改为透明 overlay canvas 重绘; 事件仍由 zrender 派发 (pointer-events:none 不遮挡图表)。
 function redrawDrawings(panelLabels) {
-  if (panelLabels) STATE.draw._labels = panelLabels;
-  if (STATE.draw._raf) return;
-  STATE.draw._raf = true;
+  const dr = STATE.draw;
+  if (panelLabels) dr._labels = panelLabels;
+  if (dr._raf) { dr._rafAgain = true; return; }
+  dr._raf = true;
   requestAnimationFrame(() => {
-    STATE.draw._raf = false;
-    _renderDrawingsNow();
+    dr._raf = false;
+    const again = dr._rafAgain === true;
+    dr._rafAgain = false;
+    const done = _renderDrawingsNow();
+    if (done === false && dr._retry < 3) {   // 投影未就绪: 保留上一帧并补绘, 有上限防空转
+      dr._retry += 1;
+      redrawDrawings();
+      return;
+    }
+    if (done !== false && again) {           // 排期期间又被请求: 内容可能已变, 再画一帧
+      dr._retry = 0;
+      redrawDrawings();
+      return;
+    }
+    dr._retry = 0;
   });
 }
 
@@ -4305,6 +4718,41 @@ function paintTag(c2, text, xRight, y, bg) {
   c2.fillStyle = '#fff';
   c2.fillText(text, xRight + 6, y + 3.5);
   c2.font = '12px monospace';
+}
+
+/** 贴线框签归属哪一列: 贴网格左缘 / 右缘的算列内 (要纵向错开), 其它位置各自独立 */
+function tagColumnOf(x, grid) {
+  if (!grid) return 'free';
+  if (Math.abs(x - grid.left) <= 12) return 'left';
+  if (Math.abs(x - grid.right) <= 12) return 'right';
+  return 'free';
+}
+
+/** 画线层贴线框签: 同一列"先收集后错开"再落笔。
+ *  左缘列把现价/风控签当不可移动的占位 —— 画线注解给行情签让位, 谁也不会盖谁。
+ *  注: 斐波那契档位/仓位盒 R:R/测量尺等文字在各自锚点 (非同一列), 不走这里。 */
+function paintTagLayer(c2, tags, P) {
+  if (!tags || !tags.length || !P) return;
+  const bounds = { top: P.grid.top, bottom: P.grid.bottom };
+  const reserve = [];
+  Object.keys(STATE._tagSlots || {}).forEach(k => {
+    const s = STATE._tagSlots[k];
+    if (s && !s.dropped && Number.isFinite(s.centerY)) reserve.push(s.centerY);
+  });
+  ['right', 'left'].forEach(col => {
+    const list = tags.filter(t => t.col === col);
+    if (!list.length) return;
+    const res = stackTags(list.map(t => ({ key: t.id, y: t.y, priority: 10 })),
+      bounds, col === 'left' ? reserve : []);
+    const byKey = {};
+    res.forEach(r => { byKey[r.key] = r; });
+    list.forEach(t => {
+      const r = byKey[t.id];
+      if (!r || r.dropped) return;
+      paintTag(c2, t.text, t.x, r.y, t.bg);
+    });
+  });
+  tags.filter(t => t.col === 'free').forEach(t => paintTag(c2, t.text, t.x, t.y, t.bg));
 }
 
 function paintLabels(c2, labels) {
@@ -4626,7 +5074,7 @@ document.addEventListener('click', (e) => {
       && !pop.contains(e.target) && !e.target.closest('.cfg-mini')) closeParamPop();
 });
 
-function paintDrawing(c2, d, P, ctx, selected) {
+function paintDrawing(c2, d, P, ctx, selected, tags) {
   const g = Drawings.geom(d, P, ctx);
   if (!g) return;
   const color = d.style.color, width = d.style.width, dash = d.style.dash ? [6, 4] : [];
@@ -4643,7 +5091,9 @@ function paintDrawing(c2, d, P, ctx, selected) {
     }
     case 'hline':
       strokeSeg(c2, P.grid.left, g.y, P.grid.right, g.y, color, width, dash);
-      paintTag(c2, fmtPrice3(g.price), P.grid.right, g.y, color);
+      const tag = { id: 'px:' + d.id, text: fmtPrice3(g.price), x: P.grid.right, y: g.y,
+        bg: color, col: tagColumnOf(P.grid.right, P.grid) };
+      if (tags) tags.push(tag); else paintTag(c2, tag.text, tag.x, tag.y, tag.bg);
       break;
     case 'vline':
       strokeSeg(c2, g.x, P.grid.top, g.x, P.grid.bottom, color, width, dash);
@@ -4721,7 +5171,9 @@ function paintDrawing(c2, d, P, ctx, selected) {
     if (d.type === 'hline') { lx = P.grid.left + 4; ly = g.y; }
     else if (g.c) { lx = g.c[2]; ly = g.c[3]; }
     else { lx = g.raw2.x; ly = g.raw2.y; }
-    paintTag(c2, '🔔' + d.name, lx, ly, color);
+    const tag = { id: 'mn:' + d.id, text: '🔔' + d.name, x: lx, y: ly, bg: color,
+      col: tagColumnOf(lx - 4, P.grid) };
+    if (tags) tags.push(tag); else paintTag(c2, tag.text, tag.x, tag.y, tag.bg);
   }
   if (selected) {
     Drawings.handlesOf(d, P, ctx).forEach(h => paintHandle(c2, h.x, h.y, color));
@@ -4817,22 +5269,29 @@ function paintDraft(c2, P, ctx) {
 
 function _renderDrawingsNow() {
   const chart = STATE.chart;
-  if (!chart) return;
-  const c2 = drawOverlayCtx();
-  if (!c2) return;
+  if (!chart) return false;
   const dctx = drawCtx();
-  if (!dctx) { positionDrawMenu(); return; }
+  const paint = !!dctx && STATE.draw.visible;
+  // 投影必须先于清屏算好: lazyUpdate 后坐标轴未 flush 时 drawMapper 返回 null,
+  // 若先 clearRect, 上一帧画线就被擦成空白 (退出画线模式丢线的症状)。
+  const P = paint ? drawMapper() : null;
+  if (paint && !P) return false; // 保留上一帧, 由 redrawDrawings 下一帧补绘
+  const c2 = drawOverlayCtx();
+  if (!c2) return false;
+  if (!dctx) { positionDrawMenu(); return true; }
   // 面板名/图例是图表固有元素, 不随 👁 画线显隐开关消失
   paintLabels(c2, STATE.draw._labels);
   paintLegend(c2, dctx);
-  if (!STATE.draw.visible) { positionDrawMenu(); return; }
-  const P = drawMapper();
+  if (!STATE.draw.visible) { positionDrawMenu(); return true; }
   if (STATE.draw.autoLines) refreshAutoLines(dctx);
   if (STATE.draw.autoLines) paintAutoLines(c2, P, dctx);
-  STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id));
+  const tags = [];  // 贴线框签: 先收集, 全部图形画完再按列错开落笔
+  STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id, tags));
   if (STATE.draw.suggest) paintSuggest(c2, P, dctx);
   if (STATE.draw.draft) paintDraft(c2, P, dctx);
+  paintTagLayer(c2, tags, P);
   positionDrawMenu();
+  return true;
 }
 
 // ── 指针交互 ──
@@ -4856,6 +5315,7 @@ function drawPointer(e) {
   const gr = (STATE._gridRects && STATE._gridRects[0]) || null;
   if (!gr || py < gr.top - 4 || py > gr.bottom + 4) return null;
   const P = drawMapper();
+  if (!P) return null;
   return { px, py, P, ctx, idxF: P.idxAt(px), price: P.priceAt(py) };
 }
 
@@ -5070,11 +5530,16 @@ function toggleDrawMode() {
     dr.enabled = false;
     dr.draft = null;
     dr.drag = null;
-    selectDrawing(null);
     document.getElementById('btn-draw').classList.remove('active');
     document.getElementById('draw-palette').style.display = 'none';
     hideDrawMenu();
     hideSuggestBox();
+    // futureBars 归零要重建坐标轴, 且重建必须先于清选中态触发的重绘:
+    // setOption 用 lazyUpdate 提交, 坐标轴下一帧才 flush, 先重绘会拿不到投影
+    // (drawMapper → null) 并把画线层清成空白 —— 退出画线模式丢线就是这么来的。
+    updateChart(false);
+    selectDrawing(null);
+    return;
   }
   updateChart(false); // 未来bar空间随开关变化, 需重建坐标轴
 }
@@ -5223,6 +5688,7 @@ function positionDrawMenu() {
   const ctx = drawCtx();
   if (!ctx) return;
   const P = drawMapper();
+  if (!P) return;
   const hs = Drawings.handlesOf(d, P, ctx);
   if (!hs.length) return;
   const wrap = document.getElementById('chart-wrap');
@@ -5296,6 +5762,7 @@ function positionSuggestBox() {
   const ctx = drawCtx();
   if (!ctx) return;
   const P = drawMapper();
+  if (!P) return;
   const x = P.x(sug.points[0].i), y = P.y(sug.points[0].p);
   const wrap = document.getElementById('chart-wrap');
   box.style.display = 'flex';
@@ -5692,16 +6159,40 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 点击代码复制 (便捷性: 分享/输入时一键取码)
+  // 点击代码复制 (便捷性: 分享/输入时一键取码); 代码在股吧链接内, 必须阻止跳转。
+  // 键盘可达: 单独可聚焦 + Enter/Space 也能复制 (触屏/无鼠标场景才有等价入口)。
   const codeEl = document.getElementById('info-code');
-  codeEl.style.cursor = 'pointer';
-  codeEl.title = '点击复制代码';
-  codeEl.addEventListener('click', () => {
+  const copyCode = () => {
     if (!STATE.symbol) return;
     navigator.clipboard?.writeText(STATE.symbol)
       .then(() => showToast('已复制 ' + STATE.symbol))
       .catch(() => {});
+  };
+  codeEl.style.cursor = 'pointer';
+  codeEl.title = '点击复制代码';
+  codeEl.tabIndex = 0;
+  codeEl.setAttribute('role', 'button');
+  codeEl.addEventListener('click', (ev) => {
+    ev.preventDefault();      // 否则点代码会连带触发外层 <a> 跳股吧
+    ev.stopPropagation();
+    copyCode();
   });
+  codeEl.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    copyCode();
+  });
+
+  // 「持仓中」徽章: 悬停看明细 (桌面), 点一下弹 toast (触屏无 hover, 也能看到风控价)
+  const holdEl = document.getElementById('info-holding');
+  if (holdEl) {
+    holdEl.style.cursor = 'pointer';
+    holdEl.addEventListener('click', () => {
+      const tip = holdingTip(STATE.position);
+      if (tip) showToast(tip);
+    });
+  }
 
   // First load: 面板设置 + 搜索历史并行与服务端对齐, 再拉 K 线 (清站点数据/换设备可恢复);
   // 3s 超时兜底, 服务端慢时不阻塞首屏
@@ -5723,7 +6214,7 @@ document.addEventListener('DOMContentLoaded', () => {
   ]);
   const bootReady = () => Promise.race([bootSync, new Promise(r => setTimeout(r, 3000))]);
   // 超时兜底: 首屏已渲染后服务端配置才到达 → 重绘一次应用新配置
-  bootSync.then(() => { if (panelCfgApplied && initDone) onIndicatorChange(); });
+  bootSync.then(() => { if (panelCfgApplied && initDone) { syncPosition(); onIndicatorChange(); } });
   if (!hist.length && !jumpSymbol) {
     bootReady().then(() => {
       const synced = loadHistory();

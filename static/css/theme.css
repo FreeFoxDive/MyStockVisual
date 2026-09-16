@@ -64,6 +64,13 @@
   --chart-predict-border: rgba(91,143,249,0.35);
   --chart-tip-bg: rgba(255,255,255,0.96);
   --chart-tip-border: #dee2e6;
+  /* 持仓风控线 (止盈/保本/止损): 刻意避开涨红跌绿, 免得与现价线混淆。
+     亮色主题用深色打底 + 白字 (--risk-fg); 暗色主题底色变浅, 字色随之翻成深色,
+     否则 10px 小字压浅底对比不足。 */
+  --risk-tp: #c97a00;
+  --risk-be: #1565c0;
+  --risk-sl: #7b3fa0;
+  --risk-fg: #ffffff;
   /* 分类饼图 12 色板 (主题中性, JS split(',') 使用) */
   --pie-colors: #5470c6,#91cc75,#fac858,#ee6666,#73c0de,#3ba272,#fc8452,#9a60b4,#ea7ccc,#48b8d0,#ff9f7f,#8d98b3;
 }
@@ -126,6 +133,10 @@
   --chart-predict-border: rgba(91,143,249,0.45);
   --chart-tip-bg: rgba(20,23,31,0.92);
   --chart-tip-border: #3a4356;
+  --risk-tp: #f0a020;
+  --risk-be: #4aa3ff;
+  --risk-sl: #b07ae0;
+  --risk-fg: #141a24;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }

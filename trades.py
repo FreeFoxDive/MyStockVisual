@@ -768,7 +768,7 @@ def delete_search_history(user_id, symbol):
 PANEL_CONFIG_BOOL_KEYS = (
     "volume", "macd", "kdj", "rsi", "atr", "obv", "chip", "info", "depth",
     "tipRsi", "tipKdj", "tipAtr", "impulse", "channel", "gap", "boll",
-    "wr", "cci", "bias", "dmi", "cross", "patterns", "logScale",
+    "wr", "cci", "bias", "dmi", "cross", "patterns", "logScale", "risk",
     "periodMore", "indMore",
 )
 PANEL_CONFIG_ADJUSTS = ("forward", "hfq", "none")
