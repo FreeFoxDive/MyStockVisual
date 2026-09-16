@@ -81,6 +81,17 @@ class TagLayoutStaticTest(unittest.TestCase):
                       "左缘列要把现价/风控签当占位, 画线注解让位给行情签")
         self.assertIn("STATE._tagSlots", body)
 
+    def test_hline_price_tag_hugs_left_edge(self):
+        """水平线价签挂左缘: 原本挂右缘压在价格轴上, 与右轴刻度混在一起。
+        改到左缘后落在 'left' 列, 自动与现价/风控签同列错开。"""
+        body = _extract_fn(self.src, "paintDrawing")
+        self.assertIn("x: P.grid.left,", body)
+        self.assertIn("col: tagColumnOf(P.grid.left, P.grid)", body)
+        # P.grid.right 只该剩线本身那一次描边, 价签不再用它
+        self.assertEqual(body.count("P.grid.right"), 1, "水平线价签不得再挂右缘")
+        # 框签盒高与错位算法共用 TAG_BOX_H, 否则左列让位量会差一个像素
+        self.assertIn("const h = TAG_BOX_H;", _extract_fn(self.src, "paintTag"))
+
 
 class TagLayoutBehaviorTest(unittest.TestCase):
     @classmethod

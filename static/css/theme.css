@@ -42,7 +42,14 @@
   /* K线图表专用 (ECharts canvas 无法解析 var(), 由页面 JS 读取计算值):
      ink/amber/rose 三色系对标东财: MA5/DIF/K/RSI1, MA10/DEA/D/RSI2, MA20/J/RSI3 */
   --chart-bg: #ffffff;
-  --chart-text: #6c757d;
+  /* 强对比文本 (刻度/图例/数值): 亮色黑、暗色白。原来的 #6c757d 中灰在两种主题下都偏淡。
+     --chart-text 给 canvas 侧 (ECharts 轴刻度、图例、筹码摘要) 读; --strong-text 同取值,
+     给 DOM 侧读数用 (顶部栏时钟、质押/流通/成交额) —— 两者是同一套「强对比文本」。 */
+  --chart-text: #000000;
+  --strong-text: #000000;
+  /* 刻度专用: 中间调。刻度是坐标系背景信息, 用满对比黑白会盖过价格签的层级
+     (实测黑白 ≈21:1, 这里 ≈6.4:1) —— 明显能读、但排在价格签/数值之后。 */
+  --axis-text: #556069;
   --chart-grid: #eeeeee;
   --chart-cross: #cccccc;
   --chart-ink: #1a1a1a;
@@ -65,12 +72,19 @@
   --chart-tip-bg: rgba(255,255,255,0.96);
   --chart-tip-border: #dee2e6;
   /* 持仓风控线 (止盈/保本/止损): 刻意避开涨红跌绿, 免得与现价线混淆。
-     亮色主题用深色打底 + 白字 (--risk-fg); 暗色主题底色变浅, 字色随之翻成深色,
-     否则 10px 小字压浅底对比不足。 */
+     --risk-fg 是「贴线价格签字色」, 风控签与现价签共用一份, 并与主题正文同向:
+     亮色黑字 / 暗色白字。**价格签是图表里最高层级**, 两侧底色都按各自字色调过对比:
+       亮色 (黑字): #c97a00 6.3:1 / #2f7fd1 5.1:1 / #9a5fd0 4.9:1
+       暗色 (白字): #a86408 4.7:1 / #2b6fbe 5.1:1 / #8a4fc4 5.3:1
+     --up-chip/--down-chip 只给「现价签的底色」用: 暗色下涨跌色本身偏中调 (白字只有 3.0~3.5:1),
+     所以签单独取压深一档的值; 涨跌线/蜡烛/涨跌文字仍用原语义色 (--up-color/--down-color)。
+     (画线层左缘的框签 paintTag 也读 --risk-fg, 保证同一列几个签同色。) */
   --risk-tp: #c97a00;
-  --risk-be: #1565c0;
-  --risk-sl: #7b3fa0;
-  --risk-fg: #ffffff;
+  --risk-be: #2f7fd1;
+  --risk-sl: #9a5fd0;
+  --risk-fg: #000000;
+  --up-chip: #ef232a;
+  --down-chip: #14b143;
   /* 分类饼图 12 色板 (主题中性, JS split(',') 使用) */
   --pie-colors: #5470c6,#91cc75,#fac858,#ee6666,#73c0de,#3ba272,#fc8452,#9a60b4,#ea7ccc,#48b8d0,#ff9f7f,#8d98b3;
 }
@@ -111,7 +125,9 @@
   --model-c7: #818cf8;
   --model-c-none: #94a3b8;
   --chart-bg: #10131c;
-  --chart-text: #787b86;
+  --chart-text: #ffffff;   /* 同亮色: 强对比文本 (刻度/图例/数值) */
+  --strong-text: #ffffff;
+  --axis-text: #8a929d;    /* 刻度: 中间调 (≈5.9:1), 让位给价格签 */
   --chart-grid: #1f2432;
   --chart-cross: #3a4356;
   --chart-ink: #eeeeee;
@@ -133,10 +149,12 @@
   --chart-predict-border: rgba(91,143,249,0.45);
   --chart-tip-bg: rgba(20,23,31,0.92);
   --chart-tip-border: #3a4356;
-  --risk-tp: #f0a020;
-  --risk-be: #4aa3ff;
-  --risk-sl: #b07ae0;
-  --risk-fg: #141a24;
+  --risk-tp: #a86408;
+  --risk-be: #2b6fbe;
+  --risk-sl: #8a4fc4;
+  --risk-fg: #ffffff;
+  --up-chip: #c0392b;      /* 现价签底色: 白字 5.4:1 (涨跌线仍是 --up-color) */
+  --down-chip: #17786f;    /* 白字 5.3:1 */
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }

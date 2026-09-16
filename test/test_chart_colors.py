@@ -59,6 +59,46 @@ class ChartColorTest(unittest.TestCase):
         self.assertIn("C().boll", block, "BOLL 渲染未使用 C().boll")
         self.assertNotIn("C().ma10", block, "BOLL 渲染仍在复用 MA10 的颜色")
 
+    def test_strong_text_is_black_light_white_dark(self):
+        """刻度/图例/读数用的强对比文本: 亮色黑、暗色白 (原来两主题都是中灰, 看着暗淡)。"""
+        for theme, block in _theme_blocks().items():
+            want = "#000000" if theme == "light" else "#ffffff"
+            self.assertEqual(_var(block, "--chart-text"), want,
+                             f"{theme} 的 --chart-text 应为 {want} (图表刻度/图例)")
+            self.assertEqual(_var(block, "--strong-text"), want,
+                             f"{theme} 的 --strong-text 应为 {want} (顶部栏读数)")
+            self.assertEqual(_var(block, "--strong-text"), _var(block, "--chart-text"),
+                             f"{theme} 两套「强对比文本」取值必须一致")
+
+    def test_legend_segments_use_series_colors(self):
+        """图例每段必须用自己的线色 (DIF 段用 macdDif 等), 不能整行一个颜色。"""
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        legend = html[html.index("function paintLegend"):html.index("function _renderDrawingsNow")]
+        self.assertIn("putSegs", legend, "图例应走分段着色")
+        self.assertNotIn("put(0, parts.join", legend, "旧的整行单色图例应已移除")
+        self.assertIn("C().boll", legend, "BOLL 段用线色")
+        self.assertIn("maFills[i]", legend, "MA 段用均线色")
+        self.assertIn("C().atr", legend, "ATR 段用线色")
+        # 段色 ↔ 各 series 的 lineStyle.color 成对出现 (防图例色与线色漂移)
+        pairs = [("DIF", "macdDif"), ("DEA", "macdDea"), ("K ", "kdjK"), ("D ", "kdjD"),
+                 ("J ", "kdjJ"), ("RSI1", "rsi6"), ("RSI2", "rsi12"), ("RSI3", "rsi24"),
+                 ("MAOBV", "maobv"), ("WR14", "rsi6"), ("CCI14", "macdDif"),
+                 ("BIAS6", "ma5"), ("BIAS12", "ma10"), ("BIAS24", "ma20"),
+                 ("+DI", "up"), ("-DI", "down"), ("ADX", "macdDea")]
+        for label, token in pairs:
+            pat = (r"text: `" + re.escape(label) + r"[^`]*`,\s*fill: [^,\n]*" + re.escape(token))
+            self.assertRegex(legend, pat, f"图例 {label.strip()} 段应使用 {token} (与线同色)")
+
+    def test_ma_line_colors_shared(self):
+        """均线配色只有一处来源 (maLineColors), 线/tooltip/图例都读它。"""
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        fn = html[html.index("function maLineColors"):]
+        fn = fn[:fn.index("}")]
+        for token in ("C().ma5", "C().ma10", "C().ma20"):
+            self.assertIn(token, fn, f"maLineColors 缺少 {token}")
+        self.assertIn("const maColors = maLineColors();", html, "updateChart 应改用共享取色")
+        self.assertNotIn("const maColors = [C().ma5", html, "旧的内联取色应已移除")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

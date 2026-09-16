@@ -80,7 +80,12 @@ class MonitorPageStaticTest(unittest.TestCase):
         idx = INDEX_HTML.read_text(encoding="utf-8")
         m = re.search(r'<button id="monitor-entry"[^>]*>([^<]*)</button>', idx)
         self.assertIsNotNone(m, "index.html 应保留 monitor-entry 入口")
-        self.assertIn("监控中心", m.group(1))
+        # 顶栏按钮文案收短为「监控」; 全称留在 title 里 (悬浮可见)
+        self.assertIn("监控", m.group(1))
+        self.assertNotIn("监控中心", m.group(1))
+        i = idx.index('id="monitor-entry"')
+        open_tag = idx[i:idx.index(">", i)]
+        self.assertIn("监控中心", open_tag, "monitor-entry 的 title 应保留全称")
 
     def test_alert_labels_cover_backend_types(self):
         keys = _object_keys(_extract_const(self.src, "ALERT_LABELS"))

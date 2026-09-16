@@ -2,12 +2,50 @@
 """前端 sortHistory / 按下标删除历史 逻辑的镜像测试（与 index.html 保持一致）。
 
 用 Node 执行与页面相同的合并/排序规则，避免仅 Python 侧通过、浏览器仍乱序。
+另含搜索记录条的交互结构断言: 触屏没有可靠 hover, 删除角标改为默认隐藏 +
+「管理」开关统一切换, 平板上最多展示 10 条。
 """
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
+from pathlib import Path
+
+_VISUAL_DIR = Path(__file__).resolve().parents[1]
+INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
+
+
+def _extract_fn(src, name):
+    m = re.search(r"(?:async\s+)?function\s+" + re.escape(name) + r"\s*\(", src)
+    if not m:
+        raise AssertionError(f"index.html 中找不到 function {name}")
+    start = src.index("{", m.end() - 1)
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[m.start():i + 1]
+    raise AssertionError(f"function {name} 大括号不配对")
+
+
+def _css_block(src, selector):
+    i = src.index(selector + " {")
+    start = src.index("{", i)
+    depth = 0
+    for j in range(start, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:j + 1]
+    raise AssertionError(f"{selector} 大括号不配对")
+
 
 # 与 index.html sortHistory 逐行一致
 _SORT_HISTORY_FN = r"""
@@ -152,6 +190,68 @@ class TestSearchHistoryJsMirror(unittest.TestCase):
                 self._run(_DEL_BY_INDEX_JS, self._MESSY, idx)["left"],
                 self._MESSY_ORDER,
             )
+
+
+class HistoryBarUiStaticTest(unittest.TestCase):
+    """搜索记录条的交互与平板展示上限。
+
+    触屏没有可靠 hover: 删除角标不能再「常显」(悬在标签外会把行高撑得不一致,
+    也容易误触), 改成默认全隐藏 + 一个「管理」开关统一切换。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = INDEX_HTML.read_text(encoding="utf-8")
+        cls.bar = cls.src[cls.src.index('<div id="history-bar"'):cls.src.index('id="indicator-bar"')]
+
+    def test_edit_toggle_button_wired(self):
+        self.assertIn('id="hist-edit"', self.bar)
+        self.assertIn('onclick="toggleHistoryEdit()"', self.bar)
+        self.assertIn('aria-pressed="false"', self.bar, "开关要有按下态供无障碍与高亮用")
+        body = _extract_fn(self.src, "toggleHistoryEdit")
+        self.assertIn("STATE._histEdit", body)
+        self.assertIn("renderHistoryTags()", body)
+
+    def test_delete_badge_hidden_by_default_everywhere(self):
+        """opacity:0 必须在基础规则里 —— 只写在 @media (hover: hover) 里触屏不匹配, 就会常显。"""
+        base = _css_block(self.src, ".history-tag .tag-del")
+        self.assertIn("opacity: 0", base)
+        self.assertIn("pointer-events: none", base)
+        i = self.src.index("@media (hover: hover)")
+        hover = self.src[i:self.src.index("}", self.src.index(".tag-del:hover", i))]
+        self.assertNotIn("opacity: 0", hover, "悬停块只管浮现")
+        edit = self.src.index("#history-bar.edit .history-tag .tag-del")
+        self.assertGreater(edit, i, "编辑态规则要排在 hover 块之后才能盖住它")
+        self.assertIn("opacity: 1", self.src[edit:edit + 200])
+
+    def test_prefix_and_edit_keep_row_height_stable(self):
+        self.assertIn('class="hist-prefix"', self.bar, "前缀样式进 CSS, 不再内联")
+        self.assertNotIn('style="color:var(--text-secondary);font-size:12px', self.bar)
+        self.assertIn("line-height", _css_block(self.src, "#history-bar .hist-prefix"))
+        # 角标悬出的空间常驻: 切换编辑态不改变栏高 (否则又是一次高度跳动)
+        self.assertIn("padding-top: 10px", _css_block(self.src, "@media (pointer: coarse)"))
+
+    def test_tablet_caps_rendered_tags(self):
+        body = _extract_fn(self.src, "renderHistoryTags")
+        self.assertIn("histLayoutMode()", body, "布局口径统一走 histLayoutMode")
+        self.assertIn("const tablet = mode !== 'desktop';", body, "平板 = 非桌面")
+        self.assertIn("list.slice(0, HIST_VIEW_MAX_TABLET)", body)
+        self.assertIn("const HIST_VIEW_MAX_TABLET = 10;", self.src)
+        self.assertIn("HIST_MAX = 20", self.src, "存储仍留 20 条, 只改展示")
+        self.assertIn("bar.classList.toggle('edit', editOn)", body)
+
+    def test_breakpoint_change_rerenders(self):
+        """转屏/拖窗口跨过平板阈值时要重渲染: 否则条数上限停留在旧口径。"""
+        body = _extract_fn(self.src, "watchHistoryBarBreakpoint")
+        self.assertIn("STATE._histMode", body)
+        self.assertIn("histLayoutMode()", body)
+        self.assertIn("renderHistoryTags()", body)
+        # 三态 (phone/tablet/desktop) 任一切换都要重渲染: 只比 isTabletUi 会漏掉 640 那条线
+        mode = _extract_fn(self.src, "histLayoutMode")
+        self.assertIn("isPhoneUi()", mode)
+        self.assertIn("isTabletUi()", mode)
+        self.assertIn("STATE._histMode = mode;", _extract_fn(self.src, "renderHistoryTags"))
+        self.assertIn("watchHistoryBarBreakpoint();", self.src)
 
 
 if __name__ == "__main__":

@@ -95,6 +95,16 @@ class RiskLinesStaticTest(unittest.TestCase):
         body = _extract_fn(self.src, "buildLastPriceLine")
         self.assertIn("'现价 ' + fmtPrice3(price)", body)
 
+    def test_all_price_tags_share_fg_token(self):
+        """现价签与风控签共用 --risk-fg: 亮色白字 / 暗色深字, 两主题下四签同色。"""
+        self.assertIn("'last', C().riskFg, rising ? C().upChip : C().downChip)",
+                      _extract_fn(self.src, "buildLastPriceLine"),
+                      "现价签: 字色走 --risk-fg, 底色走签专用的 --up-chip/--down-chip")
+        self.assertIn("it.key, C().riskFg)", _extract_fn(self.src, "buildRiskLineItems"))
+        # 画线层左缘框签 (水平线价签/监控名称签) 同色, 免得同一列两种字色
+        self.assertIn("C().riskFg", _extract_fn(self.src, "paintTag"))
+        self.assertNotIn("'#fff'", _extract_fn(self.src, "paintTag"))
+
     def test_symbol_link_replaces_guba_tag(self):
         """「股吧 ↗」独立标签去掉, 代码·名称整体成一个链接: 点代码复制, 点名称跳股吧。"""
         group = self.src[self.src.index('class="info-group"'):self.src.index('class="toolbar-right"')]
@@ -153,13 +163,27 @@ class RiskLinesStaticTest(unittest.TestCase):
         for var in ("--risk-tp", "--risk-be", "--risk-sl", "--risk-fg"):
             self.assertIn(f"{var}:", light, f"亮色缺 {var}")
             self.assertIn(f"{var}:", dark, f"暗色缺 {var}")
-        # 暗色底色是浅色系, 字色必须跟着翻深 (10px 小字配浅底, 白字对比不足)
-        num = lambda h: sum(int(h[i:i + 2], 16) for i in (1, 3, 5)) / 3
-        dark_tp = re.search(r"--risk-tp:\s*(#[0-9a-f]{6})", dark).group(1)
+        # 字色跟主题正文同向: 亮色黑字 / 暗色白字 (用户指定)。暗色底色为此压深,
+        # 用 WCAG 对比度实算而不是"平均亮度大小"的粗略判据。
         dark_fg = re.search(r"--risk-fg:\s*(#[0-9a-f]{6})", dark).group(1)
         light_fg = re.search(r"--risk-fg:\s*(#[0-9a-f]{6})", light).group(1)
-        self.assertGreater(num(dark_tp), num(dark_fg), "暗色风控签应为浅底深字")
-        self.assertGreater(num(light_fg), 200, "亮色仍是深底白字")
+        self.assertEqual(light_fg.lower(), "#000000", "亮色价格签为黑字")
+        self.assertEqual(dark_fg.lower(), "#ffffff", "暗色价格签为白字")
+        for var in ("--risk-tp", "--risk-be", "--risk-sl"):
+            fill = re.search(re.escape(var) + r":\s*(#[0-9a-f]{6})", dark).group(1)
+            self.assertGreaterEqual(self._contrast(dark_fg, fill), 4.5,
+                                    f"暗色 {var}={fill} 配白字对比不足 4.5:1")
+
+    @staticmethod
+    def _contrast(fg: str, bg: str) -> float:
+        """WCAG 相对亮度对比度 (1~21)。"""
+        def lum(h):
+            ch = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in ch]
+            return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+        a, b = lum(fg), lum(bg)
+        hi, lo = max(a, b), min(a, b)
+        return (hi + 0.05) / (lo + 0.05)
 
     def test_all_markline_sites_use_builder(self):
         # 4 处调用点 + buildKlineMarkLines/refreshPriceTagLayout 各一处; buildLastPriceLine
@@ -309,7 +333,7 @@ class RiskLinesBehaviorTest(unittest.TestCase):
             + _extract_fn(self.src, "buildKlineMarkLines") + "\n"
             + "function riskOn() { return true; }\n"
             + "function C() { return { up: '#ef5350', down: '#26a69a',"
-            + " riskTp: '#c97a00', riskBe: '#1565c0', riskSl: '#7b3fa0' }; }\n"
+            + " riskTp: '#c97a00', riskBe: '#1565c0', riskSl: '#7b3fa0', riskFg: '#f0f0f0' }; }\n"
             + "function fmtPrice3(v) { return Number(v).toFixed(3); }\n"
             + "function resolveLastPrice(bars, livePrice) { return livePrice != null ? livePrice : bars[bars.length - 1].close; }\n"
             + "const echarts = require(process.argv[2]);\n"
@@ -326,7 +350,9 @@ class RiskLinesBehaviorTest(unittest.TestCase):
             + "const svg = chart.renderToSVGString();\n"
             + "chart.dispose();  // SSR 下 zrender 动画循环会让 node 永不退出\n"
             + "process.stdout.write(JSON.stringify({ isArray: Array.isArray(markLine),"
-            + " items: markLine.data.length, silent: markLine.silent, svg }));"
+            + " items: markLine.data.length, silent: markLine.silent, svg,"
+            + " fgs: markLine.data.map(d => d.label.color),"
+            + " texts: markLine.data.map(d => d.label.formatter) }));"
         )
         proc = subprocess.run(
             ["node", "-e", script, json.dumps(payload), str(ECHARTS_JS)],
@@ -343,6 +369,9 @@ class RiskLinesBehaviorTest(unittest.TestCase):
             self.assertGreaterEqual(svg.count(color), 1, f"{color} 未用上")
         # 现价线在最右一根 close 之上 → 涨色
         self.assertGreaterEqual(svg.count("#ef5350"), 1, "现价线未画")
+        # 四个签的字色必须同源 (亮色白字 / 暗色深字都由 --risk-fg 给), 不再现价签固定白字
+        self.assertTrue(any("现价" in t for t in out["texts"]), "现价签文案丢了")
+        self.assertEqual(set(out["fgs"]), {"#f0f0f0"}, f"四个签字色应一致: {out['fgs']}")
 
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")

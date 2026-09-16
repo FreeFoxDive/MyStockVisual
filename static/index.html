@@ -129,16 +129,8 @@ body {
   color: var(--btn-active-text);
   border-color: var(--btn-active);
 }
-#toolbar #trades-entry {
-  padding: 6px 9px;
-  font-size: 12px;
-}
-/* 图标按钮统一: SVG 取代 emoji 字形, 消除基线/尺寸错位 (主题按钮由 theme.js 注入同类 SVG) */
-#toolbar .icon-text-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
+/* 图标按钮统一: SVG 取代 emoji 字形, 消除基线/尺寸错位 (主题按钮由 theme.js 注入同类 SVG)。
+   全部按钮只留图标 (刷新/画线/截图/主题…), 文字说明走 title + aria-label。 */
 #toolbar .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -235,9 +227,42 @@ body {
   margin-left: auto;
   justify-content: flex-end;
 }
+/* 宽屏顶栏布局: 行数只由断点决定, 不随行情文字宽窄跳。
+   成因: 信息行 (代码/名称/成交额/换手/…实测最长约 1000px) 与功能组 (搜索+周期+入口+图标, 约 950~1200px)
+   都很宽, 而成交额 万↔亿、换手出现/消失、秒级时钟变宽都会改变信息行宽度 ——
+   一旦总宽压在阈值上, 功能组就在第一行与第二行之间反复切 (观感就是"重绘时顶栏突然变两行")。
+   两段都是定死行数, 没有"看文字宽度决定"的中间态:
+     <1920px  功能组独占一行 (两行);
+     ≥1920px  两段并排一行 (1920 及以上的屏本来放得下, 别白白多占一行)。
+   ≥1920px 时信息行按剩余宽度伸展, 真装不下只裁尾部次要字段 (时钟/开高低), 绝不把功能组挤下去。 */
+@media (min-width: 1000px) and (max-width: 1919px) {
+  #toolbar .info-group { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  /* 功能组独占一行 (右对齐, 与原本「数据齐全时」的观感一致), 且内部不换行 */
+  #toolbar .toolbar-right {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+}
+@media (min-width: 1920px) {
+  /* 信息行取容器剩余宽度 (flex-basis 0 → 永不把功能组挤到第二行) */
+  #toolbar .info-group { flex: 1 1 0; min-width: 0; overflow: hidden; }
+  #toolbar .toolbar-right {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    margin-left: auto;
+  }
+}
 .info-group .name { color: var(--text); font-weight: 600; }
 #info-code { color: var(--text-secondary); font-weight: 600; }
-#info-time { color: var(--text-secondary); font-size: 11px; }
+/* 秒级时钟宽度必须恒定: 它是唯一每秒都在重排的字段, 曾把顶栏推成两行。
+   字色走强对比文本 (亮黑/暗白), 与图表刻度同一套 */
+#info-time { color: var(--strong-text); font-size: 11px; width: 9ch; text-align: right; }
+/* 顶部栏读数的「属性名 + 数值」分色: 属性名沿用原来的次要灰, 数值走强对比文本
+   (这几个 span 以前是名称+数值同一个 textContent, 只能一个颜色) */
+#toolbar .info-lbl { color: var(--text-secondary); font-weight: 500; margin-right: 3px; }
+#toolbar .info-val { color: var(--strong-text); }
 .info-group .price { font-size: 17px; font-weight: 700; }
 .info-group .change { font-size: 13px; font-weight: 600; }
 .info-group .up { color: var(--up-text); }
@@ -271,12 +296,39 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* 顶部多留: 删除角标有一半悬在标签上边缘外 */
+  /* 顶部多留: 删除角标有一半悬在标签上边缘外 (编辑态仍要空间, 故不随显隐变化) */
   padding: 8px 14px 6px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   flex-wrap: wrap;
+}
+/* 「最近:」前缀与标签同高居中: 角标默认不显示, 行高不会再被撑高 */
+#history-bar .hist-prefix {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+  flex-shrink: 0;
+}
+/* 「管理」开关: 平板没有可靠 hover, 用它统一切换全部删除角标的显隐 */
+#history-bar .hist-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#history-bar .hist-edit .ico-svg { width: 14px; height: 14px; }
+#history-bar .hist-edit:hover { color: var(--btn-active); border-color: var(--btn-active); }
+#history-bar .hist-edit[aria-pressed="true"] {
+  color: var(--btn-active-text);
+  background: var(--btn-active);
+  border-color: var(--btn-active);
 }
 #history-tags {
   display: flex;
@@ -303,8 +355,9 @@ body {
   border-color: var(--btn-active);
 }
 .history-tag .sym { color: var(--text-secondary); font-size: 11px; margin-left: 2px; }
-/* 右上角圆形删除角标: 一半压在标签角外, 16px 桌面 / 20px 触控 (见 pointer:coarse);
- * 桌面悬停标签才浮现 (见下方 hover:hover 块), 触屏无悬停保持常显 */
+/* 右上角圆形删除角标: 一半压在标签角外, 16px 桌面 / 20px 触控 (见 pointer:coarse)。
+ * 默认全部隐藏 (触屏也要藏 —— 常显的角标会把标签行撑高, 也会误触删除);
+ * 桌面悬停浮现, 任何设备点「管理」开关后全部浮现。 */
 .history-tag .tag-del {
   position: absolute;
   top: -7px;
@@ -324,23 +377,27 @@ body {
   cursor: pointer;
   user-select: none;
   transition: background 0.15s, color 0.15s, opacity 0.15s;
+  opacity: 0;
+  pointer-events: none; /* 隐形时不可点, 防止角上幽灵点击 */
 }
 .history-tag .tag-del:hover {
   background: var(--up-text);
   color: var(--btn-active-text);
 }
-/* 有悬停能力的设备(桌面): 默认隐藏, 悬停标签浮现; 触屏(hover:none)不匹配, 保持常显 */
+/* 有悬停能力的设备(桌面): 悬停标签浮现 */
 @media (hover: hover) {
-  .history-tag .tag-del {
-    opacity: 0;
-    pointer-events: none; /* 隐形时不可点, 防止角上幽灵点击 */
-  }
   /* 悬出标签外的一半也要保持可点: 从标签滑向角标时 :hover 不断链 */
   .history-tag:hover .tag-del,
   .tag-del:hover {
     opacity: 1;
     pointer-events: auto;
   }
+}
+/* 管理开关打开: 角标全部常显 (媒体查询不提升优先级, 故必须排在 hover 块之后) */
+#history-bar.edit .history-tag .tag-del,
+#history-bar.edit .tag-del:hover {
+  opacity: 1;
+  pointer-events: auto;
 }
 .type-badge {
   display: inline-block; padding: 0 5px; margin-right: 4px; border-radius: 3px;
@@ -389,7 +446,8 @@ body {
   font-weight: 600;
 }
 #indicator-bar label.dim { color: var(--text-secondary); }
-/* 低频指标折叠: 信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴。周期始终可滚动访问。 */
+/* 低频指标折叠: 信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴 + 缺口/ATR/K线形态。
+   折叠只收控件, 渲染不受影响 (缺口灰区与形态标注照旧按勾选状态画)。周期始终可滚动访问。 */
 /* 选股后台扫描: 主页入口脉冲动画 + 进度文字 */
 @keyframes scanning-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 #screener-entry.scanning { animation: scanning-pulse 1.2s ease-in-out infinite; color: var(--btn-active); font-variant-numeric: tabular-nums; }
@@ -399,6 +457,11 @@ body {
 #indicator-bar.show-extra .more-btn { border-color: var(--btn-active); color: var(--btn-active); }
 #indicator-bar input[type="checkbox"] { accent-color: var(--btn-active); width: 13px; height: 13px; margin: 0; }
 #indicator-bar label:has(input:focus-visible) { outline: 2px solid var(--btn-active); outline-offset: 1px; }
+
+/* ── 面板栏包装层 (给手机下拉浮层用, 桌面完全透明) ──
+   display:contents 让包装节点不参与布局 → 桌面 DOM 只是深了一层, 视觉与顺序逐字不变。 */
+#ind-body, #adj-slot, #adj-group { display: contents; }
+#btn-ind-sheet, #btn-ind-sheet-done { display: none; }
 
 /* ═══════════════ Chart ═══════════ */
 #chart-wrap {
@@ -488,6 +551,29 @@ body {
   margin-bottom: 3px; padding-bottom: 2px;
 }
 #side-panel .dp-empty { color: var(--text-secondary); text-align: center; padding-top: 8px; }
+/* ── 手机: 五档独占右缘 (仅分时); 用独立 id, 不复用早年已移除的那个独立五档面板 id ──
+   手机上左侧基本信息默认折叠、且只放基本信息; 五档搬到右缘自成一块, 与左栏互不影响。
+   容器常驻 DOM 但默认 display:none, 桌面/平板完全不受影响 (手机由 applySidePanels 打开)。 */
+#depth-dock {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 118px;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  font-family: monospace;
+  font-size: 11px;
+  z-index: 6;
+  display: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* 五档三列在窄栏里重新配宽: 左栏那套 (档位 34 + 量 58) 会把价格挤到溢出 */
+#depth-dock .dp-row { font-size: 10px; line-height: 16px; }
+#depth-dock .dp-row .dp-label { width: 22px; }
+#depth-dock .dp-row .dp-price { padding-right: 4px; }
+#depth-dock .dp-row .dp-vol { width: 40px; }
 /* 侧栏展开时右移画线工具面板, 避免被遮挡 */
 #chart-wrap.side-on #draw-palette { left: 212px; }
 
@@ -540,7 +626,8 @@ body {
 /* ═══════════════ 响应式 (平板/手机) ═══════════════ */
 @media (max-width: 900px) {
   #toolbar { row-gap: 4px; }
-  /* 信息组允许换行收缩: 防止 nowrap 溢出视口被 body overflow:hidden 裁切 */
+  /* 信息组允许换行收缩: 防止 nowrap 溢出视口被 body overflow:hidden 裁切
+     (窄屏宁可多占一行, 也不裁字段 —— 宽屏那套「裁尾部」策略只在 ≥1000px 生效) */
   #toolbar .info-group { flex-wrap: wrap; white-space: normal; flex-shrink: 1; min-width: 0; row-gap: 2px; }
   #toolbar .toolbar-right { margin-left: 0; justify-content: flex-start; min-width: 0; }
   /* 周期按钮固定单行横向滚动, 避免折成多行挤压图表 */
@@ -550,23 +637,92 @@ body {
   }
   #toolbar .period-viewport { width: min(252px, calc(100vw - 68px)); }
   #toolbar .period-group button { flex-shrink: 0; }
-}
-@media (max-width: 768px) {
-  /* 次要行情信息收进图表 tooltip, 信息行只留核心字段 (代码·名称是股吧入口, 不隐藏) */
+  /* 平板宽度先摘掉次要行情字段 (原本到 768px 才摘, 窄屏早已是 480px 再摘一批):
+     信息行留出余量, 功能组就不会被挤在换行阈值上 */
   #toolbar .oh, #toolbar #info-time { display: none; }
 }
 @media (max-width: 640px) {
   #toolbar { padding: 6px 10px; }
   #toolbar input[type="text"] { width: 120px; }
   #history-bar { padding: 8px 10px 6px; }
-  /* 指标配置栏改横向滚动, 不再占多行; label 保持单行 */
-  #indicator-bar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  #indicator-bar label { white-space: nowrap; flex-shrink: 0; }
-  #indicator-bar > span { flex-shrink: 0; }
-  #indicator-bar::-webkit-scrollbar { display: none; }
+  /* 手机不提供画线入口: 窄屏点选精度不够, 工具面板也没地方摆 */
+  #toolbar #btn-draw { display: none; }
+  /* 手机不显示 GitHub 入口 (顶栏空间留给行情与操作) */
+  #toolbar .github-link { display: none; }
+  /* ── 手机指标栏: 不再横向滑动, 改成「面板 ▾ + 复权」一行 + 下拉浮层 ── */
+  #indicator-bar {
+    position: relative;      /* 浮层相对它定位 */
+    flex-wrap: nowrap;       /* 一行: 触发按钮 + 复权; 控件都在浮层里 */
+    gap: 8px;
+    padding: 6px 10px;
+    overflow: visible;
+  }
+  #btn-ind-sheet {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-panel);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #btn-ind-sheet[aria-expanded="true"] { border-color: var(--btn-active); color: var(--btn-active); }
+  #adj-group { display: inline-flex; align-items: center; gap: 6px; }
+  #adj-slot { display: none; }   /* 复权那对已挪到触发按钮旁 */
+  /* 浮层: 全宽、悬浮在图表之上 (不推挤图表高度), 内部滚动 */
+  #ind-body {
+    display: none;
+    position: absolute;
+    left: 0; right: 0; top: 100%;
+    z-index: 30;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px 12px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+    max-height: 58vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #indicator-bar.sheet-open #ind-body { display: flex; }
+  /* 打开后浮层里所有控件都可见: 不再需要「更多」两级折叠 */
+  #indicator-bar .extra-ind { display: inline-flex; }
+  #btn-ind-more { display: none; }
   #indicator-bar .separator { display: none; }
+  #indicator-bar label { white-space: nowrap; flex-shrink: 0; }
+  /* 段标题: 用已有的文本 span (面板:/提示框:) + 运行时就地插入的两个 */
+  #ind-body > span:not(.separator),
+  #ind-body .ind-group {
+    flex: 1 1 100%;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: 2px;
+  }
+  #btn-ind-sheet-done {
+    display: inline-flex;
+    position: absolute;
+    top: 6px; right: 10px;
+    align-items: center;
+    padding: 5px 12px;
+    border: 1px solid var(--btn-active);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--btn-active);
+    font-size: 12px;
+    cursor: pointer;
+  }
   #side-panel { width: 150px; font-size: 11px; }
   #side-panel .dp-row, #side-panel .sp-row { line-height: 17px; }
+  /* 手机上把 开/高/低 放回来: 上面 900px 那条是为宽屏防跳行而摘的, 手机顶栏本来就多行流式,
+     不需要牺牲行情字段 (时钟仍隐藏, 省横向空间) */
+  #toolbar .oh { display: inline-block; }
 }
 @media (max-width: 480px) {
   #toolbar #info-code, #toolbar #info-turnover, #toolbar #info-premium,
@@ -693,9 +849,9 @@ body {
     <span id="info-holding" class="hold-badge" style="display:none">持仓中</span>
     <span id="info-turnover" style="font-size:13px;font-weight:600;display:none"></span>
     <span id="info-premium" style="font-size:13px;font-weight:600;display:none"></span>
-    <span id="info-pledge" style="font-size:12px;color:var(--text-secondary);display:none"></span>
-    <span id="info-shares" style="font-size:12px;color:var(--text-secondary);display:none"></span>
-    <span id="info-amount" style="font-size:12px;color:var(--text-secondary);display:none"></span>
+    <span id="info-pledge" style="font-size:12px;display:none"></span>
+    <span id="info-shares" style="font-size:12px;display:none"></span>
+    <span id="info-amount" style="font-size:12px;display:none"></span>
     <span class="price" id="info-price">—</span>
     <span class="change" id="info-change">—</span>
     <span class="oh" id="info-open">开 —</span>
@@ -704,9 +860,9 @@ body {
     <span id="info-time"></span>
   </div>
   <div class="toolbar-right">
-    <button id="monitor-entry" onclick="location.href='/monitor.html'" title="监控中心: 持仓风控/趋势线跌破/条件预警/告警一览">🛡 监控中心</button>
+    <button id="monitor-entry" onclick="location.href='/monitor.html'" title="监控中心: 持仓风控/趋势线跌破/条件预警/告警一览">🛡 监控</button>
     <button id="screener-entry" onclick="location.href='/screener.html'" title="条件选股: MACD金叉/MA20/筹码获利等">🎯 选股</button>
-    <button id="trades-entry" title="交易记录统计" onclick="location.href='/trades.html'">📒 交易记录</button>
+    <button id="trades-entry" title="交易记录统计" onclick="location.href='/trades.html'">📒 交易</button>
     <span class="search-wrap">
       <input type="text" id="symbol-input" value="000001.SH" placeholder="输入代码或名称搜索..."
              autocomplete="off">
@@ -730,7 +886,7 @@ body {
       <button type="button" class="period-scroll" id="period-scroll-right" aria-label="向右滚动周期" title="向右滚动周期">›</button>
     </span>
     <span class="separator"></span>
-    <button id="btn-refresh" class="icon-text-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
+    <button id="btn-refresh" class="icon-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)" aria-label="刷新"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
     <button id="btn-draw" class="icon-btn" onclick="toggleDrawMode()" title="画线模式: 趋势线/水平线/斐波那契/回归通道等"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
     <button id="btn-alerts" class="icon-btn" onclick="openAlertsModal()" title="价格预警 (现价/涨跌幅条件)">🔔</button>
     <button id="btn-cndata" class="icon-btn" onclick="toggleCnDrawer()" title="市场数据: 资金流/龙虎榜/分红/公告/交易所公告/主力净流入/股东变化/十大股东/十大流通股东/解禁限售">📊</button>
@@ -741,33 +897,39 @@ body {
 
 <!-- ═══════════════ Search History Bar ═══════════ -->
 <div id="history-bar" style="display:none">
-  <span style="color:var(--text-secondary);font-size:12px;flex-shrink:0">最近:</span>
+  <span class="hist-prefix">最近:</span>
   <div id="history-tags"></div>
+  <button type="button" id="hist-edit" class="hist-edit" onclick="toggleHistoryEdit()"
+          title="管理搜索记录: 显示/隐藏删除按钮" aria-label="管理搜索记录" aria-pressed="false"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
 </div>
 
 <!-- ═══════════════ Indicator Config Bar ═══════════ -->
 <div id="indicator-bar">
+  <!-- 手机: 触发下拉浮层 (桌面隐藏); 计数由 applyIndSheet() 维护 -->
+  <button type="button" id="btn-ind-sheet" onclick="toggleIndSheet()" aria-expanded="false" aria-controls="ind-body" title="面板设置">面板 ▾</button>
+  <div id="ind-body">
   <span>面板:</span>
   <label><input type="checkbox" id="chk-volume" checked onchange="onConfigChange()">成交量</label>
   <label id="lbl-chip"><input type="checkbox" id="chk-chip" checked onchange="onConfigChange()">筹码</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label id="lbl-impulse"><input type="checkbox" id="chk-impulse" onchange="onConfigChange()">动力系统</label>
   <label id="lbl-channel"><input type="checkbox" id="chk-channel" onchange="onConfigChange()">通道</label>
-  <label id="lbl-gap"><input type="checkbox" id="chk-gap" checked onchange="onConfigChange()">缺口</label>
+  <label class="extra-ind" id="lbl-gap"><input type="checkbox" id="chk-gap" checked onchange="onConfigChange()">缺口</label>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label title="MACD 平滑异同均线 (DIF/DEA + 柱状图)"><input type="checkbox" id="chk-macd" checked onchange="onConfigChange()">MACD</label>
-  <label title="KDJ 随机指标 (超买超卖)"><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
-  <label title="RSI 相对强弱指标"><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
-  <label title="ATR 平均真实波幅"><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
+  <label id="lbl-kdj" title="KDJ 随机指标 (超买超卖)"><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
+  <label id="lbl-rsi" title="RSI 相对强弱指标"><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
+  <label class="extra-ind" title="ATR 平均真实波幅"><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label title="OBV 能量潮 (成交量累计); 数值随加载窗口变化, 比较看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
   <label id="lbl-risk" style="display:none" title="持仓风控: 主图止盈/保本/止损虚线 + 名称标签 (数值看代码旁的「持仓中」徽章)"><input type="checkbox" id="chk-risk" checked onchange="onConfigChange()">风控线</label>
-  <span>复权:</span>
+  <!-- 复权那一对: 外面套壳是为了手机上能整体挪到触发按钮旁 (桌面 display:contents → 布局透明) -->
+  <span id="adj-slot"><span id="adj-group"><span>复权:</span>
   <select id="adj-select" onchange="onAdjustChange(this.value)" title="复权方式 (分钟周期固定前复权)">
     <option value="forward">前复权</option>
     <option value="hfq">后复权</option>
     <option value="none">不复权</option>
-  </select>
+  </select></span></span>
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label title="BOLL 布林带 (MA20 ± 2 倍标准差)"><input type="checkbox" id="chk-boll" onchange="onConfigChange()">BOLL</label>
   <button class="cfg-mini" id="cfg-boll" onclick="openParamEditor('boll')" title="编辑布林带参数 (N,K)">⚙</button>
@@ -779,7 +941,7 @@ body {
   <label class="extra-ind" title="CCI 顺势指标"><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
   <label class="extra-ind" title="BIAS 乖离率 (价格偏离均线)"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
   <label class="extra-ind" title="DMI 趋向指标 (ADX 多空趋势)"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
-  <label title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" checked onchange="onConfigChange()">K线形态</label>
+  <label class="extra-ind" title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" checked onchange="onConfigChange()">K线形态</label>
   <label class="extra-ind" title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
   <button class="cfg-mini more-btn" id="btn-ind-more" onclick="toggleIndMore()" title="展开/收起更多面板设置">▾ 更多</button>
   <span class="separator" style="height:18px;background:var(--border)"></span>
@@ -787,6 +949,8 @@ body {
   <label title="在提示框中显示 RSI 数值"><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
   <label title="在提示框中显示 KDJ 数值"><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
   <label title="在提示框中显示 ATR 数值"><input type="checkbox" id="tip-atr" checked onchange="onConfigChange()">ATR</label>
+  <button type="button" id="btn-ind-sheet-done" onclick="closeIndSheet()">完成</button>
+  </div>
 </div>
 
 <!-- ═══════════════ Chart ═══════════ -->
@@ -804,6 +968,7 @@ body {
     </div>
   </div>
   <button id="side-reopen" title="展开侧栏" onclick="unfoldSidePanel()">›</button>
+  <div id="depth-dock"></div>
   <div id="draw-palette" style="display:none"></div>
   <div id="draw-menu">
     <span style="font-size:11px;color:var(--text-secondary)">颜色</span>
@@ -968,6 +1133,9 @@ function saveChartImage() {
     // 侧栏是 DOM: 之前只导出两个 canvas, 基本信息从不出现在图片里, 且 grid.left
     // 已为面板让位 → 图片左侧留一条空白。这里把面板一并重绘上去。
     const panel = sidePanelOn() ? document.getElementById('side-panel') : null;
+    // 手机五档是右缘独立容器 (不在 #side-panel 里), 单独贴到图片右边
+    const depthEl = document.getElementById('depth-dock');
+    const depthBar = (depthEl && depthEl.style.display !== 'none' && depthEl.offsetWidth) ? depthEl : null;
     const finish = (url) => {
       const a = document.createElement('a');
       a.href = url;
@@ -976,8 +1144,8 @@ function saveChartImage() {
       showToast('图表图片已保存');
     };
     const hasOverlay = !!(overlay && overlay.width);
-    if (!hasOverlay && !panel) { finish(base); return; }
-    // 合成: K线图 → 画线层 → 侧栏 (覆盖左侧留白区, 顺序不可颠倒)
+    if (!hasOverlay && !panel && !depthBar) { finish(base); return; }
+    // 合成: K线图 → 画线层 → 侧栏 (覆盖左侧留白区) → 右缘五档栏, 顺序不可颠倒
     const img = new Image();
     img.onload = () => {
       try {
@@ -986,11 +1154,16 @@ function saveChartImage() {
         const ctx = cv.getContext('2d');
         ctx.drawImage(img, 0, 0);
         if (hasOverlay) ctx.drawImage(overlay, 0, 0, cv.width, cv.height);
-        if (panel) {
-          const box = document.getElementById('chart-container');
-          const cssW = (box && box.clientWidth) || panel.offsetWidth || 204;
-          const ratio = cv.width / Math.max(1, cssW);
-          drawSidePanelShot(ctx, sidePanelShotModel(panel.offsetWidth, cv.height / ratio), ratio);
+        const box = document.getElementById('chart-container');
+        const cssW = (box && box.clientWidth) || (panel && panel.offsetWidth) || 204;
+        const ratio = cv.width / Math.max(1, cssW);
+        if (panel) drawSidePanelShot(ctx, sidePanelShotModel(panel.offsetWidth, cv.height / ratio), ratio);
+        if (depthBar) {
+          const dw = depthBar.offsetWidth;
+          ctx.save();
+          ctx.translate(cv.width - dw * ratio, 0);
+          drawSidePanelShot(ctx, sidePanelShotModel(dw, cv.height / ratio, { depthOnly: true }), ratio);
+          ctx.restore();
         }
         finish(cv.toDataURL('image/png'));
       } catch (err) { finish(base); }
@@ -1015,6 +1188,12 @@ const STATE = {
   position: null,        // 当前 symbol 的最新持仓 (徽章/悬停文案用; syncPosition 维护)
   _tradesSeq: 0,         // 交易记录请求序号 (迟到响应不得覆盖新股票的持仓)
   _tagSlots: null,       // 现价/风控签的槽位 {key: {position,distance} | {dropped}} (layoutPriceTagSlots)
+  _histEdit: false,      // 搜索记录「管理」开关 (显示全部删除角标; 触屏无 hover 的替代)
+  _histMode: null,       // 上次渲染记录条时的布局口径 phone/tablet/desktop (任一切换即重渲染)
+  _histFocus: false,     // 搜索框是否聚焦 (手机上据此展开记录条, 默认不占位)
+  _indSheetPhone: null,  // 上次应用手机指标浮层时的设备口径 (转屏/拖窗口后据此重排)
+  _panelCfgChecks: null, // 最近一次服务端面板配置里的勾选态 (手机上上传时带上, 免得清掉别的设备)
+  _periodRelayoutTimer: 0, // 周期条宽度重量的去抖定时器
   _tagKeys: '',          // 签位签名: 变了才重推 markLine / 重绘画线层
   _tagRefreshPending: false, // 建图后签位重排已排队 (rendered 事件 + 延时兜底)
   chips: null,           // 筹码分布 (/api/chips, 仅日K股票)
@@ -1100,7 +1279,8 @@ async function syncSessionFlag() {
 // 亮/暗两套数值只维护在 theme.css 的 --chart-* / --up-color 等变量里。
 // 三色系对标东财: ink(MA5/DIF/K/RSI1/OBV) → amber(MA10/DEA/D/RSI2/MAOBV/筹码均价) → rose(MA20/J/RSI3)
 const CHART_VAR_MAP = {
-  bg: '--chart-bg', text: '--chart-text', gridLine: '--chart-grid', crossLine: '--chart-cross',
+  bg: '--chart-bg', text: '--chart-text', axisText: '--axis-text',
+  gridLine: '--chart-grid', crossLine: '--chart-cross',
   border: '--border',
   up: '--up-color', down: '--down-color', halt: '--chart-halt',
   gapFill: '--chart-gap-fill', gapBorder: '--chart-gap-border',
@@ -1118,6 +1298,7 @@ const CHART_VAR_MAP = {
   predictFill: '--chart-predict-fill', predictBorder: '--chart-predict-border',
   tipBg: '--chart-tip-bg', tipBorder: '--chart-tip-border', tipText: '--text',
   riskTp: '--risk-tp', riskBe: '--risk-be', riskSl: '--risk-sl', riskFg: '--risk-fg',
+  upChip: '--up-chip', downChip: '--down-chip',
   // 截图合成侧栏时取色 (DOM 面板与导出图必须同色)
   panelBg: '--bg-panel', muted: '--text-secondary',
 };
@@ -1242,7 +1423,7 @@ function priceLineLabel(fallbackPos, key) {
 /** 主图水平标注 (markLine 的 data 项): 线型与标签写在每一项上, 才能把风控线与现价线
  *  合并进同一个 markLine —— ECharts 5 的 series.markLine 只接受单个对象, 传数组会被
  *  整段忽略 (实测 5.5.0 一条线都不画)。 */
-function priceLineItem(price, color, text, fallbackPos, tagKey, fg) {
+function priceLineItem(price, color, text, fallbackPos, tagKey, fg, bg) {
   const label = priceLineLabel(fallbackPos, tagKey);
   return {
     yAxis: price,
@@ -1250,7 +1431,8 @@ function priceLineItem(price, color, text, fallbackPos, tagKey, fg) {
     label: Object.assign(label, {
       formatter: text,
       fontSize: 10, fontFamily: 'monospace', color: fg || '#fff',
-      backgroundColor: color, padding: [2, 4], borderRadius: 2,
+      // 底色默认跟线色; 现价签单独传 bg (暗色下涨跌色偏中调, 签要压深一档才够对比)
+      backgroundColor: bg || color, padding: [2, 4], borderRadius: 2,
     }),
   };
 }
@@ -1269,6 +1451,8 @@ function resolveLastPrice(bars, livePrice) {
 
 /** TradingView 式最新价虚线: 末端虚线 + 轴端色块价格签, 涨红/跌绿随主题。
  *  签上带「现价」前缀: 四条签都自带名称后, 避让把谁推开十几像素也能一眼对上。
+ *  字色与风控签同走 --risk-fg (亮色黑字 / 暗色白字), 四个贴线签在两种主题下都同色;
+ *  底色用 --up-chip/--down-chip (签专用, 比涨跌线色压深一档, 保证白字/黑字都够对比)。
  * 传入实时价时优先使用实时价；重绘图表时也自动读取当前 SSE 快照。 */
 function buildLastPriceLine(bars, livePrice) {
   if (!bars || !bars.length) return undefined;
@@ -1277,7 +1461,7 @@ function buildLastPriceLine(bars, livePrice) {
   const prev = bars.length > 1 ? bars[bars.length - 2] : null;
   const rising = !prev || prev.close == null || price >= prev.close;
   const item = priceLineItem(price, rising ? C().up : C().down, '现价 ' + fmtPrice3(price),
-    'insideStartTop', 'last');
+    'insideStartTop', 'last', C().riskFg, rising ? C().upChip : C().downChip);
   return {
     silent: true, symbol: 'none', animation: false,
     lineStyle: item.lineStyle, label: item.label,
@@ -1839,7 +2023,7 @@ async function fetchData(opts) {
           if (STATE._fetchTs !== fetchTs) return; // 已切到新股票, 丢弃旧响应
           const el = document.getElementById('info-pledge');
           if (d.pledge) {
-            el.textContent = '质押 ' + d.pledge.ratio.toFixed(2) + '%';
+            setReadout(el, '质押', d.pledge.ratio.toFixed(2) + '%');
             el.style.display = '';
           } else {
             el.style.display = 'none';
@@ -1988,10 +2172,38 @@ function unfoldSidePanel() {
   onConfigChange();
 }
 
+/** 五档子块是否该显示: 勾选框为总闸门; 手机上再叠一层周期闸门 (五档只跟分时)。
+ *  桌面/平板维持「所有周期可用」(depthSecOn 本身不按周期门控)。 */
+function depthPanelVisible() {
+  if (!depthSecOn()) return false;
+  return isPhoneUi() ? STATE.period === 'intraday' : true;
+}
+
+/** 五档块挂在哪个容器: 手机挂右缘 #depth-dock, 其余挂回左侧基本信息框 (原位置=末子节点)。
+ *  可逆且幂等, 容器归属不依赖占位符。 */
+function syncDepthHost() {
+  const sec = document.getElementById('depth-sec');
+  if (!sec) return;
+  const host = isPhoneUi() ? document.getElementById('depth-dock') : document.getElementById('info-sec');
+  if (host && sec.parentNode !== host) host.appendChild(sec);
+}
+
 function showDepthSection(on) {
   const el = document.getElementById('depth-sec');
   // 用 block 而非 flex: 该区块已无 sp-sec 的 column 方向, flex 会变 row 使盘口行压到标题
   if (el) el.style.display = on ? 'block' : 'none';
+}
+
+/** 侧栏 + 五档的统一显隐入口 (建图/分时/配置变更/周期切换/启动都走它, 免得各处各写一遍)。
+ *  手机: 左栏只放基本信息(默认折叠), 五档独占右缘且只分时; 桌面: 不变 (五档在左栏内)。 */
+function applySidePanels() {
+  syncDepthHost();
+  const phone = isPhoneUi();
+  const depthOn = depthPanelVisible();
+  showSidePanel(sidePanelOn());
+  showDepthSection(depthOn);
+  const dp = document.getElementById('depth-dock');
+  if (dp) dp.style.display = (phone && depthOn) ? 'block' : 'none';
 }
 
 /** K线网格左边距: 侧栏展开时让出面板宽度 + Y 轴刻度标签宽度, 否则 8% */
@@ -2005,10 +2217,35 @@ function panelGridLeft() {
   return (w + 12 + AXIS_LABEL_RESERVE) + 'px';
 }
 
+/** K线网格右边距: 手机五档独占右缘时让出面板宽度, 否则返回 null (由调用方按筹码/默认取值) */
+function panelGridRight() {
+  const dp = document.getElementById('depth-dock');
+  if (!dp || dp.style.display === 'none') return null;
+  const w = dp.offsetWidth;
+  if (!w) return null;
+  return (w + 4) + 'px';
+}
+
 // ── 基本信息面板 (代码/名称/现价/行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态) ──
 function fmtLots(v) {
   if (v == null) return '—';
   return Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(2) + '万手' : Math.round(v) + '手';
+}
+
+/** 顶部栏读数: 属性名 + 数值拆成两个 span 分别配色 (属性名沿用次要灰, 数值走强对比文本)。
+ *  这几个 span 以前是同一个 textContent, 只能一个颜色 —— 所以用子元素而不是拼字符串。
+ *  用 createElement/textContent 而不是 innerHTML: 值来自行情接口, 不做字符串拼接更省心。 */
+function setReadout(el, label, value) {
+  if (!el) return;
+  const lbl = document.createElement('span');
+  lbl.className = 'info-lbl';
+  lbl.textContent = label;
+  const val = document.createElement('span');
+  val.className = 'info-val';
+  val.textContent = value;
+  el.textContent = '';
+  el.appendChild(lbl);
+  el.appendChild(val);
 }
 
 /** 面板里的名称: stock-info 未返回时用 K 线返回的 name 兜底 (实时行情会先到) */
@@ -2161,10 +2398,12 @@ const SIDE_SHOT_LAYOUT = {
   emptyPadTop: 8,                              // .dp-empty padding-top
 };
 
-/** 组装截图绘制模型 (纯函数, 不读 DOM): 文本/色块带绝对坐标与基线 y, 便于测试。 */
-function sidePanelShotModel(width, height) {
+/** 组装截图绘制模型 (纯函数, 不读 DOM): 文本/色块带绝对坐标与基线 y, 便于测试。
+ *  opts.depthOnly=true 时只出五档块 (手机右缘那栏是独立容器, 导出时要单独贴到右边)。 */
+function sidePanelShotModel(width, height, opts) {
   const c = C();
   const L = SIDE_SHOT_LAYOUT;
+  const depthOnly = !!(opts && opts.depthOnly);
   const w = Number(width) > 0 ? Number(width) : 204;
   const h = Number(height) > 0 ? Number(height) : 0;
   const muted = c.muted || 'var(--text-secondary)';
@@ -2177,23 +2416,25 @@ function sidePanelShotModel(width, height) {
     x, maxWidth: Math.max(0, maxWidth), align, y: y + L.font,
   }, opts || {}));
 
-  if (!infoPanelOn()) return { width: w, height: h, bg: c.panelBg, texts, rules, contentHeight: 0 };
+  if (!depthOnly && !infoPanelOn()) return { width: w, height: h, bg: c.panelBg, texts, rules, contentHeight: 0 };
 
-  put('基本信息', muted, L.padX, w - L.padX * 2, 'left', { bold: true });
-  y += L.font + L.titlePadBottom;
-  rules.push({ x: 0, y, width: w, height: 1, color: border });
-  y += 1 + L.titleGap;
+  if (!depthOnly) {
+    put('基本信息', muted, L.padX, w - L.padX * 2, 'left', { bold: true });
+    y += L.font + L.titlePadBottom;
+    rules.push({ x: 0, y, width: w, height: 1, color: border });
+    y += 1 + L.titleGap;
 
-  const rows = infoPanelRows(STATE.stockInfo);
-  if (!rows) {
-    y += L.emptyPadTop;
-    put('无数据', muted, w / 2, w - L.padX * 2, 'center');
-    y += L.line;
-  } else {
-    for (const r of rows) {
-      put(r.label, muted, L.padX, L.infoLabel, 'left');
-      put(r.text, r.color, w - L.padX, w - L.padX - (L.padX + L.infoLabel), 'right');
+    const rows = infoPanelRows(STATE.stockInfo);
+    if (!rows) {
+      y += L.emptyPadTop;
+      put('无数据', muted, w / 2, w - L.padX * 2, 'center');
       y += L.line;
+    } else {
+      for (const r of rows) {
+        put(r.label, muted, L.padX, L.infoLabel, 'left');
+        put(r.text, r.color, w - L.padX, w - L.padX - (L.padX + L.infoLabel), 'right');
+        y += L.line;
+      }
     }
   }
 
@@ -2478,7 +2719,8 @@ function updateLiveStockInfo(q, symbol = STATE.symbol) {
 function ensureQuoteStream() {
   const tail = ['1d', '1w', '1M'].includes(STATE.period)
     ? { period: STATE.period, count: STATE.period === '1d' ? DAILY_COUNT : 300, adjust: STATE.adjust } : null;
-  liveQuotes.setSymbols([STATE.symbol], depthSecOn(), tail);
+  // 五档订阅跟随「是否可见」: 手机非分时五档不显示, 就别再轮询/订阅 (depthPanelVisible 内部仍以 depthSecOn 为总闸门)
+  liveQuotes.setSymbols([STATE.symbol], depthPanelVisible(), tail);
 }
 function scheduleQuoteStream() { ensureQuoteStream(); }
 
@@ -2784,7 +3026,7 @@ function updateFundInfo(q) {
 
   // 换手率 (股票/ETF; 指数通常没有成交换手率)
   if (turnover != null && Number.isFinite(turnover) && !isIndex) {
-    turnoverEl.textContent = `换手 ${turnover.toFixed(2)}%`;
+    setReadout(turnoverEl, '换手', `${turnover.toFixed(2)}%`);
     turnoverEl.style.display = '';
   } else {
     turnoverEl.style.display = 'none';
@@ -2793,10 +3035,10 @@ function updateFundInfo(q) {
   // 流通市值 (股票) / 基金份额 (ETF)
   if (fs != null && fs > 0) {
     if (isEtf) {
-      sharesEl.textContent = `份额 ${(fs / 1e8).toFixed(2)}亿份`;
+      setReadout(sharesEl, '份额', `${(fs / 1e8).toFixed(2)}亿份`);
       sharesEl.style.display = '';
     } else if (!isIndex && last != null) {
-      sharesEl.textContent = `流通 ${fmtCN(fs * last)}`;
+      setReadout(sharesEl, '流通', fmtCN(fs * last));
       sharesEl.style.display = '';
     } else {
       sharesEl.style.display = 'none';
@@ -2807,7 +3049,7 @@ function updateFundInfo(q) {
 
   // 当日成交额
   if (q && q.amount != null && q.amount > 0) {
-    amountEl.textContent = `额 ${fmtCN(q.amount)}`;
+    setReadout(amountEl, '额', fmtCN(q.amount));
     amountEl.style.display = '';
   } else {
     amountEl.style.display = 'none';
@@ -2883,7 +3125,8 @@ function updateInfo(data) {
       const cached = STATE.premium;
       const matching = cached && cached.symbol === data.symbol && cached.period === data.period;
       const stale = !matching || cached.stale || Date.now() >= cached.expiresAt;
-      document.getElementById('info-premium').textContent = `溢价${stale ? '（待更新）' : ''} ${p>=0?'+':''}${p.toFixed(2)}%`;
+      setReadout(document.getElementById('info-premium'), `溢价${stale ? '（待更新）' : ''}`,
+        `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`);
       document.getElementById('info-premium').title = matching && cached.generatedAt
         ? `计算时间：${new Date(cached.generatedAt * 1000).toLocaleString()}` : '';
       document.getElementById('info-premium').className = pcls;
@@ -2911,8 +3154,24 @@ function updateInfo(data) {
 // ═══════════════════════════════════════════════════════════════
 const HIST_KEY = 'visual_search_history';
 const HIST_MAX = 20;
+const HIST_VIEW_MAX_TABLET = 10; // 平板只展示最近 10 条 (存储仍留 HIST_MAX 条)
 const LS_CACHE_BUDGET = 2 * 1024 * 1024; // vk_/vi_ 缓存上限 2MB，保留历史/配置键
-const LS_KEEP_KEYS = new Set([HIST_KEY, 'visual_chart_config', 'visual-theme', 'trades-theme']);
+/* 保留键用字面量: 本行在 CFG_KEY 声明之前执行, 引用常量会撞 TDZ */
+const LS_KEEP_KEYS = new Set([HIST_KEY, 'visual_chart_config', 'visual_chart_config_phone', 'visual-theme', 'trades-theme']);
+
+/** 平板/触屏判定 (同时覆盖窄窗口): 触屏无可靠 hover, 且横向空间紧张 ——
+ *  搜索记录条数上限、周期条只显示 3 个周期都按它分流。 */
+function isTabletUi() {
+  return (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
+    || window.innerWidth <= 1024;
+}
+
+/** 手机判定: 与 CSS 的 @media (max-width: 640px) 用同一条查询, JS 分支与样式同进同退。
+ *  手机上的差异: 基本信息默认折叠 / 五档独占右缘且只分时 / 无画线入口 /
+ *  搜索记录默认不占位 / 面板勾选走独立本地缓存 (不与其他设备互相覆盖)。 */
+function isPhoneUi() {
+  return !!(window.matchMedia && window.matchMedia('(max-width: 640px)').matches);
+}
 
 /** 只取开头的 ts: 淘汰策略不必为每条 ~600KB 的响应整包 JSON.parse。
  *  缓存条目一律以 {"ts":<数字>,... 写入 (见 kline/chips/分时 三处 setItem),
@@ -3078,15 +3337,77 @@ function renderHistoryTags() {
   const list = loadHistory();
   const bar = document.getElementById('history-bar');
   const tags = document.getElementById('history-tags');
-  if (!list.length) { bar.style.display = 'none'; return; }
-  bar.style.display = 'flex';
+  const mode = histLayoutMode();
+  STATE._histMode = mode;   // 转屏/拖窗口时据此决定要不要重渲染 (见 watchHistoryBarBreakpoint)
+  const tablet = mode !== 'desktop';
+  if (!list.length) {
+    bar.style.display = 'none';
+    STATE._histEdit = false;      // 历史清空后编辑态没有意义, 免得下次出现还挂着角标
+    bar.classList.remove('edit');
+    return;
+  }
+  // 手机: 默认不占位 (屏幕高度金贵), 只在搜索框获得焦点时展开
+  const collapsed = isPhoneUi() && STATE._histFocus !== true;
+  bar.style.display = collapsed ? 'none' : 'flex';
+  if (collapsed) return;
+  // 平板只渲染最近 10 条: slice 保留原下标, delHistoryTag(i) 的按下标删仍然对得上
+  const view = tablet ? list.slice(0, HIST_VIEW_MAX_TABLET) : list;
+  const editOn = STATE._histEdit === true;
+  bar.classList.toggle('edit', editOn);
+  const editBtn = document.getElementById('hist-edit');
+  if (editBtn) editBtn.setAttribute('aria-pressed', editOn ? 'true' : 'false');
   // 角标按下标传参 (同 screener.html delCond(i)): 不把 symbol 插进内联 JS
-  tags.innerHTML = list.map((h, i) =>
+  tags.innerHTML = view.map((h, i) =>
     `<span class="history-tag" onclick="switchToHistory('${esc(h.symbol)}')" title="${esc(h.symbol)}">
       ${typeBadge(h.type)}${esc(h.name)}
       <span class="tag-del" title="删除" onclick="event.stopPropagation();delHistoryTag(${i})">✕</span>
     </span>`
   ).join('');
+}
+
+/** 手机: 搜索框聚焦时展开搜索记录, 失焦收起 (带宽限, 免得点标签时先收起来点空)。 */
+function wireHistoryBarFocus() {
+  const input = document.getElementById('symbol-input');
+  if (!input) return;
+  let blurTimer = 0;
+  input.addEventListener('focus', () => {
+    clearTimeout(blurTimer);   // 220ms 内又聚焦回来时, 不能让旧定时器把记录条收掉
+    if (!isPhoneUi()) return;
+    STATE._histFocus = true;
+    renderHistoryTags();
+  });
+  input.addEventListener('blur', () => {
+    if (!isPhoneUi()) return;
+    clearTimeout(blurTimer);
+    // 宽限 220ms: 点记录标签时 click 先落地再收; 期间又聚焦则取消收起
+    blurTimer = setTimeout(() => {
+      if (document.activeElement === input) return;
+      STATE._histFocus = false;
+      renderHistoryTags();
+    }, 220);
+  });
+}
+
+/** 平板/桌面切换 (转屏、拖窗口) 后重渲染记录条: 展示条数上限要在切换时立刻生效,
+ *  不能停留在上一次渲染时的口径。 */
+function watchHistoryBarBreakpoint() {
+  window.addEventListener('resize', () => {
+    if (STATE._histMode === histLayoutMode()) return;
+    renderHistoryTags();
+  });
+}
+
+/** 记录条布局口径: 手机(≤640, 默认收起) / 平板(≤1024 或触屏, 最多 10 条) / 桌面(全量)。
+ *  三态任一切换都要重渲染 —— 只比 isTabletUi 会漏掉 640 那条线 (手机横屏后记录条再也出不来)。 */
+function histLayoutMode() {
+  if (isPhoneUi()) return 'phone';
+  return isTabletUi() ? 'tablet' : 'desktop';
+}
+
+/** 「管理」开关: 触屏没有 hover, 用它显隐全部删除角标 (桌面悬停仍可直接删)。 */
+function toggleHistoryEdit() {
+  STATE._histEdit = !(STATE._histEdit === true);
+  renderHistoryTags();
 }
 
 /** 删除单条搜索历史。下标对应 renderHistoryTags 的顺序 (同样 loadHistory → sortHistory)。 */
@@ -3116,6 +3437,47 @@ function switchToHistory(symbol) {
 // CONFIG PERSISTENCE (localStorage)
 // ═══════════════════════════════════════════════════════════════
 const CFG_KEY = 'visual_chart_config';
+/* 手机另存一份「勾选态」: 手机屏幕小、常只留两三个指标, 不该去改账号里其他设备的勾选组合。
+   只切分勾选 (面板栏的勾选框 + 基本信息折叠态), 复权/MA/BOLL 参数/主题仍走共享键并跟账号同步。 */
+const CFG_KEY_PHONE = 'visual_chart_config_phone';
+const CFG_CHECK_KEYS = [
+  'volume', 'macd', 'kdj', 'rsi', 'atr', 'obv', 'chip', 'info', 'depth',
+  'tipRsi', 'tipKdj', 'tipAtr', 'impulse', 'channel', 'gap', 'boll', 'wr', 'cci',
+  'bias', 'dmi', 'cross', 'patterns', 'risk', 'logScale',
+];
+
+/** 拆出勾选态与非勾选态 (纯函数, 便于测试)。 */
+function splitCfg(cfg) {
+  const src = cfg || {};
+  const checks = {};
+  const rest = {};
+  Object.keys(src).forEach(k => {
+    if (CFG_CHECK_KEYS.indexOf(k) >= 0) checks[k] = src[k];
+    else rest[k] = src[k];
+  });
+  return { checks, rest };
+}
+
+/** 读一份本地配置字符串 (容错: 空/坏 JSON 都当没有)。 */
+function readCfg(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    const obj = raw ? JSON.parse(raw) : null;
+    return (obj && typeof obj === 'object') ? obj : {};
+  } catch (e) { return {}; }
+}
+
+/** 勾选态的设备默认值: 手机首次使用默认折叠基本信息 (窄屏先把图面让出来);
+ *  用户展开后写进手机勾选键, 之后按设备记住。 */
+function checkDefaults() {
+  return isPhoneUi() ? { info: false } : {};
+}
+
+/** 当前设备该用哪份勾选态: 手机 = 手机专用键; 其他设备 = 共享键里的勾选部分。
+ *  两边互不覆盖, 且都不含非勾选字段 (那部分永远来自共享键)。 */
+function localChecksCfg() {
+  return splitCfg(readCfg(isPhoneUi() ? CFG_KEY_PHONE : CFG_KEY)).checks;
+}
 
 function buildConfig() {
   return {
@@ -3154,8 +3516,22 @@ function buildConfig() {
 
 function saveConfig() {
   const cfg = buildConfig();
-  try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch(e) {}
+  saveConfigParts(cfg);
   scheduleSavePanelConfig();
+}
+
+/** 落盘: 手机把勾选态另存一份, 共享键只更新非勾选字段且保留原有勾选
+ *  (否则手机一保存就会把桌面写在共享键里的勾选抹掉)。 */
+function saveConfigParts(cfg) {
+  try {
+    if (!isPhoneUi()) {
+      localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+      return;
+    }
+    const { checks, rest } = splitCfg(cfg);
+    localStorage.setItem(CFG_KEY_PHONE, JSON.stringify(checks));
+    localStorage.setItem(CFG_KEY, JSON.stringify(Object.assign(readCfg(CFG_KEY), rest)));
+  } catch (e) {}
 }
 
 function loadConfig() {
@@ -3181,8 +3557,9 @@ function loadConfig() {
     }
   } catch(e) {}
   try {
-    const cfg = JSON.parse(localStorage.getItem(CFG_KEY));
-    if (cfg) applyConfig(cfg);
+    // 非勾选字段 (复权/MA/主题…) 一律来自共享键; 勾选字段按设备取 (手机取手机键)。
+    // 必须先把共享键里的勾选切掉: 否则手机首用会吃进桌面存在共享键里的 info:true, 折叠就不生效。
+    applyConfig(Object.assign({}, splitCfg(readCfg(CFG_KEY)).rest, checkDefaults(), localChecksCfg()));
   } catch(e) {}
 }
 
@@ -3196,7 +3573,8 @@ function applyConfig(cfg) {
   document.getElementById('chk-atr').checked = !!cfg.atr;
   document.getElementById('chk-obv').checked = !!cfg.obv;
   document.getElementById('chk-chip').checked = cfg.chip !== false;
-  document.getElementById('chk-info').checked = cfg.info !== false;
+  // 基本信息折叠态: 手机首次使用默认折叠 (屏幕窄, 先把图面让出来); 用户展开后按设备记住
+  document.getElementById('chk-info').checked = cfg.info === undefined ? !isPhoneUi() : cfg.info !== false;
   document.getElementById('chk-depth').checked = cfg.depth !== false;
   document.getElementById('tip-rsi').checked = cfg.tipRsi !== false;
   document.getElementById('tip-kdj').checked = cfg.tipKdj !== false;
@@ -3261,16 +3639,24 @@ function scheduleSavePanelConfig() {
 async function pushPanelConfig() {
   if (_panelCfgSuppress) return;
   try {
+    const phone = isPhoneUi();
+    // 手机: 只上传非勾选字段, 勾选沿用「最近一次服务端给的值」(拿不到就退回共享键里的值)。
+    // 服务端 PUT 是整包覆盖 (UPDATE users SET panel_config=?), 不带上的话会把其他设备的勾选清掉。
+    const cfg = phone
+      ? Object.assign({}, splitCfg(buildConfig()).rest,
+          STATE._panelCfgChecks || splitCfg(readCfg(CFG_KEY)).checks)
+      : buildConfig();
     await fetch('/api/me/panel-config', {
       method: 'PUT',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config: panelCfgPayload(buildConfig()) }),
+      body: JSON.stringify({ config: panelCfgPayload(cfg) }),
     });
   } catch (e) { /* 未登录/离线: 静默, 下次改动再同步 */ }
 }
 
-/** 启动对齐: 服务端有配置 → 合并覆盖本地; 服务端为空 → 用本地(或默认)初始化账号配置 */
+/** 启动对齐: 服务端有配置 → 合并覆盖本地; 服务端为空 → 用本地(或默认)初始化账号配置。
+ *  手机上服务端配置只吃非勾选字段, 勾选以本机为准 (手机勾选独立, 不与账号/其他设备互相覆盖)。 */
 async function syncPanelConfigWithServer() {
   try {
     const resp = await fetch('/api/me/panel-config', { credentials: 'same-origin' });
@@ -3280,13 +3666,15 @@ async function syncPanelConfigWithServer() {
       pushPanelConfig();
       return false;
     }
-    let local = {};
-    try { local = JSON.parse(localStorage.getItem(CFG_KEY)) || {}; } catch (_) {}
-    const merged = Object.assign({}, local, server);
-    _panelCfgSuppress = true;
+    const phone = isPhoneUi();
+    const local = readCfg(CFG_KEY);
+    STATE._panelCfgChecks = splitCfg(server).checks;
+    let merged = Object.assign({}, local, server);
+    // 手机: 非勾选跟随服务端; 勾选 = 设备默认 < 本机手机键 (永远不吃服务端/共享键的勾选)
+    if (phone) merged = Object.assign(merged, splitCfg(server).rest, checkDefaults(), localChecksCfg());    _panelCfgSuppress = true;
     try {
       applyConfig(merged);
-      try { localStorage.setItem(CFG_KEY, JSON.stringify(merged)); } catch (_) {}
+      try { saveConfigParts(merged); } catch (_) {}
     } finally {
       _panelCfgSuppress = false;
     }
@@ -3353,13 +3741,13 @@ async function fetchIntraday(opts) {
 
 function renderIntraday(data) {
   const chart = STATE.chart;
-  // 左侧栏 (基本信息 + 五档): 显隐 + 用当前缓存渲染
-  showSidePanel(sidePanelOn());
-  showDepthSection(depthSecOn());
+  // 侧栏(基本信息) + 五档 显隐；五档手机在右缘且只分时
+  applySidePanels();
   if (sidePanelOn() && !STATE.stockInfo) fetchStockInfo();
   if (STATE.depth) renderDepth(STATE.depth);
   if (!chart) return; // echarts 兜底: 图表不可用时仍保证侧栏可用
   const gridLeft = panelGridLeft();
+  const gridRight = panelGridRight() || '2%';   // 手机五档栏占右缘时让位
   const bars = data.bars;
   const times = bars.map(b => b.time);
   const ohlc = bars.map(b => {
@@ -3380,9 +3768,9 @@ function renderIntraday(data) {
   const nextTop = 12 + klineH + 3;
   const subStart = showVolume ? (nextTop + 13) : nextTop;
 
-  const grids = [{ left: gridLeft, right: '2%', top: '12%', height: `${klineH}%` }];
+  const grids = [{ left: gridLeft, right: gridRight, top: '12%', height: `${klineH}%` }];
   const xAxes = [{ gridIndex: 0, type: 'category', data: times, show: false }];
-  const yAxes = [{ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } }];
+  const yAxes = [{ gridIndex: 0, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().axisText, fontSize: 11 } }];
   const series = [
     { name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
       itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
@@ -3399,9 +3787,9 @@ function renderIntraday(data) {
       const up = (b.close || 0) >= (b.open || 0);
       return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
     });
-    grids.push({ left: gridLeft, right: '2%', top: `${nextTop}%`, height: '11%' });
-    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
-    yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
+    grids.push({ left: gridLeft, right: gridRight, top: `${nextTop}%`, height: '11%' });
+    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().axisText, fontSize: 10, rotate: 30, interval: 29 } });
+    yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().axisText, fontSize: 10, formatter: fmtVolume } });
     series.push({ name: '成交量', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: vols });
     zoomIndices.push(gi);
     gi++;
@@ -3411,9 +3799,9 @@ function renderIntraday(data) {
 
   subList.forEach((p, pi) => {
     const top = subStart + pi * perSubH;
-    grids.push({ left: gridLeft, right: '2%', top: `${top}%`, height: `${perSubH - 1}%` });
-    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().text, fontSize: 10, rotate: 30, interval: 29 } });
-    yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 9 } });
+    grids.push({ left: gridLeft, right: gridRight, top: `${top}%`, height: `${perSubH - 1}%` });
+    xAxes.push({ gridIndex: gi, type: 'category', data: times, show: false, axisLabel: { color: C().axisText, fontSize: 10, rotate: 30, interval: 29 } });
+    yAxes.push({ gridIndex: gi, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().axisText, fontSize: 9 } });
     zoomIndices.push(gi);
     if (p === 'macd') {
       series.push(
@@ -3445,11 +3833,11 @@ function renderIntraday(data) {
   series.forEach(s => {
     if (showRsi && s.name === 'RSI1') {
       s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
-        data: [{ yAxis: 70, label: { show: true, formatter: '70', color: C().text, fontSize: 10 } }, { yAxis: 30, label: { show: true, formatter: '30', color: C().text, fontSize: 10 }, lineStyle: { color: C().oversold } }] };
+        data: [{ yAxis: 70, label: { show: true, formatter: '70', color: C().axisText, fontSize: 10 } }, { yAxis: 30, label: { show: true, formatter: '30', color: C().axisText, fontSize: 10 }, lineStyle: { color: C().oversold } }] };
     }
     if (showKdj && s.name === 'K') {
       s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
-        data: [{ yAxis: 80, label: { show: true, formatter: '80', color: C().text, fontSize: 10 } }, { yAxis: 20, label: { show: true, formatter: '20', color: C().text, fontSize: 10 }, lineStyle: { color: C().oversold } }] };
+        data: [{ yAxis: 80, label: { show: true, formatter: '80', color: C().axisText, fontSize: 10 } }, { yAxis: 20, label: { show: true, formatter: '20', color: C().axisText, fontSize: 10 }, lineStyle: { color: C().oversold } }] };
     }
     if (showMacd && s.name === 'DIF') {
       s.markLine = { silent: true, symbol: 'none', lineStyle: { color: C().zeroLine, type: 'solid', width: 1 },
@@ -3462,10 +3850,12 @@ function renderIntraday(data) {
     animation: false,
     tooltip: {
       trigger: 'axis',
+      confine: isPhoneUi(),   // 手机: 提示框限制在容器内, 点边缘 bar 不会跑到屏幕外
+      extraCssText: isPhoneUi() ? 'max-width: calc(100vw - 22px); white-space: normal; word-break: break-word;' : '',
       axisPointer: { type: 'cross' },
       backgroundColor: C().tipBg,
       borderColor: C().tipBorder,
-      textStyle: { color: C().tipText, fontSize: 12, fontFamily: 'monospace' },
+      textStyle: { color: C().tipText, fontSize: isPhoneUi() ? 11 : 12, fontFamily: 'monospace' },
       formatter: function(ps) {
         const idx = ps[0] && ps[0].dataIndex;
         const b = data.bars[idx];
@@ -3473,7 +3863,12 @@ function renderIntraday(data) {
         const prevBar = idx > 0 ? data.bars[idx - 1] : null;
         const pc = prevBar ? prevBar.close : b.open;
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?C().up:v<pc?C().down:C().tipText}">${fmtPrice3(v)}</span>`;
-        let h = `<div><b>${b.time}</b>${haltLabel(b)}</div><div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div><div>量 ${fmtVolume(b.volume)}</div>`;
+        // 手机: 开/高 与 低/收 分两行 (一行四字段在窄屏会溢出)
+        let h = `<div><b>${b.time}</b>${haltLabel(b)}</div>`;
+        h += isPhoneUi()
+          ? `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)}</div><div>低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`
+          : `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`;
+        h += `<div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?C().overbought:v<20?C().oversold:clr}">${v.toFixed(2)}</span>`;
         const cRsiV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?C().overbought:v<30?C().oversold:clr}">${v.toFixed(1)}</span>`;
@@ -3488,8 +3883,8 @@ function renderIntraday(data) {
       { type: 'inside', xAxisIndex: zoomIndices, start: 0, end: 100 },
       { type: 'slider', xAxisIndex: zoomIndices, top: 2, height: 16,
         borderColor: C().gridLine, backgroundColor: 'transparent',
-        fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().text },
-        textStyle: { color: C().text, fontSize: 10 } }
+        fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().axisText },
+        textStyle: { color: C().axisText, fontSize: 10 } }
     ],
     series: series,
   };
@@ -3499,38 +3894,35 @@ function renderIntraday(data) {
   // 同样必须同步提交 (见 updateChart 处的说明): 换 model 与跑数据管线不能跨帧, 否则旧元素会在
   // 这一帧里命中无数据的新 series, 鼠标事件一碰就抛 TypeError。
   chart.setOption(option, { notMerge: true, silent: true });
-  // 分时面板名称标签 (graphic)
-  const igraphics = [];
+  // 面板名称标签 (VOL/MACD/KDJ/RSI/ATR): 与 K 线周期走同一条路径 ——
+  // 组装成 STATE.draw._labels 交给 overlay 画布 paintLabels 绘制, 位置口径也照抄
+  // (x = grid.left + 6, y = grid.top + 15, bold 11px monospace)。
+  // 早先分时用 ECharts graphic 写死 left:10/top:+2, 于是标签贴在屏幕最左、还比别的视图高几像素。
   const iLabels = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR' };
   const iColors = { macd: C().macdDif, kdj: C().kdjK, rsi: C().rsi6, atr: C().macdDif };
-  let gIdx = showVolume ? 1 : 0;
-  subList.forEach((p, pi) => {
-    const gTop = parseFloat(grids[gIdx + 1 + pi].top) / 100 * chart.getHeight();
+  const iCw = chart.getWidth(), iCh = chart.getHeight();
+  const igraphics = [];
+  const pushILabel = (gi, text, fill) => {
+    const g = grids[gi];
+    if (!g) return;
     igraphics.push({
-      type: 'text', left: 10, top: gTop + 2,
-      style: { text: iLabels[p] || p, fill: iColors[p] || C().text, font: 'bold 11px monospace' },
-      z: 100,
+      text, x: spanPx(g.left, iCw, false) + 6, y: spanPx(g.top, iCh, false) + 15,
+      fill, font: 'bold 11px monospace',
     });
-  });
-  // 成交量标签
-  if (showVolume) {
-    const vgTop = parseFloat(grids[1].top) / 100 * chart.getHeight();
-    igraphics.push({
-      type: 'text', left: 10, top: vgTop + 2,
-      style: { text: 'VOL', fill: C().macdDif, font: 'bold 11px monospace' },
-      z: 100,
-    });
-  }
-  chart.setOption({ graphic: igraphics });
-  cacheGridRects(grids);
-  refreshPriceTagLayout(); // 分时也要按新刻度重排现价/风控签位
-  // 分时视图无画线层: 清空 overlay, 避免 K 线周期的画线残留
+  };
+  if (showVolume) pushILabel(1, 'VOL', C().macdDif);
+  subList.forEach((p, pi) => pushILabel((showVolume ? 2 : 1) + pi, iLabels[p] || p, iColors[p] || C().text));
+  // 分时无画线层: 先同步清掉上一个周期残留的画线 (标签随后由 redrawDrawings 按帧重绘,
+  // drawOverlayCtx 每帧也会清一次, 这里只为消掉"清屏前的一帧残留")
   const ov = document.getElementById('draw-overlay');
   if (ov && ov.width) {
     const c2 = ov.getContext('2d');
     c2.setTransform(1, 0, 0, 1, 0, 0);
     c2.clearRect(0, 0, ov.width, ov.height);
   }
+  redrawDrawings(igraphics);
+  cacheGridRects(grids);
+  refreshPriceTagLayout(); // 分时也要按新刻度重排现价/风控签位
 }
 
 function onConfigChange() {
@@ -3546,9 +3938,9 @@ function onConfigChange() {
     fetchChips(STATE.symbol);
   }
   // 侧栏开关 (信息/五档): 重排图/面板并即时拉取
-  showSidePanel(sidePanelOn());
-  showDepthSection(depthSecOn());
-  if (depthSecOn()) fetchDepth();
+  applySidePanels();
+  applyIndSheet();   // 勾选变了 → 手机触发按钮上的副图计数跟着变
+  if (depthPanelVisible()) fetchDepth();
   if (sidePanelOn() && !STATE.stockInfo) fetchStockInfo();
   syncPosition(); // 持仓徽章 + 风控线开关显隐 (线条由下方 onIndicatorChange 重建)
   onIndicatorChange();
@@ -3562,12 +3954,136 @@ function toggleIndMore() {
   saveConfig();
 }
 
-/** 将当前周期滚入固定宽度的可视区，不改变任何布局高度。 */
+// ── 手机: 指标面板下拉浮层 (≤640px; 桌面这些函数是空转, 元素都 display:none/contents) ──
+/** 触发按钮文案: 「面板」+ 已开副图个数 (不展开也知道当前状态)。 */
+function indSheetLabel(count) {
+  const n = Number(count) || 0;
+  return n > 0 ? `面板 ${n} ▾` : '面板 ▾';
+}
+
+/** 浮层里的段标题: 在副图起点与「高级」块前各插一个 (运行时就地插入, 不动任何控件的归属)。
+ *  只插一次; 桌面下它们也带 ind-group, 但 #ind-body 是 display:contents, 段标题会跟着露出来 ——
+ *  所以只在手机布局下插, 切回桌面时移除。 */
+function syncIndSheetGroups() {
+  const bar = document.getElementById('indicator-bar');
+  const body = document.getElementById('ind-body');
+  if (!bar || !body) return;
+  const phone = isPhoneUi();
+  const marks = [
+    { id: 'ind-group-sub', text: '副图指标', before: document.getElementById('chk-macd') },
+    { id: 'ind-group-adv', text: '高级', before: document.getElementById('lbl-info') },
+  ];
+  marks.forEach(m => {
+    const cur = document.getElementById(m.id);
+    if (phone && !cur && m.before) {
+      const span = document.createElement('span');
+      span.id = m.id;
+      span.className = 'ind-group';
+      span.textContent = m.text;
+      const anchor = m.before.closest('label') || m.before;
+      anchor.parentNode.insertBefore(span, anchor);
+    } else if (!phone && cur) {
+      cur.remove();
+    }
+  });
+}
+
+/** 手机: 复权那一对挪到触发按钮旁; 其他设备放回原位 (#adj-slot 是它的家, 无锚点依赖)。
+ *  计数标签 / 段标题一起在这里对齐。
+ *  全程不用「参照物」插入 (insertBefore(新节点, 参照物) 要求参照物必须是该父节点的子节点,
+ *  归属一旦有偏差就抛 NotFoundError) —— 本函数由点面板/每次勾选/切周期/启动调用,
+ *  抛出去会连带打断点击与切周期, 所以只用 appendChild 且整段吞异常。 */
+function applyIndSheet() {
+  const bar = document.getElementById('indicator-bar');
+  const slot = document.getElementById('adj-slot');
+  const group = document.getElementById('adj-group');
+  const btn = document.getElementById('btn-ind-sheet');
+  if (!bar || !slot || !group || !btn) return;
+  // 段标题插入与「复权挪位」各自独立兜异常: 前者失败不该连带跳过后者 (桌面会停在栏尾)
+  try { syncIndSheetGroups(); } catch (e) { /* 段标题失败不影响控件可用 */ }
+  try {
+    if (isPhoneUi()) {
+      // 手机: 复权挂到栏内。手机下 #ind-body 是绝对定位 (不占流内位置),
+      // 故 DOM 顺序 [触发按钮, 浮层, 复权] 渲染出来仍是「[面板 ▾][复权: …]」一行。
+      if (group.parentNode !== bar) bar.appendChild(group);
+    } else if (group.parentNode !== slot) {
+      slot.appendChild(group);   // 桌面: 放回原位 (复权夹在风控线与 BOLL 之间)
+    }
+    if (!isPhoneUi()) closeIndSheet();
+    const on = getIndicatorPanels().length;
+    btn.textContent = indSheetLabel(on);
+    btn.title = on > 0 ? `面板设置 (已开 ${on} 个副图)` : '面板设置';
+  } catch (e) { /* 面板装饰失败不该影响勾选生效/切周期: 静默 (同 pushPanelConfig 的离线静默) */ }
+}
+
+function toggleIndSheet() {
+  const bar = document.getElementById('indicator-bar');
+  if (!bar) return;
+  if (bar.classList.contains('sheet-open')) closeIndSheet();
+  else {
+    applyIndSheet();
+    bar.classList.add('sheet-open');
+    const btn = document.getElementById('btn-ind-sheet');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function closeIndSheet() {
+  const bar = document.getElementById('indicator-bar');
+  if (!bar) return;
+  bar.classList.remove('sheet-open');
+  const btn = document.getElementById('btn-ind-sheet');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+/** 点浮层外 / Esc 收起 (和点「完成」等价) */
+function wireIndSheet() {
+  document.addEventListener('click', (e) => {
+    const bar = document.getElementById('indicator-bar');
+    if (!bar || !bar.classList.contains('sheet-open')) return;
+    if (bar.contains(e.target)) return;
+    closeIndSheet();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeIndSheet();
+  });
+  window.addEventListener('resize', () => {
+    if (STATE._indSheetPhone !== isPhoneUi()) {
+      STATE._indSheetPhone = isPhoneUi();
+      applyIndSheet();
+      // 手机不提供画线入口: 若跨到手机时画线模式还开着, 主动退出,
+      // 否则画线调色板会常驻而手机上按不到 Esc (只能刷新)
+      if (isPhoneUi() && STATE.draw.enabled) toggleDrawMode();
+    }
+  });
+}
+
+/** 周期按钮相对可视区左缘的偏移 (两者同属一个 offsetParent, 见 CSS 未给它们定位)。 */
+function periodBtnOffset(btn, viewport) {
+  return btn.offsetLeft - viewport.offsetLeft;
+}
+
+/** 周期可视区宽度: 桌面 5 个 (CSS 固定 252px), 平板只显示 3 个 —— 按真实按钮宽度算,
+ *  这样触控放大过的按钮/不同字宽都能正好卡在 3 个上, 不用写死像素。 */
+const PERIOD_VISIBLE_DESKTOP = 5;
+const PERIOD_VISIBLE_TABLET = 3;
+function layoutPeriodViewport() {
+  const viewport = document.getElementById('period-viewport');
+  if (!viewport) return;
+  if (!isTabletUi()) { viewport.style.width = ''; return; }  // 回落到 CSS 的 252px
+  const nth = document.getElementById('btn-' + ALL_PERIODS[PERIOD_VISIBLE_TABLET - 1]);
+  if (!nth) return;
+  // 第 N 个按钮右缘 + 分组右内边距(2) + 右边框(1) = 正好装下 N 个, 不露出下一个的边
+  const w = periodBtnOffset(nth, viewport) + nth.offsetWidth + 3;
+  viewport.style.width = Math.max(80, Math.min(w, window.innerWidth - 68)) + 'px';
+}
+
+/** 将当前周期滚入可视区，不改变任何布局高度。 */
 function ensurePeriodVisible(period) {
   const btn = document.getElementById('btn-' + period);
   const viewport = document.getElementById('period-viewport');
   if (!btn || !viewport) return;
-  const left = btn.offsetLeft - viewport.offsetLeft;
+  const left = periodBtnOffset(btn, viewport);
   const right = left + btn.offsetWidth;
   if (left < viewport.scrollLeft || right > viewport.scrollLeft + viewport.clientWidth) {
     viewport.scrollTo({ left: Math.max(0, left - (viewport.clientWidth - btn.offsetWidth) / 2), behavior: 'smooth' });
@@ -3579,15 +4095,42 @@ function initPeriodScroller() {
   const left = document.getElementById('period-scroll-left');
   const right = document.getElementById('period-scroll-right');
   if (!viewport || !left || !right) return;
+  const btns = ALL_PERIODS.map(p => document.getElementById('btn-' + p)).filter(Boolean);
   const sync = () => {
     left.disabled = viewport.scrollLeft <= 1;
     right.disabled = viewport.scrollLeft + viewport.clientWidth >= viewport.scrollWidth - 1;
   };
-  const move = direction => viewport.scrollBy({ left: direction * Math.max(120, viewport.clientWidth * .8), behavior: 'smooth' });
+  // 翻页幅度 = 一屏按钮数 (桌面 5 / 平板 3), 目标按钮左缘对齐可视区左缘:
+  // 固定像素滚动在换行宽/换按钮字宽后会对不齐按钮, 这里按真实按钮宽度算。
+  const move = direction => {
+    if (!btns.length) return;
+    const page = isTabletUi() ? PERIOD_VISIBLE_TABLET : PERIOD_VISIBLE_DESKTOP;
+    const sl = viewport.scrollLeft;
+    const offs = btns.map(b => periodBtnOffset(b, viewport));
+    // 当前页首 = 左缘已越过的最后一个按钮; 手动滚到一半也不会跳着翻
+    const cur = offs.reduce((acc, o, i) => (o <= sl + 2 ? i : acc), 0);
+    const target = Math.max(0, Math.min(btns.length - 1, cur + direction * page));
+    const max = viewport.scrollWidth - viewport.clientWidth;
+    // 末页直接对齐到最右: 否则一屏 3 个时最后两个周期会被切在可视区外
+    const left = target >= btns.length - page
+      ? max
+      : Math.max(0, Math.min(max, offs[target] - 2));
+    viewport.scrollTo({ left, behavior: 'smooth' });
+  };
   left.addEventListener('click', () => move(-1));
   right.addEventListener('click', () => move(1));
   viewport.addEventListener('scroll', sync, { passive: true });
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(sync).observe(viewport);
+  // 首帧布局就绪后再定宽 (按钮宽度此时才量得到); 换行宽/转屏/字体就绪都要重量
+  const relayout = () => { layoutPeriodViewport(); sync(); };
+  requestAnimationFrame(relayout);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(relayout).observe(viewport.parentNode || viewport);
+  window.addEventListener('resize', () => {
+    clearTimeout(STATE._periodRelayoutTimer);
+    STATE._periodRelayoutTimer = setTimeout(relayout, 150);
+  });
+  window.addEventListener('orientationchange', relayout);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(relayout).catch(() => {});
   sync();
 }
 
@@ -3669,6 +4212,21 @@ function initChart() {
     return;
   }
   STATE.chart = echarts.init(dom, null, { renderer: 'canvas' });
+  // 容器尺寸看护: 顶栏/记录栏/指标栏高度变化 (搜索记录增减、展开「更多」、风控线勾选框显隐)
+  // 会改变图表可用高度, 而 window.resize 不会触发 —— 不 resize 的话 ECharts 画布与
+  // overlay 画线层 (尺寸取自 chart.getWidth/Height) 会一起和容器错位。
+  // 容器是 flex:1 且 overlay 是它的兄弟节点, resize 不会回改容器尺寸, 无反馈环。
+  let sizeFrame = 0;
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => {
+      if (sizeFrame) return;
+      sizeFrame = requestAnimationFrame(() => {
+        sizeFrame = 0;
+        try { STATE.chart.resize({ animation: { duration: 0 } }); } catch (e) { /* ignore */ }
+        redrawDrawings();
+      });
+    }).observe(dom);
+  }
   // resize 时重渲染 (解决全屏/窗口变化后日期被截断)
   let resizeTimer, resizeFrame = 0;
   window.addEventListener('resize', () => {
@@ -3821,9 +4379,39 @@ function getIndicatorPanels() {
   return panels;
 }
 
-function calcGridLayout(panels, chipOn) {
+/** 筹码带几何 (主图右侧那条)。桌面取值与历史硬编码逐字一致 (带 83%~97%, K 线让位 17%)。
+ *  手机加宽到约占三分之一 (对标东财手机版, 390px 下约 55px → 约 129px), 但必须按
+ *  「扣掉左侧面板/轴位之后的可用宽度」来算**像素**: 左侧让位是绝对 px (展开侧栏时 234px),
+ *  若带宽按整屏百分比给 (35%), 360px 屏上 234 + 0.35*360 正好相等 → K 线网格被挤成 0 宽。
+ *  可用宽度给不出最小带宽时返回 null, 调用方本次不画筹码带 (K 线拿回整宽, 折叠侧栏后自动恢复)。 */
+const CHIP_MIN_BAND_PX = 80;
+const CHIP_MAX_BAND_PX = 140;
+function chipBandFor(chartW, gridLeft) {
+  if (!isPhoneUi()) return { klineRight: '17%', bandLeft: '83%', bandRight: '3%' };
+  const w = Number(chartW) > 0 ? Number(chartW) : 0;
+  const glPx = spanPx(gridLeft, w, false);   // '234px' 或 '8%' 都吃
+  if (!(w > 0)) return null;
+  const avail = w - glPx;
+  const bandW = Math.min(CHIP_MAX_BAND_PX, Math.round(avail * 0.35));
+  if (bandW < CHIP_MIN_BAND_PX) return null;
+  const gap = 6;
+  return {
+    klineRight: (bandW + gap) + 'px',
+    bandLeft: Math.max(0, w - bandW - 2) + 'px',
+    bandRight: '2%',
+  };
+}
+
+/** MA 三条线的配色 (与线、tooltip、图例共用一处, 避免图例色与线色漂移)。
+ *  取当前主题计算值, 每次调用都重新读 (主题切换后立即生效)。 */
+function maLineColors() {
+  return [C().ma5, C().ma10, C().ma20];
+}
+
+function calcGridLayout(panels, chipOn, chipBand) {
   const showVolume = document.getElementById('chk-volume').checked;
-  const rightPct = chipOn ? '17%' : '2%'; // 筹码面板占用右侧空间 (含摘要两列文本)
+  // 右侧让位: 手机五档栏 >> 筹码带 >> 默认细边
+  const rightPct = panelGridRight() || (chipOn && chipBand ? chipBand.klineRight : '2%');
   const topGap = 2, bottomGap = 8, mGap = 2, volPct = showVolume ? 10 : 0;
   const nPanels = panels.length, totalGaps = (showVolume ? 1 : 0) + nPanels;
   const gapTotal = mGap * totalGaps;
@@ -3839,7 +4427,7 @@ function calcGridLayout(panels, chipOn) {
   // K-line grid (index 0)
   grids.push({ left: gLeft, right: rightPct, top: `${topGap}%`, height: `${klinePct}%` });
   xAxes.push({ gridIndex: 0, type: 'category', data: [], show: false });
-  yAxes.push({ gridIndex: 0, type: STATE.logScale ? 'log' : 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 11 } });
+  yAxes.push({ gridIndex: 0, type: STATE.logScale ? 'log' : 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().axisText, fontSize: 11 } });
 
   let cursor = topGap + klinePct + mGap;
   let nextGi = 1;
@@ -3849,7 +4437,7 @@ function calcGridLayout(panels, chipOn) {
   if (hasVolume) {
     grids.push({ left: gLeft, right: rightPct, top: `${cursor}%`, height: `${volPct}%` });
     xAxes.push({ gridIndex: nextGi, type: 'category', data: [], show: false });
-    yAxes.push({ gridIndex: nextGi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().text, fontSize: 10, formatter: fmtVolume } });
+    yAxes.push({ gridIndex: nextGi, type: 'value', scale: true, position: 'left', splitLine: { show: false }, axisLabel: { color: C().axisText, fontSize: 10, formatter: fmtVolume } });
     cursor += volPct + mGap;
     nextGi++;
   }
@@ -3858,14 +4446,14 @@ function calcGridLayout(panels, chipOn) {
   panels.forEach((p, i) => {
     grids.push({ left: gLeft, right: rightPct, top: `${cursor}%`, height: `${indEach}%` });
     xAxes.push({ gridIndex: nextGi + i, type: 'category', data: [], show: false });
-    yAxes.push({ gridIndex: nextGi + i, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().text, fontSize: 10 } });
+    yAxes.push({ gridIndex: nextGi + i, type: 'value', scale: true, position: 'left', splitLine: { lineStyle: { color: C().gridLine } }, axisLabel: { color: C().axisText, fontSize: 10 } });
     cursor += indEach + mGap;
   });
 
   // 最后一个 grid 显示日期标签
   if (xAxes.length > 0) {
     xAxes[xAxes.length - 1].show = true;
-    xAxes[xAxes.length - 1].axisLabel = { color: C().text, fontSize: 10, rotate: 30 };
+    xAxes[xAxes.length - 1].axisLabel = { color: C().axisText, fontSize: 10, rotate: 30 };
   }
 
   return { grids, xAxes, yAxes, panels, hasVolume, indicatorStartGi: nextGi };
@@ -3945,18 +4533,20 @@ function updateChart(reTheme) {
   if (!data || !data.klines || data.klines.length === 0) return;
   if (!STATE.chart) return; // echarts 兜底
 
-  showSidePanel(sidePanelOn());   // 基本信息所有周期常驻
-  showDepthSection(depthSecOn()); // 五档仅分时
+  applySidePanels();   // 侧栏(信息) + 五档: 手机五档在右缘且只分时
 
   const chart = STATE.chart;
   const klines = data.klines;
   const pf = fmtPrice3;
   const dates = klines.map(k => k.date);
   const panels = getIndicatorPanels();
+  // 筹码带几何先算: 手机在窄屏+侧栏展开时给不出最小带宽 → 本次不画带 (否则 K 线会归零)
+  const chipBand = chipBandFor(chart.getWidth(), panelGridLeft());
   const chipOn = isChipPeriod(STATE.period)
     && document.getElementById('chk-chip').checked
-    && !!STATE.chips && !!STATE.chips.buckets;
-  const { grids, xAxes, yAxes, hasVolume, indicatorStartGi } = calcGridLayout(panels, chipOn);
+    && !!STATE.chips && !!STATE.chips.buckets
+    && !!chipBand;
+  const { grids, xAxes, yAxes, hasVolume, indicatorStartGi } = calcGridLayout(panels, chipOn, chipBand);
   const visibleBars = STATE.period === '1m' ? 240 : 80;
   const futureBars = drawNeedsFuture() ? (window.Drawings ? Drawings.FUTURE_BARS : 0) : 0;
   const totalSlots = Math.max(dates.length, 1) + futureBars;
@@ -3968,7 +4558,7 @@ function updateChart(reTheme) {
   const vols = klines.map((k) => buildVolPoint(k));
   const eff = effectiveMaBoll(klines);
   const maDefs = eff.ma.map((arr, i) => ({ name: `MA${STATE.maPeriods[i]}`, data: arr }));
-  const maColors = [C().ma5, C().ma10, C().ma20];
+  const maColors = maLineColors();
 
   const series = [];
 
@@ -4209,9 +4799,10 @@ function updateChart(reTheme) {
     const range = klineVisibleYRange(klines, startPct, 100)
       || { min: STATE.chips.min, max: STATE.chips.max };
     const chipPxH = parseFloat(grids[0].height) / 100 * chart.getHeight();
+    const band = chipBand;
     const overlay = ChipChart.buildOverlay(STATE.chips, {
       gi: chipGi,
-      left: '83%', right: '3%',
+      left: band.bandLeft, right: band.bandRight,
       top: grids[0].top, height: grids[0].height,
       colors: C(),
       lastClose: klines[klines.length - 1].close,
@@ -4222,7 +4813,7 @@ function updateChart(reTheme) {
     xAxes.push(overlay.xAxis);
     yAxes.push(overlay.yAxis);
     overlay.series.forEach(s => series.push(s));
-    STATE._chip = { gi: chipGi, n: overlay.n, pxHeight: overlay.pxHeight };
+    STATE._chip = { gi: chipGi, n: overlay.n, pxHeight: overlay.pxHeight, band };
   } else {
     STATE._chip = null;
   }
@@ -4253,20 +4844,27 @@ function updateChart(reTheme) {
     { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100, moveOnMouseMove: !dzLocked },
     { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16,
       borderColor: C().gridLine, backgroundColor: 'transparent',
-      fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().text },
-      textStyle: { color: C().text, fontSize: 10 } }
+      fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().axisText },
+      textStyle: { color: C().axisText, fontSize: 10 } }
   ];
 
   // ── Tooltip (adaptive: shows different data per panel) ──
+  // 画线模式下不弹提示框: 触屏点/拖 K 线就是在定位画线, 提示框会盖住落点。
+  // 十字线 (axisPointer) 保留 —— 画线仍需要读数辅助。模式切换走 toggleDrawMode → 这里重算。
+  // 手机提示框: 贴屏内 + 限宽可换行 + 小一号字 (长指标行默认 nowrap 会顶出屏幕)
+  const phoneTip = isPhoneUi();
   const tooltip = {
+    show: !STATE.draw.enabled,
     trigger: 'axis',
+    confine: phoneTip,
+    extraCssText: phoneTip ? 'max-width: calc(100vw - 22px); white-space: normal; word-break: break-word;' : '',
     axisPointer: { type: 'cross',
       crossStyle: { color: C().crossLine },
-      label: { backgroundColor: C().bg, color: C().text, borderColor: C().border }
+      label: { backgroundColor: C().bg, color: C().axisText, borderColor: C().border }
     },
     backgroundColor: C().tipBg,
     borderColor: C().tipBorder,
-    textStyle: { color: C().tipText, fontSize: 12, fontFamily: 'monospace' },
+    textStyle: { color: C().tipText, fontSize: phoneTip ? 11 : 12, fontFamily: 'monospace' },
     formatter: function(ps) {
       if (!ps || ps.length === 0) return '';
       const idx = ps[0].dataIndex;
@@ -4287,13 +4885,23 @@ function updateChart(reTheme) {
       // Grid 0: K-line — full detail
       if (g === 0) {
         let html = hdr;
-        html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)} 低 ${cfn(k.low)} 收 ${cfn(k.close)}`;
-        if (chgPct != null) html += ` <span style="color:${chgPct>=0?C().up:C().down}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
+        const chgHtml = chgPct != null
+          ? ` <span style="color:${chgPct>=0?C().up:C().down}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>` : '';
         const effTip = effectiveMaBoll(klines);
         const maLabels = STATE.maPeriods.map((n, i) =>
           `MA${n} <span style="color:${maColors[i] || C().ma5}">${pf(effTip.ma[i][idx])}</span>`).join(' ');
-        html += `</div><div>${maLabels}</div>`;
-        html += `<div>量 ${fmtVolume(k.volume)} 额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿</div>`;
+        const volAmt = `量 ${fmtVolume(k.volume)} 额 ${k.amount!=null?(k.amount/1e8).toFixed(2):'—'}亿`;
+        if (phoneTip) {
+          // 手机: 一行两个字段 (一行四个在 390px 上必溢出), 指标 extras 逐项独占一行
+          html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)}</div>`;
+          html += `<div>低 ${cfn(k.low)} 收 ${cfn(k.close)}${chgHtml}</div>`;
+          html += `<div>${volAmt}</div>`;
+          html += `<div>${maLabels}</div>`;
+        } else {
+          html += `<div>开 ${cfn(k.open)} 高 ${cfn(k.high)} 低 ${cfn(k.low)} 收 ${cfn(k.close)}${chgHtml}</div>`;
+          html += `<div>${maLabels}</div>`;
+          html += `<div>${volAmt}</div>`;
+        }
         if (document.getElementById('chk-macd').checked) {
           html += `<div>MACD DIF <span style="color:${C().macdDif}">${k.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${k.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(k.macd_hist||0)>=0?C().up:C().down}">${k.macd_hist?.toFixed(3)||'—'}</span></div>`;
         }
@@ -4309,7 +4917,10 @@ function updateChart(reTheme) {
         if (document.getElementById('tip-atr').checked) {
           extras.push(`<span style="color:${C().atr}">ATR</span> ${k.atr14?.toFixed(3)||'—'}`);
         }
-        if (extras.length > 0) html += `<div>${extras.join(' | ')}</div>`;
+        // 桌面拼一行 (短), 手机每项一行 (RSI1/2/3 拼起来在窄屏必换行, 不如直接分行整齐)
+        if (extras.length > 0) {
+          html += phoneTip ? extras.map(e => `<div>${e}</div>`).join('') : `<div>${extras.join(' | ')}</div>`;
+        }
         if (k.premium != null) html += `<div>溢价率 <span style="color:${k.premium>=0?C().up:C().down}">${k.premium>=0?'+':''}${normPct(k.premium).toFixed(2)}%</span></div>`;
         // 十字线落在未回补缺口灰区内时追加缺口信息（markArea 与 axis tooltip 冲突，走此注入）
         if (typeof GapScanner !== 'undefined' && STATE._gaps && STATE._gaps.length) {
@@ -4399,8 +5010,8 @@ function updateChart(reTheme) {
             symbol: 'none',
             lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
             data: [
-              { yAxis: 70, label: { show: true, formatter: '70', color: C().text, fontSize: 10, position: 'end' } },
-              { yAxis: 30, label: { show: true, formatter: '30', color: C().text, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
+              { yAxis: 70, label: { show: true, formatter: '70', color: C().axisText, fontSize: 10, position: 'end' } },
+              { yAxis: 30, label: { show: true, formatter: '30', color: C().axisText, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
               { yAxis: 50, label: { show: false }, lineStyle: { color: C().gridLine } },
             ]
           };
@@ -4415,8 +5026,8 @@ function updateChart(reTheme) {
             silent: true, symbol: 'none',
             lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
             data: [
-              { yAxis: 80, label: { show: true, formatter: '80', color: C().text, fontSize: 10, position: 'end' } },
-              { yAxis: 20, label: { show: true, formatter: '20', color: C().text, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
+              { yAxis: 80, label: { show: true, formatter: '80', color: C().axisText, fontSize: 10, position: 'end' } },
+              { yAxis: 20, label: { show: true, formatter: '20', color: C().axisText, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
             ]
           };
           break;
@@ -4446,8 +5057,8 @@ function updateChart(reTheme) {
             silent: true, symbol: 'none',
             lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
             data: [
-              { yAxis: 80, label: { show: true, formatter: '80', color: C().text, fontSize: 10, position: 'end' } },
-              { yAxis: 20, label: { show: true, formatter: '20', color: C().text, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
+              { yAxis: 80, label: { show: true, formatter: '80', color: C().axisText, fontSize: 10, position: 'end' } },
+              { yAxis: 20, label: { show: true, formatter: '20', color: C().axisText, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
             ]
           };
           break;
@@ -4461,8 +5072,8 @@ function updateChart(reTheme) {
             silent: true, symbol: 'none',
             lineStyle: { color: C().overbought, type: 'dashed', width: 1 },
             data: [
-              { yAxis: 100, label: { show: true, formatter: '+100', color: C().text, fontSize: 10, position: 'end' } },
-              { yAxis: -100, label: { show: true, formatter: '-100', color: C().text, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
+              { yAxis: 100, label: { show: true, formatter: '+100', color: C().axisText, fontSize: 10, position: 'end' } },
+              { yAxis: -100, label: { show: true, formatter: '-100', color: C().axisText, fontSize: 10, position: 'end' }, lineStyle: { color: C().oversold } },
             ]
           };
           break;
@@ -4513,7 +5124,12 @@ function updateChart(reTheme) {
     const titleRow = rows.find(r => r.title);
     const titleText = titleRow ? titleRow.label : '';
     const body = rows.filter(r => !r.title);
-    const colLeft = cw * 0.835, colRight = cw * 0.968;
+    // 摘要两列跟着筹码带 (手机带更宽 → 文字也能摊开), 不再是写死的 83.5%/96.8%:
+    // 左列 = 带左缘 +0.5%宽, 右列 = 带右缘 -0.2%宽。带几何在手机上可能是 px (见 chipBandFor),
+    // 所以统一用 spanPx 解析而不是 parseFloat 当百分比。
+    const cband = (STATE._chip && STATE._chip.band) || chipBand;
+    const colLeft = spanPx(cband.bandLeft, cw, false) + cw * 0.005;
+    const colRight = spanPx(cband.bandRight, cw, true) - cw * 0.002;
     const bandW = colRight - colLeft;
     const klineBottom = (parseFloat(grids[0].top) + parseFloat(grids[0].height)) / 100 * ch;
     const bandH = ch - klineBottom - 6;
@@ -4535,12 +5151,14 @@ function updateChart(reTheme) {
     let sy = klineBottom + titleFs + 3;
     rows.forEach(function (row) {
       if (row.title) {
-        graphics.push({ text: row.label, x: colLeft, y: sy, fill: chipColors.text,
+        graphics.push({ text: row.label, x: colLeft, y: sy, fill: chipColors.muted,
                         font: 'bold ' + titleFs + 'px monospace' });
         sy += titleFs + 3;
         return;
       }
-      graphics.push({ text: row.label, x: colLeft, y: sy, fill: chipColors.text,
+      // 左列是说明标签 (次要层, 保持灰); 右列数值走强对比文本
+      // (获利/均本/中位价有各自语义色, 90%/70% 两行没有 → 用 chipColors.text = 亮黑/暗白)
+      graphics.push({ text: row.label, x: colLeft, y: sy, fill: chipColors.muted,
                       font: fs + 'px monospace' });
       graphics.push({ text: row.value, x: colRight, y: sy,
                       fill: chipColors[row.color] || chipColors.text,
@@ -4574,17 +5192,25 @@ function applyPeriodUI(period) {
   const lblGap = document.getElementById('lbl-gap');
   if (lblGap) {
     const showGap = typeof GapScanner !== 'undefined' && GapScanner.isGapPeriod(period);
+    // 内联 '' 交回 CSS 决定 → 该 label 还带 extra-ind, 实际显示 = 周期允许 且「更多」展开。
+    // 内联 'none' 是硬闸门, 任何情况都不显示 (见 test_risk_lines_js 对内联/class 覆盖的说明)。
     lblGap.style.display = showGap ? '' : 'none';
   }
+  // KDJ/RSI 按周期折叠勾选框 (渲染不变): 周K及以上折 KDJ, 日K及以下折 RSI
+  const weekPlus = isWeeklyPlus(period);
+  const lblKdj = document.getElementById('lbl-kdj');
+  if (lblKdj) lblKdj.style.display = weekPlus ? 'none' : '';
+  const lblRsi = document.getElementById('lbl-rsi');
+  if (lblRsi) lblRsi.style.display = weekPlus ? '' : 'none';
   // 筹码: 日/周/月 K
   const lblChip = document.getElementById('lbl-chip');
   if (lblChip) lblChip.style.display = isChipPeriod(period) ? '' : 'none';
   if (!isChipPeriod(period)) STATE.chips = null;
-  // 五档: 所有周期常显
+  // 五档勾选框: 手机只分时才有效 (其余周期五档根本不显示, 免得留个死控件); 桌面/平板常显
   const lblDepth = document.getElementById('lbl-depth');
-  if (lblDepth) lblDepth.style.display = '';
-  showSidePanel(sidePanelOn());
-  showDepthSection(depthSecOn());
+  if (lblDepth) lblDepth.style.display = (isPhoneUi() && period !== 'intraday') ? 'none' : '';
+  applySidePanels();
+  applyIndSheet();   // 周期变了 → RSI/KDJ 折叠变化, 副图计数与浮层分组要跟着重算
 }
 
 function switchPeriod(period) {
@@ -4608,6 +5234,12 @@ function isChipPeriod(p) {
 /** Elder 通道 (EMA13±ATR) 与动力系统 (EMA13+MACD柱): 日/周/月K 适用 */
 function isElderPeriod(p) {
   return p === '1d' || p === '1w' || p === '1M';
+}
+
+/** 周K及以上 (周/月K)。注意与 isElderPeriod 不同: 它含日K。
+ *  面板栏据此折叠勾选框 —— 周K及以上折 KDJ (日K及以下折 RSI)。 */
+function isWeeklyPlus(p) {
+  return p === '1w' || p === '1M';
 }
 
 function onIndicatorChange() {
@@ -4913,10 +5545,11 @@ function paintHandle(c2, x, y, color) {
 function paintTag(c2, text, xRight, y, bg) {
   c2.font = '10px monospace';
   const w = c2.measureText(text).width + 8;
-  const h = 15;
+  const h = TAG_BOX_H;   // 与错位算法共用一个盒高, 否则左列让位量会差一个像素
   c2.fillStyle = bg;
   c2.fillRect(xRight + 2, y - h / 2, w, h);
-  c2.fillStyle = '#fff';
+  // 字色与现价/风控签同源 (--risk-fg): 亮色黑字/暗色白字, 左列几个签观感一致
+  c2.fillStyle = C().riskFg;
   c2.fillText(text, xRight + 6, y + 3.5);
   c2.font = '12px monospace';
 }
@@ -5009,30 +5642,103 @@ function paintLegend(c2, dctx) {
     c2.fillText(t, x, y);
   };
 
-  c2.font = '11px monospace';
-  // 主图: MA + BOLL
-  const eff = effectiveMaBoll(klines);
-  const parts = STATE.maPeriods.map((p, i) => `MA${p} ${fmt3(eff.ma[i][endIdx])}`);
-  if (document.getElementById('chk-boll').checked) {
-    parts.push(`BOLL ${fmt3(eff.boll.up[endIdx])}/${fmt3(eff.boll.mid[endIdx])}/${fmt3(eff.boll.low[endIdx])}`);
-  }
-  put(0, parts.join('  '), C().text, 31);
+  /** 分段图例: 每个指标「名称+数值」用自己的线色画, 与图上的线一一对应
+   *  (TradingView/富途 同款观感)。超宽时整段丢尾部 —— 不做字符级截断,
+   *  否则一段文字会被切成两种颜色。 */
+  const SEG_GAP = '  ';
+  const putSegs = (gi, segs, yOff) => {
+    const rect = STATE._gridRects[gi];
+    if (!rect || !segs.length) return;
+    const x0 = rect.left + 6;
+    const y = rect.top + (yOff || 17);
+    const maxW = rect.right - rect.left - 14;
+    // 网格被挤到没有宽度 (窄屏 + 侧栏展开时可能发生): 不画, 免得底衬宽度为负、文字外溢
+    if (!(maxW > 0)) return;
+    const textOf = (list) => list.map(s => s.text).join(SEG_GAP);
+    const widthOf = (t) => c2.measureText(t).width;
+    const list = segs.slice();
+    let truncated = false;
+    while (list.length > 1 && widthOf(textOf(list)) > maxW) { list.pop(); truncated = true; }
+    const text = textOf(list);
+    const tail = truncated ? ' …' : '';
+    const drawn = text + tail;
+    // 底衬要盖住省略号一起算宽 (否则 ' …' 会画在底衬外)
+    const w = Math.min(widthOf(drawn) + 10, maxW + 10);
+    c2.fillStyle = C().bg;
+    c2.globalAlpha = 0.65;
+    c2.fillRect(x0 - 4, y - 12, w, 16);
+    c2.globalAlpha = 1;
+    let x = x0;
+    list.forEach((s, i) => {
+      const t = (i ? SEG_GAP : '') + s.text;
+      c2.fillStyle = s.fill || C().text;
+      c2.fillText(t, x, y);
+      x += widthOf(t);
+    });
+    if (truncated) {
+      c2.fillStyle = (list[list.length - 1] || {}).fill || C().text;
+      c2.fillText(' …', x, y);
+    }
+  };
 
-  const valText = {
-    macd: () => `DIF ${fmt3(k.macd_dif)}  DEA ${fmt3(k.macd_dea)}  柱 ${fmt3(k.macd_hist)}`,
-    kdj: () => `K ${fmt3(k.kdj_k)}  D ${fmt3(k.kdj_d)}  J ${fmt3(k.kdj_j)}`,
-    rsi: () => `RSI ${fmt3(k.rsi6, 1)} / ${fmt3(k.rsi12, 1)} / ${fmt3(k.rsi24, 1)}`,
-    atr: () => `ATR14 ${fmt3(k.atr14, 3)}`,
-    obv: () => `OBV ${fmtVolume(k.obv)}  MAOBV ${fmtVolume(k.maobv)}`,
-    premium: () => `溢价率 ${k.premium == null ? '—' : k.premium.toFixed(2) + '%'}`,
-    wr: () => `WR14 ${fmt3(k.wr14)}`,
-    cci: () => `CCI14 ${fmt3(k.cci14, 1)}`,
-    bias: () => `BIAS ${fmt3(k.bias6)} / ${fmt3(k.bias12)} / ${fmt3(k.bias24)}`,
-    dmi: () => `+DI ${fmt3(k.dmi_pdi, 1)}  -DI ${fmt3(k.dmi_mdi, 1)}  ADX ${fmt3(k.dmi_adx, 1)}`,
+  c2.font = '11px monospace';
+  // 主图: MA + BOLL —— 每段用自己的线色 (MA5/10/20 见 maLineColors, BOLL 见 C().boll)
+  const eff = effectiveMaBoll(klines);
+  const maFills = maLineColors();
+  const mainSegs = STATE.maPeriods.map((p, i) => ({
+    text: `MA${p} ${fmt3(eff.ma[i][endIdx])}`,
+    fill: maFills[i] || C().ma5,
+  }));
+  if (document.getElementById('chk-boll').checked) {
+    mainSegs.push({
+      text: `BOLL ${fmt3(eff.boll.up[endIdx])}/${fmt3(eff.boll.mid[endIdx])}/${fmt3(eff.boll.low[endIdx])}`,
+      fill: C().boll,
+    });
+  }
+  putSegs(0, mainSegs, 31);
+
+  // 面板图例: 段色与各 series 的 lineStyle.color 一一对应 (见 updateChart 里的指标构建)
+  const valSegs = {
+    macd: () => [
+      { text: `DIF ${fmt3(k.macd_dif)}`, fill: C().macdDif },
+      { text: `DEA ${fmt3(k.macd_dea)}`, fill: C().macdDea },
+      { text: `柱 ${fmt3(k.macd_hist)}`, fill: (k.macd_hist || 0) >= 0 ? C().up : C().down },
+    ],
+    kdj: () => [
+      { text: `K ${fmt3(k.kdj_k)}`, fill: C().kdjK },
+      { text: `D ${fmt3(k.kdj_d)}`, fill: C().kdjD },
+      { text: `J ${fmt3(k.kdj_j)}`, fill: C().kdjJ },
+    ],
+    rsi: () => [
+      { text: `RSI1 ${fmt3(k.rsi6, 1)}`, fill: C().rsi6 },
+      { text: `RSI2 ${fmt3(k.rsi12, 1)}`, fill: C().rsi12 },
+      { text: `RSI3 ${fmt3(k.rsi24, 1)}`, fill: C().rsi24 },
+    ],
+    atr: () => [{ text: `ATR14 ${fmt3(k.atr14, 3)}`, fill: C().atr }],
+    obv: () => [
+      { text: `OBV ${fmtVolume(k.obv)}`, fill: C().obv },
+      { text: `MAOBV ${fmtVolume(k.maobv)}`, fill: C().maobv },
+    ],
+    premium: () => [{
+      text: `溢价率 ${k.premium == null ? '—' : k.premium.toFixed(2) + '%'}`,
+      fill: (k.premium || 0) >= 0 ? C().up : C().down,
+    }],
+    wr: () => [{ text: `WR14 ${fmt3(k.wr14)}`, fill: C().rsi6 }],
+    cci: () => [{ text: `CCI14 ${fmt3(k.cci14, 1)}`, fill: C().macdDif }],
+    bias: () => [
+      { text: `BIAS6 ${fmt3(k.bias6)}`, fill: C().ma5 },
+      { text: `BIAS12 ${fmt3(k.bias12)}`, fill: C().ma10 },
+      { text: `BIAS24 ${fmt3(k.bias24)}`, fill: C().ma20 },
+    ],
+    dmi: () => [
+      { text: `+DI ${fmt3(k.dmi_pdi, 1)}`, fill: C().up },
+      { text: `-DI ${fmt3(k.dmi_mdi, 1)}`, fill: C().down },
+      { text: `ADX ${fmt3(k.dmi_adx, 1)}`, fill: C().macdDea },
+    ],
   };
   panels.forEach((p, i) => {
-    if (!valText[p]) return;
-    put(startGi + i, valText[p](), C().text, 31);
+    if (!valSegs[p]) return;
+    putSegs(startGi + i, valSegs[p](), 31);
   });
   c2.font = '12px monospace';
 }
@@ -5292,8 +5998,10 @@ function paintDrawing(c2, d, P, ctx, selected, tags) {
     }
     case 'hline':
       strokeSeg(c2, P.grid.left, g.y, P.grid.right, g.y, color, width, dash);
-      const tag = { id: 'px:' + d.id, text: fmtPrice3(g.price), x: P.grid.right, y: g.y,
-        bg: color, col: tagColumnOf(P.grid.right, P.grid) };
+      // 价格签挂左缘 (与现价/风控签同一列): 右缘原本压在价格轴上, 与右轴刻度混在一起。
+      // col='left' 会让 paintTagLayer 把现价/风控签当占位, 同列纵向错开不重叠。
+      const tag = { id: 'px:' + d.id, text: fmtPrice3(g.price), x: P.grid.left, y: g.y,
+        bg: color, col: tagColumnOf(P.grid.left, P.grid) };
       if (tags) tags.push(tag); else paintTag(c2, tag.text, tag.x, tag.y, tag.bg);
       break;
     case 'vline':
@@ -5479,7 +6187,9 @@ function _renderDrawingsNow() {
   if (paint && !P) return false; // 保留上一帧, 由 redrawDrawings 下一帧补绘
   const c2 = drawOverlayCtx();
   if (!c2) return false;
-  if (!dctx) { positionDrawMenu(); return true; }
+  // 无画线上下文 (分时, 或 K 线数据未就绪): 画不了画线, 但面板名标签仍要画 ——
+  // 分时的 VOL/MACD 标签就靠这一支, 与 K 线周期共用同一份 _labels 与同一条绘制路径。
+  if (!dctx) { paintLabels(c2, STATE.draw._labels); positionDrawMenu(); return true; }
   // 面板名/图例是图表固有元素, 不随 👁 画线显隐开关消失
   paintLabels(c2, STATE.draw._labels);
   paintLegend(c2, dctx);
@@ -5725,6 +6435,8 @@ function toggleDrawMode() {
     if (!drawSupported()) { showToast('图表尚未就绪', { type: 'warn' }); return; }
     dr.enabled = true;
     document.getElementById('btn-draw').classList.add('active');
+    // 已经弹出的提示框立即收掉 (重绘走 next frame, 否则会闪在画线落点上)
+    try { STATE.chart.dispatchAction({ type: 'hideTip' }); } catch (e) { /* ignore */ }
     buildPalette();
     document.getElementById('draw-palette').style.display = 'flex';
   } else {
@@ -6108,10 +6820,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();
+  applyIndSheet();   // 手机指标浮层: 复权外移/分组标题/触发按钮计数, 以及非手机时归位
+  wireIndSheet();
 
-  // 左侧栏初始显隐 (基本信息 + 五档, 所有周期), 不等首根K线渲染
-  showSidePanel(sidePanelOn());
-  showDepthSection(depthSecOn());
+  // 侧栏初始显隐 (手机: 基本信息默认折叠, 五档在右缘且只分时), 不等首根K线渲染
+  applySidePanels();
 
   // ── 自动主题: 系统偏好 > 时间 ──
   if (STATE._themeAuto) {
@@ -6319,6 +7032,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore last search from history (本地) + 与账号同步
   renderHistoryTags();
+  watchHistoryBarBreakpoint();
+  wireHistoryBarFocus();
   const hist = loadHistory();
   if (hist.length > 0) {
     const last = hist[0];
@@ -6339,6 +7054,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   const jumpPeriod = bootParams.get('period');
   if (jumpPeriod && ALL_PERIODS.includes(jumpPeriod)) applyPeriodUI(jumpPeriod);
+  else applyPeriodUI(STATE.period);   // 首屏也要过一次: 面板栏的周期折叠 (RSI/KDJ) 靠它落地
   syncSymbolUrl(true); // 规范化入口 URL, 浏览器返回键可回溯历史股票
 
   // 浏览器返回/前进: 回到上一只/下一只股票 (对标 TradingView), 周期同样跟随

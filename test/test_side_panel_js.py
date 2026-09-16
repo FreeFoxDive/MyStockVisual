@@ -52,10 +52,42 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertNotIn("showDepthPanel", self.src)
         self.assertNotIn('id="depth-panel"', self.src)
 
+    def test_phone_depth_dock(self):
+        """手机: 五档搬到右缘独立容器 (仅分时); 桌面/平板仍在左侧基本信息框内。"""
+        self.assertIn('id="depth-dock"', self.src)
+        # 容器常驻 DOM 但默认不显示 → 桌面渲染不受影响
+        css = self.src[self.src.index('#depth-dock {'):]
+        css = css[:css.index('}')]
+        self.assertIn("display: none", css)
+        self.assertIn("right: 0", css, "手机五档栏贴右缘")
+        # 归属可逆: 手机挂右缘容器, 否则挂回左侧信息框
+        host = _extract_fn(self.src, "syncDepthHost")
+        self.assertIn("depth-dock", host)
+        self.assertIn("info-sec", host)
+        self.assertIn("depth-sec", host)
+        # 可见性: 勾选框为总闸门, 手机再叠一层「只分时」
+        vis = _extract_fn(self.src, "depthPanelVisible")
+        self.assertIn("depthSecOn()", vis)
+        self.assertIn("isPhoneUi()", vis)
+        self.assertIn("intraday", vis)
+
     def test_depth_section_not_gated_by_period(self):
         body = _extract_fn(self.src, "depthSecOn")
         self.assertNotIn("intraday", body, "五档应所有周期可用, 不再按周期门控")
         self.assertIn("chk-depth", body)
+
+    def test_side_panels_apply_in_one_place(self):
+        """显隐统一走 applySidePanels, 各处不再各写一遍 (手机/桌面分支集中在一处)。"""
+        self.assertIn("function applySidePanels()", self.src)
+        self.assertEqual(self.src.count("showSidePanel(sidePanelOn())"), 1,
+                         "只允许 applySidePanels 内部出现一次")
+        self.assertEqual(self.src.count("showDepthSection("), 2,
+                         "一处定义 + 只允许 applySidePanels 里调用一次")
+        self.assertNotIn("showDepthSection(depthSecOn())", self.src)
+        body = _extract_fn(self.src, "applySidePanels")
+        for token in ("syncDepthHost()", "showSidePanel(sidePanelOn())",
+                      "depthPanelVisible()", "depth-dock"):
+            self.assertIn(token, body)
 
     def test_depth_has_header_row(self):
         # 五档盘口补列头 (基本信息每行自带 sp-label, 五档此前缺失)
@@ -220,8 +252,12 @@ class SidePanelStaticTest(unittest.TestCase):
         for message in ("请填写有效的退出价", "请填写卖出日期", "请选择卖出理由"):
             self.assertIn(message, submit)
 
-    def test_stream_uses_depth_sec_on(self):
-        self.assertIn("depthSecOn()", _extract_fn(self.src, "ensureQuoteStream"))
+    def test_stream_uses_depth_visibility(self):
+        """五档订阅跟随「是否可见」: 手机非分时不该白拉五档, 桌面仍按勾选框。"""
+        stream = _extract_fn(self.src, "ensureQuoteStream")
+        self.assertIn("depthPanelVisible()", stream)
+        vis = _extract_fn(self.src, "depthPanelVisible")
+        self.assertIn("depthSecOn()", vis, "总闸门仍是勾选框")
 
     def test_live_quote_patches_price_line_for_all_views(self):
         on_quote = _extract_fn(self.src, "updateLivePriceLine")

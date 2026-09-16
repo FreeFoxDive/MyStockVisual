@@ -60,6 +60,14 @@ class ChipDrawModeStaticTest(unittest.TestCase):
         self.assertIn("category", fn, "必须按轴类型守卫")
         self.assertIn("return", fn)
 
+    def test_tooltip_suppressed_in_draw_mode(self):
+        """画线模式下点/拖 K 线不给提示框 (触屏落点会被盖住); 十字线读数保留。"""
+        body = _extract_fn(self.src, "updateChart")
+        self.assertIn("show: !STATE.draw.enabled", body, "tooltip.show 要跟画线模式走")
+        self.assertIn("axisPointer", body, "十字线仍要保留")
+        # 进入画线模式时把已弹出的提示框立刻收掉 (重绘在下一帧)
+        self.assertIn("hideTip", _extract_fn(self.src, "toggleDrawMode"))
+
 
 class ChipDrawModeBehaviorTest(unittest.TestCase):
     """用真实 index.html 源码 + 真实轴结构跑 applyFutureSlots。"""
