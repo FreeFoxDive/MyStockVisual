@@ -175,13 +175,36 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertGreaterEqual(self.src.count("fetchStockInfo()"), 3)
 
     def test_stock_info_shows_and_live_updates_last_price(self):
-        render = _extract_fn(self.src, "renderStockInfo")
-        self.assertIn("row('现价'", render)
+        # 行规格由 renderStockInfo 与截图绘制共用 (见 test_side_panel_shot_js)
+        render = _extract_fn(self.src, "infoPanelRows")
+        self.assertIn("label: '现价'", render)
         self.assertIn("d.last_price", render)
         self.assertIn("priceColor", render)
+        self.assertIn("infoPanelRows", _extract_fn(self.src, "renderStockInfo"))
         live = _extract_fn(self.src, "updateLiveStockInfo")
         self.assertIn("d.last_price = Number(q.last_price)", live)
         self.assertIn("d.prev_close = Number(q.prev_close)", live)
+
+    def test_stock_info_shows_code_and_name(self):
+        # 基本信息面板补 代码/名称 (此前只有工具栏显示), 排在字段最前
+        render = _extract_fn(self.src, "infoPanelRows")
+        self.assertLess(render.index("label: '名称'"), render.index("label: '现价'"))
+        self.assertLess(render.index("label: '代码'"), render.index("label: '现价'"))
+        self.assertIn("panelStockName", render)
+        self.assertIn("panelStockCode", render)
+        # stock-info 未返回时用 K 线 name / 当前 symbol 兜底, 否则面板先闪 "—"
+        self.assertIn("STATE.klineData", _extract_fn(self.src, "panelStockName"))
+        self.assertIn("STATE.symbol", _extract_fn(self.src, "panelStockCode"))
+
+    def test_reopen_button_doubled(self):
+        # 收起后唯一的恢复入口: 点按区域按 2 倍放大 (8px 2px → 16px 4px, 12px → 20px 字)
+        seg = self.src[self.src.index("#side-reopen {"):]
+        css = seg[:seg.index("}")]
+        self.assertIn("padding: 16px 4px", css)
+        self.assertIn("font-size: 20px", css)
+        # 侧栏宽度不变 → grid.left / 画线面板偏移不受牵连
+        panel = self.src[self.src.index("#side-panel {"):]
+        self.assertIn("width: 204px", panel[:panel.index("}")])
 
     def test_stock_info_loads_core_before_enrichment(self):
         body = _extract_fn(self.src, "fetchStockInfo")

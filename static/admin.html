@@ -45,6 +45,7 @@ tr:hover td { background: var(--btn-hover); }
   <button onclick="location.href='/trades.html'" title="返回交易记录">← 交易记录</button>
   <span class="spacer"></span>
   <span class="user" id="toolbar-user"></span>
+  <button onclick="location.href='/quant.html'" title="量化模型管理 / 信号忽视记录">📊 量化管理</button>
   <button id="btn-theme" onclick="toggleTheme()" title="切换主题">🌙</button>
   <button id="btn-logout" class="danger" onclick="doLogout()" style="display:none">退出登录</button>
 </div>
@@ -61,19 +62,6 @@ tr:hover td { background: var(--btn-hover); }
         <tr><th>用户名</th><th>角色</th><th>监控</th><th>创建时间</th><th style="width:180px">操作</th></tr>
       </thead>
       <tbody id="admin-tbody"></tbody>
-    </table>
-  </div>
-
-  <div class="section-title" id="models"><span class="bar"></span>量化模型管理
-    <span style="flex:1"></span>
-    <button class="primary" onclick="openModelModal()">＋ 添加模型</button>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr><th>名称</th><th>策略描述</th><th>推荐持仓</th><th>状态</th><th style="width:180px">操作</th></tr>
-      </thead>
-      <tbody id="model-tbody"></tbody>
     </table>
   </div>
 </div>
@@ -97,29 +85,12 @@ tr:hover td { background: var(--btn-hover); }
   </div>
 </div>
 
-<!-- ═══════════════ 量化模型管理弹窗 (仅 admin) ═══════════════ -->
-<div class="modal-mask" id="model-modal-mask">
-  <div class="modal">
-    <h2 id="model-modal-title">添加模型</h2>
-    <div class="field"><label>模型名称</label><input id="m-name" autocomplete="off" maxlength="64"></div>
-    <div class="field"><label>推荐持仓交易日</label>
-      <input id="m-hold-days" type="number" min="1" max="250" step="1" placeholder="留空则不提醒平仓" style="width:160px">
-      <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">到期日 10:00 / 14:00 钉钉提醒平仓。A/B/C/D 默认 3/20/10/7。</div>
-    </div>
-    <div class="field"><label>策略描述</label><textarea id="m-description" placeholder="可选，说明该模型的选股/买卖策略"></textarea></div>
-    <div class="err" id="model-modal-err"></div>
-    <div class="actions">
-      <button onclick="closeModelModal()">取消</button>
-      <button class="primary" onclick="saveModel()">保存</button>
-    </div>
-  </div>
-</div>
-
 <script>
 // ═══════════════════════════════════════════════════════════════
-// 管理后台 (用户管理 + 量化模型管理) — 仅管理员可访问
+// 管理后台 (用户管理) — 仅管理员可访问
+// 量化模型管理 / 信号忽视记录 见 quant.html
 // ═══════════════════════════════════════════════════════════════
-const state = { user: null, models: [] };
+const state = { user: null };
 
 function escHtml(s) {
   if (s === null || s === undefined) return '';
@@ -144,7 +115,7 @@ async function checkAuth() {
     document.getElementById('toolbar-user').textContent = '👤 ' + state.user.username;
     document.getElementById('btn-logout').style.display = '';
     document.getElementById('main-view').style.display = '';
-    await Promise.all([loadUsers(), loadModels()]);
+    await loadUsers();
     applyHash();
   } catch (e) {
     redirectToLogin();
@@ -269,101 +240,6 @@ bindEnter('au-username', saveAdminAction);
 bindEnter('au-password', saveAdminAction);
 bindEnter('au-reset-password', saveAdminAction);
 
-// ═══════════════ 量化模型管理 ═══════════════
-let modelModalMode = 'add';   // 'add' | 'edit'
-let modelModalTargetId = null;
-
-async function loadModels() {
-  const models = await api('/api/models');
-  state.models = models || [];
-  renderAdminModels();
-}
-
-function renderAdminModels() {
-  const tbody = document.getElementById('model-tbody');
-  if (!state.models.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无模型</td></tr>';
-    return;
-  }
-  tbody.innerHTML = state.models.map(m => `
-    <tr>
-      <td>${escHtml(m.name)}</td>
-      <td class="reason-cell">${escHtml(m.description || '')}</td>
-      <td>${m.hold_days ? m.hold_days + ' 日' : '—'}</td>
-      <td>${m.active ? '<span class="badge closed">启用</span>' : '<span class="badge open">已删除</span>'}</td>
-      <td>${m.active ? `
-        <button onclick="openModelModal(${m.id})">编辑</button>
-        <button class="danger" onclick="deleteModel(${m.id})">删除</button>` : `
-        <button onclick="restoreModel(${m.id})">恢复</button>`}
-      </td>
-    </tr>`).join('');
-}
-
-function openModelModal(id) {
-  modelModalMode = id ? 'edit' : 'add';
-  modelModalTargetId = id || null;
-  const m = id ? state.models.find(x => x.id === id) : null;
-  document.getElementById('model-modal-title').textContent = id ? '编辑模型' : '添加模型';
-  document.getElementById('m-name').value = m ? m.name : '';
-  document.getElementById('m-hold-days').value = (m && m.hold_days) ? m.hold_days : '';
-  document.getElementById('m-description').value = m ? (m.description || '') : '';
-  document.getElementById('model-modal-err').textContent = '';
-  document.getElementById('model-modal-mask').classList.add('show');
-  focusFirstInput('model-modal-mask');
-}
-
-function closeModelModal() {
-  document.getElementById('model-modal-mask').classList.remove('show');
-  modelModalTargetId = null;
-}
-
-async function saveModel() {
-  document.getElementById('model-modal-err').textContent = '';
-  const holdRaw = document.getElementById('m-hold-days').value.trim();
-  const body = {
-    name: document.getElementById('m-name').value.trim(),
-    description: document.getElementById('m-description').value.trim(),
-    hold_days: holdRaw === '' ? null : parseInt(holdRaw, 10),
-  };
-  try {
-    if (modelModalMode === 'add') {
-      await api('/api/models', { method: 'POST', body: JSON.stringify(body) });
-    } else {
-      await api('/api/models/' + modelModalTargetId, { method: 'PUT', body: JSON.stringify(body) });
-    }
-    closeModelModal();
-    await loadModels();
-  } catch (e) {
-    document.getElementById('model-modal-err').textContent = e.message;
-  }
-}
-
-async function deleteModel(id) {
-  const m = state.models.find(x => x.id === id);
-  const name = m ? m.name : '该模型';
-  if (!confirm(`确认删除模型「${name}」？将标记为停用，其名下交易记录与统计历史不受影响。`)) return;
-  try {
-    await api('/api/models/' + id, { method: 'DELETE' });
-    await loadModels();
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-async function restoreModel(id) {
-  try {
-    await api('/api/models/' + id + '/restore', { method: 'POST' });
-    await loadModels();
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-document.getElementById('model-modal-mask').addEventListener('click', function (e) {
-  if (e.target === this) closeModelModal();
-});
-bindEnter('m-name', saveModel);
-
 function bindEnter(id, fn) {
   document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
 }
@@ -384,10 +260,10 @@ document.addEventListener('keydown', (e) => {
 // 初始化主题 (与其它页共享 visual-theme)
 VisualTheme.init({ buttonId: 'btn-theme' });
 
-// 锚点定位 (#users / #models)
+// 锚点定位 (#users)
 function applyHash() {
   const h = location.hash.replace('#', '');
-  if (h === 'users' || h === 'models') {
+  if (h === 'users') {
     const el = document.getElementById(h);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }

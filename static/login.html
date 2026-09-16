@@ -77,6 +77,7 @@ function resolveNext() {
   const next = new URLSearchParams(location.search).get('next');
   if (next === '/trades.html') return '/trades.html';
   if (next === '/admin.html') return '/admin.html';
+  if (next === '/quant.html') return '/quant.html';
   return '/index.html';
 }
 

@@ -458,8 +458,9 @@ body {
 }
 #side-reopen {
   position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 7;
-  display: none; padding: 8px 2px; font-size: 12px; line-height: 1;
-  border: 1px solid var(--border); border-left: none; border-radius: 0 4px 4px 0;
+  /* 收起后唯一的恢复入口, 点按区域按 2 倍放大 (8px 2px → 16px 4px, 12px → 20px 字) */
+  display: none; padding: 16px 4px; font-size: 20px; line-height: 1;
+  border: 1px solid var(--border); border-left: none; border-radius: 0 8px 8px 0;
   background: var(--bg-panel); color: var(--text-secondary); cursor: pointer;
 }
 #side-reopen:hover { color: var(--text); }
@@ -957,12 +958,16 @@ function showToast(msg, opts) {
   setTimeout(() => el.remove(), opts.duration || 5000);
 }
 
-/** 保存当前图表为 PNG (TradingView 相机按钮对标) */
+/** 保存当前图表为 PNG (TradingView 相机按钮对标; 含画线层与左侧基本信息面板) */
 function saveChartImage() {
   if (!STATE.chart) { showToast('图表未就绪'); return; }
   try {
-    const base = STATE.chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: C().bg });
+    const pixelRatio = 2;
+    const base = STATE.chart.getDataURL({ type: 'png', pixelRatio, backgroundColor: C().bg });
     const overlay = document.getElementById('draw-overlay');
+    // 侧栏是 DOM: 之前只导出两个 canvas, 基本信息从不出现在图片里, 且 grid.left
+    // 已为面板让位 → 图片左侧留一条空白。这里把面板一并重绘上去。
+    const panel = sidePanelOn() ? document.getElementById('side-panel') : null;
     const finish = (url) => {
       const a = document.createElement('a');
       a.href = url;
@@ -970,8 +975,9 @@ function saveChartImage() {
       a.click();
       showToast('图表图片已保存');
     };
-    if (!overlay || !overlay.width) { finish(base); return; }
-    // 合成画线层 (K线图与 overlay 同尺寸, 2x pixelRatio)
+    const hasOverlay = !!(overlay && overlay.width);
+    if (!hasOverlay && !panel) { finish(base); return; }
+    // 合成: K线图 → 画线层 → 侧栏 (覆盖左侧留白区, 顺序不可颠倒)
     const img = new Image();
     img.onload = () => {
       try {
@@ -979,7 +985,13 @@ function saveChartImage() {
         cv.width = img.width; cv.height = img.height;
         const ctx = cv.getContext('2d');
         ctx.drawImage(img, 0, 0);
-        ctx.drawImage(overlay, 0, 0, cv.width, cv.height);
+        if (hasOverlay) ctx.drawImage(overlay, 0, 0, cv.width, cv.height);
+        if (panel) {
+          const box = document.getElementById('chart-container');
+          const cssW = (box && box.clientWidth) || panel.offsetWidth || 204;
+          const ratio = cv.width / Math.max(1, cssW);
+          drawSidePanelShot(ctx, sidePanelShotModel(panel.offsetWidth, cv.height / ratio), ratio);
+        }
         finish(cv.toDataURL('image/png'));
       } catch (err) { finish(base); }
     };
@@ -1106,6 +1118,8 @@ const CHART_VAR_MAP = {
   predictFill: '--chart-predict-fill', predictBorder: '--chart-predict-border',
   tipBg: '--chart-tip-bg', tipBorder: '--chart-tip-border', tipText: '--text',
   riskTp: '--risk-tp', riskBe: '--risk-be', riskSl: '--risk-sl', riskFg: '--risk-fg',
+  // 截图合成侧栏时取色 (DOM 面板与导出图必须同色)
+  panelBg: '--bg-panel', muted: '--text-secondary',
 };
 let _chartColorsCache = { theme: null, colors: null };
 
@@ -1991,26 +2005,38 @@ function panelGridLeft() {
   return (w + 12 + AXIS_LABEL_RESERVE) + 'px';
 }
 
-// ── 基本信息面板 (现价/行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态) ──
+// ── 基本信息面板 (代码/名称/现价/行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态) ──
 function fmtLots(v) {
   if (v == null) return '—';
   return Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(2) + '万手' : Math.round(v) + '手';
 }
 
-function renderStockInfo(d) {
-  const body = document.getElementById('info-body');
-  if (!body) return;
-  if (!d || d.error) { body.innerHTML = '<div class="dp-empty">无数据</div>'; return; }
+/** 面板里的名称: stock-info 未返回时用 K 线返回的 name 兜底 (实时行情会先到) */
+function panelStockName(d) {
+  return (d && d.name) || (STATE.klineData && STATE.klineData.name) || '—';
+}
+
+/** 面板里的代码: 带交易所后缀, 与 stock-info/kline 的 symbol 一致 */
+function panelStockCode(d) {
+  return (d && d.symbol) || STATE.symbol || '—';
+}
+
+/** 基本信息行规格, 返回 [{label, text, color}] (color=null 用默认前景色; 无数据返回 null)。
+ *
+ *  HTML 渲染 (renderStockInfo) 与截图绘制 (sidePanelShotModel) 共用本函数,
+ *  两处各自取数会让截图与面板漂移 (出现截图缺行/值不同步)。
+ */
+function infoPanelRows(d) {
+  if (!d || d.error) return null;
   const up = C().up, down = C().down;
   const gray = 'var(--text-secondary)';
   const pct = (v) => {
-    if (v == null || isNaN(v)) return '—';
+    if (v == null || isNaN(v)) return { text: '—', color: null };
     v = normPct(v);
-    return `<span style="color:${v >= 0 ? up : down}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+    return { text: (v >= 0 ? '+' : '') + v.toFixed(2) + '%', color: v >= 0 ? up : down };
   };
   const fixed = (v) => (v == null || isNaN(v) ? '—' : Number(v).toFixed(2));
-  const row = (label, val) =>
-    `<div class="sp-row"><span class="sp-label">${label}</span><span class="sp-val">${val}</span></div>`;
+  const px = (v, color) => (v == null ? { text: '—', color: null } : { text: fmtPrice3(v), color });
   const statusColor = d.trade_status === 'trading' ? up
     : (d.trade_status === 'halt' ? 'var(--chart-halt)' : gray);
   const lastPrice = Number(d.last_price);
@@ -2018,22 +2044,39 @@ function renderStockInfo(d) {
   const priceColor = Number.isFinite(lastPrice)
     ? (lastPrice > prevClose ? up : (lastPrice < prevClose ? down : gray))
     : gray;
-  body.innerHTML = [
-    row('现价', d.last_price == null ? '—' : `<span style="color:${priceColor}">${fmtPrice3(d.last_price)}</span>`),
-    row('行业', escHtml(d.industry || '—')),
-    row('总手', fmtLots(d.volume)),
-    row('成交额', d.amount == null ? '—' : fmtCN(d.amount)),
-    row('换手', d.turnover_rate == null ? '—' : Number(d.turnover_rate).toFixed(2) + '%'),
-    row('量比', fixed(d.vol_ratio)),
-    row('涨停价', d.limit_up == null ? '—' : `<span style="color:${up}">${fmtPrice3(d.limit_up)}</span>`),
-    row('跌停价', d.limit_down == null ? '—' : `<span style="color:${down}">${fmtPrice3(d.limit_down)}</span>`),
-    row('3日涨幅', pct(d.chg_3d)),
-    row('5日涨幅', pct(d.chg_5d)),
-    row('10日涨幅', pct(d.chg_10d)),
-    row('PE', fixed(d.pe)),
-    row('PB', fixed(d.pb)),
-    row('状态', `<span style="color:${statusColor}">${escHtml(d.trade_status_text || '—')}</span>`),
-  ].join('');
+  const p3 = pct(d.chg_3d), p5 = pct(d.chg_5d), p10 = pct(d.chg_10d);
+  return [
+    { label: '名称', text: panelStockName(d), color: null },
+    { label: '代码', text: panelStockCode(d), color: null },
+    Object.assign({ label: '现价' }, px(d.last_price, priceColor)),
+    { label: '行业', text: d.industry || '—', color: null },
+    { label: '总手', text: fmtLots(d.volume), color: null },
+    { label: '成交额', text: d.amount == null ? '—' : fmtCN(d.amount), color: null },
+    { label: '换手', text: d.turnover_rate == null ? '—' : Number(d.turnover_rate).toFixed(2) + '%', color: null },
+    { label: '量比', text: fixed(d.vol_ratio), color: null },
+    Object.assign({ label: '涨停价' }, px(d.limit_up, up)),
+    Object.assign({ label: '跌停价' }, px(d.limit_down, down)),
+    { label: '3日涨幅', text: p3.text, color: p3.color },
+    { label: '5日涨幅', text: p5.text, color: p5.color },
+    { label: '10日涨幅', text: p10.text, color: p10.color },
+    { label: 'PE', text: fixed(d.pe), color: null },
+    { label: 'PB', text: fixed(d.pb), color: null },
+    { label: '状态', text: d.trade_status_text || '—', color: statusColor },
+  ];
+}
+
+function stockInfoRowHtml(r) {
+  const style = r.color ? ` style="color:${r.color}"` : '';
+  return `<div class="sp-row"><span class="sp-label">${escHtml(r.label)}</span>` +
+    `<span class="sp-val"${style}>${escHtml(r.text)}</span></div>`;
+}
+
+function renderStockInfo(d) {
+  const body = document.getElementById('info-body');
+  if (!body) return;
+  const rows = infoPanelRows(d);
+  body.innerHTML = rows ? rows.map(stockInfoRowHtml).join('')
+    : '<div class="dp-empty">无数据</div>';
 }
 
 async function fetchStockInfo(enrich = false, retry = 0) {
@@ -2067,27 +2110,164 @@ async function fetchStockInfo(enrich = false, retry = 0) {
   }
 }
 
-function renderDepth(depth) {
-  const body = document.getElementById('depth-body');
-  if (!body) return;
-  if (!depth) { body.innerHTML = '<div class="dp-empty">无五档数据</div>'; return; }
-  const up = C().up;
-  const down = C().down;
-  const pf = fmtPrice3;
-  const vf = (v) => (v == null ? '—' : String(v));
-  const row = (label, price, vol, color) =>
-    `<div class="dp-row"><span class="dp-label">${label}</span>` +
-    `<span class="dp-price" style="color:${color}">${pf(price)}</span>` +
-    `<span class="dp-vol">${vf(vol)}</span></div>`;
+/** 五档行规格, 返回 [{kind:'row',label,price,vol,priceColor} | {kind:'sep'}] (无数据返回 null)。
+ *
+ *  与 infoPanelRows 同一约定: HTML 渲染与截图绘制共用, 避免截图缺行/价格不同步。
+ */
+function depthPanelRows(depth) {
+  if (!depth) return null;
+  const up = C().up, down = C().down;
+  const rows = [];
+  const row = (label, price, vol, color) => rows.push({
+    kind: 'row', label, price: fmtPrice3(price),
+    vol: (vol == null ? '—' : String(vol)), priceColor: color,
+  });
   const asks = depth.ask_prices || [];
   const av = depth.ask_volumes || [];
   const bids = depth.bid_prices || [];
   const bv = depth.bid_volumes || [];
-  let html = '';
-  for (let i = 4; i >= 0; i--) html += row('卖' + (i + 1), asks[i], av[i], down);
-  html += '<div class="dp-sep"></div>';
-  for (let i = 0; i < 5; i++) html += row('买' + (i + 1), bids[i], bv[i], up);
-  body.innerHTML = html;
+  for (let i = 4; i >= 0; i--) row('卖' + (i + 1), asks[i], av[i], down);
+  rows.push({ kind: 'sep' });
+  for (let i = 0; i < 5; i++) row('买' + (i + 1), bids[i], bv[i], up);
+  return rows;
+}
+
+function renderDepth(depth) {
+  const body = document.getElementById('depth-body');
+  if (!body) return;
+  const rows = depthPanelRows(depth);
+  if (!rows) { body.innerHTML = '<div class="dp-empty">无五档数据</div>'; return; }
+  body.innerHTML = rows.map((r) => {
+    if (r.kind === 'sep') return '<div class="dp-sep"></div>';
+    const style = r.priceColor ? ` style="color:${r.priceColor}"` : '';
+    return `<div class="dp-row"><span class="dp-label">${r.label}</span>` +
+      `<span class="dp-price"${style}>${r.price}</span>` +
+      `<span class="dp-vol">${r.vol}</span></div>`;
+  }).join('');
+}
+
+// ── 截图合成: 侧栏 (基本信息 + 五档) ──
+// 侧栏是 DOM, 不能像 ECharts/画线层那样直接导出; 导出时按与 CSS 一致的尺寸重绘
+// 到左侧留白区 (grid.left 已为面板让位)。行内容复用 infoPanelRows/depthPanelRows,
+// 保证截图与面板不漂移。单位均为 CSS px, 绘制时整体乘 scale (导出像素比)。
+const SIDE_SHOT_LAYOUT = {
+  padTop: 4, padX: 8, font: 12, line: 18,      // #side-panel padding / 字号 / 行高
+  titlePadBottom: 3, titleGap: 3,              // .sp-title padding-bottom / margin-bottom
+  infoLabel: 58,                               // .sp-row .sp-label width
+  depthLabel: 34, depthVol: 58, depthPricePad: 8,  // .dp-label / .dp-vol / .dp-price padding-right
+  depthGapTop: 5, depthGapBottom: 4,           // #depth-sec margin-top / padding-top
+  headPadBottom: 2, headGap: 3,                // .dp-head padding-bottom / margin-bottom
+  sepBlock: 7,                                 // .dp-sep 1px + 上下 3px margin
+  emptyPadTop: 8,                              // .dp-empty padding-top
+};
+
+/** 组装截图绘制模型 (纯函数, 不读 DOM): 文本/色块带绝对坐标与基线 y, 便于测试。 */
+function sidePanelShotModel(width, height) {
+  const c = C();
+  const L = SIDE_SHOT_LAYOUT;
+  const w = Number(width) > 0 ? Number(width) : 204;
+  const h = Number(height) > 0 ? Number(height) : 0;
+  const muted = c.muted || 'var(--text-secondary)';
+  const fg = c.text || 'var(--text)';
+  const border = c.border || 'var(--border)';
+  const texts = [], rules = [];
+  let y = L.padTop;
+  const put = (text, color, x, maxWidth, align, opts) => texts.push(Object.assign({
+    text: text == null ? '' : String(text), color: color || fg,
+    x, maxWidth: Math.max(0, maxWidth), align, y: y + L.font,
+  }, opts || {}));
+
+  if (!infoPanelOn()) return { width: w, height: h, bg: c.panelBg, texts, rules, contentHeight: 0 };
+
+  put('基本信息', muted, L.padX, w - L.padX * 2, 'left', { bold: true });
+  y += L.font + L.titlePadBottom;
+  rules.push({ x: 0, y, width: w, height: 1, color: border });
+  y += 1 + L.titleGap;
+
+  const rows = infoPanelRows(STATE.stockInfo);
+  if (!rows) {
+    y += L.emptyPadTop;
+    put('无数据', muted, w / 2, w - L.padX * 2, 'center');
+    y += L.line;
+  } else {
+    for (const r of rows) {
+      put(r.label, muted, L.padX, L.infoLabel, 'left');
+      put(r.text, r.color, w - L.padX, w - L.padX - (L.padX + L.infoLabel), 'right');
+      y += L.line;
+    }
+  }
+
+  if (depthSecOn()) {
+    y += L.depthGapTop;
+    rules.push({ x: 0, y, width: w, height: 1, color: border });
+    y += 1 + L.depthGapBottom;
+    put('档位', muted, L.padX, L.depthLabel, 'left');
+    const priceRight = w - L.padX - L.depthVol - L.depthPricePad;
+    put('价格', muted, priceRight, priceRight - (L.padX + L.depthLabel), 'right');
+    put('量', muted, w - L.padX, L.depthVol, 'right');
+    y += L.line + L.headPadBottom;
+    rules.push({ x: 0, y, width: w, height: 1, color: border });
+    y += 1 + L.headGap;
+    const drows = depthPanelRows(STATE.depth);
+    if (!drows) {
+      y += L.emptyPadTop;
+      put('无五档数据', muted, w / 2, w - L.padX * 2, 'center');
+      y += L.line;
+    } else {
+      for (const r of drows) {
+        if (r.kind === 'sep') {
+          rules.push({ x: L.padX, y: y + 3, width: w - L.padX * 2, height: 1, color: border });
+          y += L.sepBlock;
+          continue;
+        }
+        put(r.label, muted, L.padX, L.depthLabel, 'left');
+        put(r.price, r.priceColor, priceRight, priceRight - (L.padX + L.depthLabel), 'right');
+        put(r.vol, fg, w - L.padX, L.depthVol, 'right');
+        y += L.line;
+      }
+    }
+  }
+  return { width: w, height: h, bg: c.panelBg, texts, rules, contentHeight: y + L.padTop };
+}
+
+/** 超宽文本截断为 "…" (按当前 font 实测宽度, 右对齐单元格不能溢出到面板外) */
+function fitShotText(ctx, text, maxPx) {
+  const s = text == null ? '' : String(text);
+  if (!ctx || typeof ctx.measureText !== 'function' || !(maxPx > 0)) return s;
+  if (ctx.measureText(s).width <= maxPx) return s;
+  let cut = s;
+  while (cut.length > 1 && ctx.measureText(cut + '…').width > maxPx) cut = cut.slice(0, -1);
+  return cut.length < s.length ? cut + '…' : s;
+}
+
+/** 把侧栏绘制模型画到 canvas (scale = 导出像素比), 返回内容高度 (CSS px)。 */
+function drawSidePanelShot(ctx, model, scale) {
+  if (!ctx || !model) return 0;
+  const s = Number(scale) > 0 ? Number(scale) : 1;
+  const L = SIDE_SHOT_LAYOUT;
+  const px = (v) => v * s;
+  ctx.save();
+  try {
+    ctx.fillStyle = model.bg;
+    ctx.fillRect(0, 0, px(model.width), px(model.height));
+    // 面板 DOM 是 overflow-y:auto: 内容超出可见高度时按裁剪处理, 不缩放变形
+    ctx.beginPath();
+    ctx.rect(0, 0, px(model.width), px(model.height));
+    ctx.clip();
+    for (const r of model.rules) {
+      ctx.fillStyle = r.color;
+      ctx.fillRect(px(r.x), px(r.y), px(r.width), Math.max(1, px(r.height)));
+    }
+    for (const t of model.texts) {
+      ctx.font = `${t.bold ? '700 ' : ''}${px(L.font)}px monospace`;
+      ctx.fillStyle = t.color;
+      ctx.textAlign = t.align || 'left';
+      ctx.fillText(fitShotText(ctx, t.text, px(t.maxWidth)), px(t.x), px(t.y));
+    }
+  } finally {
+    ctx.restore();
+  }
+  return model.contentHeight;
 }
 
 async function fetchDepth() {

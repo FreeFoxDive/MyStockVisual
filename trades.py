@@ -75,6 +75,22 @@ EXIT_REASONS = [
     "其他",
 ]
 
+# 信号忽视记录的预设剔除理由 (量化管理页用; 与交易理由一样可再补自由文本)
+IGNORE_REASONS = [
+    "量能不足",
+    "位置过高/追高风险",
+    "涨停或无法买入",
+    "大盘环境不佳",
+    "板块/题材不持续",
+    "业绩/基本面存疑",
+    "估值过高",
+    "流动性不足(成交额小)",
+    "已有同标的持仓",
+    "风控/仓位已满",
+    "信号与模型不符",
+    "其他",
+]
+
 # ── 量化模型种子 (对齐回测管线 A–E) ──
 # 策略描述默认留空，不暴露内部策略细节
 # hold_days: 推荐持仓交易日; None = 不发到期平仓提醒
@@ -153,6 +169,27 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_user_exit   ON trades(user_id, exit_date);
 CREATE INDEX IF NOT EXISTS idx_trades_user_symbol ON trades(user_id, symbol);
+
+CREATE TABLE IF NOT EXISTS signal_ignores (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,     -- 记录人
+    symbol        TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    model_id      INTEGER NOT NULL,     -- 模型必填 (软删模型仍保留历史行, 故 RESTRICT 不会误伤)
+    reason        TEXT NOT NULL,        -- 剔除理由 (预设), 不可为空
+    reason_note   TEXT,                 -- 剔除理由补充 (自由文本), 可空
+    signal_date   TEXT NOT NULL,        -- YYYY-MM-DD
+    current_price REAL,                 -- 现价, 可空
+    take_profit   REAL,                 -- 止盈, 可空
+    breakeven     REAL,                 -- 保本, 可空
+    stop_loss     REAL,                 -- 止损, 可空
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_signal_ignores_symbol ON signal_ignores(symbol);
+CREATE INDEX IF NOT EXISTS idx_signal_ignores_date   ON signal_ignores(signal_date);
 
 CREATE TABLE IF NOT EXISTS trade_legs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1104,6 +1141,238 @@ def _model_exists(model_id):
     try:
         row = conn.execute("SELECT 1 FROM models WHERE id=?", (model_id,)).fetchone()
         return row is not None
+    finally:
+        conn.close()
+
+
+# ── 信号忽视记录 (量化管理: 记录被人工剔除的信号; 仅管理员维护) ──
+# 与 trades 的关键差异: 模型必填 (不可为空), 剔除理由必填;
+# 现价/止盈/保本/止损都可留空 (事后补记时未必有这些价位)。
+IGNORE_REASON_MAX = 64
+IGNORE_NOTE_MAX = 500
+_IGNORE_PRICE_KEYS = ("current_price", "take_profit", "stop_loss", "breakeven")
+_IGNORE_RISK_ORDER = ("take_profit", "breakeven", "stop_loss")   # 止盈 > 保本 > 止损
+
+
+def _parse_ignore_prices(merged):
+    """解析 现价/止盈/保本/止损。空串或 None → 清空为 None; 非空须 > 0。
+
+    与 _parse_risk_prices(enforce=True) 的差异: 不要求三个风控价齐全 (忽视记录
+    允许只记止盈或只记止损), 但两两同时在时顺序不能反。
+    返回 ({4 个字段}, error_msg)。
+    """
+    result = {}
+    for key, label in (
+        ("current_price", "现价"),
+        ("take_profit", "止盈价"),
+        ("stop_loss", "止损价"),
+        ("breakeven", "保本价"),
+    ):
+        raw = merged.get(key, None)
+        if raw in (None, ""):
+            result[key] = None
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None, f"{label}无效"
+        if val <= 0:
+            return None, f"{label}必须大于 0"
+        result[key] = val
+    ordered = [result[k] for k in _IGNORE_RISK_ORDER if result[k] is not None]
+    for a, b in zip(ordered, ordered[1:]):
+        if not a > b:
+            return None, "须满足止盈价 > 保本价 > 止损价"
+    return result, None
+
+
+def _clean_signal_ignore(data, existing=None):
+    """校验并规范化信号忽视记录。返回 (clean_dict, error_msg)。"""
+    merged = {}
+    if existing:
+        merged.update(existing)
+    for k, v in data.items():
+        if v is not None:
+            merged[k] = v
+
+    def s(v):
+        return v.strip() if isinstance(v, str) else (v if v else "")
+
+    symbol = s(merged.get("symbol")).upper()
+    name = s(merged.get("name"))
+    if not symbol:
+        return None, "缺少股票代码"
+    if not name:
+        return None, "缺少股票名称"
+    reason = s(merged.get("reason"))
+    if not reason:
+        return None, "请选择剔除理由"
+    if len(reason) > IGNORE_REASON_MAX:
+        return None, f"剔除理由不能超过 {IGNORE_REASON_MAX} 字"
+    note = s(merged.get("reason_note"))
+    if len(note) > IGNORE_NOTE_MAX:
+        return None, f"剔除理由补充不能超过 {IGNORE_NOTE_MAX} 字"
+    # 模型必填: 空/None/非法一律拒绝, 记录必须可追溯到具体模型
+    mid = merged.get("model_id")
+    if mid in (None, ""):
+        return None, "请选择模型"
+    try:
+        model_id = int(mid)
+    except (TypeError, ValueError):
+        return None, "模型无效"
+    if not _model_exists(model_id):
+        return None, "模型不存在"
+    signal_date = _canonical_date(merged.get("signal_date"))
+    if not signal_date:
+        return None, "信号日期无效"
+    err = _reject_future_date(signal_date, "信号日期")
+    if err:
+        return None, err
+    prices, err = _parse_ignore_prices(merged)
+    if err:
+        return None, err
+    clean = {
+        "symbol": symbol, "name": name, "model_id": model_id,
+        "reason": reason, "reason_note": note or None, "signal_date": signal_date,
+    }
+    clean.update(prices)
+    return clean, None
+
+
+def validate_signal_ignore(data, existing=None):
+    """信号忽视记录字段校验: 返回错误文案 (无错为 None)。
+
+    文案由 _clean_signal_ignore 的固定规则产生, 不含异常原文。
+    """
+    _, err = _clean_signal_ignore(data, existing)
+    return err
+
+
+_SIGNAL_IGNORE_SELECT = (
+    "SELECT i.*, m.name AS model_name, m.active AS model_active, u.username AS created_by "
+    "FROM signal_ignores i "
+    "LEFT JOIN models m ON m.id = i.model_id "
+    "LEFT JOIN users u ON u.id = i.user_id"
+)
+
+
+def _signal_ignore_row(row):
+    d = dict(row)
+    d["model_active"] = bool(d.get("model_active"))
+    return d
+
+
+def get_signal_ignore(ignore_id):
+    """按 id 取单条 (含 model_name/created_by), 不存在返回 None。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(_SIGNAL_IGNORE_SELECT + " WHERE i.id=?", (ignore_id,)).fetchone()
+    finally:
+        conn.close()
+    return _signal_ignore_row(row) if row is not None else None
+
+
+def list_signal_ignores(filters=None):
+    """查询信号忽视记录, 返回 (records, total)。
+
+    filters: q(代码/名称/理由模糊)/model_id/from/to(按信号日期)/limit/offset。
+    """
+    filters = filters or {}
+    where, args = [], []
+    if filters.get("q"):
+        like = f"%{filters['q']}%"
+        where.append(
+            "(i.symbol LIKE ? OR i.name LIKE ? OR i.reason LIKE ? OR i.reason_note LIKE ?)"
+        )
+        args.extend([like] * 4)
+    if filters.get("model_id") not in (None, ""):
+        # 先转换再拼 SQL: 拼了占位符却转不出整数会让参数个数与语句不符
+        try:
+            model_id = int(filters["model_id"])
+        except (TypeError, ValueError):
+            model_id = None
+        if model_id is not None:
+            where.append("i.model_id=?")
+            args.append(model_id)
+    if filters.get("from"):
+        where.append("i.signal_date >= ?")
+        args.append(filters["from"])
+    if filters.get("to"):
+        where.append("i.signal_date <= ?")
+        args.append(filters["to"])
+    sql = _SIGNAL_IGNORE_SELECT
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    conn = get_conn()
+    try:
+        total = conn.execute(f"SELECT COUNT(*) FROM ({sql})", args).fetchone()[0]
+        sql += " ORDER BY i.signal_date DESC, i.id DESC LIMIT ? OFFSET ?"
+        limit = _clamp_int(filters.get("limit"), 1, 500, 50)
+        offset = max(0, _clamp_int(filters.get("offset"), 0, 10 ** 9, 0))
+        rows = conn.execute(sql, args + [limit, offset]).fetchall()
+    finally:
+        conn.close()
+    return [_signal_ignore_row(r) for r in rows], total
+
+
+def create_signal_ignore(user_id, data):
+    """新增信号忽视记录, 返回记录 dict; 校验失败抛 ValueError。"""
+    clean, err = _clean_signal_ignore(data)
+    if err:
+        raise ValueError(err)
+    now = _now_iso()
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO signal_ignores(user_id, symbol, name, model_id, reason, reason_note, "
+            "signal_date, current_price, take_profit, breakeven, stop_loss, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                user_id, clean["symbol"], clean["name"], clean["model_id"], clean["reason"],
+                clean["reason_note"], clean["signal_date"], clean["current_price"],
+                clean["take_profit"], clean["breakeven"], clean["stop_loss"], now, now,
+            ),
+        )
+        conn.commit()
+        ignore_id = cur.lastrowid
+    finally:
+        conn.close()
+    return get_signal_ignore(ignore_id)
+
+
+def update_signal_ignore(ignore_id, data):
+    """局部更新 (未提供的字段保留原值; 置空传空串)。返回记录 dict 或 None。"""
+    existing = get_signal_ignore(ignore_id)
+    if not existing:
+        return None
+    clean, err = _clean_signal_ignore(data, existing)
+    if err:
+        raise ValueError(err)
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE signal_ignores SET symbol=?, name=?, model_id=?, reason=?, reason_note=?, "
+            "signal_date=?, current_price=?, take_profit=?, breakeven=?, stop_loss=?, updated_at=? "
+            "WHERE id=?",
+            (
+                clean["symbol"], clean["name"], clean["model_id"], clean["reason"],
+                clean["reason_note"], clean["signal_date"], clean["current_price"],
+                clean["take_profit"], clean["breakeven"], clean["stop_loss"],
+                _now_iso(), ignore_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_signal_ignore(ignore_id)
+
+
+def delete_signal_ignore(ignore_id):
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM signal_ignores WHERE id=?", (ignore_id,))
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 

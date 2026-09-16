@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📊 量化管理 — Visual</title>
+<link rel="stylesheet" href="/css/theme.css">
+<style>
+/* ═══════════════ 主视图 (页面专属, 类名与交易页面一致) ═══════════════ */
+#main-view { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+
+.section-title { font-size: 15px; font-weight: 700; margin: 26px 0 12px; display: flex; align-items: center; gap: 8px; scroll-margin-top: 70px; }
+.section-title .bar { width: 4px; height: 16px; background: var(--btn-active); border-radius: 2px; }
+
+input, select, textarea {
+  padding: 6px 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 13px; outline: none;
+  transition: border-color 0.2s;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--btn-active); }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 980px; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--btn-hover); }
+td.sym .code { color: var(--text-secondary); font-size: 12px; }
+td.sym a.sym-link { color: inherit; text-decoration: none; display: block; cursor: pointer; }
+td.sym a.sym-link:hover, td.sym a.sym-link:hover .code { text-decoration: underline; color: var(--btn-active); }
+.badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+.badge.open { background: rgba(var(--up-rgb), 0.12); color: var(--up-text); }
+.badge.closed { background: rgba(var(--down-rgb), 0.12); color: var(--down-text); }
+.badge.model-off { background: rgba(var(--btn-active-rgb), 0.12); color: var(--btn-active); }
+.reason-cell { max-width: 260px; white-space: normal; font-size: 12px; color: var(--text-secondary); }
+.empty { text-align: center; color: var(--text-secondary); padding: 30px 0; }
+.row-actions { display: flex; gap: 6px; }
+
+/* 过滤栏 */
+.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.filter-bar input[type="date"] { width: 150px; }
+.filter-bar .grow { flex: 1; }
+.date-range { display: flex; align-items: center; gap: 4px; }
+.pagination { display: flex; align-items: center; gap: 10px; margin-top: 12px; justify-content: flex-end; }
+.pagination .info { color: var(--text-secondary); font-size: 13px; }
+
+/* 弹窗 */
+.modal-mask {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45); z-index: 100;
+  align-items: flex-start; justify-content: center;
+  padding: 40px 16px; overflow-y: auto;
+}
+.modal-mask.show { display: flex; }
+.modal {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 10px; padding: 20px 24px; width: 100%; max-width: 620px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.25);
+  max-height: calc(100vh - 80px); overflow-y: auto;
+}
+.modal h2 { font-size: 17px; margin-bottom: 16px; }
+.modal .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.modal .full { grid-column: 1 / -1; }
+.modal label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+.modal input, .modal select, .modal textarea { width: 100%; }
+.modal textarea { resize: vertical; min-height: 50px; }
+.modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.modal .err { color: var(--up-text); font-size: 13px; margin-top: 10px; }
+.modal .hint { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+
+/* 搜索补全 (与交易页面同款) */
+.autocomplete { position: relative; }
+.autocomplete .dropdown {
+  display: none; position: absolute; top: 100%; left: 0; right: 0;
+  max-height: 220px; overflow-y: auto; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 200;
+}
+.autocomplete .dropdown.show { display: block; }
+.autocomplete .dropdown .item { padding: 6px 10px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--border); }
+.autocomplete .dropdown .item:hover { background: var(--btn-active); color: var(--btn-active-text); }
+.autocomplete .dropdown .item .code { color: var(--text-secondary); font-size: 12px; margin-left: 6px; }
+.autocomplete .dropdown .item:hover .code { color: rgba(255,255,255,0.7); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+@media (max-width: 640px) {
+  #main-view { padding: 14px 12px; }
+  .filter-bar > * { flex: 1 1 auto; }
+  .filter-bar #f-iq { width: 100% !important; flex-basis: 100%; }
+  .modal { padding: 16px; }
+  .modal .grid { grid-template-columns: 1fr; }
+}
+</style>
+<script src="/js/theme.js"></script>
+<script>
+/* 主题预置: 首帧渲染前应用已存/系统主题, 消除暗色用户刷新闪白 */
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
+<script src="/js/api.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════ 顶栏 ═══════════════ -->
+<div id="toolbar">
+  <span class="title">📊 量化管理</span>
+  <button onclick="location.href='/trades.html'" title="返回交易记录">← 交易记录</button>
+  <button onclick="location.href='/admin.html'" title="用户管理">👥 用户管理</button>
+  <span class="spacer"></span>
+  <span class="user" id="toolbar-user"></span>
+  <button id="btn-theme" onclick="toggleTheme()" title="切换主题">🌙</button>
+  <button id="btn-logout" class="danger" onclick="doLogout()" style="display:none">退出登录</button>
+</div>
+
+<!-- ═══════════════ 主视图 ═══════════════ -->
+<div id="main-view" style="display:none">
+
+  <!-- ── 量化模型管理 (原 admin.html#models 移入) ── -->
+  <div class="section-title" id="models"><span class="bar"></span>量化模型管理
+    <span style="flex:1"></span>
+    <button class="primary" onclick="openModelModal()">＋ 添加模型</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>名称</th><th>策略描述</th><th>推荐持仓</th><th>状态</th><th style="width:180px">操作</th></tr>
+      </thead>
+      <tbody id="model-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- ── 信号忽视记录 ── -->
+  <div class="section-title" id="ignores"><span class="bar"></span>信号忽视记录
+    <span style="flex:1"></span>
+    <button class="primary" onclick="openIgnoreModal()">＋ 新增记录</button>
+  </div>
+  <div class="filter-bar">
+    <select id="f-imodel" onchange="resetIgnoresAndLoad()">
+      <option value="">全部模型</option>
+    </select>
+    <input type="text" id="f-iq" placeholder="代码 / 名称 / 剔除理由 搜索..." style="width:220px"
+           onkeydown="if(event.key==='Enter')resetIgnoresAndLoad()">
+    <span class="date-range">
+      <input type="date" id="f-ifrom" onchange="resetIgnoresAndLoad()">
+      <span style="color:var(--text-secondary)">至</span>
+      <input type="date" id="f-ito" onchange="resetIgnoresAndLoad()">
+    </span>
+    <button onclick="resetIgnoreFilters()">重置</button>
+    <span class="grow"></span>
+    <span style="color:var(--text-secondary);font-size:12px" id="ignore-count"></span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>代码 / 名称</th><th>模型</th><th>剔除理由</th><th>信号日期</th>
+          <th>现价</th><th>止盈</th><th>保本</th><th>止损</th><th style="width:150px">操作</th>
+        </tr>
+      </thead>
+      <tbody id="ignore-tbody"></tbody>
+    </table>
+  </div>
+  <div class="pagination">
+    <span class="info" id="ignore-page-info"></span>
+    <button id="btn-ignore-prev" onclick="changeIgnorePage(-1)">上一页</button>
+    <button id="btn-ignore-next" onclick="changeIgnorePage(1)">下一页</button>
+  </div>
+
+</div>
+
+<!-- ═══════════════ 量化模型弹窗 (仅 admin) ═══════════════ -->
+<div class="modal-mask" id="model-modal-mask">
+  <div class="modal">
+    <h2 id="model-modal-title">添加模型</h2>
+    <div class="field"><label>模型名称</label><input id="m-name" autocomplete="off" maxlength="64"></div>
+    <div class="field"><label>推荐持仓交易日</label>
+      <input id="m-hold-days" type="number" min="1" max="250" step="1" placeholder="留空则不提醒平仓" style="width:160px">
+      <div class="hint">到期日 10:00 / 14:00 钉钉提醒平仓。A/B/C/D 默认 3/20/10/7。</div>
+    </div>
+    <div class="field"><label>策略描述</label><textarea id="m-description" placeholder="可选，说明该模型的选股/买卖策略"></textarea></div>
+    <div class="err" id="model-modal-err"></div>
+    <div class="actions">
+      <button onclick="closeModelModal()">取消</button>
+      <button class="primary" onclick="saveModel()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 信号忽视记录弹窗 (仅 admin) ═══════════════ -->
+<div class="modal-mask" id="ignore-modal-mask">
+  <div class="modal">
+    <h2 id="ignore-modal-title">新增信号忽视记录</h2>
+    <div class="grid">
+      <div class="full autocomplete">
+        <label>股票代码 / 名称 <span style="color:var(--up-text)">*</span></label>
+        <input type="text" id="i-symbol-input" placeholder="输入代码或名称搜索..." autocomplete="off">
+        <div class="dropdown" id="i-symbol-dropdown"></div>
+      </div>
+      <div>
+        <label>模型 <span style="color:var(--up-text)">*</span></label>
+        <select id="i-model"></select>
+      </div>
+      <div>
+        <label>信号日期 <span style="color:var(--up-text)">*</span></label>
+        <input type="date" id="i-signal-date">
+      </div>
+      <div class="full">
+        <label>剔除理由 <span style="color:var(--up-text)">*</span></label>
+        <select id="i-reason"></select>
+      </div>
+      <div class="full">
+        <label>剔除理由补充</label>
+        <textarea id="i-reason-note" maxlength="500" placeholder="可选，自由文本补充（如具体量能/位置判断）"></textarea>
+      </div>
+      <div>
+        <label>现价</label>
+        <input type="number" id="i-current-price" min="0" step="0.001" placeholder="选股时价格，可留空">
+      </div>
+      <div>
+        <label>止盈</label>
+        <input type="number" id="i-take-profit" min="0" step="0.001" placeholder="可留空">
+      </div>
+      <div>
+        <label>保本</label>
+        <input type="number" id="i-breakeven" min="0" step="0.001" placeholder="可留空">
+      </div>
+      <div>
+        <label>止损</label>
+        <input type="number" id="i-stop-loss" min="0" step="0.001" placeholder="可留空">
+      </div>
+      <div class="full hint">现价 / 止盈 / 保本 / 止损 可只填其中几项；同时填写时须满足 止盈 &gt; 保本 &gt; 止损。</div>
+    </div>
+    <div class="err" id="ignore-modal-err"></div>
+    <div class="actions">
+      <button onclick="closeIgnoreModal()">取消</button>
+      <button class="primary" onclick="saveIgnore()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// 量化管理 (量化模型管理 + 信号忽视记录) — 仅管理员可访问
+// ═══════════════════════════════════════════════════════════════
+const state = { user: null, models: [], reasons: [], ignores: [], ignoreTotal: 0, ignorePage: 0,
+                selectedSymbol: null };
+
+function escHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+async function api(path, options = {}) {
+  return VisualApi.api(path, options, { onUnauthorized: redirectToLogin });
+}
+
+function redirectToLogin() {
+  location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search);
+}
+
+async function checkAuth() {
+  try {
+    const data = await api('/api/auth/me');
+    if (!data.is_admin) { location.href = '/trades.html'; return; }
+    state.user = { username: data.username, is_admin: data.is_admin };
+    document.getElementById('toolbar-user').textContent = '👤 ' + state.user.username;
+    document.getElementById('btn-logout').style.display = '';
+    document.getElementById('main-view').style.display = '';
+    await Promise.all([loadModels(), loadIgnoreReasons()]);
+    await loadIgnores();
+    applyHash();
+  } catch (e) {
+    redirectToLogin();
+  }
+}
+
+async function doLogout() {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  redirectToLogin();
+}
+
+// ═══════════════ 量化模型管理 ═══════════════
+let modelModalMode = 'add';   // 'add' | 'edit'
+let modelModalTargetId = null;
+
+async function loadModels() {
+  const models = await api('/api/models');
+  state.models = models || [];
+  renderAdminModels();
+  renderIgnoreModelSelect();
+  renderIgnoreFilterModelSelect();
+}
+
+function renderAdminModels() {
+  const tbody = document.getElementById('model-tbody');
+  if (!state.models.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无模型</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.models.map(m => `
+    <tr>
+      <td>${escHtml(m.name)}</td>
+      <td class="reason-cell">${escHtml(m.description || '')}</td>
+      <td>${m.hold_days ? m.hold_days + ' 日' : '—'}</td>
+      <td>${m.active ? '<span class="badge closed">启用</span>' : '<span class="badge open">已删除</span>'}</td>
+      <td><div class="row-actions">${m.active ? `
+        <button onclick="openModelModal(${m.id})">编辑</button>
+        <button class="danger" onclick="deleteModel(${m.id})">删除</button>` : `
+        <button onclick="restoreModel(${m.id})">恢复</button>`}
+      </div></td>
+    </tr>`).join('');
+}
+
+function openModelModal(id) {
+  modelModalMode = id ? 'edit' : 'add';
+  modelModalTargetId = id || null;
+  const m = id ? state.models.find(x => x.id === id) : null;
+  document.getElementById('model-modal-title').textContent = id ? '编辑模型' : '添加模型';
+  document.getElementById('m-name').value = m ? m.name : '';
+  document.getElementById('m-hold-days').value = (m && m.hold_days) ? m.hold_days : '';
+  document.getElementById('m-description').value = m ? (m.description || '') : '';
+  document.getElementById('model-modal-err').textContent = '';
+  document.getElementById('model-modal-mask').classList.add('show');
+  focusFirstInput('model-modal-mask');
+}
+
+function closeModelModal() {
+  document.getElementById('model-modal-mask').classList.remove('show');
+  modelModalTargetId = null;
+}
+
+async function saveModel() {
+  document.getElementById('model-modal-err').textContent = '';
+  const holdRaw = document.getElementById('m-hold-days').value.trim();
+  const body = {
+    name: document.getElementById('m-name').value.trim(),
+    description: document.getElementById('m-description').value.trim(),
+    hold_days: holdRaw === '' ? null : parseInt(holdRaw, 10),
+  };
+  try {
+    if (modelModalMode === 'add') {
+      await api('/api/models', { method: 'POST', body: JSON.stringify(body) });
+    } else {
+      await api('/api/models/' + modelModalTargetId, { method: 'PUT', body: JSON.stringify(body) });
+    }
+    closeModelModal();
+    await loadModels();
+  } catch (e) {
+    document.getElementById('model-modal-err').textContent = e.message;
+  }
+}
+
+async function deleteModel(id) {
+  const m = state.models.find(x => x.id === id);
+  const name = m ? m.name : '该模型';
+  if (!confirm(`确认删除模型「${name}」？将标记为停用，其名下交易记录与统计历史不受影响。`)) return;
+  try {
+    await api('/api/models/' + id, { method: 'DELETE' });
+    await loadModels();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function restoreModel(id) {
+  try {
+    await api('/api/models/' + id + '/restore', { method: 'POST' });
+    await loadModels();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ═══════════════ 信号忽视记录 ═══════════════
+const IGNORE_PAGE_SIZE = 20;
+let ignoreModalTargetId = null;   // null=新增
+
+function todayISO() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function activeModels() { return state.models.filter(m => m.active); }
+function modelName(id) {
+  const m = state.models.find(x => x.id === id);
+  return m ? m.name : '—';
+}
+
+async function loadIgnoreReasons() {
+  const data = await api('/api/ignore-reasons');
+  state.reasons = data.reasons || [];
+  document.getElementById('i-reason').innerHTML =
+    '<option value="">请选择...</option>' + state.reasons.map(r => `<option>${escHtml(r)}</option>`).join('');
+}
+
+/** 编辑旧记录时模型可能已停用: 必须回填原模型, 否则保存会把它改掉 */
+function renderIgnoreModelSelect(keepId) {
+  const sel = document.getElementById('i-model');
+  const list = state.models;
+  const active = list.filter(m => m.active);
+  const inactive = list.filter(m => !m.active);
+  const opt = (m) => `<option value="${m.id}">${escHtml(m.name)}${m.active ? '' : '（已删除）'}</option>`;
+  const extra = (keepId && inactive.some(m => m.id === keepId))
+    ? opt(inactive.find(m => m.id === keepId)) : '';
+  sel.innerHTML = '<option value="">请选择...</option>' + active.map(opt).join('') + extra;
+  if (keepId) sel.value = String(keepId);
+}
+
+function renderIgnoreFilterModelSelect() {
+  const sel = document.getElementById('f-imodel');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部模型</option>'
+    + state.models.map(m => `<option value="${m.id}">${escHtml(m.name)}${m.active ? '' : '（已删除）'}</option>`).join('');
+  sel.value = cur;
+}
+
+function ignoreFilters() {
+  return {
+    q: document.getElementById('f-iq').value.trim(),
+    model_id: document.getElementById('f-imodel').value,
+    from: document.getElementById('f-ifrom').value,
+    to: document.getElementById('f-ito').value,
+  };
+}
+
+async function loadIgnores() {
+  const f = ignoreFilters();
+  const params = new URLSearchParams({ limit: IGNORE_PAGE_SIZE, offset: state.ignorePage * IGNORE_PAGE_SIZE });
+  for (const [k, v] of Object.entries(f)) { if (v) params.set(k, v); }
+  try {
+    const data = await api('/api/signal-ignores?' + params.toString());
+    state.ignores = data.ignores || [];
+    state.ignoreTotal = data.total || 0;
+    renderIgnores();
+    renderIgnorePager();
+  } catch (e) {
+    state.ignores = [];
+    state.ignoreTotal = 0;
+    document.getElementById('ignore-tbody').innerHTML =
+      `<tr><td colspan="9" class="empty">加载失败：${escHtml(e.message)}</td></tr>`;
+    renderIgnorePager();
+  }
+}
+
+function resetIgnoresAndLoad() {
+  state.ignorePage = 0;
+  loadIgnores();
+}
+
+function resetIgnoreFilters() {
+  document.getElementById('f-iq').value = '';
+  document.getElementById('f-imodel').value = '';
+  document.getElementById('f-ifrom').value = '';
+  document.getElementById('f-ito').value = '';
+  resetIgnoresAndLoad();
+}
+
+function changeIgnorePage(delta) {
+  const maxPage = Math.max(0, Math.ceil(state.ignoreTotal / IGNORE_PAGE_SIZE) - 1);
+  const next = Math.min(maxPage, Math.max(0, state.ignorePage + delta));
+  if (next === state.ignorePage) return;
+  state.ignorePage = next;
+  loadIgnores();
+}
+
+function renderIgnorePager() {
+  document.getElementById('ignore-count').textContent = `共 ${state.ignoreTotal} 条`;
+  const maxPage = Math.max(0, Math.ceil(state.ignoreTotal / IGNORE_PAGE_SIZE) - 1);
+  document.getElementById('ignore-page-info').textContent =
+    `第 ${state.ignorePage + 1} / ${maxPage + 1} 页`;
+  document.getElementById('btn-ignore-prev').disabled = state.ignorePage <= 0;
+  document.getElementById('btn-ignore-next').disabled = state.ignorePage >= maxPage;
+}
+
+function fmtPrice(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = Number(v);
+  return Number.isFinite(n) ? String(Number(n.toFixed(3))) : '—';
+}
+
+function ignoreReasonHtml(t) {
+  const parts = [t.reason, t.reason_note].filter(Boolean);
+  return escHtml(parts.join('；') || '—');
+}
+
+function renderIgnores() {
+  const tbody = document.getElementById('ignore-tbody');
+  if (!state.ignores.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无信号忽视记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.ignores.map(t => `
+    <tr>
+      <td class="sym" data-label="代码"><a class="sym-link" href="/?symbol=${encodeURIComponent(t.symbol)}" title="查看K线">${escHtml(t.name)}<br><span class="code">${escHtml(t.symbol)}</span></a></td>
+      <td data-label="模型">${escHtml(modelName(t.model_id))}${t.model_active ? '' : ' <span class="badge model-off">已删除</span>'}</td>
+      <td class="reason-cell" data-label="剔除理由">${ignoreReasonHtml(t)}</td>
+      <td data-label="信号日期">${escHtml(t.signal_date)}</td>
+      <td data-label="现价">${fmtPrice(t.current_price)}</td>
+      <td data-label="止盈">${fmtPrice(t.take_profit)}</td>
+      <td data-label="保本">${fmtPrice(t.breakeven)}</td>
+      <td data-label="止损">${fmtPrice(t.stop_loss)}</td>
+      <td class="row-actions">
+        <button onclick="openIgnoreModal(${t.id})">编辑</button>
+        <button class="danger" onclick="removeIgnore(${t.id})">删除</button>
+      </td>
+    </tr>`).join('');
+}
+
+function openIgnoreModal(id) {
+  const t = id ? state.ignores.find(x => x.id === id) : null;
+  ignoreModalTargetId = id || null;
+  state.selectedSymbol = t ? { symbol: t.symbol, name: t.name } : null;
+  document.getElementById('ignore-modal-title').textContent = id ? '编辑信号忽视记录' : '新增信号忽视记录';
+  document.getElementById('i-symbol-input').value = t ? `${t.name} (${t.symbol})` : '';
+  hideSymbolDropdown();
+  renderIgnoreModelSelect(t ? t.model_id : null);
+  document.getElementById('i-reason').value = t ? (t.reason || '') : '';
+  document.getElementById('i-reason-note').value = t ? (t.reason_note || '') : '';
+  const dateEl = document.getElementById('i-signal-date');
+  dateEl.max = todayISO();
+  dateEl.value = t ? t.signal_date : todayISO();
+  for (const [id2, v] of [['i-current-price', t && t.current_price], ['i-take-profit', t && t.take_profit],
+                          ['i-breakeven', t && t.breakeven], ['i-stop-loss', t && t.stop_loss]]) {
+    document.getElementById(id2).value = (v === null || v === undefined) ? '' : v;
+  }
+  document.getElementById('ignore-modal-err').textContent = '';
+  document.getElementById('ignore-modal-mask').classList.add('show');
+  focusFirstInput('ignore-modal-mask');
+}
+
+function closeIgnoreModal() {
+  document.getElementById('ignore-modal-mask').classList.remove('show');
+  ignoreModalTargetId = null;
+  state.selectedSymbol = null;
+}
+
+// 搜索补全
+let ignoreSearchTimer = null;
+function onIgnoreSymbolInput() {
+  clearTimeout(ignoreSearchTimer);
+  const q = document.getElementById('i-symbol-input').value.trim();
+  ignoreSearchTimer = setTimeout(async () => {
+    if (!q) { hideSymbolDropdown(); return; }
+    try {
+      const data = await api('/api/search?q=' + encodeURIComponent(q));
+      renderSymbolDropdown(data.results || []);
+    } catch (e) { /* 忽略搜索错误 */ }
+  }, 200);
+}
+
+function renderSymbolDropdown(results) {
+  const dd = document.getElementById('i-symbol-dropdown');
+  if (!results.length) { hideSymbolDropdown(); return; }
+  dd.innerHTML = results.map(r =>
+    `<div class="item" data-symbol="${escHtml(r.symbol)}" data-name="${escHtml(r.name)}" onclick="selectSymbol(this)">
+       ${escHtml(r.name)}<span class="code">${escHtml(r.symbol)}</span>
+     </div>`).join('');
+  dd.classList.add('show');
+}
+
+function hideSymbolDropdown() {
+  document.getElementById('i-symbol-dropdown').classList.remove('show');
+}
+
+function selectSymbol(el) {
+  const symbol = el.getAttribute('data-symbol');
+  const name = el.getAttribute('data-name');
+  state.selectedSymbol = { symbol, name };
+  document.getElementById('i-symbol-input').value = `${name} (${symbol})`;
+  hideSymbolDropdown();
+  prefillCurrentPrice(symbol);
+}
+
+/** 现价预填: 快照取不到就留空, 不阻塞录入 (纯便利功能) */
+async function prefillCurrentPrice(symbol) {
+  const input = document.getElementById('i-current-price');
+  if (input.value) return;
+  try {
+    const q = await api('/api/quote?symbol=' + encodeURIComponent(symbol));
+    const px = q && q.last_price;
+    if (px != null && Number.isFinite(Number(px)) && !input.value) input.value = Number(px);
+  } catch (e) { /* 忽略 */ }
+}
+
+function numOrEmpty(id) {
+  const raw = document.getElementById(id).value.trim();
+  return raw === '' ? '' : Number(raw);
+}
+
+async function saveIgnore() {
+  const err = (m) => { document.getElementById('ignore-modal-err').textContent = m; };
+  err('');
+  if (!state.selectedSymbol) { err('请先搜索并选择股票'); return; }
+  const modelId = document.getElementById('i-model').value;
+  if (!modelId) { err('请选择模型'); return; }
+  const reason = document.getElementById('i-reason').value;
+  if (!reason) { err('请选择剔除理由'); return; }
+  const signalDate = document.getElementById('i-signal-date').value;
+  if (!signalDate) { err('请选择信号日期'); return; }
+  const body = {
+    symbol: state.selectedSymbol.symbol,
+    name: state.selectedSymbol.name,
+    model_id: parseInt(modelId, 10),
+    reason,
+    reason_note: document.getElementById('i-reason-note').value.trim(),
+    signal_date: signalDate,
+    // 清空用空串 (后端把 ''/null 都当未填), 避免局部更新时旧值留着
+    current_price: numOrEmpty('i-current-price'),
+    take_profit: numOrEmpty('i-take-profit'),
+    breakeven: numOrEmpty('i-breakeven'),
+    stop_loss: numOrEmpty('i-stop-loss'),
+  };
+  const tp = body.take_profit, be = body.breakeven, sl = body.stop_loss;
+  if (tp !== '' && be !== '' && !(tp > be)) { err('须满足止盈 > 保本'); return; }
+  if (be !== '' && sl !== '' && !(be > sl)) { err('须满足保本 > 止损'); return; }
+  if (tp !== '' && sl !== '' && !(tp > sl)) { err('须满足止盈 > 止损'); return; }
+  try {
+    if (ignoreModalTargetId) {
+      await api('/api/signal-ignores/' + ignoreModalTargetId, { method: 'PUT', body: JSON.stringify(body) });
+    } else {
+      await api('/api/signal-ignores', { method: 'POST', body: JSON.stringify(body) });
+    }
+    closeIgnoreModal();
+    await loadIgnores();
+  } catch (e) {
+    err(e.message);
+  }
+}
+
+async function removeIgnore(id) {
+  const t = state.ignores.find(x => x.id === id);
+  const label = t ? `${t.name}（${t.symbol}）` : '该记录';
+  if (!confirm(`确认删除 ${label} 的信号忽视记录？此操作不可撤销。`)) return;
+  try {
+    await api('/api/signal-ignores/' + id, { method: 'DELETE' });
+    await loadIgnores();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ═══════════════ 通用 ═══════════════
+function bindEnter(id, fn) {
+  document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
+}
+
+// ── 键盘可达性: Esc 关闭已打开的模态框; 打开模态自动聚焦首输入框 ──
+function focusFirstInput(maskId) {
+  setTimeout(() => {
+    const m = document.getElementById(maskId);
+    const f = m && m.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+    if (f) f.focus();
+  }, 50);
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  document.querySelectorAll('.modal-mask.show').forEach(m => m.classList.remove('show'));
+});
+
+document.getElementById('i-symbol-input').addEventListener('input', onIgnoreSymbolInput);
+document.getElementById('i-symbol-input').addEventListener('blur', () => setTimeout(hideSymbolDropdown, 150));
+document.getElementById('model-modal-mask').addEventListener('click', function (e) {
+  if (e.target === this) closeModelModal();
+});
+document.getElementById('ignore-modal-mask').addEventListener('click', function (e) {
+  if (e.target === this) closeIgnoreModal();
+});
+bindEnter('m-name', saveModel);
+
+// 初始化主题 (与其它页共享 visual-theme)
+VisualTheme.init({ buttonId: 'btn-theme' });
+
+// 锚点定位 (#models / #ignores)
+function applyHash() {
+  const h = location.hash.replace('#', '');
+  if (h === 'models' || h === 'ignores') {
+    const el = document.getElementById(h);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+checkAuth();
+</script>
+</body>
+</html>

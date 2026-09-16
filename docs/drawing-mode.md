@@ -59,7 +59,7 @@
 - **`static/js/drawings.js`（纯逻辑 UMD，无 DOM 依赖，Node 可测）**：日期索引映射与线性外推换算（支持未来 bar 越界）、Liang-Barsky 线段裁剪、命中测试、磁吸、ZigZag 摆动点、趋势线触点评分与修正寻优、最小二乘回归、斐波那契、`valueAt`（tooltip 相交价）。
 - **渲染层：独立 overlay canvas**（`#draw-overlay`，`pointer-events:none`，事件仍由 zrender 派发）。不使用 ECharts graphic——其增量合并对新增元素会静默丢弃；overlay 每帧 `clearRect` 全量重绘，确定性无状态。面板名称标签同样由 overlay 绘制。
 - **未来空间**：仅按需把 category xAxis `max = len-1+8`，不改数据数组。**只作用于分类（日期）轴**：筹码叠加的 xAxis 是 value 轴（量纲 0..权重），一并写入会让筹码柱宽变亚像素、画线模式下整片消失（见 `applyFutureSlots` 的类型守卫）。
-- **截图导出**：`saveChartImage()` 将 overlay 与 ECharts 画布手动合成后导出。
+- **截图导出**：`saveChartImage()` 将 overlay 与 ECharts 画布手动合成后导出；侧栏可见时再把「基本信息/五档」按 `sidePanelShotModel()` 的行规格（与面板 HTML 同源：`infoPanelRows`/`depthPanelRows`）重绘到左侧留白区，导出图左侧因此不再是空白。回归测试见 `test/test_side_panel_shot_js.py`。
 
 ## 6. 测试
 

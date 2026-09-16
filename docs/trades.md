@@ -54,6 +54,29 @@
 - **软删除**：管理员「删除」仅置 `active=0` 并记录 `deleted_at`，**不物理删除、不动交易记录**，历史交易与按模型统计永久可追溯；同名模型可「恢复」。
 - **种子数据**：首次建库自动播种 A–E 五个模型（对应回测管线）：`A 60分钟超短`（3 日）、`B 日线波段`（20 日）、`C 日线波段·阳包阴`（10 日）、`D 动力管线`（7 日）、`E K线反转管线`（不提醒）；策略描述默认留空，不暴露内部策略细节。旧库升级时仅在刚补 `hold_days` 列时回填 A–D 默认值，之后不覆盖人工修改。
 - **推荐持仓**：管理员可改 `hold_days`（1~250 或空）。关联该模型的 **open 持仓** 在到期日（买入日起算第 N 个交易日；批次用最晚一笔买入日）上午 10:00、下午 14:00 各发一次钉钉平仓提醒。无模型或未填天数的持仓不提醒。
+- **管理入口**：模型增删改查在 **`/quant.html`（量化管理）**，仅管理员；`/admin.html` 只保留用户管理。
+
+### 表 `signal_ignores` — 信号忽视记录（仅管理员录入）
+
+记录「模型给出了信号但人工剔除」的标的与原因，用于复盘模型的假信号。
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | 记录 ID |
+| `user_id` | INTEGER | NOT NULL, FK→`users` ON DELETE CASCADE | 记录人（管理员） |
+| `symbol` | TEXT | NOT NULL | 股票代码（入库前去空格并大写） |
+| `name` | TEXT | NOT NULL | 股票名称 |
+| `model_id` | INTEGER | **NOT NULL**, FK→`models` ON DELETE RESTRICT | 关联模型，**不可为空**（`models` 只软删，RESTRICT 不会误伤） |
+| `reason` | TEXT | NOT NULL | 剔除理由（预设，见 `IGNORE_REASONS`），**不可为空**，≤ 64 字 |
+| `reason_note` | TEXT | 可空 | 剔除理由补充（自由文本），≤ 500 字 |
+| `signal_date` | TEXT | NOT NULL | 信号日期 `YYYY-MM-DD`（不得晚于今天） |
+| `current_price` | REAL | 可空 | 选股时的现价 |
+| `take_profit` / `breakeven` / `stop_loss` | REAL | 可空 | 止盈 / 保本 / 止损 |
+
+- **录入校验**（`validate_signal_ignore` → `_clean_signal_ignore`）：代码与名称必填；模型必填且必须存在（空/非整数 → `请选择模型`，不存在 → `模型不存在`）；剔除理由必填非空；信号日期归一为 `YYYY-MM-DD` 且不得晚于今天（`20260805` 这类紧凑写法会先归一，避免字典序比较打挂未来日校验）；现价/止盈/保本/止损各自可空，非空须 > 0，**已填的风控价之间**须满足 止盈 > 保本 > 止损（不像交易记录那样要求三个齐全）。
+- **更新语义**：局部更新，未提供的字段保留原值；清空价位传空串（`''` 与 `null` 都按未填处理）。
+- **删除**：物理删除单条记录（与模型的软删除不同）。模型停用不影响已录记录，列表仍显示「（已删除）」徽标。
+- **页面**：`/quant.html`「信号忽视记录」区，支持按代码/名称/理由搜索、按模型与信号日期区间过滤、分页（每页 20 条），行内代码可点回主页 K 线。
 
 ### 表 `trades` — 交易记录
 
@@ -188,6 +211,11 @@
 | DELETE | `/api/trades/{id}` | 是 | 删除 |
 | GET | `/api/trades/stats?from=&to=` | 是 | 统计汇总 + 时序序列 + 按股票汇总 + 按模型汇总 |
 | GET | `/api/trade-reasons` | 否 | 返回 `{entry:[...], exit:[...]}` 预设分类 |
+| GET | `/api/ignore-reasons` | 管理员 | 返回 `{reasons:[...]}` 信号忽视的预设剔除理由 |
+| GET | `/api/signal-ignores` | 管理员 | 信号忽视记录列表，参数 `q,model_id,from,to,limit,offset`；`q` 对 `symbol`/`name`/`reason`/`reason_note` 模糊匹配，`from`/`to` 作用于 `signal_date`；返回 `{ignores,total}` |
+| POST | `/api/signal-ignores` | 管理员 | 新增信号忽视记录（模型与剔除理由必填，校验失败 400 + 固定文案） |
+| PUT | `/api/signal-ignores/{id}` | 管理员 | 更新（字段局部合并，空串清空价位；不存在 404） |
+| DELETE | `/api/signal-ignores/{id}` | 管理员 | 删除（不存在 404） |
 
 - `GET /api/trades` 的 `from`/`to` 作用于 `COALESCE(exit_date, entry_date)`（即平仓用卖出日、持仓用买入日作为归属日期）；`q` 对 `symbol`/`name` 模糊匹配；`model_id` 为空不加条件，`none`/`null` 匹配未关联模型，正整数精确匹配。
 - 股票代码/名称补全复用现有 `GET /api/search?q=...`。
@@ -371,6 +399,12 @@
 
 止盈(达到目标价)、止损(跌破止损位)、均线死叉/MACD死叉、跌破支撑/破位、基本面恶化、利空消息/政策风险、资金流出/放量下跌、调仓换股、时间止损(持有超期)、动力红转、其他。
 
+### 信号忽视的剔除理由 `IGNORE_REASONS`
+
+量能不足、位置过高/追高风险、涨停或无法买入、大盘环境不佳、板块/题材不持续、业绩/基本面存疑、估值过高、流动性不足(成交额小)、已有同标的持仓、风控/仓位已满、信号与模型不符、其他。
+
+> 与买卖理由同款交互：预设分类（下拉，必选）+ 自由文本补充；分类之外的原因写在补充里。
+
 > 分类参考券商/交易社区（东方财富、雪球、淘股吧等）常用口径；每条记录可在分类之外补充自由文本说明。
 >
 > 「动力红转 / 动力绿转 / 动力蓝转」来自管线 D（动力管线）的颜色转换信号：红转=卖出，绿转=买入，蓝转=买入。
@@ -397,7 +431,7 @@
 | `visual/security.py` | CSP、限流、登录锁定、会话/CSRF Cookie |
 | `visual/market.py` | 行情代理、缓存、质押、`get_daily_bar` |
 | `visual/logger.py` | 日志配置 + 密钥脱敏 |
-| `visual/trades.py` | DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、统计、监控告警、录入校验 |
+| `visual/trades.py` | DB 建表/连接、口令哈希、会话、交易 CRUD、模型 CRUD、信号忽视记录 CRUD、统计、监控告警、录入校验 |
 | `visual/monitor.py` | 持仓监控循环 / 告警判定 / `--replay` 回放 |
 | `visual/feed.py` | AlphaFeed REST 行情接入（令牌桶 + 429 退避） |
 | `visual/dingtalk.py` | 钉钉薄包装（myappnotify） |
