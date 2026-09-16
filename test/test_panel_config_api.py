@@ -104,6 +104,15 @@ class PanelConfigApiTest(unittest.TestCase):
         cfg = r.get_json()["config"]
         self.assertEqual(cfg, {"volume": True})
 
+    def test_risk_key_in_whitelist(self):
+        # 主页持仓风控线开关跟账号同步: 白名单缺键会被静默丢弃
+        import trades
+        self.assertIn("risk", trades.PANEL_CONFIG_BOOL_KEYS)
+        r = self._put({"risk": False})
+        self.assertEqual(r.get_json()["config"], {"risk": False})
+        self.assertEqual(self.client.get("/api/me/panel-config").get_json()["config"],
+                         {"risk": False})
+
     def test_empty_does_not_clear(self):
         self._put(SAMPLE_CONFIG)
         before = self.client.get("/api/me/panel-config").get_json()["config"]
