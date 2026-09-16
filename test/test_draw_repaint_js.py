@@ -81,6 +81,7 @@ function paintDrawing(c2, d) { log.painted.push(d.id); }
 STATE.chart = {
   getWidth: () => 600,
   getHeight: () => 400,
+  getModel: () => ({}),                          // setOption 已跑过 (model 在, 只是轴没 flush)
   convertToPixel: (finder, coord) => {
     if (!flushed) return undefined;              // 坐标轴未 flush
     return [600 + coord[0], 330 - coord[1] * 10];
@@ -170,12 +171,13 @@ class AxisProjectionTest(unittest.TestCase):
     def _run(self, log_scale):
         log = "true" if log_scale else "false"
         script = (
-            _extract_fn(self.src, "priceYMapper") + "\n"
+            _extract_fn(self.src, "chartModel") + "\n"
+            + _extract_fn(self.src, "priceYMapper") + "\n"
             + "const LO = 10, HI = 100;   // 末根 low/high\n"
             + "const BARS = [{ low: LO, high: HI }];\n"
             + "const STATE = { logScale: " + log + ", chart: null };\n"
             + "const calls = [];\n"
-            + "STATE.chart = { convertToPixel: (finder, coord) => {\n"
+            + "STATE.chart = { getModel: () => ({}), convertToPixel: (finder, coord) => {\n"
             + "  calls.push(coord[1]);\n"
             + "  if (" + log + ") {\n"
             + "    if (coord[1] === 0) return [600, null];          // 对数轴上 price=0 非法\n"
@@ -223,7 +225,8 @@ class DrawRepaintBehaviorTest(unittest.TestCase):
 
     def _run(self, plan):
         script = (
-            _extract_fn(self.src, "priceYMapper") + "\n"
+            _extract_fn(self.src, "chartModel") + "\n"
+            + _extract_fn(self.src, "priceYMapper") + "\n"
             + _extract_fn(self.src, "drawMapper") + "\n"
             + _extract_fn(self.src, "_renderDrawingsNow") + "\n"
             + _extract_fn(self.src, "redrawDrawings") + "\n"

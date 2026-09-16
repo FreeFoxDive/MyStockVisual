@@ -524,8 +524,8 @@ class MarkLineLayoutRenderTest(unittest.TestCase):
     def _run(self, payload):
         fns = ["stackTags", "tagLabelPos", "priceLineLabel", "priceLineItem",
                "resolveLastPrice", "buildLastPriceLine", "buildRiskLineItems",
-               "buildKlineMarkLines", "spanPx", "cacheGridRects", "priceYMapper", "tagBars",
-               "tagColumnCtx", "layoutPriceTagSlots"]
+               "buildKlineMarkLines", "spanPx", "cacheGridRects", "chartModel", "priceYMapper",
+               "tagBars", "tagColumnCtx", "layoutPriceTagSlots"]
         script = (
             "".join(_extract_const(self.src, n) + "\n"
                     for n in ("TAG_PITCH", "TAG_HUG", "TAG_MAX_SHIFT", "TAG_BOX_H"))

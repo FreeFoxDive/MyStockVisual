@@ -1413,14 +1413,26 @@ function cacheGridRects(grids) {
   });
 }
 
+/** ECharts 实例是否已建 model (即 setOption 跑过): 没有时返回 null。
+ *  `echarts.init` 之后、首次 `setOption` 之前 `chart._model` 是 undefined, 而 ECharts 内部
+ *  只挡了 `_disposed` 没挡 `_model` —— 此时 `convertToPixel` 会在 `queryComponents` 上抛
+ *  TypeError, `getModel().getComponent(...)` 同理。异常会顺着调用方冒出去打断它 (Vue 同步
+ *  watcher 里抛 = 这个 tick 的行情/建图全丢), 所以取像素/取轴之前一律先探一下, 拿不到就让路。
+ *  用 `getModel()` 而不是 `getOption()`: 后者每次深拷贝整份 option, 不能放进逐帧路径。 */
+function chartModel() {
+  const chart = STATE.chart;
+  if (!chart || typeof chart.getModel !== 'function') return null;
+  try { return chart.getModel() || null; } catch (e) { return null; }
+}
+
 /** 价格 → 像素 y 的投影 (签位与画线层共用)。
  *  线性轴沿用 0/1 两点探针; **对数轴**不能这么探: price=0 无定义, convertToPixel 会返回
  *  `[x, null]`, 于是整个投影失效 (标签退回固定位置、画线层干脆不重绘)。对数轴改用末根的
  *  low/high 在对数空间插值。
- *  取不到有效投影 (坐标轴未就绪 / 退化) 返回 null, 调用方跳过本次绘制。 */
+ *  取不到有效投影 (model 未建 / 坐标轴未就绪 / 退化) 返回 null, 调用方跳过本次绘制。 */
 function priceYMapper(bars) {
   const chart = STATE.chart;
-  if (!chart || !bars || !bars.length) return null;
+  if (!chart || !chartModel() || !bars || !bars.length) return null;
   const bar = bars[bars.length - 1];
   const lo = Number(bar.low), hi = Number(bar.high);
   if (STATE.logScale && Number.isFinite(lo) && lo > 0 && Number.isFinite(hi) && hi > lo) {
@@ -1508,10 +1520,11 @@ function layoutPriceTagSlots(bars, livePrice) {
 
 /** 建图/缩放后按新刻度重排签位并只推一次 markLine。
  *  setOption 用 lazyUpdate 提交, 提交完 convertToPixel 拿到的还是"旧刻度", 所以要等这一帧
- *  真正渲染完 (rendered 事件) 再算; 另留一个延时兜底, 防事件不来时签位停在上一次的状态。 */
+ *  真正渲染完 (rendered 事件) 再算; 另留一个延时兜底, 防事件不来时签位停在上一次的状态。
+ *  未建图 (model 还没建) 时整个让路: 80ms 兜底可能早于首次 setOption, 硬算会抛 TypeError。 */
 function refreshPriceTagLayout() {
   const chart = STATE.chart;
-  if (!chart || STATE._tagRefreshPending) return;
+  if (!chart || !chartModel() || STATE._tagRefreshPending) return;
   STATE._tagRefreshPending = true;
   let done = false;
   const run = () => {
@@ -1519,7 +1532,7 @@ function refreshPriceTagLayout() {
     done = true;
     STATE._tagRefreshPending = false;
     try { chart.off('rendered', run); } catch (e) { /* 图表已销毁 */ }
-    if (!STATE.chart || !tagBars()) return;
+    if (!chartModel() || !tagBars()) return;
     const before = STATE._tagKeys;
     if (!layoutPriceTagSlots()) return;
     const line = buildKlineMarkLines(tagBars());
@@ -2220,9 +2233,11 @@ VisualMarketStore.watch(() => marketStore.last, (change) => {
 
 /** 快照更新只需改最新价线，避免为每个 1.25s 快照重建整张图。
  *  签位先算后建: 现价每 tick 都在动, 与风控签的重叠关系随之变化, 一次 setOption 同时
- *  更新线和位置 (画线层框签同列避让, 也跟随重绘)。 */
+ *  更新线和位置 (画线层框签同列避让, 也跟随重绘)。
+ *  model 未建 (首屏 setOption 之前) 直接让路 —— 本函数由 flush:'sync' 的行情 watcher 直接
+ *  调用, 抛异常会打断行情回调; 首屏建图后 refreshPriceTagLayout 会补算签位。 */
 function updateLivePriceLine(q, symbol = STATE.symbol) {
-  if (!q || symbol !== STATE.symbol || q.last_price == null || !STATE.chart) return;
+  if (!q || symbol !== STATE.symbol || q.last_price == null || !chartModel()) return;
   const bars = STATE.period === 'intraday'
     ? STATE.intradayData && STATE.intradayData.bars
     : STATE.klineData && STATE.klineData.klines;
@@ -3301,7 +3316,9 @@ function renderIntraday(data) {
   // 最后面板显示日期（setOption 之前设置）
   if (xAxes.length > 0) xAxes[xAxes.length - 1].show = true;
   // notMerge 会替换上一周期的坐标轴/系列，但不先清空 canvas，切换时旧图可保留到新图就绪。
-  chart.setOption(option, { notMerge: true, lazyUpdate: true, silent: true });
+  // 同样必须同步提交 (见 updateChart 处的说明): 换 model 与跑数据管线不能跨帧, 否则旧元素会在
+  // 这一帧里命中无数据的新 series, 鼠标事件一碰就抛 TypeError。
+  chart.setOption(option, { notMerge: true, silent: true });
   // 分时面板名称标签 (graphic)
   const igraphics = [];
   const iLabels = { macd: 'MACD', kdj: 'KDJ', rsi: 'RSI', atr: 'ATR' };
@@ -3576,7 +3593,7 @@ function syncChipAxis() {
   const chip = STATE._chip;
   const chart = STATE.chart;
   const data = STATE.klineData;
-  if (!chip || chip.gi < 0 || !chart || !data || !data.klines) return;
+  if (!chip || chip.gi < 0 || !chart || !chartModel() || !data || !data.klines) return;
   const opt = chart.getOption();
   const dzs = opt.dataZoom || [];
   const dz = dzs.find(z => z.type === 'inside') || dzs[0] || {};
@@ -4274,8 +4291,12 @@ function updateChart(reTheme) {
     }
   });
 
-  // 保留旧 canvas 至新 option 原子替换，避免周期切换出现白屏闪烁。
-  chart.setOption(option, { notMerge: true, lazyUpdate: true, silent: true });
+  // 保留旧 canvas 至新 option 原子替换，避免周期切换出现白屏闪烁 (防闪烁靠的是不 clear canvas,
+  // 不是 lazyUpdate)。全量重建必须同步提交: notMerge 会立刻换掉 model 与全部 seriesModel, 若再
+  // lazyUpdate, 数据管线要等下一帧才跑, 而画布上还是带旧 seriesIndex 的旧元素 —— 这中间移一下
+  // 鼠标, ECharts 内部事件桥接就会拿旧索引去查新 series 的 getDataParams, getData() 为空直接抛
+  // TypeError (getRawIndex)。增量补丁 (merge 语义, 模型实例不变) 保留 lazyUpdate 没问题。
+  chart.setOption(option, { notMerge: true, silent: true });
   if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
   cacheGridRects(grids);
   refreshPriceTagLayout(); // 布局后按新刻度重排现价/风控签位 (建图前拿不到新刻度)
@@ -4534,7 +4555,7 @@ function drawCtx() {
 function drawMapper() {
   const chart = STATE.chart;
   const bars = STATE.klineData && STATE.klineData.klines;
-  if (!chart || !bars || !bars.length) return null;
+  if (!chart || !chartModel() || !bars || !bars.length) return null;
   const n = bars.length;
   const yMap = priceYMapper(bars);
   if (!yMap) return null;

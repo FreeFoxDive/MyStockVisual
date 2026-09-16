@@ -244,7 +244,8 @@ class TagRefreshDeferralTest(unittest.TestCase):
 
     def _run(self, plan):
         script = (
-            _extract_fn(self.src, "refreshPriceTagLayout") + "\n"
+            _extract_fn(self.src, "chartModel") + "\n"
+            + _extract_fn(self.src, "refreshPriceTagLayout") + "\n"
             + "const handlers = {}; const timers = [];\n"
             + "globalThis.setTimeout = (fn) => { timers.push(fn); return timers.length; };\n"
             + "const log = { layout: 0, setOption: 0, redraw: 0 };\n"
@@ -254,6 +255,7 @@ class TagRefreshDeferralTest(unittest.TestCase):
             + "function buildKlineMarkLines() { return { data: [1] }; }\n"
             + "function redrawDrawings() { log.redraw++; }\n"
             + "STATE.chart = { on: (n, f) => { handlers[n] = f; }, off: () => {},"
+            + " getModel: () => ({}),   // 已建图 (model 在, 只是刻度没 flush)\n"
             + " setOption: () => { log.setOption++; } };\n"
             + "const out = {};\n"
             + "refreshPriceTagLayout();\n"

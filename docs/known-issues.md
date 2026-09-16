@@ -297,6 +297,63 @@ amplitude/turnover_rate 做了 ×100（`_af_pct`），唯独漏了 change_pct。
 - `compute_stats` 全量加载 + 批次交易逐条开连接（个人规模无感）。
 
 
+## 7. 前端 ECharts 时序：未建 model 就取像素 / 全量重建跨帧
+
+**状态**：已修复（2026-09-16）。回归测试 `visual/test/test_chart_ready_js.py`（用真实 vendored
+echarts-5.5.0 复现两个报错，报错文案逐字一致）。
+
+### 现象
+
+主图控制台两条 TypeError：
+
+1. `Cannot read properties of undefined (reading 'queryComponents')`，栈底是
+   `priceYMapper → tagColumnCtx → (Vue)`；冷启动/换股时偶发，分时冷启动更严重。
+2. `Cannot read properties of undefined (reading 'getRawIndex')`，栈底是
+   zrender mousemove → ECharts 事件桥接；鼠标划过 K 线时偶发。
+
+### 根因
+
+ECharts 5.5.0 内部实现（反编译 vendored 包确认）：
+
+- **报错 1**：`ECharts.prototype.convertToPixel` 走 `Fv(this, ...)`，而 `Fv` 只挡了 `_disposed`，
+  **没挡 `_model`**。`_model` 在首次 `setOption` 之前是 `undefined`（`getModel()` 返回 undefined），
+  于是 `Yo` 里 `t.queryComponents(...)` 抛错。可达路径：
+  - 日/周/月K 冷启动：`fetchData` 先写 `STATE.klineData` 再 `await loadTrades(...)`，这个窗口里
+    任一快照 tick 都会走 `flush:'sync'` 的 watcher → `updateLivePriceLine` → `convertToPixel`；
+  - 分时冷启动：`fetchIntraday` 写 `STATE.intradayData` 后先 `applyQuoteData(quote)`（同步触发同一
+    watcher）再 `renderIntraday` —— 抛错被外层 catch 吞掉，**分时图永久白屏且每 tick 复现**。
+- **报错 2**：`setOption(option, {notMerge:true, lazyUpdate:true})` 会**同步**换掉 model 与全部
+  seriesModel（实测 `before !== after`），但 `lazyUpdate` 把数据管线推迟到下一帧；画布上仍是带旧
+  数字 `seriesIndex` 的旧元素。这中间 mousemove 会让 `_initEvents` 的桥接拿旧索引查新 series 的
+  `getDataParams` → `getData()` 返回 `undefined` → `n.getRawIndex(t)` 抛错。`zr.flush()` 关不掉这个
+  窗口，只有非 lazy 的 `setOption`/`resize` 或跨帧才行。merge 语义的 lazy 补丁（模型实例不变、
+  旧数据仍可达）不受影响。
+
+### 修复
+
+两条不变量，改动都在 `static/index.html`：
+
+1. **取像素/取轴之前先探 model**：新增 `chartModel()`（`chart.getModel() || null`，O(1)；不用
+   `getOption()`，它每次深拷贝整份 option）。接入 `priceYMapper`、`drawMapper`、
+   `updateLivePriceLine`（整只 tick 让路，避免往未初始化实例推 markLine）、
+   `refreshPriceTagLayout`（入口 + 80ms 兜底各一次）、`syncChipAxis`（替掉未保护的
+   `chart.getOption()`）。拿不到 model 就返回 null / 直接 return —— 这正是这些函数原本文档化的
+   契约（"取不到投影返回 null，调用方跳过本次绘制"），只是原先没覆盖"model 还没建"这种状态。
+2. **全量重建同步提交**：`updateChart` / `renderIntraday` 的 `setOption(option, ...)` 去掉
+   `lazyUpdate`（保留 `notMerge` + 不 `clear()` —— 防白屏闪烁靠的是旧 canvas 留到同 tick 内原子
+   替换，不是 lazyUpdate）。增量补丁（`patchLastBarOnChart` / markLine / 筹码轴，merge 语义）继续
+   用 `lazyUpdate`。
+
+若将来真观察到周期切换闪烁，回退方案是保留 `lazyUpdate` 并在其后紧跟一次非 lazy 的空
+`setOption`（实测能在同 tick 内关掉窗口，`renderIntraday` 原本就靠后面的 graphic 补丁顺带做到）。
+
+- 相关测试：`test_chart_ready_js.py`（探针顺序 / 整只 tick 让路 / 未建 model 时两个 mapper 返回
+  null 且建图后恢复 / 复用源码里的重建选项在真实 echarts 上验证无空窗）；
+  `test_draw_repaint_js.py`、`test_tag_layout_js.py`、`test_risk_lines_js.py` 的假 chart 已补
+  `getModel`；`test_quote_poll_js.py::test_chart_replace_does_not_clear_canvas_first` 改为断言新的
+  同步提交写法。
+
+
 ## L2 数据（十档/逐笔）获取方式调研
 
 - 结论：**网页版扫码登录方案不可行**。扫码只能获得网页会话，L2 十档/逐笔走的是各平台（东财/同花顺/富途）非公开 WebSocket 协议且绑定付费会员账号——需要逆向私有协议、维持易失效会话，稳定性差且有合规风险。

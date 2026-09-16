@@ -72,7 +72,9 @@ class QuotePollJsTest(unittest.TestCase):
 
     def test_chart_replace_does_not_clear_canvas_first(self):
         self.assertNotIn('chart.clear()', self.src)
-        self.assertGreaterEqual(self.src.count('setOption(option, { notMerge: true, lazyUpdate: true, silent: true })'), 2)
+        # 全量重建: notMerge 原子替换 (旧图留到新图就绪, 所以不能先 clear), 且必须同步提交 ——
+        # lazyUpdate 会让「model 已换、数据管线没跑」的空窗跨帧, 鼠标事件一碰就抛 TypeError。
+        self.assertGreaterEqual(self.src.count('setOption(option, { notMerge: true, silent: true })'), 2)
 
     def test_inline_scripts_parse(self):
         parser = InlineScriptParser()
