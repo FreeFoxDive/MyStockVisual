@@ -20,13 +20,21 @@ A 函数挪到 B 函数时, 很容易漏掉只属于 A 的局部变量 —— �
 """
 
 import re
+import sys
 import unittest
 from pathlib import Path
 
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
-INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
+_TEST_DIR = Path(__file__).resolve().parent
+# 与 test_quote_poll_js 同一套引导: 直接跑文件 / discover / `-m unittest visual.test.x`
+# 三种方式都要能 import 到公共工具
+for _p in (str(_VISUAL_DIR), str(_TEST_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)</script>")
+from js_test_util import inline_script_text  # noqa: E402
+
+INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
 
 # JS 内置 + 浏览器宿主 + 本页依赖的第三方全局 (ECharts/Vue/自研 UMD 模块)
 ALLOWED_GLOBALS = {
@@ -65,9 +73,12 @@ _TOP_DECL_RE = re.compile(r"^(?:async\s+)?(?:function|const|let|var|class)\s+([A
 
 
 def _read_scripts() -> str:
-    """页面所有内联脚本拼成一份 (按顺序, 便于统一检查作用域)。"""
-    html = INDEX_HTML.read_text(encoding="utf-8")
-    return "\n".join(SCRIPT_RE.findall(html))
+    """页面所有内联脚本拼成一份 (按顺序, 便于统一检查作用域)。
+
+    用 HTMLParser 解析而不是正则匹配 <script>: 正则处理不好引号/属性顺序与
+    `</script >` 这类变体 (CodeQL py/bad-tag-filter 正是盯这种写法)。
+    """
+    return inline_script_text(INDEX_HTML)
 
 
 def _clean(text: str) -> str:
