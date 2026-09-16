@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from unittest import mock
 
@@ -42,6 +43,30 @@ def _is_index(sym):
 
 def _is_etf(sym):
     return sym.startswith("51") or sym.startswith("15")
+
+
+@contextmanager
+def _depth_iso(fresh=True):
+    """五档用例的隔离环境 (test_fetch_depth_* 共用)。`fresh=True` 连带清 TTL 五档缓存
+    (首个调用点用); 需要验证「二次调用命中 TTL 缓存」的用例传 `fresh=False`。
+
+    两件事, 都为了不依赖「跑测试时刚好是盘中」这个隐含前提:
+      * 当日快照文件换成「读不到」的 Mock —— 既不读磁盘上当天遗留的快照, 也不把 mock 出来的
+        fixture 写进真实 .cache/depth_day.json。盘后/周末跑时 `_fetch_depth_locked` 会命中
+        `_depth_day_get` 短路, 直接返回磁盘上那份快照, 用例根本走不到自己 mock 的上游
+        (曾在全天盘后把这三项跑成红色);
+      * `in_session` 显式为真 —— 这些用例测的是上游五档的字段映射与回退。
+    """
+    if fresh:
+        market_mod._depth_cache._cache.clear()
+    market_mod._depth_day_cache.clear()
+    market_mod._depth_day_cache_date = None
+    market_mod._depth_bucket = None
+    fake_file = mock.Mock()
+    fake_file.read_text.side_effect = FileNotFoundError()
+    with mock.patch.object(market_mod, "_DEPTH_DAY_CACHE_FILE", fake_file), \
+         mock.patch.object(market_mod.market_hours, "in_session", return_value=True):
+        yield fake_file
 
 
 class TestFetchQuotesAfFirst(unittest.TestCase):
@@ -271,38 +296,35 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
         self.assertNotIn("000001.SH", out)
 
     def test_fetch_depth_maps_fields(self):
-        market_mod._depth_cache._cache.clear()
-        market_mod._depth_bucket = None
         af = mock.Mock()
         af.depth.get.return_value = {
             "symbol": "600519.SH", "timestamp": 1,
             "bid_prices": [10.0, 9.9], "bid_volumes": [1, 2],
             "ask_prices": [10.1, 10.2], "ask_volumes": [3, 4],
         }
-        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+        with _depth_iso(), \
+             mock.patch.object(market_mod, "AF_API_KEY", "k"), \
              mock.patch.object(market_mod, "get_af", return_value=af):
             out = market_mod.fetch_depth("600519.SH")
         self.assertEqual(out["bid_prices"], [10.0, 9.9])
         self.assertEqual(out["ask_volumes"], [3, 4])
-        # 二次调用走缓存 (不再打 API)
-        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+        # 二次调用走缓存 (不再打 API): 不清 TTL 缓存, 验证真的命中
+        with _depth_iso(fresh=False), \
+             mock.patch.object(market_mod, "AF_API_KEY", "k"), \
              mock.patch.object(market_mod, "get_af", return_value=af):
             out2 = market_mod.fetch_depth("600519.SH")
         self.assertIs(out, out2)
         af.depth.get.assert_called_once()
 
     def test_fetch_depth_none_on_empty(self):
-        market_mod._depth_cache._cache.clear()
-        market_mod._depth_bucket = None
         af = mock.Mock()
         af.depth.get.return_value = {}
-        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+        with _depth_iso(), \
+             mock.patch.object(market_mod, "AF_API_KEY", "k"), \
              mock.patch.object(market_mod, "get_af", return_value=af):
             self.assertIsNone(market_mod.fetch_depth("600519.SH"))
 
     def test_fetch_depth_falls_back_to_mairui_five(self):
-        market_mod._depth_cache._cache.clear()
-        market_mod._depth_bucket = None
         market_mod._mr_depth_bucket = market_mod.PacedBudget(24)
         mr = mock.Mock()
         mr.stock_real_five.return_value = [{
@@ -310,7 +332,8 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
             "pb1": 10.0, "vb1": 100, "pb2": 9.9, "vb2": 90,
             "ps1": 10.1, "vs1": 120, "ps2": 10.2, "vs2": 130,
         }]
-        with mock.patch.object(market_mod, "AF_API_KEY", ""), \
+        with _depth_iso(), \
+             mock.patch.object(market_mod, "AF_API_KEY", ""), \
              mock.patch.object(market_mod, "MAIRUI_API_KEY", "k"), \
              mock.patch.object(market_mod, "get_mr", return_value=mr):
             out = market_mod.fetch_depth("600519.SH")
