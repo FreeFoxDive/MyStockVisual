@@ -902,6 +902,8 @@ body {
   border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 8px; box-shadow: 0 2px 8px rgba(0,0,0,.18);
   align-items: center; gap: 6px;
+  /* 按钮满 6 个 (含「数值」): 窄图下换行, 免得整体向右顶出图表 */
+  max-width: calc(100% - 8px); flex-wrap: wrap;
 }
 #draw-menu .dm-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 #draw-menu .dm-dot.active { border-color: var(--text); }
@@ -925,6 +927,18 @@ body {
   background: var(--bg-card); color: var(--text);
 }
 #draw-monitor-input button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 10px; font-size: 12px; }
+#draw-price-input {
+  position: absolute; z-index: 33; display: none; flex-direction: column; gap: 4px;
+  background: var(--bg-panel, rgba(128,128,128,.12));
+  border: 1px solid #e6a23c; border-radius: 6px;
+  padding: 8px 10px; width: 150px; font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+}
+#draw-price-input input {
+  font-size: 13px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--bg-card); color: var(--text); width: 100%; box-sizing: border-box;
+}
+#draw-price-input button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 10px; font-size: 12px; }
 #draw-suggest {
   position: absolute; z-index: 31; display: none; align-items: center; gap: 6px;
   background: var(--bg-panel); border: 1px dashed #e6a23c; border-radius: 6px;
@@ -1076,11 +1090,20 @@ body {
     <span style="font-size:11px;color:var(--text-secondary)">颜色</span>
     <span id="draw-menu-colors" style="display:flex;gap:4px"></span>
     <button id="dm-width" title="线宽 1px/2px">细</button>
+    <button id="dm-value" title="输入精确价格">数值</button>
     <button id="dm-extend" title="向右延伸至最新bar之后 (预测区)">延伸</button>
     <button id="dm-monitor" title="跌破此线推送预警 (需命名)">🔔监控</button>
     <button id="dm-delete" style="color:#f56c6c">删除</button>
   </div>
   <div id="draw-text-input"><input type="text" id="draw-text-field" maxlength="60" placeholder="输入文字, Enter确认 / Esc取消"></div>
+  <div id="draw-price-input">
+    <span style="font-size:11px;color:var(--text-secondary)">水平线价格 <span id="dpi-hint" style="color:#e6a23c"></span></span>
+    <input type="text" id="dpi-value" inputmode="decimal" autocomplete="off" spellcheck="false">
+    <div style="display:flex;gap:6px;margin-top:6px;justify-content:flex-end">
+      <button id="dpi-cancel">取消</button>
+      <button id="dpi-ok" style="background:#e6a23c;color:#fff;border-color:#e6a23c">确定</button>
+    </div>
+  </div>
   <div id="draw-monitor-input">
     <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">🔔 趋势线监控 (每日最多提醒一次, 推送钉钉/ntfy) <span id="dmi-adjust" style="color:#e6a23c"></span></div>
     <div style="display:flex;gap:4px;align-items:center">
@@ -1328,6 +1351,8 @@ const STATE = {
     draft: null,         // 进行中的画线 {tool, pts:[{idx,price}], need}
     drag: null,          // 手柄拖拽 {id, ptIdx, before}
     suggest: null,       // 修正建议 {forId, points, touches}
+    _hover: null,        // 单点工具 (水平线/垂直线) 的悬停点 {idx, price} (已过磁吸)
+    _priceEdit: null,    // 数值编辑会话 {id, before} (before=打开前的锚点快照, Esc 还原用)
     undo: [],
     _loadedKey: null,    // 最近一次从服务器加载的 symbol:period
     _autoLines: null,    // 自动建议线缓存
@@ -4633,10 +4658,31 @@ function initChart() {
   STATE.chart.getZr().on('globalout', function() {
     STATE.hoveredGrid = -1;
     STATE._pointerPrice = null;
+    // 指针离开图表: 收掉画线模式的悬停预览 (zr 不再派发 mousemove, 否则虚线冻在原地)
+    if (STATE.draw && STATE.draw._hover) {
+      STATE.draw._hover = null;
+      redrawDrawings();
+    }
   });
   // 双击复位缩放 (TradingView 惯例): 回到全景; 折线草稿进行中时用于结束画线
   STATE.chart.getZr().on('dblclick', function(e) {
     if (STATE.draw && STATE.draw.draft) { finishPolyDraft(); return; }
+    // 双击水平线 → 直接改数值 (折线的双击结束已被上一行拦下, 不受影响)
+    if (STATE.draw && STATE.draw.enabled && !STATE.draw._priceEdit) {
+      const info = drawPointer(e);
+      if (info) {
+        const dr = STATE.draw;
+        for (let i = dr.drawings.length - 1; i >= 0; i--) {
+          const d = dr.drawings[i];
+          if (d.type !== 'hline') continue;
+          if (Drawings.hitTest(d, info.P, info.ctx, info.px, info.py)) {
+            selectDrawing(d.id);
+            openPriceInput(d, { x: info.px, y: info.py });
+            return;
+          }
+        }
+      }
+    }
     try { STATE.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); } catch (e) { /* ignore */ }
   });
   // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样); 画线层同步重投影
@@ -5204,7 +5250,7 @@ function updateChart(reTheme) {
 
   // ── DataZoom ──
   const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
-  const dzLocked = STATE.draw.enabled && STATE.draw.tool !== 'select'; // 画线工具激活时禁用拖拽平移(滚轮缩放保留)
+  const dzLocked = drawPanLocked();   // 画图时/选中画线时禁用拖拽平移(滚轮缩放保留), 规则见 drawPanLocked
   const dataZoom = [
     { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100, moveOnMouseMove: !dzLocked },
     { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16,
@@ -5580,6 +5626,9 @@ function applyPeriodUI(period) {
 
 function switchPeriod(period) {
   if (!ALL_PERIODS.includes(period) || period === STATE.period) return;
+  // 换周期前收掉画线数值编辑并立刻落库 (画线按 代码+周期 分库, 换完再存会记到新周期名下)
+  closePriceInput(false);
+  flushPendingSave();
   STATE._periodSwitching = true;
   applyPeriodUI(period);
   syncSymbolUrl(true); // 周期写入 URL: 刷新/分享/从监控中心跳转保持一致
@@ -5628,6 +5677,10 @@ function switchSymbol(symbol) {
   if (!symbol) return false;
   document.getElementById('symbol-input').value = symbol;
   if (symbol === STATE.symbol) return false;
+  // 换股前收掉画线数值编辑并立刻落库: 保存按当时的 STATE.symbol 归属,
+  // 换完再存会把上一只的画线写到新标的名下 (flushPendingSave 见画线同步一节)。
+  closePriceInput(false);
+  flushPendingSave();
   STATE.symbol = symbol;
   try { history.pushState({ symbol }, '', chartUrl(symbol, STATE.period)); } catch (e) { /* ignore */ }
   return true;
@@ -6518,11 +6571,9 @@ function paintDraft(c2, P, ctx) {
     }
     return;
   }
-  if (draft.tool === 'hline' && pts.length >= 1) {
-    strokeSeg(c2, P.grid.left, P.y(pts[0].price), P.grid.right, P.y(pts[0].price), color, 1, []);
-  } else if (draft.tool === 'vline' && pts.length >= 1) {
-    strokeSeg(c2, P.x(pts[0].idx), P.grid.top, P.x(pts[0].idx), P.grid.bottom, color, 1, []);
-  } else if (draft.tool === 'text') {
+  // 单点工具 (水平线/垂直线) 的预览不在这里: need=1 意味着草稿在同一拍就定稿, 它们
+  // 选择工具后的位置提示走 paintHoverGhost (悬停跟手虚线)。
+  if (draft.tool === 'text') {
     /* 文本: 输入框交互, 无需预览 */
   } else if (pts.length >= 1) {
     const all = pointer ? pts.concat([pointer]) : pts;
@@ -6538,6 +6589,31 @@ function paintDraft(c2, P, ctx) {
       strokeSeg(c2, P.x(all[0].idx), P.y(all[0].price), P.x(all[1].idx), P.y(all[1].price), color, 1, []);
     }
     all.forEach(p => paintHandle(c2, P.x(p.idx), P.y(p.price), color));
+  }
+}
+
+/** 当前工具是否有悬停预览: 单点工具落子前就能看到线会画在哪 (其余工具靠草稿预览) */
+function ghostToolActive() {
+  return STATE.draw.tool === 'hline' || STATE.draw.tool === 'vline';
+}
+
+/** 单点工具 (水平线/垂直线) 的悬停预览: 鼠标移动时给出一条跟手虚线。
+ *  水平线额外挂价格签 (走 tags/tagColumnOf, 与已落线的左缘价签同列避让)。
+ *  坐标取磁吸后的悬停点, 与落子口径同源 —— 预览停在哪, 点下去就画在哪。
+ *  正在输入数值时不再叠加 (屏幕上的线已经是编辑结果)。 */
+function paintHoverGhost(c2, P, ctx, tags) {
+  const dr = STATE.draw;
+  if (!dr._hover || dr._priceEdit || !ghostToolActive()) return;
+  const color = '#e6a23c';
+  if (dr.tool === 'hline') {
+    const y = P.y(dr._hover.price);
+    strokeSeg(c2, P.grid.left, y, P.grid.right, y, color, 1, [4, 4]);
+    const tag = { id: 'ghost', text: fmtPrice3(dr._hover.price), x: P.grid.left, y,
+      bg: color, col: tagColumnOf(P.grid.left, P.grid) };
+    if (tags) tags.push(tag); else paintTag(c2, tag.text, tag.x, tag.y, tag.bg);
+  } else {
+    const x = P.x(dr._hover.idx);
+    strokeSeg(c2, x, P.grid.top, x, P.grid.bottom, color, 1, [4, 4]);
   }
 }
 
@@ -6565,8 +6641,10 @@ function _renderDrawingsNow() {
   STATE.draw.drawings.forEach(d => paintDrawing(c2, d, P, dctx, STATE.draw.selectedId === d.id, tags));
   if (STATE.draw.suggest) paintSuggest(c2, P, dctx);
   if (STATE.draw.draft) paintDraft(c2, P, dctx);
+  else paintHoverGhost(c2, P, dctx, tags);
   paintTagLayer(c2, tags, P);
   positionDrawMenu();
+  positionSuggestBox();   // 建议浮框同样跟着状态走: 采纳/撤销后一帧内自愈收起
   return true;
 }
 
@@ -6618,7 +6696,7 @@ function onDrawMouseDown(e) {
       if (hit && hit.part.startsWith('h')) {
         const ptIdx = parseInt(hit.part.slice(1), 10);
         dr.drag = { id: d.id, ptIdx, before: JSON.parse(JSON.stringify(d.points)) };
-        try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: false }] }); } catch (err) { /* ignore */ }
+        // 平移已在「选中画线」时就锁住了 (selectDrawing → applyDrawPanLock), 这里不必再关一次
         return;
       }
     }
@@ -6662,15 +6740,31 @@ function onDrawMouseDown(e) {
     dr.draft.pts.push(pt);
   }
   const need = dr.draft.need;
-  if (dr.draft.pts.length >= need) finalizeDraft();
-  else redrawDrawings();
+  if (dr.draft.pts.length >= need) {
+    const isHline = dr.tool === 'hline';
+    // 阻止 mousedown 默认行为 (焦点转移到画布/body), 否则数值框刚 focus 即被 blur
+    if (isHline && e.event && e.event.preventDefault) e.event.preventDefault();
+    finalizeDraft();
+    // 落线即弹数值框: 预填落点价, 直接 Enter/点别处 = 接受 (快速画线零负担)
+    if (isHline) openPriceInput(dr.drawings[dr.drawings.length - 1], { x: info.px, y: info.py });
+  } else redrawDrawings();
 }
 
 function onDrawMouseMove(e) {
   if (!STATE.draw.enabled) return;
   const info = drawPointer(e);
-  if (!info) return;
+  if (!info) {
+    // 指针移出主图: 收掉悬停预览, 免得虚线冻在边缘。
+    // _pointer 故意保留 —— 它是草稿端点预览的坐标, 既有的"冻结在最后位置"行为不动。
+    if (STATE.draw._hover) {
+      STATE.draw._hover = null;
+      redrawDrawings();
+    }
+    return;
+  }
   STATE.draw._pointer = { idx: info.idxF, price: info.price };
+  // 悬停预览与落子同用磁吸口径 (paintHoverGhost 只读 _hover)
+  STATE.draw._hover = snappedPoint(info);
   const dr = STATE.draw;
   if (dr.drag) {
     const d = dr.drawings.find(x => x.id === dr.drag.id);
@@ -6686,6 +6780,8 @@ function onDrawMouseMove(e) {
     // 预览端点跟随指针由 paintDraft 用 _pointer 绘制;
     // 已落子的锚点不可跟随鼠标, 否则第二击前 pt1 会被移动到 pt2 位置 (两点重合)
     redrawDrawings();
+  } else if (ghostToolActive()) {
+    redrawDrawings();   // 单点工具: 跟手虚线 + 价格签
   }
 }
 
@@ -6700,10 +6796,8 @@ function onDrawMouseUp() {
     scheduleSave();
   }
   dr.drag = null;
-  // 选择工具下恢复拖拽平移
-  if (dr.enabled && dr.tool === 'select') {
-    try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: true }] }); } catch (err) { /* ignore */ }
-  }
+  // 拖拽结束重算平移锁 (选区没变就保持锁着 —— 选中画线期间本就不该拖图)
+  applyDrawPanLock();
   redrawDrawings();
 }
 
@@ -6751,10 +6845,43 @@ function runSuggest(d) {
   positionSuggestBox();
 }
 
+/** 拖拽平移是否要锁住: 画线模式下只有「选择工具 + 没选中画线」允许拖拽平移。
+ *  选中画线时这段交互属于这条线 (拖手柄改端点 / 点菜单换色监控), 图跟着鼠标跑会把线
+ *  和菜单一起带偏。滚轮缩放不走这个开关, 始终可用。
+ *  规则必须收在这里一份 —— 图表 option 构建 (updateChart 的 dzLocked) 与运行时切换
+ *  (applyDrawPanLock) 两处共用, 否则任何一次重绘都会把锁的状态覆盖回去。 */
+function drawPanLocked() {
+  const dr = STATE.draw;
+  if (!dr.enabled) return false;                     // 非画线模式一律放开
+  return !(dr.tool === 'select' && !dr.selectedId);   // 仅「选择工具 + 未选中」可拖拽平移
+}
+
+/** 运行时切换拖拽平移开关 (选区/工具/模式变化时调用; 重绘时由 option 里的 dzLocked 带上同一规则) */
+function applyDrawPanLock() {
+  if (!STATE.chart) return;
+  try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: !drawPanLocked() }] }); } catch (e) { /* ignore */ }
+}
+
 function selectDrawing(id) {
   if (id !== STATE.draw.selectedId) hideMonitorInput();
+  // 换选/取消选中即结束数值编辑 (已输入的数值保留, 无效输入才回退)
+  if (STATE.draw._priceEdit && STATE.draw._priceEdit.id !== id) closePriceInput(false);
+  const changed = id !== STATE.draw.selectedId;
   STATE.draw.selectedId = id;
-  if (!id) { STATE.draw.suggest = null; hideSuggestBox(); }
+  // 选中画线即锁住拖拽平移 (点中画线的那一次 mousedown 就生效, 同一次手势的拖动不会再平移图)
+  applyDrawPanLock();
+  if (!id) {
+    // 取消选中: 修正建议 (含画布上的幽灵线) 随选区一起销毁
+    STATE.draw.suggest = null;
+    hideSuggestBox();
+  } else if (changed && STATE.draw.suggest) {
+    // 换选另一条线: 建议不销毁, 而是改指向新选中对象 —— 留着的必须是被选中那条线的方案,
+    // 否则就是一条指向别人的幽灵线。新对象不适配 (非趋势线/射线) 时清空, 由定位函数收起。
+    STATE.draw.suggest = null;
+    const nd = getSelected();
+    if (nd) runSuggest(nd);
+    positionSuggestBox();
+  }
   if (id) showDrawMenu(); else hideDrawMenu();
   redrawDrawings();
 }
@@ -6766,10 +6893,9 @@ function deleteSelectedDrawing() {
   if (idx < 0) return false;
   dr.undo.push({ op: 'del', d: dr.drawings[idx], at: idx });
   dr.drawings.splice(idx, 1);
-  dr.selectedId = null;
-  dr.suggest = null;
+  // 选中对象没了: 迷你菜单/监控输入/数值输入/建议浮框一并收起 (selectDrawing 是唯一收尾口)
+  selectDrawing(null);
   scheduleSave();
-  redrawDrawings();
   return true;
 }
 
@@ -6780,13 +6906,16 @@ function drawUndo() {
   if (op.op === 'add') {
     const i = dr.drawings.findIndex(d => d.id === op.id);
     if (i >= 0) dr.drawings.splice(i, 1);
-    if (dr.selectedId === op.id) dr.selectedId = null;
   } else if (op.op === 'del') {
     dr.drawings.splice(Math.min(op.at, dr.drawings.length), 0, op.d);
   } else if (op.op === 'move') {
     const d = dr.drawings.find(x => x.id === op.id);
     if (d) d.points = op.before;
+  } else if (op.op === 'del-all') {
+    dr.drawings = op.list.slice();   // 清空可撤销 (这条 op 以前被 pop 掉却没人处理)
   }
+  // 撤销把选中的那条线撤掉了 → 走统一收尾; move/del 选区仍有效, 不动它
+  if (dr.selectedId && !dr.drawings.some(x => x.id === dr.selectedId)) selectDrawing(null);
   dr.suggest = null;
   scheduleSave();
   redrawDrawings();
@@ -6804,10 +6933,16 @@ function toggleDrawMode() {
     try { STATE.chart.dispatchAction({ type: 'hideTip' }); } catch (e) { /* ignore */ }
     buildPalette();
     document.getElementById('draw-palette').style.display = 'flex';
+    // 进入画线模式: 按当前工具/选区定平移锁 (上一次会话可能停在画线工具上)
+    applyDrawPanLock();
   } else {
     dr.enabled = false;
     dr.draft = null;
     dr.drag = null;
+    dr._hover = null;
+    closePriceInput(false);   // 退出画线模式: 已输入的数值保留, 只收弹框
+    // 退出即放开拖拽平移 (enabled=false), 否则停在画线工具上退出后普通视图也拖不动
+    applyDrawPanLock();
     document.getElementById('btn-draw').classList.remove('active');
     document.getElementById('draw-palette').style.display = 'none';
     hideDrawMenu();
@@ -6851,14 +6986,13 @@ function buildPalette() {
 function setDrawTool(tool) {
   STATE.draw.tool = tool;
   STATE.draw.draft = null;
+  STATE.draw._hover = null;   // 换工具即失效, 免得上一工具的跟手虚线残留
   if (tool !== 'select') selectDrawing(null);
   document.querySelectorAll('#draw-palette .dp-btn[data-tool]').forEach(b => {
     b.classList.toggle('active', b.dataset.tool === tool);
   });
-  // 拖拽平移锁: 非选择工具时禁用 (滚轮缩放不受影响)
-  if (STATE.chart) {
-    try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: tool === 'select' }] }); } catch (e) { /* ignore */ }
-  }
+  // 拖拽平移锁: 非选择工具、以及选择工具下已选中画线时都禁用 (见 applyDrawPanLock)
+  applyDrawPanLock();
   redrawDrawings();
 }
 
@@ -6876,7 +7010,8 @@ function onPaletteAction(id, btn) {
   } else if (id === 'hide') {
     dr.visible = !dr.visible;
     btn.classList.toggle('toggled', !dr.visible);
-    redrawDrawings();
+    // 画线整体隐藏: 选中的线也看不见了, 菜单/监控/数值框/建议浮框一并收起
+    if (dr.visible) redrawDrawings(); else selectDrawing(null);
   } else if (id === 'undo') {
     drawUndo();
   } else if (id === 'clear') {
@@ -6884,10 +7019,8 @@ function onPaletteAction(id, btn) {
     if (!confirm('清空当前代码/周期下的全部 ' + dr.drawings.length + ' 条画线?')) return;
     dr.undo.push({ op: 'del-all', list: dr.drawings });
     dr.drawings = [];
-    dr.selectedId = null;
-    dr.suggest = null;
+    selectDrawing(null);   // 选中的线没了: 依附它的控件一并收起
     scheduleSave();
-    redrawDrawings();
   }
 }
 
@@ -6916,6 +7049,10 @@ function buildDrawMenu() {
     document.getElementById('dm-width').textContent = d.style.width === 2 ? '粗' : '细';
     scheduleSave();
     redrawDrawings();
+  });
+  document.getElementById('dm-value').addEventListener('click', () => {
+    const d = getSelected();
+    if (d) openPriceInput(d);
   });
   document.getElementById('dm-extend').addEventListener('click', () => {
     const d = getSelected();
@@ -6946,6 +7083,8 @@ function showDrawMenu() {
     b.classList.toggle('active', b.title === d.style.color);
   });
   document.getElementById('dm-width').textContent = d.style.width === 2 ? '粗' : '细';
+  // 数值入口只对水平线有意义 (垂直线定位的是日期, 其余类型由锚点推导)
+  document.getElementById('dm-value').style.display = d.type === 'hline' ? '' : 'none';
   const ext = document.getElementById('dm-extend');
   ext.style.color = d.extendRight ? '#e6a23c' : '';
   const canExtend = ['trend', 'fib', 'regression', 'position', 'rect'].includes(d.type);
@@ -6962,7 +7101,10 @@ function showDrawMenu() {
 function positionDrawMenu() {
   const d = getSelected();
   const menu = document.getElementById('draw-menu');
-  if (!d || menu.style.display === 'none') return;
+  // 没有选中对象就别留着菜单 —— 与 positionSuggestBox 同一条规矩: 状态没了控件就收起。
+  // 重绘每帧都走这里, 删除/撤销/清空/换标的之后残留的菜单由它兜底 (不必每个路径都记得手动隐藏)。
+  if (!d) { hideDrawMenu(); return; }
+  if (menu.style.display === 'none') return;
   const ctx = drawCtx();
   if (!ctx) return;
   const P = drawMapper();
@@ -7067,6 +7209,143 @@ function adoptSuggest() {
   redrawDrawings();
 }
 
+// ── 水平线数值输入 (落线即弹; 输入时线实时跟随, Enter 确认 / Esc 还原落点价) ──
+function priceEditDrawing() {
+  const pe = STATE.draw._priceEdit;
+  return pe ? (STATE.draw.drawings.find(d => d.id === pe.id) || null) : null;
+}
+
+/** 价签旁的偏离提示 (相对末根收盘), 只做提示不参与校验 */
+function updatePriceHint(price) {
+  const el = document.getElementById('dpi-hint');
+  if (!el) return;
+  const bars = STATE.klineData && STATE.klineData.klines;
+  const close = (bars && bars.length) ? Number(bars[bars.length - 1].close) : NaN;
+  if (!Number.isFinite(price) || !Number.isFinite(close) || !close) { el.textContent = ''; return; }
+  const pct = normPct((price - close) / Math.abs(close) * 100);
+  el.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+  el.style.color = pct >= 0 ? C().up : C().down;
+}
+
+/** 打开数值编辑: d 必须是水平线; anchor 为落点像素 (不给则挂线的左缘价签下方)。
+ *  线在点击时已经画出, 这里只是给它一个精确取值的入口 —— 不输入直接 Enter/点别处即接受落点价。 */
+function openPriceInput(d, anchor) {
+  const dr = STATE.draw;
+  if (!d || d.type !== 'hline' || !d.points || !d.points[0]) return;
+  closePriceInput(false);   // 同一时刻只编辑一条线
+  hideMonitorInput();
+  // 落线本身排的那次防抖保存要等编辑结束: 否则用户刚敲进去的数字会被它顺手带走 ——
+  // Esc 还原后服务器上留着的却是中途那个值 (收尾会重新排一次保存)。
+  clearTimeout(_saveTimer);
+  dr._priceEdit = { id: d.id, before: JSON.parse(JSON.stringify(d.points)) };
+  const box = document.getElementById('draw-price-input');
+  const field = document.getElementById('dpi-value');
+  const wrap = document.getElementById('chart-wrap');
+  const price = d.points[0].p;
+  field.value = fmtPrice3(price);
+  // ↑↓ 微调步长按价位量级取, 与展示精度对齐 (低价股/指数都好用);
+  // 输入框是 type=text (number 类型下 select() 无效, 预填值会被后续输入追加而不是替换)
+  field.dataset.step = price < 1 ? '0.001' : (price < 100 ? '0.01' : '1');
+  updatePriceHint(price);
+  box.style.display = 'flex';
+  const P = drawMapper();
+  const px = anchor ? anchor.x : (P ? P.grid.left + 4 : 4);
+  const py = anchor ? anchor.y : (P ? P.y(price) : 4);
+  box.style.left = Math.max(4, Math.min(px + 8, wrap.clientWidth - box.offsetWidth - 4)) + 'px';
+  box.style.top = Math.max(4, Math.min(py + 16, wrap.clientHeight - box.offsetHeight - 4)) + 'px';
+  // mousedown 处理器内同步 focus 会被浏览器默认行为覆盖, 延迟到下一拍 (同 openTextInput)
+  setTimeout(() => { field.focus(); field.select(); }, 0);
+  redrawDrawings();
+}
+
+/** 输入中: 合法值即时写回画线 (线跟着数字走); 非法输入静默保留上一个合法值 */
+function onPriceInput() {
+  const d = priceEditDrawing();
+  if (!d) return;
+  const field = document.getElementById('dpi-value');
+  const value = parseFloat(field.value);
+  updatePriceHint(value);
+  if (Drawings.setPointValue(d, value, 0)) redrawDrawings();
+}
+
+/** ↑↓ 微调: 按打开时定的步长步进 (type=text 没有原生步进器, 自己来) */
+function nudgePriceInput(dir) {
+  const field = document.getElementById('dpi-value');
+  const d = priceEditDrawing();
+  const step = parseFloat(field.dataset.step) || 0.01;
+  const typed = parseFloat(field.value);
+  const from = Number.isFinite(typed) ? typed : (d ? d.points[0].p : NaN);
+  if (!Number.isFinite(from)) return;
+  field.value = fmtPrice3(from + dir * step);
+  onPriceInput();
+}
+
+/** Enter / 确定 (explicit) 或失焦: 校验后落库。
+ *  非法值: 显式提交时提示并要求改正 (不关框), 失焦时直接还原落点价 —— 否则弹框会把焦点抢回来。 */
+function commitPriceInput(explicit) {
+  const dr = STATE.draw;
+  const pe = dr._priceEdit;
+  if (!pe) return false;
+  const field = document.getElementById('dpi-value');
+  const value = parseFloat(field && field.value);
+  if (!Number.isFinite(value) || value <= 0) {
+    if (!explicit) { closePriceInput(true); return false; }
+    showToast('请输入大于 0 的价格', { type: 'warn' });
+    if (field) { field.focus(); field.select(); }
+    return false;
+  }
+  const d = priceEditDrawing();
+  if (d) Drawings.setPointValue(d, value, 0);
+  closePriceInput(false);
+  return true;
+}
+
+/** 收尾: revert=true 还原打开前的值 (Esc/取消), 否则保留并记一次可撤销的改动 */
+function closePriceInput(revert) {
+  const dr = STATE.draw;
+  const pe = dr._priceEdit;
+  if (!pe) return;
+  const d = priceEditDrawing();
+  const before0 = pe.before && pe.before[0] ? pe.before[0].p : null;
+  const dirty = !!(d && d.points[0] && d.points[0].p !== before0);
+  dr._priceEdit = null;
+  const box = document.getElementById('draw-price-input');
+  if (box) box.style.display = 'none';
+  if (d && revert && dirty) d.points = pe.before;
+  // 无论确认还是还原都要落库: openPriceInput 取消了落线那次防抖保存, 收尾不补一次的话
+  // 新线不会入库; 还原同理 (服务器上可能有更早的中间态)。
+  if (d) {
+    if (!revert && dirty) {
+      dr.undo.push({ op: 'move', id: d.id, before: pe.before,
+                     after: JSON.parse(JSON.stringify(d.points)) });
+      if (dr.undo.length > 50) dr.undo.shift();
+    }
+    scheduleSave();
+  }
+  redrawDrawings();
+  showDrawMenu();   // 线仍在选中态: 刷新菜单 (数值按钮/监控状态)
+}
+
+function buildPriceInput() {
+  const field = document.getElementById('dpi-value');
+  field.addEventListener('input', onPriceInput);
+  field.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commitPriceInput(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); closePriceInput(true); }
+    else if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      nudgePriceInput(ev.key === 'ArrowUp' ? 1 : -1);
+    }
+  });
+  field.addEventListener('blur', () => { if (STATE.draw._priceEdit) commitPriceInput(false); });
+  // 按钮用 mousedown 阻止默认: 否则输入框先 blur 提交, 取消/确定就点了个寂寞
+  [['dpi-ok', () => commitPriceInput(true)], ['dpi-cancel', () => closePriceInput(true)]].forEach(([id, fn]) => {
+    const btn = document.getElementById(id);
+    btn.addEventListener('mousedown', (ev) => ev.preventDefault());
+    btn.addEventListener('click', fn);
+  });
+}
+
 // ── 文本标注输入 ──
 function openTextInput(info, pt) {
   const box = document.getElementById('draw-text-input');
@@ -7104,6 +7383,7 @@ function openTextInput(info, pt) {
 }
 
 function onDrawEscape() {
+  if (STATE.draw._priceEdit) { closePriceInput(true); return true; }
   if (document.getElementById('draw-monitor-input').style.display === 'block') { hideMonitorInput(); return true; }
   const dr = STATE.draw;
   if (dr.draft) { cancelDraft(); return true; }
@@ -7117,6 +7397,11 @@ async function loadDrawings() {
   const key = STATE.symbol + ':' + STATE.period;
   if (STATE.draw._loadedKey === key) { redrawDrawings(); return; }
   if (STATE.period === 'intraday') return;
+  // 换股/换周期会整批替换画线: 数值编辑会话必须收掉, 否则会写到一个已不在列表里的对象
+  closePriceInput(false);
+  // 选区与依附控件 (迷你菜单/监控输入/建议浮框) 都属于上一只标的: 立即收掉,
+  // 后面两条提前 return (请求失败/竞态) 也就不会留下残留控件
+  selectDrawing(null);
   STATE.draw._loadedKey = key;
   try {
     const resp = await fetch(`/api/drawings?symbol=${encodeURIComponent(STATE.symbol)}&period=${encodeURIComponent(STATE.period)}`);
@@ -7125,28 +7410,39 @@ async function loadDrawings() {
     if (STATE.symbol + ':' + STATE.period !== key) return; // 竞态
     STATE.draw.drawings = (data.drawings || []).map(d => Drawings.normalize(d));
     STATE.draw.undo = [];
-    STATE.draw.selectedId = null;
-    STATE.draw.suggest = null;
     STATE.draw._autoLines = null;
   } catch (e) { /* 离线/未登录: 画线仅本会话内存态 */ }
   redrawDrawings();
 }
 
 let _saveTimer = null;
+let _saveKey = null;   // 排期时的 {symbol, period}: 防抖期间换了股/周期, 这批数据就不属于当前键了
 function scheduleSave() {
   clearTimeout(_saveTimer);
+  _saveKey = { symbol: STATE.symbol, period: STATE.period };
   _saveTimer = setTimeout(saveDrawings, 800);
 }
 
+/** 立刻写出待写的画线 (换股/换周期前调用): 防抖没到期也要先写, 否则会记到新标的名下 */
+function flushPendingSave() {
+  if (!_saveTimer) return;
+  clearTimeout(_saveTimer);
+  _saveTimer = null;
+  saveDrawings();
+}
+
 async function saveDrawings() {
-  if (STATE.period === 'intraday') return;
+  const key = _saveKey || { symbol: STATE.symbol, period: STATE.period };
+  _saveTimer = null;
+  if (key.period === 'intraday') return;
+  if (key.symbol !== STATE.symbol || key.period !== STATE.period) return;   // 已换标的: 别写到新键上
   try {
     await fetch('/api/drawings', {
       method: 'PUT',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        symbol: STATE.symbol, period: STATE.period, drawings: STATE.draw.drawings,
+        symbol: key.symbol, period: key.period, drawings: STATE.draw.drawings,
       }),
     });
   } catch (e) { /* 静默: 下次编辑再同步 */ }
@@ -7156,6 +7452,7 @@ async function saveDrawings() {
 document.getElementById('ds-adopt').addEventListener('click', adoptSuggest);
 document.getElementById('ds-ignore').addEventListener('click', () => { STATE.draw.suggest = null; hideSuggestBox(); });
 buildDrawMenu();
+buildPriceInput();
 
 // 趋势线监控输入弹层按钮
 document.getElementById('dmi-save').addEventListener('click', () => { const d = getSelected(); if (d) saveMonitorInput(d); });
@@ -7384,8 +7681,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── 全局快捷键 (输入时失效): / 或 Ctrl+K 聚焦搜索, 1-9 切周期, Esc 关弹层 ──
   const PERIOD_KEYS = { '1': '1d', '2': '1w', '3': '1M', '4': 'intraday', '5': '1m', '6': '5m', '7': '15m', '8': '30m', '9': '60m' };
   document.addEventListener('keydown', (e) => {
-    // 文本标注输入中: Esc/Enter 由输入框自身处理, 画线快捷键全部让路
-    if (e.target && e.target.id === 'draw-text-field') return;
+    // 文本标注/水平线数值输入中: Esc/Enter 由输入框自身处理, 画线快捷键全部让路
+    if (e.target && (e.target.id === 'draw-text-field' || e.target.id === 'dpi-value')) return;
     if (e.key === 'Escape') {
       if (STATE.draw.enabled && onDrawEscape()) return;
       closeDropdown(); return;
@@ -7458,6 +7755,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const periodChanged = nextPeriod !== STATE.period;
     if (!symbolChanged && !periodChanged) return;
     if (symbolChanged) {
+      // 与 switchSymbol/switchPeriod 同口径: 换标的前先收掉画线数值编辑并立刻落库,
+      // 否则收尾时的保存会按新标的名下写出上一只的 drawings (fetch 未回来或失败时)
+      closePriceInput(false);
+      flushPendingSave();
       STATE.symbol = s;
       document.getElementById('symbol-input').value = s;
       applyPeriodUI(nextPeriod);

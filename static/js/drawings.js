@@ -1,6 +1,6 @@
 /**
  * 画线模式纯逻辑: 数据模型 / 坐标解析 / 命中测试 / 磁吸 / ZigZag 摆动点 /
- * 趋势线触点评分与修正建议 / 线性回归 / 斐波那契 / 线段裁剪 / 测量统计。
+ * 趋势线触点评分与修正建议 / 线性回归 / 斐波那契 / 线段裁剪 / 测量统计 / 锚点改值。
  * 无 DOM 依赖; Node 可测 (test/test_drawings_js.py)。
  *
  * 坐标约定: 画线锚点存 {t, p, off} —— t=K线日期字符串(过去锚点, 优先按日期粘附),
@@ -595,6 +595,21 @@
     return null;
   }
 
+  /** 改写某个锚点的价格 (水平线数值输入用): 非法值返回 false 且不改动原对象。
+   *  只动 p, 保留 t/off —— 水平线不依赖日期锚点, 但日期锚点丢了会污染其他类型的序列化。
+   *  取整到 3 位小数与展示精度 (fmtPrice3) 一致, 免浮点噪声进服务器 JSON; 取整后可能归零
+   *  (0.0004 → 0), 而 price=0 在对数轴上是非法探针, 故按取整后的值判定有效性。 */
+  function setPointValue(d, price, ptIdx) {
+    var v = parseFloat(price);
+    if (!d || !Array.isArray(d.points) || !isFinite(v) || v <= 0) return false;
+    var rounded = Number(v.toFixed(3));
+    if (!(rounded > 0)) return false;
+    var i = ptIdx || 0;
+    if (!d.points[i]) return false;
+    d.points[i].p = rounded;
+    return true;
+  }
+
   /** 磁吸: 在指针附近的 bar 极值 (开高低收) 中找 ≤tolPx 的最近价格 */
   function snap(klines, idxF, price, P, tolPx) {    var n = klines.length;
     var base = Math.round(idxF);
@@ -636,6 +651,7 @@
     arrowHead: arrowHead,
     lineValue: lineValue,
     valueAt: valueAt,
+    setPointValue: setPointValue,
     zigzag: zigzag,
     scoreLine: scoreLine,
     detectTrendlines: detectTrendlines,

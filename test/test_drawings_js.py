@@ -392,5 +392,67 @@ class TestDrawingsNameMonitor(unittest.TestCase):
         self.assertNotIn("monitor", no_pct)
 
 
+class TestDrawingsSetPointValue(unittest.TestCase):
+    """setPointValue: 水平线数值输入的纯逻辑 (非法值不动原对象)。"""
+
+    def _mk(self, price=10.5):
+        return ("D.createDrawing('hline', "
+                f"[{{t: '2026-01-05', p: {price}, off: 0}}])")
+
+    def test_writes_rounded_price_and_keeps_anchor(self):
+        out = run_drawings_js(
+            f"const d = {self._mk()};"
+            "const ok = D.setPointValue(d, '12.3456');"
+            "process.stdout.write(JSON.stringify({ok, p: d.points[0].p, "
+            "t: d.points[0].t, off: d.points[0].off, type: d.type}));")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["p"], 12.346, "与 fmtPrice3 展示精度一致 (3 位小数)")
+        self.assertEqual(out["t"], "2026-01-05", "只改价格, 日期锚点必须保留")
+        self.assertEqual(out["off"], 0)
+        self.assertEqual(out["type"], "hline")
+
+    def test_number_input_accepted(self):
+        out = run_drawings_js(
+            f"const d = {self._mk()}; D.setPointValue(d, 9.5);"
+            "process.stdout.write(JSON.stringify(d.points[0].p));")
+        self.assertEqual(out, 9.5)
+
+    def test_invalid_values_rejected_without_mutation(self):
+        out = run_drawings_js(
+            f"const d = {self._mk(10.5)};"
+            "const results = ['', 'abc', '0', '-1', 'NaN', '0.0004', '1e-9'].map(v => D.setPointValue(d, v));"
+            "process.stdout.write(JSON.stringify({results, p: d.points[0].p}));")
+        self.assertEqual(out["results"], [False] * 7)
+        self.assertEqual(out["p"], 10.5, "非法输入不得改动画线")
+
+    def test_sub_milli_value_rejected_instead_of_rounding_to_zero(self):
+        """取整到 3 位小数后归零的输入要拒绝: price=0 在对数轴上是非法探针。"""
+        out = run_drawings_js(
+            f"const d = {self._mk(10.5)};"
+            "const ok = D.setPointValue(d, '0.0004');"
+            "const edge = D.setPointValue(d, '0.0005');"
+            "process.stdout.write(JSON.stringify({ok, edge, p: d.points[0].p}));")
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["edge"], "0.0005 取整后是 0.001, 合法")
+        self.assertEqual(out["p"], 0.001)
+
+    def test_missing_point_rejected(self):
+        out = run_drawings_js(
+            "const d = {id: 'x', type: 'hline', points: []};"
+            "const ok = D.setPointValue(d, 10);"
+            "const noPoints = D.setPointValue({id: 'y', type: 'hline'}, 10);"
+            "process.stdout.write(JSON.stringify({ok, noPoints}));")
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["noPoints"])
+
+    def test_second_point_by_index(self):
+        out = run_drawings_js(
+            "const d = D.createDrawing('trend', [{t: '2026-01-01', p: 10, off: 0},"
+            " {t: '2026-01-02', p: 11, off: 1}]);"
+            "D.setPointValue(d, 12, 1);"
+            "process.stdout.write(JSON.stringify(d.points.map(p => p.p)));")
+        self.assertEqual(out, [10, 12])
+
+
 if __name__ == "__main__":
     unittest.main()

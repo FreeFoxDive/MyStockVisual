@@ -75,7 +75,9 @@ function refreshAutoLines() {}
 function paintAutoLines() {}
 function paintSuggest() {}
 function paintDraft() {}
+function paintHoverGhost() {}
 function positionDrawMenu() {}
+function positionSuggestBox() {}
 function paintTagLayer() {}
 function paintDrawing(c2, d) { log.painted.push(d.id); }
 STATE.chart = {
