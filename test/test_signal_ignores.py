@@ -18,7 +18,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
@@ -29,7 +29,12 @@ import trades  # noqa: E402
 
 
 def _today(offset=0):
-    return (date.today() + timedelta(days=offset)).isoformat()
+    """北京墙钟的今天 (与 trades._today_iso 同一时钟)。
+
+    不能用 date.today(): UTC 机器在北京 0-8 点时它还是"昨天", _today(1) 会正好落到
+    北京的今天 —— 未来日校验于是合法放行, 断言拿到 None (CI 上就是这条假失败)。
+    """
+    return (trades._now().date() + timedelta(days=offset)).isoformat()
 
 
 class SignalIgnoreStoreTest(unittest.TestCase):
@@ -83,6 +88,9 @@ class SignalIgnoreStoreTest(unittest.TestCase):
     def test_signal_date_normalized_and_not_future(self):
         self.assertEqual(trades.validate_signal_ignore(self.base(signal_date="")), "信号日期无效")
         self.assertEqual(trades.validate_signal_ignore(self.base(signal_date="2026/01/05")), "信号日期无效")
+        # 今天/明天是一对边界, 必须与校验同一个时钟 (_today 已改成北京口径)
+        self.assertIsNone(trades.validate_signal_ignore(self.base(signal_date=_today())),
+                          "今天必须放行")
         self.assertEqual(trades.validate_signal_ignore(self.base(signal_date=_today(1))),
                          "信号日期不能晚于今天")
         rec = trades.create_signal_ignore(self.user_id, self.base(signal_date="20260105"))
@@ -90,6 +98,16 @@ class SignalIgnoreStoreTest(unittest.TestCase):
             self.assertEqual(rec["signal_date"], "2026-01-05", "紧凑写法须归一, 否则字典序比较会打挂")
         finally:
             trades.delete_signal_ignore(rec["id"])
+
+    def test_future_date_check_uses_beijing_clock(self):
+        """未来日校验以北京墙钟为准, 不随宿主机时区漂移 (与 test_pledge 同一条口径)。
+
+        换回宿主机时钟后, UTC 容器在北京 0-8 点会差一天: 那时的"明天"其实是北京的今天,
+        校验会放行 —— 而这条只在那个窗口才红, 平时看着是绿的。
+        """
+        beijing = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
+        self.assertLess(abs((trades._now() - beijing).total_seconds()), 60,
+                        "trades 的时钟必须是北京墙钟 (trades._now → _today_iso → 未来日校验)")
 
     def test_optional_prices(self):
         # 全部留空合法; 只填一个也合法
