@@ -75,6 +75,26 @@ def _extract_arrow(src: str, name: str) -> str:
     raise AssertionError(f"const {name} 箭头函数大括号不配对")
 
 
+def _extract_formatter(fn_src: str) -> str:
+    """从函数源码里取出内联的 `formatter: function(ps) { ... }` 并包成 const。
+
+    tooltip 的 formatter 挂在 option 字面量里, 没有名字, 抽不到就无从执行; 这里按
+    大括号配平取出函数体, 再补一个名字方便在 node 里直接调用。
+    """
+    marker = "formatter: function(ps) {"
+    i = fn_src.index(marker)
+    start = i + len(marker) - 1
+    depth = 0
+    for j in range(start, len(fn_src)):
+        if fn_src[j] == "{":
+            depth += 1
+        elif fn_src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return "const formatter = function(ps) " + fn_src[start:j + 1] + ";"
+    raise AssertionError("formatter 大括号不配对")
+
+
 class ToolbarStaticTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -577,6 +597,111 @@ process.stdout.write(JSON.stringify(cases.map(c => {
         self.assertIn("低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>", intra)
         self.assertIn("开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>", intra,
                       "桌面/平板那一行不变")
+
+    def test_intraday_tooltip_switches_by_panel(self):
+        """分时提示框按悬停面板切换, 文案与日K 对应面板分支同口径。
+
+        回归点: 分时的 tooltip formatter 不读 STATE.hoveredGrid, 于是悬停成交量 /
+        MACD / KDJ / RSI / ATR 面板看到的提示框和悬停 K 线一模一样; 日K 那边是分面板的。
+        """
+        intra = _extract_fn(self.src, "renderIntraday")
+        chart = _extract_fn(self.src, "updateChart")
+        # 日K 从成交量分支往后切: 否则「 MA10 」这类片段会被主图那套 MA 文案蒙混过关
+        chart_panels = chart[chart.index("// Volume (only if enabled)"):]
+        self.assertIn("const pi = STATE.hoveredGrid - (showVolume ? 2 : 1);", intra,
+                      "面板下标基准与画面板名标签同源 (showVolume ? 2 : 1)")
+        self.assertIn("const panel = pi >= 0 && pi < subList.length ? subList[pi] : null;", intra,
+                      "面板名直接取建图顺序的 subList, 不另建映射")
+        self.assertIn("if (showVolume && STATE.hoveredGrid === 1) {", intra, "成交量面板")
+
+        # 面板分支必须提前 return, 不能拼在 K 线全套后面
+        branches = intra[intra.index("const ihdr = "):
+                         intra.index("const prevBar = idx > 0 ? data.bars[idx - 1] : null;")]
+        self.assertEqual(branches.count("return ihdr"), 5,
+                         "成交量 + MACD/KDJ/RSI/ATR 五个面板分支")
+        self.assertNotIn("tip-", branches,
+                         "面板分支只看面板本身 (由 chk-* 决定画不画), 不受 K 线 extras 复选框影响")
+        self.assertIn("let h = ihdr;", intra, "K 线面板那一套保持原样 (grid 0 与未命中时兜底)")
+
+        # 变量前缀 k./b. 不同, 所以只比前缀无关的片段: 两条路径的文案必须一致
+        for frag in ("<div>成交量 ", "<div>VOL MA5 ", " MA10 ", " MA20 ", "<div>成交额 ",
+                     "<div>DIF ", " DEA ", " 柱 ", ";font-weight:700",
+                     ">RSI1</span> ", ">RSI2</span> ", ">RSI3</span> ", "<div>ATR(14) "):
+            self.assertIn(frag, branches, f"分时面板分支缺少「{frag}」")
+            self.assertIn(frag, chart_panels,
+                          f"日K 的面板分支缺少「{frag}」(两处口径必须一致)")
+
+    def test_intraday_tooltip_panel_output(self):
+        """跑真 formatter: 悬停哪个面板就只出哪个面板的数据。
+
+        上面那条是源码结构断言; 这条把内联 formatter 抽出来在 node 里按不同
+        STATE.hoveredGrid 实跑, 覆盖 showVolume 开关导致的面板下标平移, 以及
+        K 线面板/指针在图外时的兜底。
+        """
+        script = _extract_formatter(_extract_fn(self.src, "renderIntraday")) + """
+const C = () => new Proxy({}, { get: () => '#000000' });
+const STATE = { hoveredGrid: 0 };
+const BAR = { time: '09:31', open: 10, high: 10.5, low: 9.9, close: 10.4,
+              volume: 12345, amount: 1.5e8, vol_ma5: 10000, vol_ma10: 20000, vol_ma20: 30000,
+              macd_dif: 0.012, macd_dea: 0.008, macd_hist: 0.004,
+              kdj_k: 45.2, kdj_d: 52.1, kdj_j: 31.4,
+              rsi6: 61.2, rsi12: 55.0, rsi24: 50.1, atr14: 0.123 };
+const data = { bars: [] };
+function fmtVolume(v) {
+  if (v == null) return '';
+  const a = Math.abs(v);
+  if (a >= 1e8) return (v / 1e8).toFixed(1) + '亿';
+  if (a >= 1e4) return (v / 1e4).toFixed(0) + '万';
+  return v.toFixed(0);
+}
+function haltLabel() { return ''; }
+function fmtPrice3(v) { return v == null ? '—' : v.toFixed(2); }
+function isPhoneUi() { return false; }
+const document = { getElementById: () => ({ checked: false }) };
+// formatter 从闭包里取这几个量, 所以必须声明在外层, 逐例改写。
+// showMacd 与 macd 面板同源 (真页面上都由 chk-macd 决定), 别拆成两个开关。
+let showVolume = true, showMacd = true, subList = [];
+const cases = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(cases.map(c => {
+  showVolume = c.vol;
+  showMacd = c.macd;
+  subList = [c.macd && 'macd', c.kdj && 'kdj', c.rsi && 'rsi', c.atr && 'atr'].filter(Boolean);
+  STATE.hoveredGrid = c.g;
+  data.bars = c.nobar ? [] : [BAR];
+  return formatter([{ dataIndex: 0 }]).replace(/<[^>]+>/g, '');
+})));
+"""
+        allPanels = {"vol": True, "macd": True, "kdj": True, "rsi": True, "atr": True}
+        out = self._run(script, [
+            dict(allPanels, g=0),          # K 线面板: 全套
+            dict(allPanels, g=1),          # 成交量面板
+            dict(allPanels, g=2),          # MACD
+            dict(allPanels, g=3),          # KDJ
+            dict(allPanels, g=4),          # RSI
+            dict(allPanels, g=5),          # ATR
+            dict(allPanels, g=6),          # 超出面板范围: 回到 K 线全套
+            dict(allPanels, g=-1),         # 指针不在任何面板上
+            dict(allPanels, vol=False, g=1),   # 关掉成交量后, 下标整体前移一位
+            dict(allPanels, g=1, nobar=True),  # 数据还没到
+        ])
+
+        self.assertIn("开 10.00", out[0])
+        self.assertIn("收 10.40", out[0])
+        self.assertNotIn("成交量", out[0], "K 线面板不该出现成交量面板的专属行")
+
+        self.assertEqual(out[1], "09:31成交量 1万VOL MA5 1万 MA10 2万 MA20 3万成交额 1.50亿")
+        self.assertNotIn("开", out[1], "成交量面板只报成交量/成交额")
+
+        self.assertEqual(out[2], "09:31DIF 0.012 DEA 0.008 柱 0.004")
+        self.assertEqual(out[3], "09:31K 45.20 D 52.10 J 31.40")
+        self.assertEqual(out[4], "09:31RSI1 61.2 RSI2 55.0 RSI3 50.1")
+        self.assertEqual(out[5], "09:31ATR(14) 0.123")
+
+        for i, name in ((6, "超出面板范围"), (7, "指针不在面板上")):
+            self.assertIn("开 10.00", out[i], f"{name} → 兜底回 K 线全套")
+        self.assertEqual(out[8], "09:31DIF 0.012 DEA 0.008 柱 0.004",
+                         "关掉成交量面板后, 第一个指标面板就是 grid 1")
+        self.assertEqual(out[9], "", "没有 bar 时返回空串")
 
     def test_chip_band_geometry(self):
         """手机筹码带按「可用宽度」取像素, 没地方时返回 null 不画。

@@ -4250,11 +4250,37 @@ function renderIntraday(data) {
         const idx = ps[0] && ps[0].dataIndex;
         const b = data.bars[idx];
         if (!b) return '';
+        const ihdr = `<div><b>${b.time}</b>${haltLabel(b)}</div>`;
+        // 悬停在子面板 → 只报该面板数据 (文案/配色与日K 对应分支同口径)。此前一律落到下面的
+        // K 线全套, 于是分时在成交量/指标面板看到的提示框和主图一模一样。
+        // grid 下标: 0=K线, 1=成交量(若开), 其后依次是 subList 里的指标面板 (见上面的建图顺序)。
+        const pi = STATE.hoveredGrid - (showVolume ? 2 : 1);
+        const panel = pi >= 0 && pi < subList.length ? subList[pi] : null;
+        if (showVolume && STATE.hoveredGrid === 1) {
+          return ihdr
+            + `<div>成交量 ${fmtVolume(b.volume)}</div>`
+            + `<div>VOL MA5 <span style="color:${C().ma5}">${fmtVolume(b.vol_ma5)}</span> MA10 <span style="color:${C().ma10}">${fmtVolume(b.vol_ma10)}</span> MA20 <span style="color:${C().ma20}">${fmtVolume(b.vol_ma20)}</span></div>`
+            + `<div>成交额 ${b.amount!=null?(b.amount/1e8).toFixed(2):'—'}亿</div>`;
+        }
+        if (panel === 'macd') {
+          return ihdr + `<div>DIF <span style="color:${C().macdDif}">${b.macd_dif?.toFixed(3)||'—'}</span> DEA <span style="color:${C().macdDea}">${b.macd_dea?.toFixed(3)||'—'}</span> 柱 <span style="color:${(b.macd_hist||0)>=0?C().up:C().down}">${b.macd_hist?.toFixed(3)||'—'}</span></div>`;
+        }
+        if (panel === 'kdj') {
+          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?C().overbought:v<20?C().oversold:clr};font-weight:700">${v.toFixed(2)}</span>`;
+          return ihdr + `<div><span style="color:${C().kdjK}">K</span> ${cV(b.kdj_k,C().kdjK)} <span style="color:${C().kdjD}">D</span> ${cV(b.kdj_d,C().kdjD)} <span style="color:${C().kdjJ}">J</span> ${cV(b.kdj_j,C().kdjJ)}</div>`;
+        }
+        if (panel === 'rsi') {
+          const cV = (v,clr) => v == null ? '—' : `<span style="color:${v>70?C().overbought:v<30?C().oversold:clr};font-weight:700">${v.toFixed(1)}</span>`;
+          return ihdr + `<div><span style="color:${C().rsi6}">RSI1</span> ${cV(b.rsi6,C().rsi6)} <span style="color:${C().rsi12}">RSI2</span> ${cV(b.rsi12,C().rsi12)} <span style="color:${C().rsi24}">RSI3</span> ${cV(b.rsi24,C().rsi24)}</div>`;
+        }
+        if (panel === 'atr') {
+          return ihdr + `<div>ATR(14) ${b.atr14?.toFixed(3)||'—'}</div>`;
+        }
         const prevBar = idx > 0 ? data.bars[idx - 1] : null;
         const pc = prevBar ? prevBar.close : b.open;
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?C().up:v<pc?C().down:C().tipText}">${fmtPrice3(v)}</span>`;
         // 手机: 开/高 与 低/收 分两行 (一行四字段在窄屏会溢出)
-        let h = `<div><b>${b.time}</b>${haltLabel(b)}</div>`;
+        let h = ihdr;
         h += isPhoneUi()
           ? `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)}</div><div>低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`
           : `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`;

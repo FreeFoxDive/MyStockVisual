@@ -468,6 +468,7 @@ def intraday():
                 "low": _safe_float(row.get("low")),
                 "close": _safe_float(row.get("close")),
                 "volume": _safe_int(row.get("volume")),
+                "amount": _safe_float(row.get("amount")),
                 "macd_dif": indicators["macd"]["dif"][i],
                 "macd_dea": indicators["macd"]["dea"][i],
                 "macd_hist": indicators["macd"]["hist"][i],
@@ -478,6 +479,11 @@ def intraday():
                 "rsi12": indicators["rsi"]["rsi12"][i] if "rsi" in indicators else None,
                 "rsi24": indicators["rsi"]["rsi24"][i] if "rsi" in indicators else None,
                 "atr14": indicators["atr"]["values"][i] if "atr" in indicators else None,
+                # 成交量面板的提示框与日K 同口径 (成交量 + VOL MA + 成交额), 指标已在
+                # compute_all_indicators 里算好, 这里只是补进 bar。
+                "vol_ma5": _safe_float(row.get("vol_ma5")),
+                "vol_ma10": _safe_float(row.get("vol_ma10")),
+                "vol_ma20": _safe_float(row.get("vol_ma20")),
             })
         return _json({"symbol": symbol, "period": period, "bars": bars})
     except Exception as e:
