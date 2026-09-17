@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -2018,6 +2019,73 @@ def _search_catalog_status():
 _SEARCH_TYPE_RANK = {"etf": 1, "fund": 1, "index": 2}
 _SEARCH_MARKET_RANK = {"cn": 0, "hk": 1, "us": 2}
 
+# 完整代码的书写形式: 000070.SZ / sz000070 / sh.600000 / 00700.HK / AAPL.US / 600000
+# 分组: 交易所前缀 / 前缀后的分隔符 / 主体 / 后缀
+_SEARCH_CODE_RE = re.compile(
+    r"^(?:(SH|SZ|BJ|HK|US)([.\-]?))?([0-9]{4,6}|[A-Z]{1,6})(?:[.\-](SH|SZ|BJ|HK|US))?$")
+
+
+def _search_query_keys(query):
+    """用户输入 → 比对键, 按优先级: 完整 symbol / 裸代码 / 原串。
+
+    只识别带交易所标记的输入 (后缀 000070.SZ、前缀 sz000070/sh.600000);
+    裸代码与中文名原样返回, 不改变既有命中口径。全角字符按 NFKC 归一
+    (中文输入法下打出的 ００００７０.ＳＺ 也能命中)。
+    """
+    raw = unicodedata.normalize("NFKC", str(query or "")).strip()
+    keys = [raw.lower()]
+    m = _SEARCH_CODE_RE.match(raw.upper().replace(" ", ""))
+    if not m:
+        return keys
+    pre, sep, code, suf = m.group(1), m.group(2), m.group(3).lower(), m.group(4)
+    if suf:
+        keys.insert(0, f"{code}.{suf.lower()}")
+    elif pre:
+        # 无后缀时不做交易所推断: 裸代码/字母代码交给原串键, 免得改变既有命中口径。
+        # 前缀无分隔符且主体是字母时也不拆 (SHOP/SHEL 这类美股字母代码会被吃掉);
+        # 带 '.'/'-' 分隔符视为用户显式表达前缀意图 (US.AAPL)。
+        if not (code.isdigit() or sep):
+            return keys
+        keys.insert(0, code if pre == "US" else f"{code}.{pre.lower()}")
+    else:
+        return keys
+    # 裸代码兜底 (索引的 code 列不带后缀): 只对 6 位数字或字母代码加 —— 4/5 位代码
+    # 当子串会误命中 6 位 A 股代码 (00700 ⊂ 000700), 港美股分别靠完整 symbol / 字母键命中。
+    if code.isalpha() or len(code) == 6:
+        keys.insert(1, code)
+    return list(dict.fromkeys(keys))
+
+
+def _search_norm(value):
+    """候选字段与查询键同一口径归一 (NFKC + 小写)。
+
+    归一必须两边都做: 只归查询会把 "万科Ａ" 变成 "万科a", 而库里的名称是全角 "万科Ａ",
+    于是索引精确命中的行反被打成 0 分丢掉 (同时全角/半角两种写法也才能互相命中)。
+    """
+    text = str(value or "")
+    if text.isascii():        # ASCII 是 NFKC 的不动点, 兜底扫描要过全量列表, 省掉这次归一
+        return text.lower()
+    return unicodedata.normalize("NFKC", text).lower()
+
+
+def _search_score(name, code, symbol, q):
+    """单词评分: 名称/代码/symbol 精确 > 名称前缀 > 代码前缀 > 名称包含 > 代码包含。
+
+    symbol 也要参与比对: 索引里的 code 是裸代码 (000070), 但用户常输入完整代码
+    (000070.SZ), 只比 name/code 会把精确命中完整代码的行判成 0 分丢掉。
+    """
+    if name == q or code == q or symbol == q:
+        return 200
+    if name.startswith(q):
+        return 150
+    if code.startswith(q) or symbol.startswith(q):
+        return 100
+    if q in name:
+        return 50
+    if q in code or q in symbol:
+        return 30
+    return 0
+
 
 def _search_stocks(query):
     """模糊搜索: 名称/代码精确 > 名称前缀 > 代码前缀 > 名称包含 > 代码包含。
@@ -2025,7 +2093,12 @@ def _search_stocks(query):
     覆盖 A股/基金/指数/港股/美股; 结果带 type (stock/etf/index/hk/us)。
     排序为 股票(含港/美) > ETF > 指数, 组内按匹配分, 同分 A股 > 港 > 美。
     """
+    keys = _search_query_keys(query)
     indexed = search_index.search(SEARCH_INDEX_FILE, query)
+    # 前缀式输入 (sz000070) 借归一键再查一次: FTS 把 '.' 当普通字符拆开分词,
+    # 只有按完整 symbol 的精确/前缀查询才稳。
+    if not indexed and keys[0] != str(query or "").strip().lower():
+        indexed = search_index.search(SEARCH_INDEX_FILE, keys[0])
     stocks = indexed if indexed else _load_stock_list()
     universe = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
                  "type": s.get("type") if indexed and s.get("type") else
@@ -2041,22 +2114,12 @@ def _search_stocks(query):
     universe.extend(hk_rows)
     universe.extend(us_rows)
 
-    q = query.strip().lower()
     results = []
     for s in universe:
-        name = str(s.get("name") or "").lower()
-        code = str(s.get("code") or "").lower()
-        score = 0
-        if name == q or code == q:
-            score = 200   # 名称/代码精确匹配
-        elif name.startswith(q):
-            score = 150   # 名称前缀 (如 "酒ETF"/"白酒基金" 直接命中)
-        elif code.startswith(q):
-            score = 100   # 代码前缀
-        elif q in name:
-            score = 50    # 名称包含
-        elif q in code:
-            score = 30    # 代码包含
+        name = _search_norm(s.get("name"))
+        code = _search_norm(s.get("code"))
+        symbol = _search_norm(s.get("symbol"))
+        score = max((_search_score(name, code, symbol, q) for q in keys), default=0)
         if score > 0:
             results.append({**s, "score": score})
     results.sort(key=lambda x: (_SEARCH_TYPE_RANK.get(x.get("type"), 0),
@@ -2145,19 +2208,29 @@ _hkus_lock = threading.Lock()
 
 
 def normalize_symbol(raw):
-    """将用户输入标准化为带交易所后缀的 symbol 格式 (如 000001.SZ)"""
+    """将用户输入标准化为带交易所后缀的 symbol 格式 (如 000001.SZ)。
+
+    除裸代码外还接受带交易所标记的写法: 后缀式 000070.sz / 600000.SH,
+    前缀式 SH600000 / sz000070 / sh.600000 / HK00700 / US.AAPL。
+    """
     raw = raw.strip().upper()
     if raw.endswith((".SH", ".SZ", ".BJ", ".HK")):
         return raw
     if raw.endswith(".US"):
         return raw[:-3]
+    # 交易所前缀: 无分隔符时只认纯数字主体 (否则 SHOP/SHEL 这类美股字母代码会被吃掉),
+    # 带 '.'/'-' 分隔符则视为用户显式表达前缀意图 (US.AAPL)。
+    m = re.match(r"^(SH|SZ|BJ|HK|US)([.\-]?)([A-Z0-9]+)$", raw)
+    if m and (m.group(2) or m.group(3).isdigit()):
+        ex, body = m.group(1), m.group(3)
+        if ex == "US":
+            return body
+        return body if body.endswith("." + ex) else f"{body}.{ex}"
     code0 = raw.split(".")[0]
     if code0.isalpha() and 1 <= len(code0) <= 6:
         return code0  # 美股字母代码
     if code0.isdigit() and len(code0) == 5:
         return code0 + ".HK"  # 港股 5 位数字
-    if raw.startswith("SH") or raw.startswith("SZ"):
-        return raw
     if raw.startswith(("60", "68")):
         return f"{raw}.SH"
     if raw.startswith(("00", "30", "20")):
