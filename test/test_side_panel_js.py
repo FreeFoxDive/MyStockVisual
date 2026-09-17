@@ -19,6 +19,7 @@ from pathlib import Path
 
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
 INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
+MARKET_CLOCK_JS = _VISUAL_DIR / "static" / "js" / "market-clock.js"
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -277,8 +278,48 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertLess(arr.index("premiumRow"), arr.index("label: '3日涨幅'"))
         self.assertLess(arr.index("label: '10日涨幅'"), arr.index("label: '状态'"))
 
+    def test_next_open_row_sits_below_status(self):
+        """「下一开盘」排在「状态」下面 (状态说现在是什么时段, 它说下一次几点)。"""
+        body = _extract_fn(self.src, "infoPanelRows")
+        arr = body[body.index("return ["):]
+        self.assertLess(arr.index("label: '状态'"), arr.index("marketHintRow"),
+                        "下一开盘 必须收在 状态 之后")
+
+    def test_next_open_row_updates_in_place_every_second(self):
+        """值每秒变 (倒计时), 所以只就地改数值与悬停说明, 不重绘整个面板。"""
+        row = self.src[self.src.index("label: '下一开盘'"):]
+        row = row[:row.index("},")]
+        self.assertIn("id: 'info-market-hint'", row, "要有稳定 id 供就地更新")
+        self.assertIn("VisualMarketClock.openHintText", row, "文案口径来自共享时钟")
+        self.assertIn("marketCountdownSec()", row)
+        self.assertIn("title: marketHintTitle()", row, "完整描述走悬停, 不占值区")
+        fn = _extract_fn(self.src, "renderMarketHint")
+        self.assertIn("info-market-hint", fn)
+        self.assertIn(".sp-val", fn, "只写数值层")
+        self.assertNotIn("innerHTML", fn, "不得整块重绘 (会打断滚动/选中)")
+        self.assertIn("!== text", fn, "值没变就不写 DOM (盘中恒为 '—', 否则每秒白标脏)")
+        self.assertIn("row.title !== title", fn,
+                      "说明也要跟着相位就地更新 (只靠面板重绘会滞后 60s)")
+        clock = self.src[self.src.index("// 时间 1s 刷新"):]
+        clock = clock[:clock.index("}, 1000);")]
+        self.assertIn("renderMarketHint()", clock)
+
+    def test_hint_title_carries_what_the_value_box_cannot(self):
+        """值区 129px 放不下"是集合竞价还是连续竞价开盘", 这段语义只能在悬停里。"""
+        fn = _extract_fn(self.src, "marketHintTitle")
+        self.assertIn("openHintDetail", fn)
+        self.assertIn("degraded()", fn, "日历降级优先说降级")
+        # 降级提示要排在完整描述之前 (否则降级时会被描述盖掉)
+        self.assertLess(fn.index("degraded()"), fn.index("openHintDetail"))
+
+    def test_next_open_row_is_conditional_on_halt(self):
+        body = _extract_fn(self.src, "infoPanelRows")
+        self.assertIn("d.trade_status === 'halt' ? null", body,
+                      "条件要在行构造处 (与 sharesRow/premiumRow 同一套 null 过滤)")
+        self.assertIn("marketHintRow,", body, "行要进返回数组")
+        self.assertIn("].filter(r => r)", body, "空行由既有 filter 丢掉")
+
     def test_reopen_button_doubled(self):
-        # 收起后唯一的恢复入口: 点按区域按 2 倍放大 (8px 2px → 16px 4px, 12px → 20px 字)
         seg = self.src[self.src.index("#side-reopen {"):]
         css = seg[:seg.index("}")]
         self.assertIn("padding: 16px 4px", css)
@@ -432,21 +473,29 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
         src = INDEX_HTML.read_text(encoding="utf-8")
         fns = "\n".join(_extract_fn(src, n) for n in
                         ("infoPanelRows", "panelStockName", "panelStockCode",
-                         "fmtLots", "fmtCN", "fmtPrice3", "normPct"))
+                         "fmtLots", "fmtCN", "fmtPrice3", "normPct",
+                         "marketCountdownSec", "marketHintTitle"))
+        # 下一开盘行读的是共享时钟 (真模块 + 可控状态), 不是服务端返回的字段
         cls.script = (
-            fns + "\n"
+            MARKET_CLOCK_JS.read_text(encoding="utf-8") + "\n"
+            + fns + "\n"
             + "globalThis.C = () => ({ up: 'up', down: 'down' });\n"
             + "globalThis.VisualLive = { price: (v) => (v == null ? '—' : String(+Number(v).toFixed(3))) };\n"
             + "const c = JSON.parse(process.argv[1]);\n"
             + "globalThis.STATE = { symbol: c.symbol, period: c.period, klineData: null };\n"
+            # 真实载荷一定带 time (→ today); 用例不写就默认"目标时刻就在今天"
+            + "const mk = Object.assign({ phase: 'trading', at: Date.now() }, c.market || {});\n"
+            + "if (!mk.today) mk.today = String(mk.nextOpenAt || mk.nextLiveAt || '').slice(0, 10);\n"
+            + "globalThis.marketClock = { state: mk, degraded: () => !!c.degraded };\n"
             + "const rows = infoPanelRows(c.info);\n"
             + "process.stdout.write(JSON.stringify({ rows: rows || null,"
             + " labels: (rows || []).map(r => r.label) }));"
         )
 
-    def _rows(self, info, period="1d", symbol="000001.SZ"):
+    def _rows(self, info, period="1d", symbol="000001.SZ", market=None, degraded=False):
         proc = subprocess.run(["node", "-e", self.script,
-                               json.dumps({"info": info, "period": period, "symbol": symbol})],
+                               json.dumps({"info": info, "period": period, "symbol": symbol,
+                                           "market": market, "degraded": degraded})],
                               capture_output=True, check=True)
         return json.loads(proc.stdout.decode("utf-8"))
 
@@ -461,7 +510,7 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
         out = self._rows(self.STOCK)
         self.assertEqual(out["labels"], [
             '名称', '代码', '现价', '行业', '涨停价', '跌停价', '总手', '成交额', '换手', '量比',
-            '流通', '质押', 'PE', 'PB', '3日涨幅', '5日涨幅', '10日涨幅', '状态'])
+            '流通', '质押', 'PE', 'PB', '3日涨幅', '5日涨幅', '10日涨幅', '状态', '下一开盘'])
         rows = {r["label"]: r for r in out["rows"]}
         # 流通 = float_shares × 现价 (与顶栏同算法/文案): 1.2e10 × 11.5 = 1.38e11 → 1380.00亿
         self.assertEqual(rows["流通"]["text"], "1380.00亿")
@@ -503,6 +552,59 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
         # 无数据整体 → 返回 null (面板走 "无数据" 占位)
         self.assertIsNone(self._rows(None)["rows"])
 
+
+    def test_next_open_row_renders_real_clock_state(self):
+        """盘外给出下一次开盘时刻 (+ 同日倒计时); 盘中给占位符。"""
+        for market, expect in (
+            # 同日: 时刻 + 「余 <剩余>」; 倒计时值随本机时钟变, 只断言前缀
+            ({"phase": "break", "nextOpenAt": "2026-09-17 13:00:00", "nextOpenInSec": 3600},
+             "13:00 余 "),
+            # 跨日: 只给 月-日 时:分 (值区 129px 放不下"下一交易日 … 集合竞价")
+            ({"phase": "closed", "today": "2026-09-17",
+              "nextLiveAt": "2026-09-18 09:15:00", "nextLiveInSec": 64800},
+             "09-18 09:15"),
+            ({"phase": "trading"}, "—"),
+        ):
+            with self.subTest(phase=market["phase"]):
+                rows = {r["label"]: r for r in
+                        self._rows(self.STOCK, market=market)["rows"]}
+                self.assertIn("下一开盘", rows)
+                self.assertTrue(rows["下一开盘"]["text"].startswith(expect),
+                                f"{market['phase']} → {rows['下一开盘']['text']!r}")
+
+    def test_next_open_row_title_has_the_full_description(self):
+        """值被压短后, "是集合竞价还是连续竞价开盘"必须还能查到 (悬停 title)。"""
+        for market, expect in (
+            ({"phase": "break", "nextOpenAt": "2026-09-17 13:00:00"}, "连续竞价开盘"),
+            ({"phase": "pre", "nextLiveAt": "2026-09-17 09:15:00"}, "集合竞价开始"),
+            ({"phase": "closed", "today": "2026-09-17", "nextLiveAt": "2026-09-18 09:15:00"},
+             "下一交易日 09-18 09:15 集合竞价开始"),
+        ):
+            with self.subTest(phase=market["phase"]):
+                rows = {r["label"]: r for r in
+                        self._rows(self.STOCK, market=market)["rows"]}
+                self.assertIn(expect, rows["下一开盘"]["title"],
+                              f"{market['phase']} 的悬停说明 → {rows['下一开盘']['title']!r}")
+
+    def test_next_open_row_explains_calendar_degradation(self):
+        """日历降级 (缺 pandas_market_calendars) 要在界面上说, 不能只在日志里 warning。"""
+        rows = {r["label"]: r for r in self._rows(self.STOCK, degraded=True)["rows"]}
+        self.assertIn("降级", rows["下一开盘"]["title"])
+
+    def test_next_open_row_hidden_while_halted(self):
+        """停牌时不显示「下一开盘」: 这只票当日就不交易, 给"13:00 开盘"是误导。
+
+        (601995.SH 这类当日停牌标的即为此例 —— 服务端 trade_status='halt' 时,
+        该行整行消失, 而不是显示一个不会发生的开盘时间。)
+        """
+        rows = {r["label"]: r for r in
+                self._rows(dict(self.STOCK, trade_status="halt",
+                                trade_status_text="停牌", volume=0))["rows"]}
+        self.assertNotIn("下一开盘", rows, "停牌不该再提示下一次开盘")
+        self.assertEqual(rows["状态"]["text"], "停牌")
+        # 同时确认非停牌时那一行还在 (否则这条断言会因为别的原因通过)
+        ok = {r["label"] for r in self._rows(self.STOCK)["rows"]}
+        self.assertIn("下一开盘", ok)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

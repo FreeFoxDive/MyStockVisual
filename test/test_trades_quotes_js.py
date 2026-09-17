@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """交易页/监控页现价快照兜底的 JS 回归测试。
 
-背景 (bug): commit 9f6e9f9 给 LiveMarket 加了 inAshareSession 门控后, 盘后/午休
-tick() 直接 return, 一个行情请求都不发, 交易记录「现价」整列 —; 且交易页翻页/
-筛选后 loadTrades 不重订阅, 当前页平仓标的盘中也无现价。
+背景 (bug): commit 9f6e9f9 给 LiveMarket 加了时段门控后, 盘后/午休 tick() 直接
+return, 一个行情请求都不发, 交易记录「现价」整列 —; 且交易页翻页/筛选后
+loadTrades 不重订阅, 当前页平仓标的盘中也无现价。
 
 回归点:
   * trades.html loadTrades 必须调用 refreshQuotes (翻页/筛选后重订阅);
   * trades.refreshQuotes / monitor.loadQuotes 必须带不受门控的 /api/quotes
     快照兜底, 且经 liveQuotes.accept('quote', …, 'embedded') 走统一通道;
-  * 两页 active 门控必须保留 (盘中续刷仍受控, 盘后不得持续轮询)。
+  * 两页的 active/streamActive 门控必须保留 (盘中续刷仍受控, 盘后不得持续轮询),
+    且时段口径只来自共享的 market-clock.js。
 
 运行:
     venv/Scripts/python.exe -m unittest visual/test/test_trades_quotes_js.py -v
@@ -75,9 +76,20 @@ class TradesQuotesStaticTest(unittest.TestCase):
         self.assertIn('accept("quote", s, q, "embedded")', body, "须走统一 accept 通道")
 
     def test_session_gates_kept(self):
-        # 门控保留: 盘中由 LiveMarket 续刷, 盘后靠快照兜底而非持续轮询
-        self.assertIn("active: () => !!state.user && inAshareSession()", self.trades)
-        self.assertIn("active: () => inAshareSession()", self.monitor)
+        # 门控保留: 盘中由 LiveMarket 续刷, 盘后靠快照兜底而非持续轮询。
+        # 断言"有门控"而不是某个函数名 —— 名字会演进, 断的是不变量。
+        for label, src in (("trades", self.trades), ("monitor", self.monitor)):
+            with self.subTest(page=label):
+                self.assertIn("new VisualMarketClock.MarketClock(", src)
+                self.assertIn("marketClock.start()", src)
+                self.assertRegex(src, r"active: \(\) =>[^\n]*canAutoRefresh\(\)",
+                                 "现价轮询必须按时段时钟门控")
+                self.assertRegex(src, r"streamActive: \(\) =>[^\n]*canStreamQuotes\(\)",
+                                 "建流门槛与取数门槛必须分开")
+                self.assertNotIn("inAshareSession", src,
+                                 "各页不得再自己拼时段判断 (唯一口径在 market-clock.js)")
+        # 交易页还要求已登录 (未登录时连快照兜底也不该发)
+        self.assertIn("active: () => !!state.user && canAutoRefresh()", self.trades)
 
 
 class TradesQuotesBehaviorTest(unittest.TestCase):

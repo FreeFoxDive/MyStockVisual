@@ -5,6 +5,7 @@ import logging
 
 from flask import request
 
+import market
 import market_hours
 import monitor
 import trades
@@ -12,6 +13,30 @@ from api import api_bp
 from api.common import _error, _json, _monitor_error_label, _read_json_body, _require_user
 
 log = logging.getLogger("api")
+
+
+def _with_name(rows, key="name"):
+    """给每条挂上标的名称 —— 监控页的「标的」列统一只显示名称, 每条都要有标的名称。
+
+    趋势线监控与告警流水落库时只存 symbol, 这里用 24h 刷新的名称映射补齐
+    (market._lookup_name: 指数→指数名, 股票/ETF→列表名, 查不到回落 symbol 本身,
+    与 quote/kline 同一口径)。
+
+    key 可指定: 趋势线监控载荷里的 name 是**监控线自己的名字** (用户在画线上起的,
+    如"上升支撑线"), 不是标的名称 —— 那张表必须用 symbol_name, 否则标的列会显示
+    线名。两家共用一个键正是最容易出错的点。
+    """
+    try:
+        for r in rows:
+            if not str(r.get(key) or "").strip():   # 空白串也算没名称
+                r[key] = market._lookup_name(r.get("symbol"))
+    except Exception as e:
+        # 名称只是显示用: 查不到就回落代码, 绝不能因此把整页数据打空
+        log.warning("补全标的名称失败: %s", e)
+        for r in rows:
+            if not str(r.get(key) or "").strip():
+                r[key] = r.get("symbol") or ""
+    return rows
 
 
 def _merge_positions(user):
@@ -87,16 +112,17 @@ def monitor_overview():
     if st.get("last_error"):
         st["last_error"] = _monitor_error_label(st["last_error"])
     return _json({
-        "positions": positions,
+        "positions": _with_name(positions),
         "scope_all": scope_all,
         "username": user["username"],
         "is_admin": bool(user.get("is_admin")),
         "monitor_enabled": bool(user.get("is_admin") or user.get("monitor_enabled")),
         "status": st,
-        "alerts": trades.list_monitor_alerts(user["id"], limit=20),
-        # 价格监控: 趋势线跌破 (配置挂在画线上) 与任意条件预警, 均限当前用户
-        "trendline_monitors": trades.list_trendline_monitors(user["id"]),
-        "price_alerts": trades.list_price_alerts(user["id"]),
+        "alerts": _with_name(trades.list_monitor_alerts(user["id"], limit=20)),
+        # 价格监控: 趋势线跌破 (配置挂在画线上) 与任意条件预警, 均限当前用户。
+        # 趋势线那张表用 symbol_name: 它的 name 是监控线自己的名字。
+        "trendline_monitors": _with_name(trades.list_trendline_monitors(user["id"]), "symbol_name"),
+        "price_alerts": _with_name(trades.list_price_alerts(user["id"])),
     })
 
 

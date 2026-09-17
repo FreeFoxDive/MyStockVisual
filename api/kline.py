@@ -138,12 +138,21 @@ def serialize_bars(df, period):
 
 
 def _session_meta(now=None):
-    """接口 meta 的统一时段字段 (唯一口径来自 market_hours)。"""
-    now = now or market_hours.now()
+    """接口 meta 的统一时段字段 (唯一口径来自 market_hours)。
+
+    与 /api/ping、/api/stream/status 同源 (market_status), 前端据 quote_live /
+    next_live_in_sec 判断要不要刷新、何时唤醒 —— 集合竞价期 quote_live 为真,
+    in_session 仍为假, 两者不能互相替代。
+    """
+    st = market_hours.market_status(now)
     return {
-        "server_time": str(now),
-        "is_trading_day": market_hours.is_trading_day(now),
-        "session_phase": market_hours.session_phase(now),
+        "server_time": st["time"],
+        "is_trading_day": st["is_trading_day"],
+        "session_phase": st["session_phase"],
+        "is_auction": st["is_auction"],
+        "quote_live": st["quote_live"],
+        "next_live_at": st["next_live_at"],
+        "next_live_in_sec": st["next_live_in_sec"],
     }
 
 

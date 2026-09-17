@@ -301,6 +301,7 @@ td.neg { color: var(--down-text); font-weight: 600; }
 </script>
 <script src="/js/api.js"></script>
 <script src="/js/live-market.js"></script>
+<script src="/js/market-clock.js"></script>
 <script src="/vendor/vue-3.5.13.global.prod.js"></script>
 <script src="/vendor/vue-demi-0.14.10.iife.js"></script>
 <script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
@@ -1040,9 +1041,31 @@ async function loadStats() {
   renderHoldModelTable();
 }
 
+// ── 市场时段时钟 (唯一来源, 见 static/js/market-clock.js) ──
+// 门控口径与首页/监控一致: 相位由 SSE 推送, 开盘由服务端给的相对秒数精确唤醒,
+// 回到前台/断网恢复立即补一次, 不再自己 60s 轮询 ping (那正是开盘后最多 60s
+// 不刷新的根源)。集合竞价 (09:15-09:30) 也算活跃。
+const marketClock = new VisualMarketClock.MarketClock({
+  onChange: (state, kind) => {
+    if (kind === 'resume') liveQuotes.refresh();
+  },
+});
+/** 该不该自动刷新现价 (时段口径来自时钟; 标签页隐藏时停机)。 */
+function canAutoRefresh() {
+  return !document.hidden && marketClock.live();
+}
+/** 该不该维持行情流: 比 canAutoRefresh 宽 —— 交易日 09:00 起即可建流 (只保活不取数)。 */
+function canStreamQuotes() {
+  return !document.hidden && marketClock.streamAllowed();
+}
+
 // 现价：持仓优先全量 + 当前页平仓 (受筛选/分页影响), 失败保留旧值, 仅首次就失败的记 null
 const liveQuotes = new VisualLive.LiveMarket({
-  active: () => !!state.user && inAshareSession(),
+  active: () => !!state.user && canAutoRefresh(),
+  // 建流门槛比取数门槛宽: 服务端允许交易日 09:00 起连流 (只保活不取数)
+  streamActive: () => !!state.user && canStreamQuotes(),
+  onMarket: payload => marketClock.applyMarketFrame(payload),
+  onStreamState: open => marketClock.setStreamConnected(open),
   onQuote: (symbol, q) => {
     VisualMarketStore.store.accept('quote', symbol, q);
   },
@@ -2529,28 +2552,8 @@ initRanges();
 
 checkAuth();
 
-// 持仓现价定时刷新：与首页同口径, 用服务端北京时间判断盘中 (含交易日历/午休);
-// ping 未就绪/失败时回退本地时钟 (仅 UTC+8 浏览器准确)
-let _serverInSession = null;
-async function syncSessionFlag() {
-  try {
-    const r = await fetch('/api/ping');
-    const d = await r.json();
-    if (typeof d.in_session === 'boolean') _serverInSession = d.in_session;
-  } catch (e) { /* 保持上次值 */ }
-}
-syncSessionFlag();
-setInterval(syncSessionFlag, 60e3);
-
-function inAshareSession() {
-  if (_serverInSession !== null) return _serverInSession;
-  const now = new Date();
-  const dow = now.getDay();
-  if (dow === 0 || dow === 6) return false;
-  const mins = now.getHours() * 60 + now.getMinutes();
-  return (mins >= 9 * 60 + 30 && mins <= 11 * 60 + 30) ||
-         (mins >= 13 * 60 && mins <= 15 * 60);
-}
+// 持仓现价定时刷新的时段门控由 marketClock 统一维护 (见上方), 不再自己轮询 ping。
+marketClock.start();
 
 // Quotes are maintained by LiveMarket, including fallback and recovery.
 </script>

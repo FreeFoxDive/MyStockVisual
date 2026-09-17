@@ -113,6 +113,30 @@ class MonitorPageStaticTest(unittest.TestCase):
         for fn in PRICE_SECTION_FNS:
             self.assertIn(f"function {fn}", self.src, fn)
 
+    def test_symbol_column_has_one_rendering_rule(self):
+        """四张表的「标的」列必须同一口径: 只显示名称 + 可点击跳转。
+
+        原来四套写法: 持仓"名称+代码"两行、告警流水根本不是链接、趋势线只给代码、
+        条件预警"名称 代码"同行 —— 同一个页面里同一列四种样子。
+        """
+        # 不再有手写的标的单元格, 全部走 symbolCell
+        self.assertNotIn('<td class="sym">', self.src,
+                         "标的列不得再手写单元格 (统一走 symbolCell)")
+        for fn in ("renderPositions", "renderAlerts", "renderTrendlineMonitors",
+                   "renderPriceAlerts"):
+            body = _extract_fn(self.src, fn)
+            self.assertIn("symbolCell(", body, f"{fn} 的标的列要走 symbolCell")
+        # 趋势线表里的 name 是监控线自己的名字, 标的名称在 symbol_name
+        tl = _extract_fn(self.src, "renderTrendlineMonitors")
+        self.assertIn('symbolCell(m.symbol_name, m.symbol, m.period || "1d")', tl,
+                      "趋势线的标的名称取 symbol_name, 且要保留周期跳转")
+        self.assertIn("m.name", tl, "监控名称列仍用线名, 不能被标的名称顶掉")
+        # 告警流水不再自己反查名称 (服务器已给)
+        self.assertNotIn("nameOf", _extract_fn(self.src, "renderAlerts"),
+                         "客户端名称映射已由服务端 name 取代")
+        # 死规则: 代码不再可见, 该样式无人使用
+        self.assertNotIn("td.sym .code", self.src)
+
     def test_stat_cards_include_price_monitoring(self):
         for token in ('id="st-tl"', 'id="st-pa"', "趋势线监控", "条件预警"):
             self.assertIn(token, self.src, token)
@@ -161,6 +185,7 @@ class TrendlineLinkBehaviorTest(unittest.TestCase):
             _extract_fn(src, "escHtml"),
             _extract_fn(src, "escAttr"),
             _extract_fn(src, "fmtTs"),
+            _extract_fn(src, "symbolCell"),
             _extract_fn(src, "renderTrendlineMonitors"),
             "const boxes = {};",
             "globalThis.document = {getElementById: (id) => "
@@ -172,7 +197,7 @@ class TrendlineLinkBehaviorTest(unittest.TestCase):
     @staticmethod
     def _mon(**over):
         m = {"drawing_id": "d1", "symbol": "000001.SH", "period": "1w",
-             "name": "周线支撑", "line_type": "trend", "pct": 2.0,
+             "name": "周线支撑", "symbol_name": "平安银行", "line_type": "trend", "pct": 2.0,
              "adjust": "forward", "last_fired_at": None}
         m.update(over)
         return m
@@ -203,6 +228,80 @@ class TrendlineLinkBehaviorTest(unittest.TestCase):
     def test_symbol_is_url_encoded(self):
         html = self._render([self._mon(symbol="00700.HK")])
         self.assertIn("/?symbol=00700.HK&period=1w", html)
+
+    def test_symbol_column_shows_stock_name_not_line_name(self):
+        """标的列要标的名称 (symbol_name), 不是监控线自己的名字 (name)。"""
+        html = self._render([self._mon()])
+        cell = html[html.index('class="sym"'):]
+        cell = cell[:cell.index("</td>")]
+        self.assertIn("平安银行", cell, "标的列显示标的名称")
+        self.assertNotIn("周线支撑", cell, "线名是「监控名称」列的事, 不能混进标的列")
+        self.assertIn('data-symbol="000001.SH"', cell, "代码保留为元素属性")
+        self.assertIn('title="000001.SH"', cell, "悬停可见代码")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
+class SymbolCellBehaviorTest(unittest.TestCase):
+    """标的列的唯一渲染口径: 可见只有名称, 代码进属性, 名称缺失回落代码。"""
+
+    @classmethod
+    def setUpClass(cls):
+        src = MONITOR_HTML.read_text(encoding="utf-8")
+        cls.script = "\n".join([
+            _extract_fn(src, "escHtml"),
+            _extract_fn(src, "escAttr"),
+            _extract_fn(src, "symbolCell"),
+            "const cases = JSON.parse(process.argv[1]);",
+            "process.stdout.write(JSON.stringify(cases.map(c =>"
+            " symbolCell(c.name, c.symbol, c.period))));",
+        ])
+
+    def _cells(self, *cases):
+        proc = subprocess.run(["node", "-e", self.script, json.dumps(list(cases))],
+                              capture_output=True, check=True, text=True, encoding="utf-8")
+        return json.loads(proc.stdout)
+
+    def test_only_name_is_visible(self):
+        cell = self._cells({"name": "贵州茅台", "symbol": "600519.SH"})[0]
+        self.assertIn("<b>贵州茅台</b>", cell, "名称加粗可见")
+        self.assertNotIn(">600519.SH<", cell, "代码不作为可见文字")
+        self.assertNotIn('class="code"', cell, "旧的代码行已去掉 (该列只显示名称)")
+
+    def test_code_is_kept_as_attributes(self):
+        cell = self._cells({"name": "贵州茅台", "symbol": "600519.SH"})[0]
+        self.assertIn('data-symbol="600519.SH"', cell, "data-symbol 与 quant/trades 同约定")
+        self.assertIn('title="600519.SH"', cell, "悬停可见代码")
+
+    def test_clickable_and_jumps_with_period(self):
+        cell = self._cells({"name": "平安银行", "symbol": "000001.SH", "period": "1w"})[0]
+        self.assertIn('<a href="/?symbol=000001.SH&period=1w"', cell)
+        no_period = self._cells({"name": "平安银行", "symbol": "000001.SH"})[0]
+        self.assertIn('href="/?symbol=000001.SH"', no_period)
+        self.assertNotIn("period=", no_period, "没有周期就不该拼空的 period")
+
+    def test_name_missing_falls_back_to_code(self):
+        """港美股/新股不在 A 股名称表里 → 回落代码, 而不是留空。"""
+        for case in ({"name": "", "symbol": "00700.HK"}, {"symbol": "00700.HK"},
+                     {"name": None, "symbol": "00700.HK"},
+                     {"name": "   ", "symbol": "00700.HK"}):  # 只填空格的自由文本
+            with self.subTest(case=case):
+                cell = self._cells(case)[0]
+                self.assertIn("<b>00700.HK</b>", cell)
+
+    def test_name_is_trimmed(self):
+        cell = self._cells({"name": "  贵州茅台  ", "symbol": "600519.SH"})[0]
+        self.assertIn("<b>贵州茅台</b>", cell, "首尾空白不该带进单元格")
+
+    def test_both_missing_renders_placeholder(self):
+        cell = self._cells({"name": "", "symbol": ""})[0]
+        self.assertIn("<b>—</b>", cell)
+
+    def test_html_is_escaped(self):
+        cell = self._cells({"name": '<img src=x onerror="a">', "symbol": '"><b>x</b>'})[0]
+        self.assertNotIn("<img", cell, "名称里的标签必须转义")
+        self.assertNotIn('"><b>x</b>', cell, "属性里的引号必须转义")
+        self.assertIn("&lt;img", cell)
+        self.assertIn("&quot;", cell)
 
 
 @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")

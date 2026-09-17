@@ -21,6 +21,7 @@ from pathlib import Path
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
 INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
 LIVE_MARKET_JS = _VISUAL_DIR / "static" / "js" / "live-market.js"
+MARKET_CLOCK_JS = _VISUAL_DIR / "static" / "js" / "market-clock.js"
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -103,7 +104,9 @@ class SidePanelShotModelTest(unittest.TestCase):
         src = INDEX_HTML.read_text(encoding="utf-8")
         live = LIVE_MARKET_JS.read_text(encoding="utf-8")
         cls.script = (
-            _extract_const(src, "SIDE_SHOT_LAYOUT") + "\n"
+            # 真模块直接加载: openHintText/countdownTargetSec 的口径与页面完全一致
+            MARKET_CLOCK_JS.read_text(encoding="utf-8") + "\n"
+            + _extract_const(src, "SIDE_SHOT_LAYOUT") + "\n"
             + _extract_fn(live, "price") + "\n"
             + _extract_fn(src, "fmtPrice3") + "\n"
             + _extract_fn(src, "fmtCN") + "\n"
@@ -111,6 +114,8 @@ class SidePanelShotModelTest(unittest.TestCase):
             + _extract_fn(src, "normPct") + "\n"
             + _extract_fn(src, "panelStockName") + "\n"
             + _extract_fn(src, "panelStockCode") + "\n"
+            + _extract_fn(src, "marketCountdownSec") + "\n"
+            + _extract_fn(src, "marketHintTitle") + "\n"
             + _extract_fn(src, "infoPanelRows") + "\n"
             + _extract_fn(src, "depthPanelRows") + "\n"
             + _extract_fn(src, "fitShotText") + "\n"
@@ -124,6 +129,8 @@ let _infoOn = true, _depthOn = false;
 function infoPanelOn() { return _infoOn; }
 function depthSecOn() { return _depthOn; }
 VisualLive = { price: price };
+// 时段时钟: 固定成盘中 (下一开盘行显示占位符), 让几何断言与真实时段无关
+globalThis.marketClock = { state: { phase: 'trading', at: Date.now() }, degraded: () => false };
 
 // 录制型 canvas 2d 上下文: measureText 用当前 font 的字号估算宽度
 function recCtx() {

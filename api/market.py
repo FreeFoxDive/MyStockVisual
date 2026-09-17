@@ -28,13 +28,13 @@ log = logging.getLogger("api")
 
 @api_bp.route("/api/ping", methods=["GET"])
 def ping():
-    now = market_hours.now()
-    return _json({
-        "ok": True,
-        "time": str(now),
-        "in_session": market_hours.in_session(now),
-        "is_trading_day": market_hours.is_trading_day(now),
-    })
+    """市场状态 (公开, 免登录): 时段 + 下一次开盘/开始取数的相对秒数。
+
+    高频路径不靠它 —— 盘中相位变更是 SSE 的 event: market 推过来的。这里只服务
+    冷启动、兜底心跳和标签页回到前台这三处。next_live_in_sec 用**相对秒数**而不是
+    绝对时刻, 客户端时钟不准也能精确唤醒, 不必靠 60s 轮询去撞开盘时刻。
+    """
+    return _json({"ok": True, **market_hours.market_status()})
 
 
 # ── 深度健康检查 (/api/health) ──

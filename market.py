@@ -672,7 +672,8 @@ quote_cache = TTLCache(ttl_seconds=1.25)
 # 盘后"最后快照": quote_cache 只有 1.25s, 页面跳转必然过期, 且盘后撞上预算/抓取锁
 # 时只回退已过期缓存会返回 {}。这里另存一份长 TTL 快照, 盘后页面加载直接命中,
 # 不再发上游、也不再忽快忽慢。TTL 必须覆盖整个非交易时段 (过期即删), 故默认 12h;
-# 盘中会被持续覆盖, 长 TTL 无副作用。读取一律由 in_session() 门控, 盘中零影响。
+# 盘中会被持续覆盖, 长 TTL 无副作用。读取一律由 is_live() 门控 —— 集合竞价期
+# 必须走实时路径, 否则这份 12h 快照会命中并顶掉竞价撮合价。
 QUOTE_SNAPSHOT_TTL_SEC = int(float(os.environ.get("QUOTE_SNAPSHOT_TTL_SEC", "43200")))
 quote_snapshot_cache = TTLCache(ttl_seconds=QUOTE_SNAPSHOT_TTL_SEC)
 
@@ -1157,14 +1158,14 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
     adj = kline_source.normalize_adjust(adjust)
     category = _kline_category(symbol, period)
     ct = kline_source.chain_tag(category)  # 缓存按数据源链隔离, 改链即失效
-    # 检查磁盘缓存 (周月K 600s; 分钟 盘中 60s/盘后 300s; 日K 见 KLINE_DISK_TTL_*)
+    # 检查磁盘缓存 (周月K 600s; 分钟 活跃时段 60s/其余 300s; 日K 见 KLINE_DISK_TTL_*)
     now = market_hours.now()
-    in_trading = market_hours.in_session(now)
+    live = market_hours.is_live(now)
     if period in MINUTE_PERIODS:
         # 分钟 bar 不拼快照, TTL 必须短, 否则图表会滞后于实时行情
-        ttl = 60 if in_trading else 300
+        ttl = 60 if live else 300
     elif period == "1d":
-        ttl = KLINE_DISK_TTL_SEC if in_trading else KLINE_DISK_TTL_OFF_SEC
+        ttl = KLINE_DISK_TTL_SEC if live else KLINE_DISK_TTL_OFF_SEC
     else:
         ttl = 600
     cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj, chain_tag=ct)
@@ -1420,8 +1421,10 @@ def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0):
     """
     global _quote_cursor
     symbols = list(dict.fromkeys(normalize_symbol(s) for s in symbols if s))
-    # 盘后读长 TTL 最后快照, 避免撞上预算/抓取锁时返回 {} (页面跳转忽快忽慢)。
-    off_session = not market_hours.in_session()
+    # 非活跃时段 (盘前/午休/盘后) 读长 TTL 最后快照, 避免撞上预算/抓取锁时返回 {}
+    # (页面跳转忽快忽慢)。集合竞价必须走实时路径 —— 否则 12h 快照会命中并短路
+    # 掉上游抓取, 页面看到的是昨收而不是竞价撮合价。
+    off_session = not market_hours.is_live()
     # A concurrent HTTP fallback cannot start a second fetch or overwrite its result.
     if wait_for_lock:
         acquired = _quote_fetch_lock.acquire(timeout=float(wait_for_lock))
@@ -1487,8 +1490,8 @@ def _fetch_quotes_locked(symbols, fresh=False):
     if not symbols:
         return {}
 
-    # 盘后 miss 回退长 TTL 最后快照 (盘中 off_session=False, 行为不变)
-    off_session = not market_hours.in_session()
+    # 非活跃时段 miss 回退长 TTL 最后快照 (活跃时段 off_session=False, 行为不变)
+    off_session = not market_hours.is_live()
     result = {}
     if not fresh:
         # 缓存优先：命中直接返回，只抓缺失的
@@ -1724,8 +1727,9 @@ def _fetch_depth_locked(symbol):
     if cached is not None:
         return cached
     trade_date = _depth_trade_date()
-    # 收盘/午休/盘前不再请求供应商，展示当天盘中最后一份五档。
-    if not market_hours.in_session() or not market_hours.is_trading_day():
+    # 非活跃时段 (盘前/午休/收盘) 不再请求供应商，展示当天最后一份五档;
+    # 集合竞价期五档仍有意义 (虚拟撮合队列), 要走实时拉取。
+    if not market_hours.is_live():
         day_cached = _depth_day_get(symbol)
         if day_cached is not None:
             return day_cached
@@ -1748,6 +1752,8 @@ def _fetch_depth_locked(symbol):
                 }
                 out["_revision"] = time.time_ns() // 1000
                 _depth_cache.set(symbol, out, fetched_at=fetched_at)
+                # 日缓存只收连续竞价的盘口: 收盘后回放要的是"当天盘中最后一份",
+                # 不能把 09:20 的集合竞价队列当成收盘盘口 (任何盘中拉取都会覆盖)
                 if market_hours.in_session():
                     _depth_day_set(symbol, trade_date, out)
                 return out
@@ -1780,6 +1786,7 @@ def _fetch_depth_locked(symbol):
         "_revision": time.time_ns() // 1000,
     }
     _depth_cache.set(symbol, out)
+    # 同上: 日缓存只收连续竞价盘口
     if market_hours.in_session():
         _depth_day_set(symbol, trade_date, out)
     return out
@@ -2256,8 +2263,9 @@ def _maybe_append_today_bar(symbol, df, timing=None, fresh=True):
     today = market_hours.now().date()
     if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
         return df
-    if market_hours.session_phase() == "pre":
-        # 盘前快照是上一交易日残留 (volume 可能 >0), 拼出来会凭空多一根"今日"bar
+    if market_hours.session_phase() not in market_hours.BAR_READY_PHASES:
+        # 盘前/集合竞价的快照是上一交易日残留 (volume 可能 >0), 拼出来会凭空
+        # 多一根"今日"bar。必须用 not in 判定: 写成 == "pre" 会漏掉 auction。
         return df
     last_date = _last_bar_date(df)
     if last_date is None:
@@ -2287,8 +2295,8 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
         return None
     if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
         return None
-    if market_hours.session_phase() == "pre":
-        # 盘前不拼当日 bar (快照为上一交易日残留)
+    if market_hours.session_phase() not in market_hours.BAR_READY_PHASES:
+        # 盘前/集合竞价不拼当日 bar (快照为上一交易日残留)
         return None
     # 观测: 该往返的耗时即 quote_ms, 是 /api/kline 关键路径上的网络成本
     with perf.Span(timing, "quote_ms"):
@@ -2566,7 +2574,7 @@ def _volume_ratio_from_df(df):
 
 
 def _trade_status(quote):
-    """A 股交易状态 (code, text): 停牌/休市/未开盘/交易中/午间休市/已收盘。"""
+    """A 股交易状态 (code, text): 停牌/休市/集合竞价/未开盘/交易中/午间休市/已收盘。"""
     now = market_hours.now()
     if not market_hours.is_trading_day(now):
         return "closed", "休市"
@@ -2575,6 +2583,9 @@ def _trade_status(quote):
     if elapsed > 0 and quote is not None and (vol is None or vol <= 0):
         return "halt", "停牌"
     if elapsed <= 0:
+        # 09:15-09:30 已在撮合, 快照有效, 与"未开盘"要区分开
+        if market_hours.is_auction(now):
+            return "auction", "集合竞价"
         return "pre", "未开盘"
     t = now.hour * 60 + now.minute
     if 11 * 60 + 30 < t < 13 * 60:

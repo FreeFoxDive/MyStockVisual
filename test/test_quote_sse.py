@@ -55,10 +55,21 @@ class QuoteSseTest(unittest.TestCase):
         stream.QUOTE_SSE_TICK = 0.0  # 测试内不真实等待, 断连后立即归还槽位
         stream.QUOTE_SSE_MAX_LIFETIME = 3600.0  # 默认不在用例内到期
         self.addCleanup(self._restore)
-        # 路由现在只允许盘中建立 SSE；测试需固定为交易时段，避免盘外全量 425。
+        # 建流门控 (can_connect_stream) 与取数门控 (is_live) 都必须固定住: 它们各自
+        # 会去问日历/当前时间, 不 patch 的话用例会随真实墙钟变红 (09:15-09:30 或
+        # 盘外跑就换一套行为)。
         self._in_session = mock.patch.object(stream.market_hours, "in_session", return_value=True)
         self._in_session.start()
         self.addCleanup(self._in_session.stop)
+        self._phase = mock.patch.object(stream.market_hours, "session_phase", return_value="trading")
+        self._phase.start()
+        self.addCleanup(self._phase.stop)
+        self._live = mock.patch.object(stream.market_hours, "is_live", return_value=True)
+        self._live.start()
+        self.addCleanup(self._live.stop)
+        self._stream_ok = mock.patch.object(stream.market_hours, "can_connect_stream", return_value=True)
+        self._stream_ok.start()
+        self.addCleanup(self._stream_ok.stop)
         self.client = self.app.test_client()
         token, _ = trades.create_session(self.uid)
         self.client.set_cookie("session", token)
@@ -85,6 +96,14 @@ class QuoteSseTest(unittest.TestCase):
             resp.close()
         return resp, out
 
+    # 握手帧: retry + 相位帧 (event: market)。数据类断言一律跳过后再取,
+    # 免得每加一个握手帧就要改一遍下标。
+    def _frames_data(self, url, n=1):
+        resp, frames = self._frames(url, n=n + 2)
+        self.assertEqual(frames[0], "retry: 5000\n\n")
+        self.assertTrue(frames[1].startswith("event: market\ndata: "), "首帧应报相位")
+        return resp, frames[2:]
+
     def test_requires_login(self):
         anon = self.app.test_client()
         r = anon.get(f"/api/stream/quotes?symbols={SYM}")
@@ -99,24 +118,92 @@ class QuoteSseTest(unittest.TestCase):
     def test_frame_protocol_and_headers(self):
         quotes = {SYM: {"last_price": np.float64(10.5), "volume": np.int64(100)}}
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value=quotes):
-            resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}")
+            resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=3)
         self.assertEqual(frames[0], "retry: 5000\n\n")
-        self.assertTrue(frames[1].startswith("data: "))
-        self.assertTrue(frames[1].endswith("\n\n"))
-        payload = json.loads(frames[1][len("data: "):])
+        self.assertTrue(frames[1].startswith("event: market\ndata: "))
+        self.assertTrue(frames[2].startswith("data: "))
+        self.assertTrue(frames[2].endswith("\n\n"))
+        payload = json.loads(frames[2][len("data: "):])
         self.assertEqual(payload[SYM]["last_price"], 10.5, "numpy 标量应被 NumpyEncoder 正常编码")
         self.assertEqual(payload[SYM]["volume"], 100)
         self.assertEqual(resp.mimetype, "text/event-stream")
         self.assertEqual(resp.headers["Cache-Control"], "no-cache")
         self.assertEqual(resp.headers["X-Accel-Buffering"], "no")
 
+    def test_market_frame_carries_phase_and_next_wake_hint(self):
+        """相位帧是前端唯一状态来源: 连上就知道现在是什么时段、下一次几点开始。"""
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
+            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=2)
+        payload = json.loads(frames[1][len("event: market\ndata: "):])
+        for key in ("session_phase", "quote_live", "in_session", "is_trading_day",
+                    "next_open_at", "next_open_in_sec", "next_live_at", "next_live_in_sec",
+                    "stream_allowed", "calendar_source"):
+            self.assertIn(key, payload, f"相位帧应带 {key} (与 /api/ping 同一份口径)")
+        self.assertEqual(payload["session_phase"], "trading")
+
+    def test_market_frame_only_on_phase_change(self):
+        """相位不变不重复推: 它是事件, 不是心跳。"""
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
+            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=6)
+        markets = [f for f in frames if f.startswith("event: market")]
+        self.assertEqual(len(markets), 1, "相位没变就不该重复推")
+        self.assertEqual(frames[1], markets[0], "首帧即报相位")
+
+    def test_market_frame_on_phase_change(self):
+        """相位一变立刻推 —— 开盘/午休/收盘的切换不再靠前端轮询发现。"""
+        calls = {"n": 0}
+
+        def phase(*_a, **_k):
+            calls["n"] += 1
+            return "auction" if calls["n"] > 3 else "trading"
+
+        with mock.patch.object(self.stream.market_hours, "session_phase", side_effect=phase), \
+                mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
+            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=8)
+        markets = [f for f in frames if f.startswith("event: market")]
+        self.assertGreaterEqual(len(markets), 2, "相位变化要推新帧")
+        head = len("event: market\ndata: ")
+        self.assertEqual(json.loads(markets[0][head:])["session_phase"], "trading")
+        self.assertEqual(json.loads(markets[-1][head:])["session_phase"], "auction")
+
+    def test_close_frame_pushed_even_after_stream_gate_closes(self):
+        """收盘那一帧必须照推: 建流门控只关"新连接", 不能拦既有连接上的推送。
+
+        客户端拆流的**依据**就是这帧 (stream_allowed=false); 推送若被建流门控挡住,
+        "已收盘"就永远不会到达, 只能等 10 分钟兜底心跳 —— 实测会晚 600s。
+        """
+        calls = {"n": 0}
+
+        def phase(*_a, **_k):
+            calls["n"] += 1
+            return "closed" if calls["n"] > 3 else "trading"
+
+        gate = {"n": 0}
+
+        def connectable(*_a, **_k):
+            # 建立时窗口还开着, 建好之后窗口关闭 (15:01 的真实顺序)
+            gate["n"] += 1
+            return gate["n"] <= 1
+
+        with mock.patch.object(self.stream.market_hours, "session_phase", side_effect=phase), \
+                mock.patch.object(self.stream.market_hours, "can_connect_stream", side_effect=connectable), \
+                mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
+            resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=6)
+        self.assertNotEqual(resp.status_code, 425, "建立时窗口还开着, 不该被拒")
+        markets = [f for f in frames if f.startswith("event: market")]
+        self.assertGreaterEqual(len(markets), 2, "既有连接上收盘帧仍要推出去")
+        self.assertEqual(json.loads(markets[-1][len("event: market\ndata: "):])["session_phase"],
+                         "closed")
+        self.assertIs(json.loads(markets[-1][len("event: market\ndata: "):])["stream_allowed"],
+                      False, "帧里要告诉前端窗口已关, 由前端据此拆流")
+
     def test_frame_carries_is_trading_day_flag(self):
         # 非交易日标志必须随快照下发, 前端据此拦截 "残留快照补当日 bar"
         quotes = {SYM: {"last_price": 10.5, "volume": 100}}
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value=quotes), \
                 mock.patch.object(self.stream.market_hours, "is_trading_day", return_value=False):
-            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}")
-        payload = json.loads(frames[1][len("data: "):])
+            _resp, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}")
+        payload = json.loads(frames[0][len("data: "):])
         self.assertIs(payload[SYM]["is_trading_day"], False)
         self.assertEqual(payload[SYM]["last_price"], 10.5, "注入标志不得丢失原字段")
         self.assertNotIn("is_trading_day", quotes[SYM], "不得原地改写 fetch_quotes 的返回条目")
@@ -125,40 +212,39 @@ class QuoteSseTest(unittest.TestCase):
         depth = {"symbol": SYM, "bid_prices": [10], "ask_prices": [11], "_revision": 1}
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}), \
              mock.patch.object(self.stream.market, "fetch_depth", return_value=depth):
-            _, frames = self._frames(f"/api/stream/quotes?symbols={SYM}&depth=1", n=3)
-        self.assertTrue(frames[2].startswith("event: depth\ndata: "))
+            _, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}&depth=1", n=2)
+        self.assertTrue(frames[1].startswith("event: depth\ndata: "))
         self.assertFalse(self.stream.market._quote_interests)
 
     def test_indicators_named_event(self):
         payload = {"symbol": SYM, "bars": [{"date": "2026-09-14", "close": 10}], "_revision": 2}
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}), \
              mock.patch("api.kline.build_kline_tail", return_value=payload) as build:
-            _, frames = self._frames(f"/api/stream/quotes?symbols={SYM}&tail=1d&count=1006&adjust=none", n=3)
-        self.assertTrue(frames[2].startswith("event: bars\ndata: "))
+            _, frames = self._frames_data(
+                f"/api/stream/quotes?symbols={SYM}&tail=1d&count=1006&adjust=none", n=2)
+        self.assertTrue(frames[1].startswith("event: bars\ndata: "))
         build.assert_called_once_with(SYM, "1d", 1006, "none")
 
     def test_symbols_truncated_to_max(self):
         fetch = mock.Mock(return_value={})
         syms = ",".join(f"60000{i}.SH" for i in range(self.stream.QUOTE_SSE_MAX_SYMBOLS + 10))
         with mock.patch.object(self.stream.market, "fetch_quotes", fetch):
-            self._frames(f"/api/stream/quotes?symbols={syms}")
+            self._frames_data(f"/api/stream/quotes?symbols={syms}")
         self.assertEqual(len(fetch.call_args.args[0]), self.stream.QUOTE_SSE_MAX_SYMBOLS)
 
     def test_fetch_failure_emits_keepalive_frame(self):
         with mock.patch.object(self.stream.market, "fetch_quotes",
                                side_effect=RuntimeError("upstream down")):
-            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}")
-        self.assertEqual(frames[0], "retry: 5000\n\n")
-        self.assertEqual(frames[1], ": tick\n\n", "单次快照失败应发保活帧而非断开")
+            _resp, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}")
+        self.assertEqual(frames[0], ": tick\n\n", "单次快照失败应发保活帧而非断开")
 
     def test_keepalive_frame_between_snapshots(self):
         # 推送间隔未到时发 : keepalive 注释帧, 使断线能在 ~1s 内被发现并归还槽位
         self.stream.QUOTE_SSE_INTERVAL = 3600.0
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}):
-            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=3)
-        self.assertEqual(frames[0], "retry: 5000\n\n")
-        self.assertTrue(frames[1].startswith("data: "), "首帧应推送快照")
-        self.assertEqual(frames[2], ": keepalive\n\n", "间隔未到应发保活注释帧")
+            _resp, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}", n=2)
+        self.assertTrue(frames[0].startswith("data: "), "首帧应推送快照")
+        self.assertEqual(frames[1], ": keepalive\n\n", "间隔未到应发保活注释帧")
 
     def test_429_when_slots_exhausted(self):
         for _ in range(self.stream.QUOTE_SSE_MAX_CLIENTS):
@@ -222,9 +308,8 @@ class QuoteSseTest(unittest.TestCase):
         self.stream.QUOTE_SSE_MAX_LIFETIME = 3600.0
         quotes = {SYM: {"last_price": 10.0}}
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value=quotes):
-            _resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=2)
-        self.assertEqual(frames[0], "retry: 5000\n\n")
-        self.assertTrue(frames[1].startswith("data: "))
+            _resp, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}")
+        self.assertTrue(frames[0].startswith("data: "))
 
     def test_slots_recover_after_all_expire(self):
         self.stream.QUOTE_SSE_MAX_LIFETIME = 0.2

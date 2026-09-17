@@ -125,5 +125,165 @@ const finish = async (r, data) => {
   assert.equal(seen, 10, 'callback retried after a throwing render');
   assert.equal(throwing.get('A').last_price, 10, 'value cached after successful callback');
   throwing.dispose();
+
+  // ── SSE 建连失败必须指数退避 (现状固定 5s: 服务端挂掉就是 720 次/小时) ──
+  const failHttp = async (r, status = 500) => {
+    r.resolve({ ok: false, status });
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  const probes = () => requests.filter(r => r.url === '/api/stream/status');
+  {
+    const bt = new LiveMarket({ onQuote: () => {}, streamStatus: true });
+    bt.setSymbols(['A']);
+    await new Promise(resolve => setImmediate(resolve));
+    const deltas = [];
+    for (let i = 0; i < 8; i++) {
+      now += 300000;                       // 越过任何退避窗口, 保证这次真的会重连
+      const t0 = now;
+      bt.tick();
+      const probe = probes().at(-1);
+      assert.ok(probe, `第 ${i} 次预检应该发出`);
+      await failHttp(probe);
+      deltas.push(bt.retryAt - t0);
+    }
+    assert.deepEqual(deltas, [5000, 10000, 20000, 40000, 80000, 120000, 120000, 120000],
+      '退避 5s→10s→…→120s 封顶');
+    // 预检成功只证明服务端在应答: 退避要等真的收到有效帧才复位
+    const beforeOk = probes().length;
+    now += 200000;                          // 越过 120s 封顶, 才可能真的重连
+    bt.tick();
+    assert.equal(probes().length, beforeOk + 1, '退避窗口过后才重连');
+    const okProbe = probes().at(-1);
+    okProbe.resolve({ ok: true, json: async () => ({ sse_allowed: true, retry_after: 5 }) });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(bt.es, '预检通过就建流');
+    assert.ok(bt.connectFailures > 0, '预检成功不算"流好了", 退避先不清');
+    bt.es.emit({ A: q(10, 100) });
+    assert.equal(bt.connectFailures, 0, '收到有效帧才复位退避');
+    bt.dispose();
+  }
+
+  // ── 服务端说"现在不能连"时按它给的秒数等, 不固定 30s 盲等 ──
+  {
+    requests.length = 0;
+    const waited = new LiveMarket({ onQuote: () => {}, streamStatus: true });
+    waited.setSymbols(['A']);
+    await new Promise(resolve => setImmediate(resolve));
+    const t0 = now;
+    probes().at(-1).resolve({ ok: true, json: async () => ({ sse_allowed: false, retry_after: 600 }) });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(waited.retryAt - t0, 600000, '按服务端给的 600s 等');
+    assert.equal(waited.connectFailures, 0, '"现在不能连"是正常答复, 不算失败');
+    waited.dispose();
+  }
+
+  // ── HTTP 回退失败也要退避 (现状固定 2.5s, 故障期间一直打) ──
+  {
+    requests.length = 0;
+    const pb = new LiveMarket({ onQuote: () => {}, pollMs: 2500 });
+    pb.setSymbols(['A']);
+    await new Promise(resolve => setImmediate(resolve));
+    const quotes = () => requests.filter(r => r.url.includes('/api/quotes'));
+    assert.equal(quotes().length, 1, '引导轮询');
+    // 退避口径: 首次失败后仍按基础节奏重试一次, 之后每连败一次翻倍
+    await failHttp(quotes().at(-1));
+    let t = now;
+    now = t + 2600; pb.tick();
+    assert.equal(quotes().length, 2, '首次失败后仍按基础 2.5s 重试');
+    await failHttp(quotes().at(-1));
+    t = now;
+    now = t + 2600; pb.tick();
+    assert.equal(quotes().length, 2, '2.6s < 退避 5s: 不该再发');
+    now = t + 5100; pb.tick();
+    assert.equal(quotes().length, 3, '过了 5s 才发第三次');
+    await failHttp(quotes().at(-1));
+    t = now;
+    now = t + 6000; pb.tick();
+    assert.equal(quotes().length, 3, '6s < 退避 10s');
+    now = t + 10100; pb.tick();
+    assert.equal(quotes().length, 4, '过了 10s 才发第四次');
+    await finish(quotes().at(-1), {});        // 成功 → 退避复位
+    t = now;
+    now = t + 2600; pb.tick();
+    assert.equal(quotes().length, 5, '成功后退避复位, 回到 2.5s 节奏');
+    pb.dispose();
+  }
+
+  // ── 半死流不能每 15s 重连一次 ──
+  // 上游快照持续失败时服务端只发 ": tick" 注释帧, 客户端等不到有效帧 → 15s 判定
+  // 陈旧并重连。这里钉住"每次重连都要退避", 否则加上退避也只是把探测换个地方打。
+  {
+    requests.length = 0;
+    const half = new LiveMarket({ onQuote: () => {}, streamStatus: true });
+    half.setSymbols(['A']);
+    await new Promise(resolve => setImmediate(resolve));
+    probes().at(-1).resolve({ ok: true, json: async () => ({ sse_allowed: true, retry_after: 5 }) });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(half.es, '首次建流成功');
+    const deltas = [];
+    for (let i = 0; i < 4; i++) {
+      now += 16000;                          // 越过 staleMs: 一直收不到有效帧
+      const t0 = now;
+      half.tick();
+      assert.equal(half.es, null, `第 ${i} 次应判为陈旧并断开`);
+      deltas.push(half.retryAt - t0);
+      // 让它真的重连, 好观察下一次的退避
+      now += 200000;
+      half.tick();
+      const probe = probes().at(-1);
+      probe.resolve({ ok: true, json: async () => ({ sse_allowed: true, retry_after: 5 }) });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.deepEqual(deltas, [5000, 10000, 20000, 40000], '半死流重连也要指数退避');
+    half.dispose();
+  }
+
+  // ── 相位帧: 交给市场时钟, 且"流活着"要有真凭据 ──
+  {
+    requests.length = 0;
+    const markets = [], streamStates = [];
+    const mk = new LiveMarket({
+      onQuote: () => {},
+      onMarket: p => markets.push(p),
+      onStreamState: s => streamStates.push(s),
+    });
+    mk.setSymbols(['A']);
+    const mkStream = streams.at(-1);
+    assert.deepEqual(streamStates, [], 'OPEN 本身不算流活着');
+    mkStream.emit({ session_phase: 'auction', next_live_in_sec: null }, 'market');
+    // 帧对象来自 vm realm, 与宿主的对象原型不同, 逐字段比对而不是整体 deepEqual
+    assert.equal(markets.length, 1, '相位帧要转交给市场时钟');
+    assert.equal(markets[0].session_phase, 'auction');
+    assert.equal(markets[0].next_live_in_sec, null);
+    assert.deepEqual(streamStates, [true], '相位帧是流活着的凭据');
+    mkStream.emit({ A: q(10, 100) });
+    assert.deepEqual(streamStates, [true], '只在状态变化时通知');
+    mkStream.onerror();
+    assert.deepEqual(streamStates, [true, false], '断线立刻让调用方恢复探测兜底');
+    mk.dispose();
+  }
+
+  // ── 建流门槛与数据门槛分离: 允许提前连流 (09:00-09:15), 但不拉数据 ──
+  {
+    requests.length = 0;
+    const allowStream = [true];
+    const pre = new LiveMarket({
+      onQuote: () => {},
+      active: () => false,                    // 还没到取数时段
+      streamActive: () => allowStream[0],     // 但服务端允许建流
+    });
+    pre.setSymbols(['A']);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(streams.at(-1), '允许建流就要连上: 开盘第一帧零握手延迟');
+    assert.equal(requests.filter(r => r.url.includes('/api/quotes')).length, 0,
+      '不活跃时不轮询 HTTP');
+    streams.at(-1).emit({ A: q(10, 100) });
+    assert.equal(pre.get('A').last_price, 10, '提前连上的流照常送帧');
+    allowStream[0] = false;                   // 盘外: 流也不该维持
+    pre.tick();
+    assert.equal(pre.es, null, '不允许建流就停机');
+    pre.dispose();
+  }
+
   console.log('live-market boundary cases passed');
 })().catch(e => { console.error(e); process.exitCode = 1; });

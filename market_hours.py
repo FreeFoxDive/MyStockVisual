@@ -5,7 +5,8 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from bisect import bisect_left
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 import logging
 
@@ -17,6 +18,12 @@ _AM_END = (11, 30)
 _PM_START = (13, 0)
 _PM_END = (15, 0)
 _SESSION_MINUTES = 240
+# 开盘集合竞价: 09:15 起接受申报并给出虚拟匹配价, 09:25 撮合出开盘价, 09:30
+# 连续竞价接棒。这段已有快照意义 (要退回只认 09:25 就改这一个常量)。
+_AUCTION_START = (9, 15)
+# 行情流提前建连时刻: 交易日 09:00 起允许建立 SSE, 只发保活帧不取上游数据,
+# 换取 09:15 第一帧零握手延迟。
+_STREAM_OPEN = (9, 0)
 
 _CST = timezone(timedelta(hours=8))
 
@@ -47,6 +54,30 @@ def _xshg_days(start_year: int, end_year: int):
         end_date=f"{end_year}-12-31",
     )
     return frozenset(schedule.index.strftime("%Y-%m-%d"))
+
+
+@lru_cache(maxsize=16)
+def _xshg_sorted(start_year: int, end_year: int):
+    """交易日按日期升序 (YYYY-MM-DD 字典序即时间序), 供二分找「下一个交易日」。
+
+    原来的逐日 is_trading_day 扫描带 10 天上限, 长假 (春节/国庆叠加周末) 超限
+    就静默放弃; 这里对缓存日历做二分, 没有天数上限。
+    """
+    return tuple(sorted(_xshg_days(start_year, end_year)))
+
+
+def calendar_source() -> str:
+    """交易日历来源: "xshg" (pandas_market_calendars) 或 "weekday" (降级)。
+
+    降级时节假日会被当交易日 (抓到陈旧快照), 接口透出这个字段让前端能提示,
+    不再只在日志里 warning。
+    """
+    y = _now().year
+    try:
+        _xshg_days(y - 1, y + 1)
+        return "xshg"
+    except Exception:
+        return "weekday"
 
 
 def _weekday_fallback(day: str) -> bool:
@@ -95,17 +126,21 @@ def in_session(now: datetime | None = None) -> bool:
 
 
 def session_phase(now: datetime | None = None) -> str:
-    """当前时段: non_trading | pre | trading | break | closed。
+    """当前时段: non_trading | pre | auction | trading | break | closed。
 
     唯一时段口径, 供接口透传与"当日 bar 是否可用/是否终值"判定, 避免各处
     自行拼 is_trading_day + in_session 组合 (午休曾是 in_session=False 的陷阱)。
+
+    auction = 交易日 09:15-09:30 开盘集合竞价: 快照已有效, 但当日 bar 未成型。
     """
     now = now or _now()
     if not is_trading_day(now):
         return "non_trading"
     t = _mins(now.hour, now.minute)
-    if t < _mins(*_AM_START):
+    if t < _mins(*_AUCTION_START):
         return "pre"
+    if t < _mins(*_AM_START):
+        return "auction"
     if in_session(now):
         return "trading"
     if t < _mins(*_PM_START):
@@ -115,8 +150,46 @@ def session_phase(now: datetime | None = None) -> str:
     return "closed"
 
 
-# 当日 bar 已成型(开盘后)的时段: 盘前/非交易日的快照是上一交易日残留, 不可拼当日 bar。
+# 当日 bar 已成型(开盘后)的时段: 盘前 / 集合竞价 / 非交易日的快照是上一交易日
+# 残留 (volume 可能 >0), 拼出来会凭空多一根"今日"bar。判定统一写
+# `phase in BAR_READY_PHASES` 或 `phase not in BAR_READY_PHASES`, **不要写
+# `phase == "pre"`** —— 竞价时段会让那种写法静默失效。
 BAR_READY_PHASES = ("trading", "break", "closed")
+
+# 行情有意义、需要向上游取数的时段 (集合竞价 + 连续竞价, 不含午休)。
+LIVE_PHASES = ("auction", "trading")
+
+
+def is_auction(now: datetime | None = None) -> bool:
+    """开盘集合竞价 (交易日 09:15-09:30)。"""
+    return session_phase(now) == "auction"
+
+
+def is_live(now: datetime | None = None) -> bool:
+    """现在要不要拉行情 —— 快照/五档/SSE 取数/磁盘 TTL 的唯一口径。
+
+    与 in_session() 的区别: in_session() 仍只表示连续竞价 (09:30-11:30,
+    13:00-15:00), 量比估算 (session_elapsed_minutes)、watchdog 停顿判定、
+    监控价格预警都依赖它, 不要在那些地方换成 is_live()。
+    """
+    return session_phase(now) in LIVE_PHASES
+
+
+def can_connect_stream(now: datetime | None = None) -> bool:
+    """现在能不能建立行情流 (交易日 09:00 ~ 15:00, 含午休)。
+
+    只管"能不能连"; "要不要取数"由 is_live() 决定 —— 09:00-09:15 建连只花
+    保活字节, 不消耗上游额度, 换来 09:15 首帧零握手延迟; 午休期间保持连接,
+    13:00 的第一帧同样不必重新握手。
+
+    收盘后不再允许 (否则空闲连接会整夜占线程并持续发保活帧): 客户端收到
+    closed 相位就断开, 下一个交易日 09:00 再按 next_stream_at() 连回来。
+    """
+    now = now or _now()
+    if not is_trading_day(now):
+        return False
+    t = _mins(now.hour, now.minute)
+    return _mins(*_STREAM_OPEN) <= t <= _mins(*_PM_END)
 
 
 def session_elapsed_minutes(now: datetime | None = None) -> float:
@@ -138,32 +211,155 @@ def session_elapsed_minutes(now: datetime | None = None) -> float:
     return float(_SESSION_MINUTES)
 
 
+def _as_date(value):
+    """datetime / date / YYYY-MM-DD → date; 无效返回 None。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def next_trading_day(day=None, inclusive: bool = False) -> datetime | None:
+    """day 当天 (inclusive) 或之后第一个交易日 (00:00 时刻); 找不到返回 None。
+
+    走缓存日历二分, 没有长假天数上限 (旧实现逐日扫 10 天就放弃)。
+    """
+    base = _as_date(day) or _now().date()
+    if not inclusive:
+        base += timedelta(days=1)
+    try:
+        days = _xshg_sorted(base.year - 1, base.year + 1)
+    except Exception:
+        # 日历包缺失: 退化为周一~周五, 与 is_trading_day 的降级口径一致
+        for _ in range(400):
+            if _weekday_fallback(base.isoformat()):
+                return datetime(base.year, base.month, base.day)
+            base += timedelta(days=1)
+        return None
+    i = bisect_left(days, base.isoformat())
+    if i >= len(days):
+        return None
+    return datetime.strptime(days[i], "%Y-%m-%d")
+
+
+def _at(day: datetime | None, hm) -> datetime | None:
+    if day is None:
+        return None
+    return day.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+
+
+def next_session_open(now: datetime | None = None) -> datetime | None:
+    """下一个连续竞价开盘时刻: 今日 09:30 / 今日 13:00 / 次交易日 09:30。
+
+    已在连续竞价中返回 None (没有"下一个"可言)。
+    """
+    now = now or _now()
+    if in_session(now):
+        return None
+    if is_trading_day(now):
+        t = _mins(now.hour, now.minute)
+        if t < _mins(*_AM_START):
+            return _at(now, _AM_START)
+        if t < _mins(*_PM_START):
+            return _at(now, _PM_START)
+    return _at(next_trading_day(now), _AM_START)
+
+
+def next_live_at(now: datetime | None = None) -> datetime | None:
+    """下一个"开始拉行情"时刻: 今日 09:15 / 今日 13:00 / 次交易日 09:15。
+
+    与 next_session_open() 的差别只在 09:15-09:30 —— 集合竞价期快照已有意义。
+    """
+    now = now or _now()
+    if is_live(now):
+        return None
+    if is_trading_day(now):
+        t = _mins(now.hour, now.minute)
+        if t < _mins(*_AUCTION_START):
+            return _at(now, _AUCTION_START)
+        if t < _mins(*_PM_START):
+            return _at(now, _PM_START)
+    return _at(next_trading_day(now), _AUCTION_START)
+
+
+def next_stream_at(now: datetime | None = None) -> datetime | None:
+    """下一个可建立行情流的时刻: 今日 09:00 / 次交易日 09:00。已在窗口内 None。"""
+    now = now or _now()
+    if can_connect_stream(now):
+        return None
+    if is_trading_day(now) and _mins(now.hour, now.minute) < _mins(*_STREAM_OPEN):
+        return _at(now, _STREAM_OPEN)
+    return _at(next_trading_day(now), _STREAM_OPEN)
+
+
+def _secs_until(target: datetime | None, now: datetime) -> float | None:
+    if target is None:
+        return None
+    return max(0.0, round((target - now).total_seconds(), 1))
+
+
 def seconds_until_session(now: datetime | None = None) -> float:
     """距离下一个连续竞价窗口的秒数。已在窗口内返回 0。"""
     now = now or _now()
     if in_session(now):
         return 0.0
-    t = _mins(now.hour, now.minute)
-    candidates = []
-    if is_trading_day(now):
-        if t < _mins(*_AM_START):
-            target = now.replace(hour=_AM_START[0], minute=_AM_START[1], second=0, microsecond=0)
-            candidates.append(target)
-        elif t < _mins(*_PM_START):
-            target = now.replace(hour=_PM_START[0], minute=_PM_START[1], second=0, microsecond=0)
-            candidates.append(target)
-    # 下一个交易日 09:30
-    day = now.date() + timedelta(days=1)
-    for _ in range(10):
-        dt = datetime(day.year, day.month, day.day, _AM_START[0], _AM_START[1])
-        if is_trading_day(dt):
-            candidates.append(dt)
-            break
-        day += timedelta(days=1)
-    if not candidates:
-        return 60.0
-    nxt = min(candidates)
-    return max(1.0, (nxt - now).total_seconds())
+    secs = _secs_until(next_session_open(now), now)
+    return 60.0 if secs is None else max(1.0, secs)
+
+
+def seconds_until_live(now: datetime | None = None) -> float:
+    """距离下一个"开始拉行情"时刻的秒数 (含集合竞价)。已在活跃时段返回 0。"""
+    now = now or _now()
+    if is_live(now):
+        return 0.0
+    secs = _secs_until(next_live_at(now), now)
+    return 60.0 if secs is None else max(1.0, secs)
+
+
+def _fmt_dt(value: datetime | None) -> str | None:
+    return value.strftime("%Y-%m-%d %H:%M:%S") if value else None
+
+
+def market_status(now: datetime | None = None) -> dict:
+    """接口透传的统一市场状态 (ping / stream/status / kline meta 共用一份口径)。
+
+    in_session 语义与历史一致 (仅连续竞价), 老客户端不受影响; quote_live 才是
+    "现在该不该拉行情" (含集合竞价)。next_live_in_sec 下发的是**相对秒数**——
+    客户端时钟不准也能精确唤醒, 不要下发绝对时刻让前端去跟本地时钟比。
+
+    server_ms 必须按 _CST 解释后再取 epoch: now 是 naive 北京时间, 直接
+    .timestamp() 会在 UTC 容器里被当成 UTC, 整体差 8 小时。
+    """
+    now = now or _now()
+    phase = session_phase(now)
+    live = phase in LIVE_PHASES
+    stream_ok = can_connect_stream(now)
+    nxt_live = None if live else next_live_at(now)
+    nxt_open = next_session_open(now)
+    nxt_stream = None if stream_ok else next_stream_at(now)
+    return {
+        "time": str(now),
+        "server_ms": int(now.replace(tzinfo=_CST).timestamp() * 1000),
+        "is_trading_day": is_trading_day(now),
+        "in_session": in_session(now),
+        "session_phase": phase,
+        "is_auction": phase == "auction",
+        "quote_live": live,
+        "stream_allowed": stream_ok,
+        "next_open_at": _fmt_dt(nxt_open),
+        "next_open_in_sec": _secs_until(nxt_open, now),
+        "next_live_at": _fmt_dt(nxt_live),
+        "next_live_in_sec": _secs_until(nxt_live, now),
+        "next_stream_at": _fmt_dt(nxt_stream),
+        "next_stream_in_sec": _secs_until(nxt_stream, now),
+        "calendar_source": calendar_source(),
+    }
 
 
 def nth_trading_day(start_day: str, n: int):

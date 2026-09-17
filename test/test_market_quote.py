@@ -55,7 +55,8 @@ def _depth_iso(fresh=True):
         fixture 写进真实 .cache/depth_day.json。盘后/周末跑时 `_fetch_depth_locked` 会命中
         `_depth_day_get` 短路, 直接返回磁盘上那份快照, 用例根本走不到自己 mock 的上游
         (曾在全天盘后把这三项跑成红色);
-      * `in_session` 显式为真 —— 这些用例测的是上游五档的字段映射与回退。
+      * `is_live` 显式为真 —— 这些用例测的是上游五档的字段映射与回退
+        (取数门控已统一到 is_live: 含集合竞价, 不含午休)。
     """
     if fresh:
         market_mod._depth_cache._cache.clear()
@@ -65,7 +66,7 @@ def _depth_iso(fresh=True):
     fake_file = mock.Mock()
     fake_file.read_text.side_effect = FileNotFoundError()
     with mock.patch.object(market_mod, "_DEPTH_DAY_CACHE_FILE", fake_file), \
-         mock.patch.object(market_mod.market_hours, "in_session", return_value=True):
+         mock.patch.object(market_mod.market_hours, "is_live", return_value=True):
         yield fake_file
 
 
@@ -359,7 +360,11 @@ def _std_quote(symbol, last=9.9):
 
 
 class OffSessionSnapshotTest(unittest.TestCase):
-    """盘后长 TTL 最后快照: 页面跳转不再因预算/锁抖动返回 {}。"""
+    """非活跃时段的长 TTL 最后快照: 页面跳转不再因预算/锁抖动返回 {}。
+
+    门控口径是 is_live: 集合竞价必须走实时路径, 否则这份 12h 快照会命中并
+    顶掉竞价撮合价 —— 所以这里 patch 的是 is_live 而不是 in_session。
+    """
 
     def setUp(self):
         market_mod.quote_cache._cache.clear()
@@ -378,7 +383,7 @@ class OffSessionSnapshotTest(unittest.TestCase):
 
     def test_off_session_serves_snapshot_without_upstream(self):
         market_mod.quote_snapshot_cache.set("600519.SH", _std_quote("600519.SH", 9.9))
-        with mock.patch.object(market_mod.market_hours, "in_session", return_value=False), \
+        with mock.patch.object(market_mod.market_hours, "is_live", return_value=False), \
              mock.patch.object(market_mod, "_fetch_af_quotes") as fetch_af, \
              mock.patch.object(market_mod, "get_mr") as get_mr:
             out = market_mod.fetch_quotes(["600519.SH"])
@@ -391,7 +396,7 @@ class OffSessionSnapshotTest(unittest.TestCase):
         acquired = market_mod._quote_fetch_lock.acquire(blocking=False)
         self.assertTrue(acquired)
         try:
-            with mock.patch.object(market_mod.market_hours, "in_session", return_value=False):
+            with mock.patch.object(market_mod.market_hours, "is_live", return_value=False):
                 out = market_mod.fetch_quotes(["600519.SH"])
         finally:
             market_mod._quote_fetch_lock.release()
@@ -399,7 +404,7 @@ class OffSessionSnapshotTest(unittest.TestCase):
 
     def test_off_session_budget_denied_returns_snapshot(self):
         market_mod.quote_snapshot_cache.set("600519.SH", _std_quote("600519.SH", 9.9))
-        with mock.patch.object(market_mod.market_hours, "in_session", return_value=False), \
+        with mock.patch.object(market_mod.market_hours, "is_live", return_value=False), \
              mock.patch.object(market_mod, "_fetch_af_quotes", return_value={}), \
              mock.patch.object(market_mod, "get_mr", return_value=mock.Mock()):
             out = market_mod.fetch_quotes(["600519.SH"], fresh=True)
@@ -412,13 +417,13 @@ class OffSessionSnapshotTest(unittest.TestCase):
             market_mod.fetch_quotes(["600519.SH"], fresh=True)
         self.assertIsNotNone(market_mod.quote_snapshot_cache.get("600519.SH"))
         market_mod.quote_cache._cache.clear()  # 模拟 1.25s 实时缓存过期
-        with mock.patch.object(market_mod.market_hours, "in_session", return_value=False):
+        with mock.patch.object(market_mod.market_hours, "is_live", return_value=False):
             out = market_mod.fetch_quotes(["600519.SH"])
         self.assertEqual(out["600519.SH"]["last_price"], 10.5)
 
-    def test_in_session_ignores_snapshot(self):
+    def test_live_ignores_snapshot(self):
         market_mod.quote_snapshot_cache.set("600519.SH", _std_quote("600519.SH", 99.0))
-        with mock.patch.object(market_mod.market_hours, "in_session", return_value=True), \
+        with mock.patch.object(market_mod.market_hours, "is_live", return_value=True), \
              mock.patch.object(market_mod, "_fetch_af_quotes",
                                return_value={"600519.SH": _af_row("600519.SH")}), \
              mock.patch.object(market_mod, "get_mr", return_value=mock.Mock()) as get_mr:
@@ -426,9 +431,9 @@ class OffSessionSnapshotTest(unittest.TestCase):
         self.assertEqual(out["600519.SH"]["last_price"], 10.5)
         self.assertNotEqual(out["600519.SH"]["last_price"], 99.0)
 
-    def test_in_session_no_upstream_no_snapshot_fallback(self):
+    def test_live_no_upstream_no_snapshot_fallback(self):
         market_mod.quote_snapshot_cache.set("600519.SH", _std_quote("600519.SH", 99.0))
-        with mock.patch.object(market_mod.market_hours, "in_session", return_value=True), \
+        with mock.patch.object(market_mod.market_hours, "is_live", return_value=True), \
              mock.patch.object(market_mod, "_fetch_af_quotes", return_value={}), \
              mock.patch.object(market_mod, "get_mr", return_value=mock.Mock()):
             out = market_mod.fetch_quotes(["600519.SH"], fresh=True)
@@ -465,13 +470,13 @@ class DepthDayCacheTest(unittest.TestCase):
              mock.patch.object(market_mod, "get_af", return_value=af), \
              mock.patch.object(market_mod.market_hours, "now", return_value=friday), \
              mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
-             mock.patch.object(market_mod.market_hours, "in_session", return_value=True):
+             mock.patch.object(market_mod.market_hours, "is_live", return_value=True):
             first = market_mod.fetch_depth("002472.SZ")
         market_mod._depth_cache._cache.clear()
         saturday = datetime(2026, 9, 12, 12, 0)
         with mock.patch.object(market_mod.market_hours, "now", return_value=saturday), \
              mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=False), \
-             mock.patch.object(market_mod.market_hours, "in_session", return_value=False):
+             mock.patch.object(market_mod.market_hours, "is_live", return_value=False):
             self.assertEqual(market_mod.fetch_depth("002472.SZ"), first)
         af.depth.get.assert_called_once()
 
@@ -482,13 +487,13 @@ class DepthDayCacheTest(unittest.TestCase):
              mock.patch.object(market_mod, "get_af", return_value=af), \
              mock.patch.object(market_mod.market_hours, "now", return_value=friday), \
              mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
-             mock.patch.object(market_mod.market_hours, "in_session", return_value=True):
+             mock.patch.object(market_mod.market_hours, "is_live", return_value=True):
             market_mod.fetch_depth("002472.SZ")
         market_mod._depth_cache._cache.clear()
         monday = datetime(2026, 9, 14, 9, 0)
         with mock.patch.object(market_mod.market_hours, "now", return_value=monday), \
              mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
-             mock.patch.object(market_mod.market_hours, "in_session", return_value=False):
+             mock.patch.object(market_mod.market_hours, "is_live", return_value=False):
             self.assertIsNone(market_mod._depth_day_get("002472.SZ"))
 
 

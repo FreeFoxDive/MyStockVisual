@@ -77,7 +77,7 @@ th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600
 tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: var(--btn-hover); }
 td.num { font-variant-numeric: tabular-nums; }
-td.sym .code { color: var(--text-secondary); font-size: 12px; }
+/* 标的列: 只显示名称的链接 (代码走 data-symbol/title, 不占可见宽度) */
 td.sym a { color: inherit; text-decoration: none; display: block; }
 td.sym a:hover { color: var(--btn-active); }
 .pos { color: var(--up-text); font-weight: 600; }
@@ -233,6 +233,7 @@ td.sym a:hover { color: var(--btn-active); }
 
 <script src="/js/api.js"></script>
 <script src="/js/live-market.js"></script>
+<script src="/js/market-clock.js"></script>
 <script src="/vendor/vue-3.5.13.global.prod.js"></script>
 <script src="/vendor/vue-demi-0.14.10.iife.js"></script>
 <script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
@@ -335,6 +336,25 @@ function render(data) {
   loadQuotes(positions);
 }
 
+/** 标的列的唯一口径: 可见文字只有名称, 点击跳该标的图表。
+ *
+ *  代码不占可见宽度, 但挂在元素上: data-symbol (与 quant/trades 同约定, 脚本可取)
+ *  与 title (悬停可见)。名称查不到时回落代码 —— 港美股/新股/退市不在 A 股列表里,
+ *  与 quote/kline 同一口径, 不做特例 (留空比显示代码更糟)。
+ *
+ *  监控页四张表曾经各写各的: 持仓是"名称+代码"两行、告警流水还不是链接、
+ *  趋势线只给代码、条件预警是"名称 代码"同行。
+ */
+function symbolCell(name, symbol, period) {
+  const code = symbol || "";
+  // 空白串也算没名称 (条件预警的备注名是自由文本, 可能只填了空格)
+  const label = String(name == null ? "" : name).trim() || code || "—";
+  const href = "/?symbol=" + encodeURIComponent(code)
+    + (period ? "&period=" + encodeURIComponent(period) : "");
+  return `<td class="sym" data-symbol="${escAttr(code)}">`
+    + `<a href="${href}" title="${escAttr(code)}"><b>${escHtml(label)}</b></a></td>`;
+}
+
 function condBadges(p, last) {
   const out = [];
   const hitCls = (triggered) => triggered ? "badge on" : "badge";
@@ -393,7 +413,7 @@ function renderPositions(positions) {
       (p.stop_loss != null && last <= p.stop_loss) ||
       (p.take_profit != null && last >= p.take_profit)));
     return `<tr class="${triggered ? "triggered" : ""}">
-      <td class="sym"><a href="/?symbol=${encodeURIComponent(p.symbol)}"><b>${escHtml(p.name || p.symbol)}</b><br><span class="code">${escHtml(p.symbol)}</span></a></td>
+      ${symbolCell(p.name, p.symbol)}
       <td class="num"><span id="q-last-${escAttr(p.symbol)}">${fmt(last)}</span><br><span class="${chg >= 0 ? "pos" : "neg"}" style="font-size:11px" id="q-chg-${escAttr(p.symbol)}">${chg == null ? "—" : pctStr(chg)}</span></td>
       <td class="num">${fmt(p.entry_price)}</td>
       <td class="num">${p.quantity ?? "—"}</td>
@@ -413,13 +433,10 @@ function renderAlerts(alerts) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无告警记录</td></tr>';
     return;
   }
-  // 告警流水只存 symbol (无 name); 持仓里能查到名称就补上, 查不到回落代码
-  const nameOf = {};
-  ((STATE.overview && STATE.overview.positions) || []).forEach(p => { nameOf[p.symbol] = p.name; });
   tbody.innerHTML = alerts.map(a => `<tr>
     <td class="dim">${(a.fired_at || "").replace("T", " ").slice(0, 16)}</td>
     <td>${ALERT_LABELS[a.alert_type] || escHtml(a.alert_type)}</td>
-    <td class="sym"><b>${escHtml(nameOf[a.symbol] || a.symbol || "")}</b> <span class="code">${escHtml(a.symbol || "")}</span></td>
+    ${symbolCell(a.name, a.symbol)}
     <td class="num">${fmt(a.price)}</td>
     <td class="dim" style="white-space:normal">${escHtml(a.detail || "")}</td>
   </tr>`).join("");
@@ -438,7 +455,7 @@ function renderTrendlineMonitors(list) {
     return;
   }
   tbody.innerHTML = list.map(m => `<tr>
-    <td class="sym"><a href="/?symbol=${encodeURIComponent(m.symbol)}&period=${encodeURIComponent(m.period || "1d")}"><b>${escHtml(m.symbol)}</b></a></td>
+    ${symbolCell(m.symbol_name, m.symbol, m.period || "1d")}
     <td>🔔 ${escHtml(m.name || "(未命名)")}</td>
     <td>${escHtml(TL_TYPE_NAMES[m.line_type] || m.line_type || "—")}</td>
     <td>${escHtml(m.period || "—")}</td>
@@ -464,7 +481,7 @@ function renderPriceAlerts(list) {
     return;
   }
   tbody.innerHTML = list.map(a => `<tr class="${a.enabled ? "" : "dim"}">
-    <td class="sym"><a href="/?symbol=${encodeURIComponent(a.symbol)}"><b>${escHtml(a.name || a.symbol)}</b> <span class="code">${escHtml(a.symbol)}</span></a></td>
+    ${symbolCell(a.name, a.symbol)}
     <td>${escHtml(condText(a.rule))}</td>
     <td class="dim">${escHtml(a.note || "—")}</td>
     <td>${a.enabled ? '<span class="badge on">启用</span>' : '<span class="badge">停用</span>'}</td>
@@ -529,18 +546,30 @@ async function deletePriceAlert(btn) {
   }
 }
 
-let _serverInSession = null;
-function inAshareSession() {
-  if (_serverInSession !== null) return _serverInSession;
-  const now = new Date();
-  const day = now.getDay();
-  if (day === 0 || day === 6) return false;
-  const mins = now.getHours() * 60 + now.getMinutes();
-  return (mins >= 570 && mins <= 690) || (mins >= 780 && mins <= 900);
+// ── 市场时段时钟 (唯一来源, 见 static/js/market-clock.js) ──
+// 以前这里只在 init() 里取一次 /api/ping: 页面对着午休或收盘打开, 那个 false 就
+// 一直钉到刷新页面为止, 行情流整段不启动。现在交给时钟: 相位由 SSE 推送, 开盘
+// 由服务端给的相对秒数精确唤醒, 回到前台立即补一次。
+const marketClock = new VisualMarketClock.MarketClock({
+  onChange: (state, kind) => {
+    if (kind === 'resume') liveQuotes.refresh();
+  },
+});
+/** 该不该自动刷新行情 (时段口径来自时钟; 标签页隐藏时停机)。 */
+function canAutoRefresh() {
+  return !document.hidden && marketClock.live();
+}
+/** 该不该维持行情流: 比 canAutoRefresh 宽 —— 交易日 09:00 起即可建流 (只保活不取数),
+ *  提前连上换来开盘第一帧零握手延迟。 */
+function canStreamQuotes() {
+  return !document.hidden && marketClock.streamAllowed();
 }
 
 const liveQuotes = new VisualLive.LiveMarket({
-  active: () => inAshareSession(),
+  active: () => canAutoRefresh(),
+  streamActive: () => canStreamQuotes(),
+  onMarket: payload => marketClock.applyMarketFrame(payload),
+  onStreamState: open => marketClock.setStreamConnected(open),
   onQuote: (symbol, q) => {
     VisualMarketStore.store.accept('quote', symbol, q);
   },
@@ -614,11 +643,9 @@ async function init() {
     STATE.me = await api("/api/auth/me");
     document.getElementById("main-view").style.display = "";
   } catch (e) { return; /* 未登录已跳转 */ }
-  // 盘中门控以服务端为准 (与 trades/index 一致), 避免浏览器时区/时钟偏差
-  try {
-    const ping = await api("/api/ping");
-    if (typeof ping.in_session === "boolean") _serverInSession = ping.in_session;
-  } catch (e) { /* 取不到回落本地时间门控 */ }
+  // 时段门控交给时钟: 自己会做冷启动同步、精确唤醒、兜底心跳与回到前台补同步,
+  // 不用再在这里取一次 ping 就完事 (那正是本页跨午休/跨天不恢复的原因)。
+  marketClock.start();
   await loadOverview();
   setInterval(() => { if (!document.hidden) loadOverview(); }, 15000);
 }

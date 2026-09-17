@@ -356,9 +356,9 @@ class TestDailyDiskTtl(unittest.TestCase):
             with mock.patch.object(market_mod.kline_source, "fetch_kline_df",
                                    return_value=(None, None)):
                 with mock.patch.object(market_mod, "market_hours") as mh:
-                    mh.in_session.return_value = True
+                    mh.is_live.return_value = True
                     market_mod.fetch_kline_ex(self.SYM, "1d", 1006)
-                    mh.in_session.return_value = False
+                    mh.is_live.return_value = False
                     market_mod.fetch_kline_ex(self.SYM, "1d", 1006)
         self.assertEqual(seen[0], market_mod.KLINE_DISK_TTL_SEC)
         self.assertEqual(seen[1], market_mod.KLINE_DISK_TTL_OFF_SEC)
@@ -379,7 +379,7 @@ class TestDailyDiskTtl(unittest.TestCase):
             with mock.patch.object(market_mod.kline_source, "fetch_kline_df",
                                    return_value=(None, None)):
                 with mock.patch.object(market_mod, "market_hours") as mh:
-                    mh.in_session.return_value = True
+                    mh.is_live.return_value = True
                     market_mod.fetch_kline_ex(self.SYM, "5m", 480)
         self.assertEqual(seen[0], 60.0)
 

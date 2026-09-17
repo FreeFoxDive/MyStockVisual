@@ -195,6 +195,7 @@ class MonitorApiTest(unittest.TestCase):
     # ── 价格监控 (趋势线跌破 + 条件预警) 在监控页的暴露 ──
     TL_SYM = "600036.SH"
     PA_SYM = "601988.SH"
+    ALERT_SYM = "601398.SH"
 
     @staticmethod
     def _trendline_drawing(did="dtl1"):
@@ -232,6 +233,69 @@ class MonitorApiTest(unittest.TestCase):
         finally:
             trades.delete_chart_drawings(self.alice_id, self.TL_SYM, "1d")
             trades.delete_price_alert(self.alice_id, aid)
+
+    def test_overview_every_symbol_row_carries_name(self):
+        """监控页「标的」列统一只显示名称, 所以四张表每条都要有 name。
+
+        趋势线监控 (只 SELECT symbol) 与告警流水 (库表只有 symbol) 原本没有 name,
+        页面只好显示代码; 现在由 _with_name 用名称映射补齐。
+        """
+        c = self._client("alice")
+        trades.save_chart_drawings(self.alice_id, self.TL_SYM, "1d",
+                                   [self._trendline_drawing("dtl_name")])
+        aid = trades.create_price_alert(
+            self.alice_id, self.PA_SYM, "",  # 故意不给名称 → 由映射补
+            [{"metric": "price", "op": "<=", "value": 9.5}])
+        aid_blank = trades.create_price_alert(
+            self.alice_id, self.ALERT_SYM, "   ",  # 只填空格也算没名称
+            [{"metric": "price", "op": "<=", "value": 9.5}])
+        alert_id = trades.insert_monitor_alert(
+            self.alice_id, None, self.ALERT_SYM, "price_alert",
+            "2026-01-05", price=9.4, detail="测试流水")
+        try:
+            with mock.patch("market._lookup_name", side_effect=lambda s: f"名-{s}"):
+                data = c.get("/api/monitor/overview").get_json()
+            for key in ("positions", "alerts", "trendline_monitors", "price_alerts"):
+                name_key = "symbol_name" if key == "trendline_monitors" else "name"
+                rows = list(data[key])
+                with self.subTest(table=key):
+                    self.assertTrue(rows, f"{key} 应有数据才能验到 name")
+                    for r in rows:
+                        self.assertTrue(r.get(name_key),
+                                        f"{key} 的 {r.get('symbol')} 缺 {name_key}")
+            tl = next(m for m in data["trendline_monitors"] if m["drawing_id"] == "dtl_name")
+            self.assertEqual(tl["symbol_name"], f"名-{self.TL_SYM}",
+                             "趋势线监控载荷原本没有标的名称, 必须补上")
+            self.assertEqual(tl["name"], "上升支撑线",
+                             "趋势线表里的 name 是监控线自己的名字, 不能被标的名称覆盖")
+            al = next(a for a in data["alerts"] if a["id"] == alert_id)
+            self.assertEqual(al["name"], f"名-{self.ALERT_SYM}",
+                             "告警流水只存 symbol, 必须补上")
+            pa = next(a for a in data["price_alerts"] if a["id"] == aid)
+            self.assertEqual(pa["name"], f"名-{self.PA_SYM}", "落库名称为空时也要补")
+            blank = next(a for a in data["price_alerts"] if a["id"] == aid_blank)
+            self.assertEqual(blank["name"], f"名-{self.ALERT_SYM}",
+                             "只填空格的名称也算缺失")
+        finally:
+            trades.delete_chart_drawings(self.alice_id, self.TL_SYM, "1d")
+            trades.delete_price_alert(self.alice_id, aid)
+            trades.delete_price_alert(self.alice_id, aid_blank)
+
+    def test_overview_survives_name_lookup_failure(self):
+        """名称只是显示用: 查不到必须回落代码, 不能把监控页唯一的数据源打成 500。"""
+        c = self._client("alice")
+        trades.save_chart_drawings(self.alice_id, self.TL_SYM, "1d",
+                                   [self._trendline_drawing("dtl_fail")])
+        try:
+            with mock.patch("market._lookup_name", side_effect=RuntimeError("名称源挂了")):
+                r = c.get("/api/monitor/overview")
+            self.assertEqual(r.status_code, 200, "名称查询失败不该影响接口本身")
+            data = r.get_json()
+            self.assertIn("positions", data)
+            tl = next(m for m in data["trendline_monitors"] if m["drawing_id"] == "dtl_fail")
+            self.assertEqual(tl["symbol_name"], self.TL_SYM, "回落成代码")
+        finally:
+            trades.delete_chart_drawings(self.alice_id, self.TL_SYM, "1d")
 
     def test_trendline_disable_endpoint(self):
         c = self._client("alice")

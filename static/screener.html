@@ -78,6 +78,7 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
 </div>
 <script src="/js/api.js"></script>
 <script src="/js/live-market.js"></script>
+<script src="/js/market-clock.js"></script>
 <script src="/vendor/vue-3.5.13.global.prod.js"></script>
 <script src="/vendor/vue-demi-0.14.10.iife.js"></script>
 <script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
@@ -89,6 +90,9 @@ const METRIC_LABELS = {
 };
 let conditions = [];
 let scanning = false;
+// 进度轮询的连败计数: 与 scanning 一起声明在顶部 —— pollStatus 由 runScan/initResume
+// 提前调用, 靠 "反正前面有 await" 来保证它已初始化太脆 (去掉那个 await 就是 TDZ)。
+let pollFailures = 0;
 
 function api(path, options = {}) {
   return VisualApi.api(path, options, {
@@ -137,12 +141,37 @@ function setStopBtn(on) {
   document.getElementById("btn-stop").style.display = on ? "" : "none";
 }
 
+// ── 市场时段时钟 (唯一来源, 见 static/js/market-clock.js) ──
+// 结果表的现价靠 LiveMarket 刷新。盘外服务端只会返回收盘快照, 轮询毫无收益 ——
+// 这里原来没有任何门控, 选股页开着就全天每 2.5s 轮询一次 /api/quotes, 比整个
+// 行情链路的探测预算还高。现在按交易时段门控 (盘外 0 请求), 开盘由服务端给的
+// 相对秒数精确唤醒。
+const marketClock = new VisualMarketClock.MarketClock({
+  onChange: (state, kind) => {
+    // 与其余三页同一套: 休眠/后台节流后时间已脱节, 现价立刻重来一次
+    if (kind === 'resume') liveQuotes.refresh();
+  },
+});
+/** 该不该自动刷新现价 (时段口径来自时钟; 标签页隐藏时停机)。 */
+function canAutoRefresh() {
+  return !document.hidden && marketClock.live();
+}
+/** 该不该维持行情流: 比 canAutoRefresh 宽 —— 交易日 09:00 起即可建流 (只保活不取数)。 */
+function canStreamQuotes() {
+  return !document.hidden && marketClock.streamAllowed();
+}
+
 const liveQuotes = new VisualLive.LiveMarket({
   streamStatus: true,
+  active: () => canAutoRefresh(),
+  streamActive: () => canStreamQuotes(),
+  onMarket: payload => marketClock.applyMarketFrame(payload),
+  onStreamState: open => marketClock.setStreamConnected(open),
   onQuote: (symbol, q) => {
     VisualMarketStore.store.accept('quote', symbol, q);
   },
 });
+marketClock.start();
 VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
   if (!change || change.kind !== 'quote') return;
   const { symbol, value: q } = change;
@@ -171,6 +200,7 @@ VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
 async function pollStatus() {
   try {
     const s = await api("/api/screener/status");
+    pollFailures = 0;
     document.getElementById("prog-fill").style.width =
       s.total ? Math.round(s.progress / s.total * 100) + "%" : "0%";
     document.getElementById("scan-hint").textContent = s.running
@@ -181,7 +211,13 @@ async function pollStatus() {
     scanning = false;
     setStopBtn(false);
     renderResults(s.results);
-  } catch (e) { scanning = false; }
+  } catch (e) {
+    // 单次失败不能让进度永久冻住: 原实现置 scanning=false, 而兜底轮询的
+    // `if (scanning)` 也随之失效 —— 一次状态请求抖动就再也回不来, 只能刷新页面。
+    // 改为保持扫描态并退避重试 (服务端任务本来就与页面解耦, 关页都不中断)。
+    pollFailures += 1;
+    setTimeout(pollStatus, Math.min(1500 * pollFailures, 15000));
+  }
 }
 function renderResults(results) {
   liveQuotes.setSymbols(results.map(r => r.symbol));
@@ -203,7 +239,9 @@ document.getElementById("cond-metric").addEventListener("change", (e) => {
   document.getElementById("cond-value").style.display =
     (m === "macd_cross_up" || m === "above_ma20") ? "none" : "";
 });
-setInterval(() => { if (scanning) pollStatus(); }, 3000);
+// 进度轮询由 pollStatus 自己按 1.5s / 退避续排; 这里原来还有一个 3s 的兜底
+// interval, 但它同样以 `if (scanning)` 为条件 —— 失败时 scanning 已被置假, 兜底
+// 根本不生效, 只是扫描期间白多一倍请求 (1.5s 链 + 3s 链)。已删除。
 </script>
 </body>
 </html>

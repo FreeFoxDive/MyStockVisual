@@ -22,6 +22,7 @@
 </script>
 <script src="/js/api.js"></script>
 <script src="/js/live-market.js"></script>
+<script src="/js/market-clock.js"></script>
 <script src="/js/market-store.js"></script>
 <script src="/js/gaps.js"></script>
 <script src="/js/chips.js"></script>
@@ -1305,8 +1306,6 @@ const STATE = {
   _premiumTask: null,
   depth: null,           // 五档盘口 (/api/depth, 所有周期)
   stockInfo: null,
-  _serverTradingDay: null,
-  _serverInSession: null,
   chart: null,
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
   _gridRects: null,      // cached grid pixel rects
@@ -1350,26 +1349,66 @@ const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3
 const INTRADAY_REFRESH_MS = 60e3;
 const marketStore = VisualMarketStore.store;
 
-function inAshareSession() {
-  if (STATE._serverInSession !== null) return STATE._serverInSession;
-  const now = new Date();
-  const d = now.getDay();
-  if (d === 0 || d === 6) return false;
-  const t = now.getHours() * 60 + now.getMinutes();
-  return (t >= 9 * 60 + 30 && t <= 11 * 60 + 30) || (t >= 13 * 60 && t <= 15 * 60);
-}
+// ── 市场时段时钟 ──
+// 时段状态只有一份来源 (static/js/market-clock.js): 盘中相位由 SSE 的 event: market
+// 推送, 冷启动/兜底/回到前台才走 /api/ping; 精确唤醒用服务端给的相对秒数, 所以
+// 开盘那一刻是准点切自动刷新, 而不是等下一次 60s 轮询撞上。
+const marketClock = new VisualMarketClock.MarketClock({
+  onChange: (state, kind) => {
+    if (kind === 'change') renderMarketHint();
+    if (kind === 'resume') {
+      // 休眠/后台节流后时间已经脱节: 状态之外, 行情本身也得重来一次
+      liveQuotes.refresh();
+      if (canAutoRefresh()) fetchData({ silent: true });
+    }
+    if (kind === 'unreachable') showToast('服务端不可达, 稍后自动重试', { type: 'err' });
+  },
+});
 
+/** 该不该自动刷新行情 (服务端时段口径优先, 浏览器时钟只作兜底)。 */
 function canAutoRefresh() {
-  return !document.hidden && inAshareSession() && STATE._serverTradingDay !== false;
+  return !document.hidden && marketClock.live();
 }
 
-async function syncSessionFlag() {
-  try {
-    const r = await fetch('/api/ping');
-    const d = await r.json();
-    if (typeof d.is_trading_day === 'boolean') STATE._serverTradingDay = d.is_trading_day;
-    if (typeof d.in_session === 'boolean') STATE._serverInSession = d.in_session;
-  } catch (_) { /* ping failure falls back to browser clock */ }
+/** 该不该维持行情流: 比 canAutoRefresh 宽 —— 服务端允许交易日 09:00 起建流
+ *  (只发保活帧不取数), 提前连上换来开盘第一帧零握手延迟。 */
+function canStreamQuotes() {
+  return !document.hidden && marketClock.streamAllowed();
+}
+
+/** 下一次开盘倒计时: 服务端给的相对秒数减去本地已过时间。
+ *  用相对量推, 不跟服务端对绝对时刻 —— 用户机器时钟不准也不影响。
+ *  盯哪个时刻由共享时钟按相位决定 (竞价/午休盯 09:30/13:00, 盘前盯 09:15)。 */
+function marketCountdownSec() {
+  const st = marketClock.state;
+  const target = VisualMarketClock.countdownTargetSec(st);
+  if (target == null || st.at == null) return null;
+  return target - (Date.now() - st.at) / 1000;
+}
+
+/** 侧栏「下一开盘」行的悬停说明: 完整描述优先 (值区 129px 放不下"是集合竞价还是
+ *  连续竞价开盘"), 日历降级时改说降级 —— 降级不能只留在日志里。 */
+function marketHintTitle() {
+  if (marketClock.degraded()) {
+    return '交易日历降级为周一~周五 (缺 pandas_market_calendars), 节假日可能误判';
+  }
+  return VisualMarketClock.openHintDetail(marketClock.state)
+    || '市场时段自动刷新: 盘中分时/分钟K 定时, 快照/五档 实时推送';
+}
+
+/** 侧栏「下一开盘」行每秒就地更新数值与悬停说明, 不重绘整个面板。
+ *  盘中恒为 '—': 值没变就不碰 DOM, 免得每秒白白标脏文本节点。 */
+function renderMarketHint() {
+  const row = document.getElementById('info-market-hint');
+  if (!row) return;
+  const val = row.querySelector('.sp-val');
+  if (!val) return;
+  const text = VisualMarketClock.openHintText(marketClock.state, marketCountdownSec());
+  if (val.textContent !== text) val.textContent = text;
+  // 说明也跟着相位走: 只在重绘面板时更新会让它滞后最多 60s, 值在变而说明是旧的
+  // 比不给说明更糟。
+  const title = marketHintTitle();
+  if (row.title !== title) row.title = title;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2544,6 +2583,18 @@ function infoPanelRows(d) {
       title: d.premium_at ? `计算时间：${new Date(d.premium_at * 1000).toLocaleString()}` : null,
     }
     : null;
+  // 下一开盘: 盘外是"页面为什么不动"的唯一解释。值区只有 129px, 所以只留
+  // 「时刻 + 余 倒计时」—— 相位名由上一行「状态」给, 完整描述放 title。
+  // 停牌时整行不显示: 这只票当日就不参与交易, 给"下一次开盘 13:00"是误导
+  // (与「状态」行的"停牌"也重复)。
+  const marketHintRow = d.trade_status === 'halt' ? null
+    : {
+      label: '下一开盘',
+      text: VisualMarketClock.openHintText(marketClock.state, marketCountdownSec()),
+      color: null,
+      id: 'info-market-hint',
+      title: marketHintTitle(),
+    };
   // 排列分块: ①标识 ②价格边界 ③成交与资金 ④股本结构 ⑤估值 ⑥区间表现 ⑦状态 ——
   // 涨停/跌停 是现价的价格边界, 所以紧跟现价; PE/PB 与 ETF 溢价 同属估值。
   // 顺序被 test_side_panel_js / test_side_panel_shot_js 锁着 (名称/代码/现价 须在最前且连续)。
@@ -2567,14 +2618,16 @@ function infoPanelRows(d) {
     { label: '5日涨幅', text: p5.text, color: p5.color },
     { label: '10日涨幅', text: p10.text, color: p10.color },
     { label: '状态', text: d.trade_status_text || '—', color: statusColor },
+    marketHintRow,
   ].filter(r => r);
 }
 
 function stockInfoRowHtml(r) {
+  const id = r.id ? ` id="${r.id}"` : '';
   const style = r.color ? ` style="color:${r.color}"` : '';
-  // title 可选 (目前只有溢价用它给出计算时间); escHtml 不管引号, 这里自己补一下
+  // title 可选 (目前只有溢价/下一开盘用它给出计算时间与时段说明); escHtml 不管引号, 这里自己补一下
   const title = r.title ? ` title="${escHtml(r.title).replace(/"/g, '&quot;')}"` : '';
-  return `<div class="sp-row"${title}><span class="sp-label">${escHtml(r.label)}</span>` +
+  return `<div class="sp-row"${id}${title}><span class="sp-label">${escHtml(r.label)}</span>` +
     `<span class="sp-val"${style}>${escHtml(r.text)}</span></div>`;
 }
 
@@ -2885,6 +2938,17 @@ function scheduleKlineRecovery() {
 const liveQuotes = new VisualLive.LiveMarket({
   streamStatus: true,
   active: () => typeof canAutoRefresh === 'function' && canAutoRefresh(),
+  // 建流门槛单独给: 服务端 09:00 起就允许连 (只保活不取数), 提前连上让开盘首帧
+  // 不必再等一次预检+握手。
+  streamActive: () => typeof canStreamQuotes === 'function' && canStreamQuotes(),
+  // 相位帧: 开盘/午休/收盘切换由服务端推过来, 不再靠轮询 ping 去发现。
+  // 订阅由 1s 调度器与 LiveMarket 自己按门槛重建, 这里只更新状态与界面。
+  onMarket: payload => {
+    marketClock.applyMarketFrame(payload);
+    renderMarketHint();
+  },
+  // 流活着/断开都要告诉时钟: 活着就不必再发兜底探测, 断了立刻恢复
+  onStreamState: open => marketClock.setStreamConnected(open),
   onQuote: (symbol, q) => {
     marketStore.accept('quote', symbol, q);
   },
@@ -7474,17 +7538,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
 
-  // 时间 1s 刷新
+  // 时间 1s 刷新; 顺便重算侧栏「下一开盘」倒计时 (服务端相对秒数减本地已过时间)
   setInterval(() => {
     document.getElementById('info-time').textContent = new Date().toLocaleTimeString();
+    renderMarketHint();
   }, 1000);
 
-  // 盘中自动刷新: 快照 / 分时 / 分钟K 分开间隔; 午休、周末、节假日不拉
+  // 盘中自动刷新: 快照 / 分时 / 分钟K 分开间隔; 午休、周末、节假日不拉。
+  // 时段状态由 marketClock 统一维护 (SSE 相位推送 + 精确唤醒 + 兜底心跳),
+  // 这里不再自己轮询 ping —— 那正是"开盘后最多 60s 不刷新"的根源。
   STATE._lastQuoteAt = 0;
   STATE._lastBarAt = 0;
   STATE._lastBarPatchDrawAt = 0;
-  syncSessionFlag();
-  setInterval(syncSessionFlag, 60e3);
+  marketClock.start();
 
   // 选股后台扫描状态: 每 10s 轻量轮询, 运行中入口脉冲 + 进度
   /** 只写入口的文字层: 图标是独立节点, 平板/手机由 CSS 只显示图标 ——
@@ -7515,8 +7581,20 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch (e) { /* ignore */ }
   }
-  refreshScreenerBadge();
-  setInterval(refreshScreenerBadge, 10e3);
+  // 只有"确实在扫描"时才需要 10s 的进度刷新; 平时 60s 一次就够。
+  // 原来的固定 10s 是全天候轮询 (8640 次/天/标签页), 比整条行情探测链路还多一个
+  // 量级 —— 而它只是给入口按钮加个百分比。
+  let screenerBadgeTimer = null;
+  const scheduleScreenerBadge = () => {
+    clearTimeout(screenerBadgeTimer);
+    screenerBadgeTimer = setTimeout(async () => {
+      await refreshScreenerBadge();
+      scheduleScreenerBadge();
+    }, STATE._scanWasRunning ? 10e3 : 60e3);
+  };
+  // 两个分支都重排: 这个链一旦断掉, 徽章就永久不再刷新 (而它只在跑扫描时才重要,
+  // 断了根本没人会发现)。
+  refreshScreenerBadge().then(scheduleScreenerBadge, scheduleScreenerBadge);
 
   setInterval(() => {
     if (!canAutoRefresh()) return;
