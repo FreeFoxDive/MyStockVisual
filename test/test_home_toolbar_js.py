@@ -8,6 +8,8 @@
   * 顶栏/记录栏/指标栏高度变化时图表容器尺寸跟着变, 必须触发 chart.resize
     (否则 ECharts 画布与 overlay 画线层一起和容器错位);
   * 平板周期条默认只显示 3 个周期, 翻页按真实按钮宽度而不是固定像素;
+  * 平板 (触屏 或 ≤1024px) 顶栏口径: 不显示秒级时钟、入口只留图标、指标栏固定单行横向滚动
+    (换行时栏高随周期在 1/2 行之间跳)、搜索框按 symbol.ex 收窄、下拉长名称限宽省略;
   * isTabletUi / isWeeklyPlus 的判定口径 (从 index.html 抽真源码用 node 执行)。
 
 运行:
@@ -109,6 +111,9 @@ class ToolbarStaticTest(unittest.TestCase):
         实测几何: 信息行最长约 1000px (代码/名称/成交额/换手/…), 功能组约 950~1200px
         (搜索+周期条+入口+图标), 而成交额 万↔亿、换手出现/消失、秒级时钟变宽都会改变
         信息行宽度 —— 只要总宽压在阈值上, 功能组就会在一行/两行之间反复切。
+
+        例外: 大宽度触屏 (iPad Pro 13 横屏 1376 这类) 改成实测争取单行, 由 .tb-2row 兜底
+        (见 test_wide_touch_can_merge_into_one_row) —— 桌面各断点的规则仍然是定死的。
         """
         narrow = _css_block(self.src, "@media (min-width: 1000px) and (max-width: 1919px)")
         self.assertIn("#toolbar .info-group", narrow)
@@ -187,6 +192,228 @@ class TabletPeriodStripTest(unittest.TestCase):
         # 折叠式「更多周期」是废弃方案, 不得回归
         self.assertNotIn("togglePeriodMore", self.src)
         self.assertNotIn('class="extra-period"', self.src)
+
+
+class TabletLayoutTest(unittest.TestCase):
+    """平板口径: 触屏 或 ≤1024px (与 isTabletUi() 同一条判定)。
+
+    覆盖的事故:
+      * 768~1024 的平板掉在 900px 与 1000px 两条断点之间: 秒级时钟照显示、指标栏照换行、
+        搜索框跟着触控按钮放大到 38px/16px (比同排按钮还显眼);
+      * 指标栏换行时 pill 数量随周期变 (分时少 筹码/动力系统/通道 三个), 栏高就在
+        「日K 两行 / 分时 一行」之间跳, 图表跟着上下一截 → 平板改成固定单行 + 横向滚动;
+      * 入口文案 (监控/选股/交易) 在平板/手机上仍占位 → 只留图标, 进度只能写文字层。
+      * 信息行的 开/高/低 在平板被截断/被整条摘掉 → 改成「实测一行放不下才收次要读数」
+        (见 test_info_row_drops_stats_only_when_it_does_not_fit 与 test_info_drop_plan)。
+    """
+
+    TABLET_MQ = "@media (max-width: 1024px), (pointer: coarse)"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = INDEX_HTML.read_text(encoding="utf-8")
+        cls.tablet = _css_block(cls.src, cls.TABLET_MQ)
+
+    def test_same_criteria_and_source_order(self):
+        """口径与 isTabletUi() 一致, 且必须排在 640 手机块之前 (手机块要能覆盖它)。"""
+        js = _extract_fn(self.src, "isTabletUi")
+        self.assertIn("(pointer: coarse)", js)
+        self.assertIn("innerWidth <= 1024", js)
+        self.assertIn("(pointer: coarse)", self.TABLET_MQ)
+        self.assertIn("(max-width: 1024px)", self.TABLET_MQ)
+        self.assertLess(self.src.index(self.TABLET_MQ + " {"),
+                        self.src.index("@media (max-width: 640px) {"),
+                        "平板块排在手机块之后就会把手机的浮层/字号盖坏")
+
+    def test_hides_clock_and_entry_text(self):
+        """平板: 不占秒级时钟的空间; 入口只留图标 (文字层隐藏, 图标仍可点)。"""
+        self.assertIn("#toolbar #info-time { display: none; }", self.tablet)
+        self.assertIn("#toolbar .nav-txt { display: none; }", self.tablet)
+        self.assertIn("row-gap: 2px", self.tablet, "两行时行距要收紧 (原本 6px)")
+        self.assertIn("#toolbar .nav-btn { padding: 6px 9px; }", self.tablet,
+                      "只剩图标后要收成图标按钮的尺寸 (触控那条 8px 14px 会把图标按钮撑胖)")
+        # 扫描进度是实时状态, 收起来就看不见了
+        self.assertIn("#toolbar .nav-btn.scanning .nav-txt { display: inline; }", self.tablet)
+
+    def test_entry_buttons_are_two_layers_with_accessible_name(self):
+        """图标/文字必须是两个节点: 文字层被 CSS 藏掉后, 无障碍名要落在标签上。"""
+        for anchor, ico, txt, full in (("monitor-entry", "🛡", "监控", "监控中心"),
+                                       ("screener-entry", "🎯", "选股", "条件选股"),
+                                       ("trades-entry", "📒", "交易", "交易记录统计")):
+            i = self.src.index(f'id="{anchor}"')
+            open_tag = self.src[i:self.src.index(">", i)]
+            body = self.src[self.src.index(">", i) + 1:self.src.index("</button>", i)]
+            self.assertIn('class="nav-btn"', open_tag, anchor)
+            self.assertIn(f'aria-label="{full}"', open_tag, f"{anchor} 缺无障碍名 (文字层会隐藏)")
+            self.assertIn(f'<span class="nav-ico" aria-hidden="true">{ico}</span>', body, anchor)
+            self.assertIn(f'<span class="nav-txt">{txt}</span>', body, anchor)
+        self.assertIn("gap: 4px", _css_block(self.src, "#toolbar .nav-btn"),
+                      "图标与文字的间距由容器给: 文字层隐藏后间距自动消失")
+
+    def test_screener_badge_only_writes_text_layer(self):
+        """进度只写文字层: innerHTML 整体覆写会把图标/文字两层抹平, 平板上又冒出「选股」两字。"""
+        fn = _extract_fn(self.src, "refreshScreenerBadge")
+        self.assertNotIn("innerHTML", fn)
+        self.assertIn("setNavText(btn, `${pct}%`)", fn)
+        self.assertIn("setNavText(btn, '选股')", fn)
+        self.assertIn('classList.add("scanning")', fn, "扫描态仍要驱动 CSS 把进度露出来")
+        setter = _extract_fn(self.src, "setNavText")
+        self.assertIn("querySelector('.nav-txt')", setter)
+
+    def test_indicator_bar_single_row(self):
+        """指标栏固定单行 + 隐藏滚动条: 栏高恒定, 切周期不再上下跳。
+
+        换行布局下, 分时比日K 少 筹码/动力系统/通道 三个 pill (见 applyPeriodUI),
+        1 行与 2 行之间切换会把图表高度来回改。"""
+        bar = self.tablet[self.tablet.index("#indicator-bar {"):]
+        self.assertIn("flex-wrap: nowrap", bar)
+        self.assertIn("overflow-x: auto", bar)
+        self.assertIn("scrollbar-width: none", bar)
+        self.assertIn("-webkit-overflow-scrolling: touch", bar)
+        self.assertIn("#indicator-bar::-webkit-scrollbar { display: none; }", bar,
+                      "藏不住滚动条的话 Windows 的 17px 横条自己就把栏顶高了")
+        self.assertIn("#indicator-bar label,", bar, "nowrap 下 pill 必须先定住宽度")
+        self.assertIn("#indicator-bar .cfg-mini,", bar)
+        self.assertIn("#indicator-bar select { flex-shrink: 0; }", bar)
+        # 触发换行的三个 pill 仍由周期决定显隐 (单行只是把结果藏进横向滚动里)
+        ui = _extract_fn(self.src, "applyPeriodUI")
+        for lbl in ("lbl-chip", "lbl-impulse", "lbl-channel"):
+            self.assertIn(lbl, ui)
+
+    def test_phone_block_still_wins(self):
+        """手机 (≤640) 不能被平板块带坏: 浮层照旧、不被 overflow 裁掉、字号仍 16px。"""
+        narrow = _css_block(self.src, "@media (max-width: 640px)")
+        self.assertIn("flex-wrap: nowrap", narrow)
+        self.assertIn("overflow: visible", narrow,
+                      "浮层 #ind-body 是绝对定位子节点, 被 overflow 裁掉就点不到")
+        self.assertIn("#indicator-bar.sheet-open #ind-body { display: flex; }", narrow)
+        self.assertIn('#toolbar input[type="text"] { width: 120px; font-size: 16px; min-height: 38px; }',
+                      narrow, "手机保留 16px 防 iOS 聚焦放大")
+
+    def test_search_input_sized_for_symbol(self):
+        """搜索框宽度按 symbol.ex 定 (服务端 symbol 最长 9 字符, 如 688004.SH), 不再 160px。"""
+        self.assertIn("width: 120px", self.tablet)
+        self.assertIn("font-size: 14px", self.tablet)
+        self.assertIn("min-height: 32px", self.tablet)
+        self.assertIn('#toolbar input[type="text"]:focus { font-size: 16px; }', self.tablet,
+                      "聚焦抬回 16px: iOS 只在聚焦那一刻看字号决定要不要放大页面")
+        # 触控块不得再写输入框尺寸: 它排在平板块之后, 会把 14px/32px 顶回 16px/38px
+        self.assertNotIn('input[type="text"]', _css_block(self.src, "@media (pointer: coarse)"))
+        # 120px 放不下原 placeholder → 收短
+        self.assertIn('placeholder="代码/名称"', self.src)
+        self.assertNotIn("输入代码或名称搜索", self.src)
+
+    def test_info_row_drops_stats_only_when_it_does_not_fit(self):
+        """顶栏信息行: 默认全显示, **实测**一行放不下才按优先级收起次要读数。
+
+        回归点: 原先按设备档收 (平板块固定隐藏三个统计读数), 宽屏明明放得下也收; 而 开/高/低
+        在 DOM 尾部, 1000~1919 那条「装不下就裁尾部」正好把它截断 (iPad Mini 横屏), 900 那条
+        更是在竖屏把它整条摘掉。
+        """
+        # 布局侧走类, 数据侧继续写内联 display; 绝不 !important 盖掉数据侧「没数据就不显示」的闸门
+        self.assertIn("#toolbar .info-group > .rd-drop { display: none; }", self.src)
+        self.assertNotIn(".rd-drop { display: none !important", self.src)
+        self.assertIn("const INFO_DROP_ORDER = ['info-pledge', 'info-shares', 'info-amount', "
+                      "'info-premium', 'info-turnover'];", self.src, "收起顺序即优先级, 顺序变了要写进用例")
+        plan = _extract_fn(self.src, "infoDropPlan")
+        self.assertIn("INFO_DROP_ORDER", plan)
+        self.assertIn("return null;", plan, "收光仍放不下 → 交回 CSS (窄屏换行), 而不是硬收")
+        fit = _extract_fn(self.src, "fitInfoRow")
+        self.assertIn("infoRowBudget(", fit, "预算来自顶栏可用宽度, 不是信息行自己的框宽")
+        self.assertNotIn("group.getBoundingClientRect().width, gap", fit,
+                         "拿信息行自己的框宽当预算是错的: flex-basis:auto 时它等于内容宽, "
+                         "收过字段后更小 → 会把「已收」判成「放不下」, 字段再也放不回来")
+        self.assertIn("el.getBoundingClientRect().width", fit,
+                      "逐项宽度要用小数值: offsetWidth 取整后十来项累加能凭空多出 1px (实测过)")
+        self.assertIn("r.bottom > gt.top + 1 && r.top < gt.bottom - 1", fit,
+                      "只算同一行的兄弟项, 高矮不一要比纵向重叠而不是 top")
+        self.assertIn("const INFO_FIT_SLACK = ", self.src, "亚像素容差常量 (取值由 test_info_drop_plan 用例锁)")
+        self.assertIn("classList.remove('rd-drop')", fit, "先全放回再从头量: 幂等, 变宽会自动放回来")
+        self.assertIn("classList.add('rd-drop')", fit)
+        self.assertIn("scheduleFitInfoRow", _extract_fn(self.src, "wireInfoRowFit"),
+                      "尺寸一变就重算 (ResizeObserver 盯信息行本身)")
+        self.assertIn("wireInfoRowFit();", self.src, "启动时要接上")
+        self.assertIn("scheduleFitInfoRow", _extract_fn(self.src, "scheduleFitInfoRow"),
+                      "rAF 合并 (行情每秒重写读数, 不必每帧都量)")
+        # 挂钩点: 行情快照与换股/换周期都过 updateFundInfo; 质押是异步到的;
+        # 持仓中徽章显隐会改宽度; resize/转屏/字体就绪都走 initPeriodScroller 的 relayout
+        for fn in ("updateFundInfo", "syncPosition", "initPeriodScroller"):
+            self.assertIn("scheduleFitInfoRow()", _extract_fn(self.src, fn), f"{fn} 应重算顶栏信息行")
+        pledge = self.src[self.src.index("/api/pledge"):]
+        pledge = pledge[:pledge.index("}).catch")]   # 整个回调 (它同时还会把质押并进面板)
+        self.assertIn("scheduleFitInfoRow()", pledge, "质押响应回来要重算")
+        # 平板块: 开/高/低 放回来 + 901~999 那道缝补上可收缩; 但不再按断点收字段
+        self.assertIn("#toolbar .oh { display: inline-block; }", self.tablet,
+                      "竖屏 768 也要看得到 开/高/低")
+        self.assertIn("#toolbar .info-group { flex: 0 1 auto; min-width: 0; }", self.tablet,
+                      "901~999 无可收缩规则 → 整行溢出视口被 body 裁掉")
+        for pid in ("info-pledge", "info-shares", "info-amount", "info-premium", "info-turnover"):
+            self.assertNotIn(f"#{pid}", self.tablet, f"平板块不该再按断点收 {pid} (交给实测)")
+
+    def test_wide_touch_can_merge_into_one_row(self):
+        """大宽度触屏 (iPad Pro 13 横屏 1376): 允许把功能组并回信息行做成一行。
+
+        桌面 <1920 是「功能组独占一行」的既定设计 (行数只由断点定); 触屏大宽度上改成实测争取
+        单行 —— 为此可以收掉几个次要读数, 连收光都放不下才退回那条两行规则 (.tb-2row)。
+        """
+        css = _css_block(self.src, "@media (min-width: 1025px) and (pointer: coarse)")
+        self.assertIn("#toolbar .toolbar-right { flex: 0 0 auto; flex-wrap: nowrap; margin-left: auto;",
+                      css, "默认并排: 功能组保持自然宽, 不被压扁")
+        self.assertIn("#toolbar.tb-2row .toolbar-right { flex: 1 1 100%; margin-left: 0; "
+                      "justify-content: flex-end; }", css, "退回两行时与桌面 1000~1919 同口径")
+        # 11 寸 (1180) 并成一行靠这段「非信息部分」挤紧约 140px: 间距/内边距/分隔线/搜索框/顶栏内边距/GitHub
+        for rule in ("#toolbar { padding: 4px 8px; column-gap: 4px; }",
+                     "#toolbar .info-group { column-gap: 4px; }",
+                     "#toolbar .icon-btn { padding: 6px 7px; }",
+                     "#toolbar .nav-btn { padding: 6px 7px; }",
+                     "#toolbar .separator { display: none; }",
+                     "#toolbar .github-link { display: none; }",
+                     '#toolbar input[type="text"] { width: 100px; }'):
+            self.assertIn(rule, css, f"11 寸一行少了这条紧凑规则: {rule}")
+        self.assertNotIn("font-size: 12px", css, "这一轮不动字号 (你选的: 只收紧间距/内边距)")
+        # GitHub 入口只在触屏大宽度块与 ≤640 手机块里隐藏, 桌面不得被波及
+        for band in ("@media (min-width: 1000px) and (max-width: 1919px)", "@media (min-width: 1920px)"):
+            self.assertNotIn("github-link", _css_block(self.src, band), band)
+        self.assertIn("#toolbar .github-link { display: none; }",
+                      _css_block(self.src, "@media (max-width: 640px)"), "手机一直是隐藏的")
+        # JS 与样式同一条查询 (同 isPhoneUi 的做法), 免得又出现「样式生效/判定不生效」的漂移
+        wide = _extract_fn(self.src, "isWideTouchUi")
+        self.assertIn("(min-width: 1025px) and (pointer: coarse)", wide)
+        self.assertIn("@media (min-width: 1025px) and (pointer: coarse) {", self.src,
+                      "样式块的查询串要与 isWideTouchUi 逐字一致")
+        # 源序: 必须排在桌面 1000~1919 与平板块之后 (要靠后者覆盖它们), 在手机块之前
+        self.assertLess(self.src.index("@media (min-width: 1000px) and (max-width: 1919px)"),
+                        self.src.index("@media (min-width: 1025px) and (pointer: coarse)"))
+        self.assertLess(self.src.index("@media (min-width: 1025px) and (pointer: coarse)"),
+                        self.src.index("@media (max-width: 640px) {"))
+        row = _extract_fn(self.src, "toolbarRowPlan")
+        self.assertIn("rows: 1", row)
+        self.assertIn("rows: 2", row, "单行收光也放不下要能退回两行")
+        self.assertIn("|| []", row, "退回两行时字段全放回 (而不是继续收)")
+        fit = _extract_fn(self.src, "fitInfoRow")
+        self.assertIn("isWideTouchUi()", fit, "只有大宽度触屏才争取单行, 桌面口径不变")
+        self.assertIn("toolbarRowPlan(", fit)
+        self.assertIn("fnNaturalWidth(", fit, "功能组的自然宽: 与当前排几行无关, 不必先改类再量")
+        self.assertIn("classList.toggle('tb-2row', wideTouch && twoRows)", fit,
+                      "只在「宽触屏 + 两行」时加退回类")
+
+    def test_search_dropdown_contained(self):
+        """长名称: 名称走省略号 (代码/徽章不被裁), 浮层宽度有上限且按位置限位不出屏。"""
+        dd = _css_block(self.src, ".search-dropdown")
+        self.assertIn("min-width: 300px", dd)
+        self.assertIn("max-width: min(360px, calc(100vw - 24px))", dd)
+        item = _css_block(self.src, ".search-dropdown .item")
+        self.assertIn("display: flex", item)
+        self.assertIn("gap: 6px", item)
+        name = _css_block(self.src, ".search-dropdown .item .name")
+        for rule in ("flex: 1 1 auto", "min-width: 0", "overflow: hidden",
+                     "text-overflow: ellipsis", "white-space: nowrap"):
+            self.assertIn(rule, name, rule)
+        self.assertIn("flex: 0 0 auto", _css_block(self.src, ".search-dropdown .item .code"),
+                      "代码是识别项, 不能被名称挤掉")
+        render = _extract_fn(self.src, "renderDropdown")
+        self.assertIn('<span class="name">', render, "名称要能单独省略号")
+        self.assertIn("applyDropdownBox()", render)
 
 
 @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
@@ -577,6 +804,159 @@ process.stdout.write(JSON.stringify({
         out0 = self._run(script, [{"top": 0, "bottom": 300, "left": 200, "right": 206}])
         self.assertEqual(out0["texts"], 0, "无宽度时不画文字")
         self.assertNotIn("rect", out0, "无宽度时连底衬都不画")
+
+    def test_info_row_budget(self):
+        """信息行这一行能用多少宽度 (纯函数): 顶栏内宽 − 内边距 − 同行其它项及间距。"""
+        script = _extract_fn(self.src, "infoRowBudget") + """
+const cases = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(cases.map(c => infoRowBudget(c.innerW, c.pad, c.sibs, c.gap))));
+"""
+        out = self._run(script, [
+            {"innerW": 768, "pad": 24, "sibs": [], "gap": 6},          # 信息行独占一行 (自己换行时)
+            {"innerW": 768, "pad": 24, "sibs": [32], "gap": 6},        # 同行只有 GitHub 入口
+            {"innerW": 1024, "pad": 24, "sibs": [32], "gap": 6},
+            {"innerW": 1920, "pad": 24, "sibs": [32, 606], "gap": 6},  # ≥1920: 功能组也在同一行
+            {"innerW": 390, "pad": 20, "sibs": [], "gap": 6},          # ≤640 GitHub 入口已隐藏
+        ])
+        self.assertEqual(out[0], 744)
+        self.assertEqual(out[1], 706)
+        self.assertEqual(out[2], 962)
+        self.assertEqual(out[3], 1246, "1920 - 24 内边距 - (32+606) 同行两项 - 2*6 间距")
+        self.assertEqual(out[4], 370)
+
+    def test_toolbar_row_plan(self):
+        """顶栏排几行 (抽真源码跑): 大宽度触屏先争取单行, 收尽量少的次要读数; 收光还不行才两行。
+
+        信息行权重同 test_info_drop_plan (全显示 need = 854 + 11*6 = 920), 功能组自然宽取 680。
+        """
+        m = re.search(r"const INFO_DROP_ORDER = (\[[^\]]*\]);", self.src)
+        slack = re.search(r"const INFO_FIT_SLACK = ([0-9.]+);", self.src)
+        self.assertIsNotNone(m, "index.html 中找不到 INFO_DROP_ORDER")
+        self.assertIsNotNone(slack, "index.html 中找不到 INFO_FIT_SLACK")
+        order = json.loads(m.group(1).replace("'", '"'))
+        script = ("const INFO_DROP_ORDER = " + m.group(1) + ";\n"
+                  + "const INFO_FIT_SLACK = " + slack.group(1) + ";\n"
+                  + _extract_fn(self.src, "infoRowBudget") + "\n"
+                  + _extract_fn(self.src, "infoDropPlan") + "\n"
+                  + _extract_fn(self.src, "toolbarRowPlan") + """
+const cases = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(cases.map(c => toolbarRowPlan(c.items, c.innerW, c.pad, c.gap, c.githubW, c.fnW))));
+""")
+        items = [{"id": i, "w": w, "on": True} for i, w in
+                 [("info-sym", 150), ("info-holding", 50), ("info-price", 48), ("info-change", 68),
+                  ("info-open", 53), ("info-high", 53), ("info-low", 53), ("info-pledge", 66),
+                  ("info-shares", 98), ("info-amount", 69), ("info-premium", 66), ("info-turnover", 80)]]
+
+        def case(innerW, fnW=680):
+            return {"items": items, "innerW": innerW, "pad": 24, "gap": 6, "githubW": 32, "fnW": fnW}
+
+        cases = [
+            case(1920),          # 很宽: 一行就够, 一个都不收
+            case(1376),          # iPad Pro 13 横屏: 收到只剩 换手 才刚好并排
+            case(1300),          # 更窄: 连 换手 也要收 (行情字段永不收)
+            case(1025),          # 一行收光也放不下 → 退回两行, 两行够住 → 字段全放回
+            case(1376, 0),       # 功能组量不到 (0) → 预算更宽松, 一个都不用收
+            case(1032, 680),     # 竖屏 1032: 同样退回两行
+        ]
+        out = self._run(script, cases)
+        self.assertEqual(out[0], {"rows": 1, "plan": []}, "1920 一行就够")
+        self.assertEqual(out[1], {"rows": 1, "plan": ["info-pledge", "info-shares",
+                                                      "info-amount", "info-premium"]},
+                         "1376: 单行预算 628 → 收到只剩 换手 才塞得进一行")
+        self.assertEqual(out[2], {"rows": 1, "plan": order},
+                         "1300: 单行预算 552 → 连 换手 也要收")
+        self.assertEqual(out[3], {"rows": 2, "plan": []},
+                         "1025: 单行最小宽 511 也塞不进 (预算 277) → 退回两行, 字段全放回来")
+        self.assertEqual(out[4], {"rows": 1, "plan": []}, "功能组量不到时按 0 算, 更宽松")
+        self.assertEqual(out[5], {"rows": 2, "plan": []}, "竖屏 1032 仍走两行")
+        for row in out:
+            self.assertIn(row["rows"], (1, 2))
+            self.assertTrue(all(p in order for p in row["plan"]),
+                            f"收起名单里出现了非统计字段: {row['plan']}")
+
+    def test_info_drop_plan(self):
+        """信息行收起决策 (抽真源码跑): 只在放不下时收, 且只可能收那 5 个统计读数。
+
+        权重按实测观的量级给: 代码+名称 150 / 持仓 50 / 现价 48 / 涨跌 68 / 开高低 各 53 /
+        质押 66 / 流通份额 98 / 成交额 69 / 溢价 66 / 换手 80, 项间距 6。
+        12 项全显示时 need = 854 + 11*6 = 920。
+        """
+        m = re.search(r"const INFO_DROP_ORDER = (\[[^\]]*\]);", self.src)
+        self.assertIsNotNone(m, "index.html 中找不到 INFO_DROP_ORDER")
+        slack = re.search(r"const INFO_FIT_SLACK = ([0-9.]+);", self.src)
+        self.assertIsNotNone(slack, "index.html 中找不到 INFO_FIT_SLACK")
+        order = json.loads(m.group(1).replace("'", '"'))
+        script = ("const INFO_DROP_ORDER = " + m.group(1) + ";\n"
+                  + "const INFO_FIT_SLACK = " + slack.group(1) + ";\n"
+                  + _extract_fn(self.src, "infoDropPlan") + """
+const cases = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(cases.map(c => infoDropPlan(c.items, c.avail, c.gap))));
+""")
+        keep = [("info-sym", 150), ("info-holding", 50), ("info-price", 48), ("info-change", 68),
+                ("info-open", 53), ("info-high", 53), ("info-low", 53)]
+        stats = [("info-pledge", 66), ("info-shares", 98), ("info-amount", 69),
+                 ("info-premium", 66), ("info-turnover", 80)]
+        items = [{"id": i, "w": w, "on": True} for i, w in keep + stats]
+        no_pledge = [dict(it, on=(it["id"] != "info-pledge")) for it in items]
+
+        def case(avail, its=None):
+            return {"items": its or items, "avail": avail, "gap": 6}
+
+        cases = [case(1000),                      # 放得下 → 一个都不收
+                 case(920),                       # 正好卡住 → 也不收
+                 case(919.9),                     # 0.1 的浮点/取整噪声被容差吸收
+                 case(919.6),                     # 0.4 的真实短缺: 浏览器真会为这点差额折行
+                 case(900),                       # 差一点 → 只收最次要的质押
+                 case(800),                       # 差得多 → 质押 + 流通份额
+                 case(700),                       # 再差 → 再收成交额
+                 case(520),                       # 收满 5 个才刚好放下
+                 case(500),                       # 收满 5 个仍放不下 → null (全放回)
+                 case(900, no_pledge),            # 质押本来就没数据 (数据侧隐藏) → 不用收
+                 case(10)]                        # 极端窄 → null, 且绝不能返回行情字段
+        out = self._run(script, cases)
+        self.assertEqual(out[0], [])
+        self.assertEqual(out[1], [], "need 正好等于可用宽度就算放得下")
+        self.assertEqual(out[2], [], "0.1px 的浮点噪声不能算成放不下")
+        self.assertEqual(out[3], ["info-pledge"], "0.4px 的真实短缺要收 (768 实测: 0.48px 的短缺就折行)")
+        self.assertEqual(out[4], ["info-pledge"])
+        self.assertEqual(out[5], ["info-pledge", "info-shares"])
+        self.assertEqual(out[6], ["info-pledge", "info-shares", "info-amount"])
+        self.assertEqual(out[7], order, "收满 5 个才放下时顺序必须与 INFO_DROP_ORDER 一致")
+        self.assertIsNone(out[8], "收光仍放不下 → 交回 CSS (窄屏换行), 而不是把行情字段也收掉")
+        self.assertEqual(out[9], [], "数据侧已经隐藏的项既不计入也不该被\"收\"")
+        self.assertIsNone(out[10])
+        for plan in out:
+            self.assertTrue(plan is None or all(p in order for p in plan),
+                            f"收起名单里出现了非统计字段: {plan}")
+
+    def test_dropdown_box_stays_in_viewport(self):
+        """搜索下拉的限位几何 (抽真源码跑): 搜索框在工具栏行里的左缘随入口按钮数/断点变
+        (手机上行内左缘约 150px), 只靠 CSS 的 left:0 锚不住, 300px 的浮层必然伸出右缘。"""
+        script = _extract_fn(self.src, "dropdownBox") + """
+const cases = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(cases.map(c => dropdownBox(c.left, c.vw))));
+"""
+        cases = [
+            {"left": 350, "vw": 1024},   # 平板: 宽度上限即装得下, 不用移位
+            {"left": 148, "vw": 390},    # 手机: 右缘顶出 → 整体左移
+            {"left": 148, "vw": 320},    # 极窄: 宽度先收到 vw-16
+            {"left": 10, "vw": 390},     # 贴左: 不动
+            {"left": 0, "vw": 390},      # 左缘为 0: 夹到左边距, 不越界
+            {"left": 148, "vw": 0},      # 取不到视口宽 → 回落 CSS
+        ]
+        out = self._run(script, cases)
+        self.assertEqual(out[0], {"width": 360, "left": 0})
+        self.assertEqual(out[1], {"width": 360, "left": -126})
+        self.assertEqual(out[2], {"width": 304, "left": -140})
+        self.assertEqual(out[3], {"width": 360, "left": 0})
+        self.assertEqual(out[4], {"width": 360, "left": 8})
+        self.assertIsNone(out[5], "无视口宽度时交回 CSS (left:0 + max-width)")
+        for c, box in zip(cases, out):
+            if box is None:
+                continue
+            self.assertLessEqual(box["width"], 360, "宽度上限别涨")
+            self.assertGreaterEqual(c["left"] + box["left"], 8, "左缘不得出屏")
+            self.assertLessEqual(c["left"] + box["left"] + box["width"], c["vw"] - 8, "右缘不得出屏")
 
     def test_panel_grid_right(self):
         """K线右边距: 五档栏可见时让位, 否则回落 (供筹码/默认取值)。"""

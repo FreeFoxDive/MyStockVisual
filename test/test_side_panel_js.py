@@ -228,6 +228,55 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertIn("STATE.klineData", _extract_fn(self.src, "panelStockName"))
         self.assertIn("STATE.symbol", _extract_fn(self.src, "panelStockCode"))
 
+    def test_new_rows_and_live_plumbing(self):
+        """新增 流通/份额、质押、ETF溢价 三行: 数据都要从后端并进 stockInfo (面板与截图共用那份)。
+
+        顶栏挤不下时这几项会被收起 —— 面板是它们的落处, 所以更新链路不能断:
+        流通 随现价每 tick 变, 溢价 随延迟算出的后端溢价 + 缓存过期状态, 质押 随接口返回。
+        """
+        body = _extract_fn(self.src, "infoPanelRows")
+        for label in ("label: '份额'", "label: '流通'", "label: '溢价'", "label: '质押'"):
+            self.assertIn(label, body, label)
+        self.assertIn(".filter(r => r)", body, "无数据的行要筛掉 (不画 — 空行)")
+        # 流通/份额 与顶栏 updateFundInfo 同一套算法文案
+        self.assertIn("fmtCN(fs * lastPrice)", body)
+        self.assertIn("(fs / 1e8).toFixed(2) + '亿份'", body)
+        # 元数据 (float_shares/is_etf/is_index) 并进 stockInfo
+        live = _extract_fn(self.src, "updateLiveStockInfo")
+        self.assertIn("d.is_etf = !!kd.is_etf", live)
+        self.assertIn("d.float_shares = Number(kd.float_shares)", live)
+        # 溢价缓存过期状态随 tick 重算, 否则面板会一直显示"不再是待更新"
+        self.assertIn("d.premium_stale", live)
+        self.assertIn("cached.expiresAt", live)
+        # 溢价值来自写顶栏那段 (同一份 p/stale, 不另算一遍)
+        info = _extract_fn(self.src, "updateInfo")
+        self.assertIn("premium_pct: p, premium_stale: stale", info)
+        self.assertIn("premium_at:", info)
+        # 质押
+        pledge = self.src[self.src.index("/api/pledge"):]
+        pledge = pledge[:pledge.index("}).catch")]
+        self.assertIn("pledge_ratio:", pledge)
+        self.assertIn("setReadout(el, '质押'", pledge, "顶栏那段保持原样")
+
+    def test_info_row_positions(self):
+        """面板排列 (分块): ①标识 ②价格边界 ③成交与资金 ④股本结构 ⑤估值 ⑥区间表现 ⑦状态。"""
+        body = _extract_fn(self.src, "infoPanelRows")
+        arr = body[body.index("return ["):]     # 只看返回数组里的顺序 (变量定义在前面)
+        # 名称/代码/现价 必须最前且连续 (截图与几何测试都依赖)
+        self.assertTrue(arr.index("label: '名称'") < arr.index("label: '代码'")
+                        < arr.index("label: '现价'") < arr.index("label: '行业'"))
+        # 涨停/跌停 是现价的价格边界 → 紧跟 行业, 且在成交类之前
+        self.assertLess(arr.index("label: '行业'"), arr.index("label: '涨停价'"))
+        self.assertLess(arr.index("label: '跌停价'"), arr.index("label: '总手'"))
+        # 股本结构 (流通/份额、质押) 在成交类之后; PE/PB/溢价 同属估值块且在股本之后
+        self.assertLess(arr.index("label: '量比'"), arr.index("sharesRow"))
+        self.assertLess(arr.index("sharesRow"), arr.index("pledgeRow"))
+        self.assertLess(arr.index("pledgeRow"), arr.index("label: 'PE'"))
+        self.assertLess(arr.index("label: 'PB'"), arr.index("premiumRow"))
+        # 区间涨幅紧随估值, 状态收尾
+        self.assertLess(arr.index("premiumRow"), arr.index("label: '3日涨幅'"))
+        self.assertLess(arr.index("label: '10日涨幅'"), arr.index("label: '状态'"))
+
     def test_reopen_button_doubled(self):
         # 收起后唯一的恢复入口: 点按区域按 2 倍放大 (8px 2px → 16px 4px, 12px → 20px 字)
         seg = self.src[self.src.index("#side-reopen {"):]
@@ -372,6 +421,87 @@ class PanelGridLeftBehaviorTest(unittest.TestCase):
                                "side-panel": {"offsetWidth": 204}})
         self.assertFalse(out["side"], "五档已并入信息框, 信息关闭则整框隐藏")
         self.assertEqual(out["left"], "8%")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+class InfoPanelRowsBehaviorTest(unittest.TestCase):
+    """面板行规格 (抽真源码跑): 新排列 / 新增三行 / 无数据不出行。"""
+
+    @classmethod
+    def setUpClass(cls):
+        src = INDEX_HTML.read_text(encoding="utf-8")
+        fns = "\n".join(_extract_fn(src, n) for n in
+                        ("infoPanelRows", "panelStockName", "panelStockCode",
+                         "fmtLots", "fmtCN", "fmtPrice3", "normPct"))
+        cls.script = (
+            fns + "\n"
+            + "globalThis.C = () => ({ up: 'up', down: 'down' });\n"
+            + "globalThis.VisualLive = { price: (v) => (v == null ? '—' : String(+Number(v).toFixed(3))) };\n"
+            + "const c = JSON.parse(process.argv[1]);\n"
+            + "globalThis.STATE = { symbol: c.symbol, period: c.period, klineData: null };\n"
+            + "const rows = infoPanelRows(c.info);\n"
+            + "process.stdout.write(JSON.stringify({ rows: rows || null,"
+            + " labels: (rows || []).map(r => r.label) }));"
+        )
+
+    def _rows(self, info, period="1d", symbol="000001.SZ"):
+        proc = subprocess.run(["node", "-e", self.script,
+                               json.dumps({"info": info, "period": period, "symbol": symbol})],
+                              capture_output=True, check=True)
+        return json.loads(proc.stdout.decode("utf-8"))
+
+    STOCK = {"symbol": "000001.SZ", "name": "平安银行", "last_price": 11.5, "prev_close": 11.2,
+             "industry": "银行", "volume": 123456, "amount": 1.4e8, "turnover_rate": 0.51,
+             "vol_ratio": 1.2, "limit_up": 12.32, "limit_down": 10.08, "chg_3d": 1.5,
+             "chg_5d": -2.25, "chg_10d": 0, "pe": 5.5, "pb": 0.55,
+             "trade_status": "trading", "trade_status_text": "连续竞价",
+             "float_shares": 1.2e10, "pledge_ratio": 3.4}
+
+    def test_stock_order_and_new_rows(self):
+        out = self._rows(self.STOCK)
+        self.assertEqual(out["labels"], [
+            '名称', '代码', '现价', '行业', '涨停价', '跌停价', '总手', '成交额', '换手', '量比',
+            '流通', '质押', 'PE', 'PB', '3日涨幅', '5日涨幅', '10日涨幅', '状态'])
+        rows = {r["label"]: r for r in out["rows"]}
+        # 流通 = float_shares × 现价 (与顶栏同算法/文案): 1.2e10 × 11.5 = 1.38e11 → 1380.00亿
+        self.assertEqual(rows["流通"]["text"], "1380.00亿")
+        self.assertEqual(rows["质押"]["text"], "3.40%")
+        self.assertFalse(rows["现价"]["color"] == rows["质押"]["color"], "质押不带涨跌色")
+
+    def test_etf_has_shares_and_premium_but_no_pledge(self):
+        etf = dict(self.STOCK, is_etf=True, float_shares=2.38e10,
+                   premium_pct=-0.37, premium_stale=True, premium_at=1700000000)
+        out = self._rows(etf)
+        self.assertIn("份额", out["labels"])
+        self.assertIn("溢价", out["labels"])
+        self.assertNotIn("流通", out["labels"], "ETF 用份额, 不用流通市值")
+        self.assertNotIn("质押", out["labels"], "ETF 没有质押 → 直接不出行")
+        rows = {r["label"]: r for r in out["rows"]}
+        self.assertEqual(rows["份额"]["text"], "238.00亿份")
+        self.assertEqual(rows["溢价"]["text"], "-0.37%（待更新）", "过期的后端溢价要标出来")
+        self.assertEqual(rows["溢价"]["color"], "down")
+        self.assertIn("计算时间", rows["溢价"]["title"])
+        # 缓存新鲜时不带后缀
+        fresh = self._rows(dict(etf, premium_stale=False))
+        self.assertEqual({r["label"]: r for r in fresh["rows"]}["溢价"]["text"], "-0.37%")
+
+    def test_index_shows_none_of_the_three(self):
+        idx = dict(self.STOCK, is_index=True, float_shares=1.2e10)
+        out = self._rows(idx)
+        for label in ("流通", "份额", "溢价", "质押"):
+            self.assertNotIn(label, out["labels"], f"指数不该出 {label} 行")
+
+    def test_hides_rows_without_backend_data(self):
+        """面板行只在拿到后端数据后才出现 (不是画 — 的空行)。"""
+        bare = {k: v for k, v in self.STOCK.items()
+                if k not in ("float_shares", "pledge_ratio")}
+        out = self._rows(bare)
+        self.assertEqual(out["labels"][:10], ['名称', '代码', '现价', '行业', '涨停价', '跌停价',
+                                              '总手', '成交额', '换手', '量比'])
+        for label in ("流通", "份额", "溢价", "质押"):
+            self.assertNotIn(label, out["labels"])
+        # 无数据整体 → 返回 null (面板走 "无数据" 占位)
+        self.assertIsNone(self._rows(None)["rows"])
 
 
 if __name__ == "__main__":

@@ -78,14 +78,18 @@ class MonitorPageStaticTest(unittest.TestCase):
 
     def test_index_entry_button_renamed(self):
         idx = INDEX_HTML.read_text(encoding="utf-8")
-        m = re.search(r'<button id="monitor-entry"[^>]*>([^<]*)</button>', idx)
-        self.assertIsNotNone(m, "index.html 应保留 monitor-entry 入口")
+        self.assertIn('id="monitor-entry"', idx, "index.html 应保留 monitor-entry 入口")
         # 顶栏按钮文案收短为「监控」; 全称留在 title 里 (悬浮可见)
-        self.assertIn("监控", m.group(1))
-        self.assertNotIn("监控中心", m.group(1))
         i = idx.index('id="monitor-entry"')
         open_tag = idx[i:idx.index(">", i)]
+        body = idx[idx.index(">", i) + 1:idx.index("</button>", i)]
+        self.assertIn('<span class="nav-txt">监控</span>', body, "文字层收短为「监控」")
+        self.assertNotIn("监控中心", body, "顶栏文案应收短 (全称只在 title/aria-label)")
         self.assertIn("监控中心", open_tag, "monitor-entry 的 title 应保留全称")
+        # 图标/文字两层: 平板/手机只显示图标层 (见 test_home_toolbar_js 的平板口径),
+        # 文字层一藏按钮就没有可读文字了 —— 无障碍名必须写在标签上
+        self.assertIn('<span class="nav-ico"', body)
+        self.assertIn('aria-label="监控中心"', open_tag)
 
     def test_alert_labels_cover_backend_types(self):
         keys = _object_keys(_extract_const(self.src, "ALERT_LABELS"))

@@ -403,6 +403,8 @@ class RiskLinesBehaviorTest(unittest.TestCase):
             + "function document$getElementById(id) { return nodes[id] || null; }\n"
             + "const document = { getElementById: document$getElementById };\n"
             + "function fmtPrice3(v) { return Number(v).toFixed(2); }\n"
+            # syncPosition 末尾会请顶栏重算信息行能不能放下一行 (徽章显隐会改宽度) —— 本用例只测接线
+            + "function scheduleFitInfoRow() {}\n"
             + "const STATE = { trades: null, risk: null, position: null };\n"
             + "const out = [];\n"
             + "for (const c of JSON.parse(process.argv[1]).cases) {\n"
@@ -479,6 +481,8 @@ class RiskLinesBehaviorTest(unittest.TestCase):
             + "const nodes = { 'info-holding': { style: {}, title: '' }, 'lbl-risk': { style: {} } };\n"
             + "const document = { getElementById: (id) => nodes[id] || null };\n"
             + "function fmtPrice3(v) { return Number(v).toFixed(2); }\n"
+            # syncPosition 末尾会请顶栏重算信息行能不能放下一行 (徽章显隐会改宽度) —— 本用例只测接线
+            + "function scheduleFitInfoRow() {}\n"
             + "const STATE = { trades: null, risk: null, position: null };\n"
             + "STATE.trades = JSON.parse(process.argv[1]).cases[0].trades;\n"
             + "syncPosition();\n"

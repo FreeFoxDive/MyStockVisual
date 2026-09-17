@@ -74,6 +74,9 @@ body {
   position: absolute;
   top: 100%; left: 0;
   min-width: 300px;
+  /* 长名称不再把浮层顶出屏幕: 宽度上限与视口挂钩 (JS 的 dropdownBox 还会按搜索框在行内的
+     实际位置做限位 —— 搜索框在工具栏里的左缘随按钮数/断点变化, 只靠 CSS 锚不住) */
+  max-width: min(360px, calc(100vw - 24px));
   max-height: min(70vh, 560px);
   overflow-y: auto;
   background: var(--bg-card);
@@ -90,6 +93,10 @@ body {
   font-size: 13px;
   color: var(--text);
   border-bottom: 1px solid var(--border);
+  /* flex: 名称吃掉剩余宽度 (过长省略号), 代码/类型徽章定宽不被裁 */
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
 }
 .search-dropdown .item:last-child { border-bottom: none; }
 .search-dropdown .item:hover,
@@ -97,7 +104,15 @@ body {
   background: var(--btn-active);
   color: var(--btn-active-text);
 }
-.search-dropdown .item .code { color: var(--text-secondary); font-size: 12px; margin-left: 6px; }
+.search-dropdown .item .name {
+  flex: 1 1 auto;
+  min-width: 0;                 /* 没有它 flex 子项不会收缩, 省略号不生效 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-dropdown .item .code { flex: 0 0 auto; color: var(--text-secondary); font-size: 12px; }
+.search-dropdown .item .type-badge { flex: 0 0 auto; }
 .search-dropdown .item:hover .code,
 .search-dropdown .item.active .code { color: rgba(255,255,255,0.7); }
 
@@ -141,6 +156,14 @@ body {
   width: 15px;
   height: 15px;
   display: block;
+}
+/* 顶栏入口 (监控/选股/交易): 图标与文字拆成两层 —— 平板/手机由 CSS 只留图标层, 所以
+   文字必须是独立节点 (JS 更新进度时也只能写文字层, 见 setNavText)。
+   gap 由容器给: 文字层隐藏后间距自动消失, 不用再改 padding。 */
+#toolbar .nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* 周期切换: 固定单行，左右箭头只滚动周期本身，不改变工具栏高度。 */
@@ -227,6 +250,10 @@ body {
   margin-left: auto;
   justify-content: flex-end;
 }
+/* 「一行放不下才收」的次要读数: 类由 fitInfoRow() 按实测宽度加/去 (收起顺序见 INFO_DROP_ORDER)。
+   用类而不是内联: 数据侧写 display 时赋 '' 等于撤掉内联声明, 所以这条能生效; 反过来数据到达
+   也顶不掉这个类。不加 !important —— 那会盖住数据侧「没数据就不显示」的硬闸门。 */
+#toolbar .info-group > .rd-drop { display: none; }
 /* 宽屏顶栏布局: 行数只由断点决定, 不随行情文字宽窄跳。
    成因: 信息行 (代码/名称/成交额/换手/…实测最长约 1000px) 与功能组 (搜索+周期+入口+图标, 约 950~1200px)
    都很宽, 而成交额 万↔亿、换手出现/消失、秒级时钟变宽都会改变信息行宽度 ——
@@ -404,7 +431,7 @@ body {
   font-size: 10px; font-weight: 700; line-height: 16px; vertical-align: 1px;
   background: rgba(var(--btn-active-rgb), 0.12); color: var(--btn-active);
 }
-.search-dropdown .item .type-badge { margin-right: 6px; }
+.search-dropdown .item .type-badge { margin-right: 0; }  /* 间距交给 .item 的 gap */
 .type-badge.tb-etf { color: var(--btn-active); background: rgba(var(--btn-active-rgb), 0.12); }
 .type-badge.tb-index { color: var(--warn-text); background: rgba(212, 160, 23, 0.16); }
 
@@ -641,9 +668,81 @@ body {
      信息行留出余量, 功能组就不会被挤在换行阈值上 */
   #toolbar .oh, #toolbar #info-time { display: none; }
 }
+/* ── 平板: 与 isTabletUi() 同一口径 (触屏 或 ≤1024px) ──
+   768~1024 的平板原本掉在 900px 与 1000px 两条断点的缝里: 时钟照显示、指标栏换行、
+   搜索框跟着按钮放大。手机另有 ≤640 一条, 必须排在本块之后 (冲突的属性由它覆盖, 见那里的
+   overflow —— 手机浮层是绝对定位的, 被 overflow 裁掉就点不到了)。 */
+@media (max-width: 1024px), (pointer: coarse) {
+  /* 平板顶栏必是「信息行 + 功能组行」两行, 6px 行距 + 38px 控件让两行之间显得空 */
+  #toolbar { row-gap: 2px; padding: 4px 12px; }
+  /* 秒级时钟: 手机早已隐藏, 平板同样省这一截横向空间 */
+  #toolbar #info-time { display: none; }
+  /* 入口只留图标 (全称走 title/aria-label): 三个入口省下约 90px, 图标本身即点按区 */
+  #toolbar .nav-btn { padding: 6px 9px; }
+  #toolbar .nav-txt { display: none; }
+  /* 例外: 扫描进度「45%」很短, 且是实时状态, 收起来就看不见了 */
+  #toolbar .nav-btn.scanning .nav-txt { display: inline; }
+  /* 搜索框不再跟着按钮放大到 16px/38px (比同排按钮还显眼); 宽度按 symbol.ex 定 ——
+     服务端 symbol 最长 9 字符 (688004.SH), 120px 足够。 */
+  #toolbar input[type="text"] {
+    width: 120px;
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: 14px;
+  }
+  /* 聚焦时抬回 16px: iOS Safari 只在聚焦那一刻按当时的字号决定要不要放大整个页面,
+     平时 14px 与同排文字齐平, 聚焦时不触发放大 */
+  #toolbar input[type="text"]:focus { font-size: 16px; }
+  /* 信息行: 901~999 是一段没有任何规则的缝 —— 基类 flex-shrink: 0 + nowrap 既不换行也不裁自己,
+     整行溢出视口被 body 裁掉 (比裁剪更难看)。补上可收缩 + min-width: 0 之后, 它同时也是
+     fitInfoRow() 能量到「这一行到底能给信息行多少宽度」的前提。1000~1919 那条的 overflow: hidden
+     保留: 次要读数都收光了仍放不下时, 它才是最后的兜底。 */
+  #toolbar .info-group { flex: 0 1 auto; min-width: 0; }
+  /* 开/高/低 常显: 900 那条为宽屏防跳行把它们摘了, 平板放回来 (手机 ≤640 同样是放回的)。
+     三个字段只有约 190px, 且它在收起优先级里永远不动 —— 放不下时先收统计读数 */
+  #toolbar .oh { display: inline-block; }
+  /* 指标栏固定单行 + 横向滚动 (与平板周期条同一手法): 换行布局下 pill 数量随周期变 ——
+     分时少了 筹码/动力系统/通道 三个, 栏高就在「日K 两行 / 分时 一行」之间跳, 图表跟着上下一截。
+     定成单行后高度恒定。滚动条必须藏: Windows 的 17px 横条本身就会把栏顶高。 */
+  #indicator-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  #indicator-bar::-webkit-scrollbar { display: none; }
+  /* nowrap 下 pill 默认会被压扁 (flex-shrink:1), 必须定住宽度才会真的横向滚动 */
+  #indicator-bar label,
+  #indicator-bar .cfg-mini,
+  #indicator-bar select { flex-shrink: 0; }
+}
+/* 大宽度触屏 (iPad Pro 13 横屏 1376 这类): 试试把功能组并回信息行右侧, 顶栏做成一行 ——
+   与下面 1000~1919 那条「功能组独占一行」正相反 (那条是桌面口径: 行数只由断点定, 不让行情
+   文字宽窄把行数晃来晃去)。窄于 1025 时一行必放不下 (信息行最小宽约 430px + 功能组自然宽约
+   680px), 所以只在大宽度启用; 真放不下时 fitInfoRow() 给 #toolbar 加 .tb-2row 退回两行。
+   桌面 (>1024 且鼠标) 与 ≤1024 窄屏都不受影响: 手机/竖屏平板还得靠功能组内部换行。 */
+@media (min-width: 1025px) and (pointer: coarse) {
+  /* 11 寸横屏 (1180) 要并成一行: 信息行至少需要 ~510px, 而功能组占 720px 放不下。
+     把「非信息」部分挤紧约 140px —— 不动任何行情字段、不动字号:
+       项间距 6→4 / 图标按钮与入口按钮内边距各收 2px / 去掉竖分隔线 / 搜索框 120→100 /
+       顶栏左右内边距 12→8 / 隐藏 GitHub 入口 (手机 ≤640 早就隐藏它了)。
+     信息行真要收字段时仍按既有顺序 (质押→流通份额→成交额→溢价→换手), 收光放不下才 .tb-2row 退回两行。 */
+  #toolbar { padding: 4px 8px; column-gap: 4px; }
+  #toolbar .info-group { column-gap: 4px; }
+  #toolbar .icon-btn { padding: 6px 7px; }
+  #toolbar .nav-btn { padding: 6px 7px; }
+  #toolbar .separator { display: none; }
+  #toolbar .github-link { display: none; }
+  #toolbar input[type="text"] { width: 100px; }
+  #toolbar .toolbar-right { flex: 0 0 auto; flex-wrap: nowrap; margin-left: auto; column-gap: 4px; }
+  /* 退回两行: 与桌面 1000~1919 完全同口径 (功能组独占一行, 右对齐) */
+  #toolbar.tb-2row .toolbar-right { flex: 1 1 100%; margin-left: 0; justify-content: flex-end; }
+}
 @media (max-width: 640px) {
   #toolbar { padding: 6px 10px; }
-  #toolbar input[type="text"] { width: 120px; }
+  /* 手机保留 16px (iOS 聚焦放大在窄屏更难受, 那里没有 14px 的余量), 显式写出来
+     免得被上面平板块的 14px 带下去 */
+  #toolbar input[type="text"] { width: 120px; font-size: 16px; min-height: 38px; }
   #history-bar { padding: 8px 10px 6px; }
   /* 手机不提供画线入口: 窄屏点选精度不够, 工具面板也没地方摆 */
   #toolbar #btn-draw { display: none; }
@@ -655,6 +754,8 @@ body {
     flex-wrap: nowrap;       /* 一行: 触发按钮 + 复权; 控件都在浮层里 */
     gap: 8px;
     padding: 6px 10px;
+    /* 必须 visible: 浮层 (#ind-body) 是它的绝对定位子节点, 被裁掉就点不到 ——
+       平板块给指标栏加了横向滚动 (触屏口径同时命中手机), 这里要盖回去 */
     overflow: visible;
   }
   #btn-ind-sheet {
@@ -729,10 +830,10 @@ body {
   #toolbar #info-pledge, #toolbar #info-shares, #toolbar #info-amount { display: none; }
 }
 
-/* 触控设备: 加大触控目标; 输入框 16px 防 iOS Safari 聚焦自动放大 */
+/* 触控设备: 加大触控目标 (输入框的字号/高度/宽度不在这里 —— 平板要 14px/32px,
+   手机要 16px/38px, 由上面两条断点各自定; 写在这里会被它们之中靠后的那条盖掉) */
 @media (pointer: coarse) {
   #toolbar button, #toolbar select { min-height: 38px; padding: 8px 14px; }
-  #toolbar input[type="text"] { min-height: 38px; font-size: 16px; }
   .history-tag { padding: 6px 10px; font-size: 13px; }
   #history-tags { gap: 12px 14px; }
   .history-tag .tag-del { top: -9px; right: -9px; width: 20px; height: 20px; font-size: 13px; }
@@ -860,11 +961,11 @@ body {
     <span id="info-time"></span>
   </div>
   <div class="toolbar-right">
-    <button id="monitor-entry" onclick="location.href='/monitor.html'" title="监控中心: 持仓风控/趋势线跌破/条件预警/告警一览">🛡 监控</button>
-    <button id="screener-entry" onclick="location.href='/screener.html'" title="条件选股: MACD金叉/MA20/筹码获利等">🎯 选股</button>
-    <button id="trades-entry" title="交易记录统计" onclick="location.href='/trades.html'">📒 交易</button>
+    <button id="monitor-entry" class="nav-btn" onclick="location.href='/monitor.html'" aria-label="监控中心" title="监控中心: 持仓风控/趋势线跌破/条件预警/告警一览"><span class="nav-ico" aria-hidden="true">🛡</span><span class="nav-txt">监控</span></button>
+    <button id="screener-entry" class="nav-btn" onclick="location.href='/screener.html'" aria-label="条件选股" title="条件选股: MACD金叉/MA20/筹码获利等"><span class="nav-ico" aria-hidden="true">🎯</span><span class="nav-txt">选股</span></button>
+    <button id="trades-entry" class="nav-btn" title="交易记录统计" aria-label="交易记录统计" onclick="location.href='/trades.html'"><span class="nav-ico" aria-hidden="true">📒</span><span class="nav-txt">交易</span></button>
     <span class="search-wrap">
-      <input type="text" id="symbol-input" value="000001.SH" placeholder="输入代码或名称搜索..."
+      <input type="text" id="symbol-input" value="000001.SH" placeholder="代码/名称"
              autocomplete="off">
       <div class="search-dropdown" id="search-dropdown"></div>
     </span>
@@ -933,7 +1034,7 @@ body {
   <span class="separator" style="height:18px;background:var(--border)"></span>
   <label title="BOLL 布林带 (MA20 ± 2 倍标准差)"><input type="checkbox" id="chk-boll" onchange="onConfigChange()">BOLL</label>
   <button class="cfg-mini" id="cfg-boll" onclick="openParamEditor('boll')" title="编辑布林带参数 (N,K)">⚙</button>
-  <label class="extra-ind" id="lbl-info" title="左侧基本信息面板 (行业/总手/成交额/换手/量比/涨跌停/N日涨幅/PE/PB/交易状态)"><input type="checkbox" id="chk-info" checked onchange="onConfigChange()">信息</label>
+  <label class="extra-ind" id="lbl-info" title="左侧基本信息面板 (行业/涨停跌停/总手/成交额/换手/量比/流通份额/质押/PE/PB/ETF溢价/N日涨幅/交易状态)"><input type="checkbox" id="chk-info" checked onchange="onConfigChange()">信息</label>
   <label class="extra-ind" id="lbl-depth" title="五档盘口 (所有周期可用)"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <button class="cfg-mini extra-ind" id="cfg-ma" onclick="openParamEditor('ma')" title="均线参数 (SMA 简单移动平均, 对标东财)">MA⚙</button>
   <label class="extra-ind" title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" checked onchange="onConfigChange()">金叉死叉</label>
@@ -1547,6 +1648,7 @@ function syncPosition() {
   }
   const lbl = document.getElementById('lbl-risk');
   if (lbl) lbl.style.display = risk ? '' : 'none';
+  scheduleFitInfoRow();   // 「持仓中」徽章显隐会改信息行宽度
 }
 
 /** 交易记录统一入口: 写入后立即刷新持仓状态/风控显示 */
@@ -2022,12 +2124,22 @@ async function fetchData(opts) {
         .then(r => r.json()).then(d => {
           if (STATE._fetchTs !== fetchTs) return; // 已切到新股票, 丢弃旧响应
           const el = document.getElementById('info-pledge');
-          if (d.pledge) {
-            setReadout(el, '质押', d.pledge.ratio.toFixed(2) + '%');
+          const ratio = d.pledge ? Number(d.pledge.ratio) : null;
+          if (ratio != null && Number.isFinite(ratio)) {
+            setReadout(el, '质押', ratio.toFixed(2) + '%');
             el.style.display = '';
           } else {
             el.style.display = 'none';
           }
+          // 基本信息面板也有这一行 (顶栏挤不下时会收起): 并进 stockInfo 让面板/截图一起拿到。
+          // 无数据时显式置 null, 免得同一标的下残留上一次的值 (换股靠 resetSidePanelData 清)。
+          if (STATE.stockInfo && STATE.stockInfo.symbol === data.symbol) {
+            marketStore.accept('info', data.symbol, {
+              ...STATE.stockInfo,
+              pledge_ratio: ratio != null && Number.isFinite(ratio) ? ratio : null,
+            });
+          }
+          scheduleFitInfoRow();   // 质押是异步到的, 来了要重算放不放得下
         }).catch(() => {});
       addToHistory(data.symbol, data.name,
         data.is_index ? 'index' : (data.is_etf ? 'etf' : deriveSymbolType(data.symbol)));
@@ -2248,6 +2360,132 @@ function setReadout(el, label, value) {
   el.appendChild(val);
 }
 
+/** 顶栏信息行「一行放不下才收」的收起顺序: 从最次要的收 起, 绝不收 代码/名称/持仓/现价/涨跌/开高低。
+ *  前三个是体积最大的统计读数 (合计约 230px), 溢价/换手是最后手段 —— ETF 的「溢价（待更新）」很宽
+ *  但不常出现。加字段时记得跟着想一遍: 它排在哪。 */
+const INFO_DROP_ORDER = ['info-pledge', 'info-shares', 'info-amount', 'info-premium', 'info-turnover'];
+
+/** 信息行的收起决策 (纯函数, 抽出来便于用例): items = [{id, w, on}], avail = 可用宽度, gap = 项间距。
+ *  返回 [] 表示放得下 (一个都不收); 返回收起的 id 列表表示收到够; 返回 null 表示全收光也放不下
+ *  —— 那就一个都别收 (窄屏本来就靠换行, 收了也没用), 交回 CSS 的换行/裁尾。 */
+const INFO_FIT_SLACK = 0.2;   // 宽度都是小数, 留一点余量吸收 1/64px 级的布局取整; 真实缺口 (实测 0.48px
+                              // 就会让浏览器折行) 必须大于它才算放不下
+function infoDropPlan(items, avail, gap) {
+  const FITS = (list) => list.reduce((s, it) => s + it.w, 0) + gap * Math.max(0, list.length - 1) <= avail + INFO_FIT_SLACK;
+  const shown = (items || []).filter(it => it && it.on && it.w > 0);
+  if (FITS(shown)) return [];
+  let rest = shown;
+  const dropped = [];
+  for (const id of INFO_DROP_ORDER) {
+    const hit = rest.find(it => it.id === id);
+    if (!hit) continue;
+    rest = rest.filter(it => it !== hit);
+    dropped.push(id);
+    if (FITS(rest)) return dropped;
+  }
+  return null;
+}
+
+/** 信息行这一行能用多少宽度: 顶栏内宽 − 左右内边距 − 同一行里其它项 (一般是 GitHub 入口,
+ *  ≥1920 时还有功能组) 以及它们之间的间距。纯函数, 便于用例。
+ *  为什么不拿信息行自己的框宽当预算: flex-basis:auto 时它等于内容宽, 而收过字段之后内容更小 ——
+ *  拿它当预算会把「已经收过」判成「本来就放不下」, 字段再也放不回来 (实测卡住过)。 */
+function infoRowBudget(innerW, pad, siblingWidths, gap) {
+  const others = siblingWidths || [];
+  return innerW - pad - others.reduce((s, w) => s + w, 0) - others.length * gap;
+}
+
+/** 大宽度触屏判定: 与样式里 `@media (min-width: 1025px) and (pointer: coarse)` 用同一条查询,
+ *  JS 与样式同进同退 (同 isPhoneUi 的写法)。iPad Pro 横屏 1376 这类就靠它, 与桌面区分开。 */
+function isWideTouchUi() {
+  return !!(window.matchMedia
+    && window.matchMedia('(min-width: 1025px) and (pointer: coarse)').matches);
+}
+
+/** 功能组的自然宽 (可见子项宽之和 + 间距): 与当前排一行还是两行无关, 所以不必先改类再量。
+ *  用它算「并排一行」留给信息行的宽度 —— 功能组是 flex: 0 0 auto, 不会被压扁。 */
+function fnNaturalWidth(el) {
+  if (!el) return 0;
+  const kids = Array.from(el.children).filter(k => getComputedStyle(k).display !== 'none');
+  const gap = parseFloat(getComputedStyle(el).columnGap) || 0;
+  return kids.reduce((s, k) => s + k.getBoundingClientRect().width, 0) + gap * Math.max(0, kids.length - 1);
+}
+
+/** 顶栏排几行 + 收哪些字段 (纯函数, 便于用例):
+ *  先按单行算 —— 功能组并到信息行右侧, 收尽量少的次要读数把它塞进一行;
+ *  连收光都放不下 → 退回两行 (功能组独占一行, 与桌面 <1920 一致), 两行够住就把字段全放回来。 */
+function toolbarRowPlan(items, innerW, pad, gap, githubW, fnW) {
+  const one = infoDropPlan(items, infoRowBudget(innerW, pad, [githubW, fnW].filter(w => w > 0), gap), gap);
+  if (one) return { rows: 1, plan: one };
+  const two = infoRowBudget(innerW, pad, githubW ? [githubW] : [], gap);
+  return { rows: 2, plan: infoDropPlan(items, two, gap) || [] };
+}
+
+/** 实测顶栏信息行一行放不放得下, 放不下才逐个收起次要读数 (加 .rd-drop 类)。
+ *  幂等且不存状态: 每次先把类全去掉再从头量, 所以窗口变宽/名称变短会自动放回来。
+ *  门槛 clientWidth 为 0 (还没布局 / 顶栏不可见) 时直接跳过, 免得按 0 宽度把字段全收掉。 */
+function fitInfoRow() {
+  const group = document.querySelector('#toolbar .info-group');
+  const toolbar = document.getElementById('toolbar');
+  if (!group || !toolbar || !group.clientWidth) return;
+  const els = Array.from(group.children);
+  els.forEach(el => el.classList.remove('rd-drop'));
+  // 宽度一律用 getBoundingClientRect 的小数值: offsetWidth 会取整, 十来项累加能凭空多出 1px,
+  // 够把「本来就放得下」判成放不下, 白收一个字段 (宽屏实测过)。
+  const items = els.map(el => ({
+    id: el.id, el,
+    on: getComputedStyle(el).display !== 'none',
+    w: el.getBoundingClientRect().width,
+  }));
+  const gap = parseFloat(getComputedStyle(group).columnGap) || 0;
+  const tcs = getComputedStyle(toolbar);
+  const pad = (parseFloat(tcs.paddingLeft) || 0) + (parseFloat(tcs.paddingRight) || 0);
+  const inner = toolbar.clientWidth;
+  const gh = toolbar.querySelector('.github-link');
+  const githubW = gh && getComputedStyle(gh).display !== 'none' ? gh.getBoundingClientRect().width : 0;
+  const wideTouch = isWideTouchUi();
+  let plan = null, twoRows = false;
+  if (wideTouch) {
+    // 大宽度触屏: 先争取单行 (功能组并排), 代价是可能收掉几个次要读数
+    const row = toolbarRowPlan(items, inner, pad, gap, githubW,
+      fnNaturalWidth(toolbar.querySelector('.toolbar-right')));
+    plan = row.plan;
+    twoRows = row.rows === 2;
+  } else {
+    // 其余设备: 行数由断点定死 (≤1024 靠功能组内部换行, 1000~1919 功能组独占一行, ≥1920 并排),
+    // 这里只管信息行自己那一行够不够 —— 只算与它同一行的兄弟项。高矮不一的项没法比 top,
+    // 用纵向重叠判定: 对齐方式/字号不同也不会误判。
+    const gt = group.getBoundingClientRect();
+    const siblingW = Array.from(toolbar.children).filter(el => el !== group)
+      .map(el => el.getBoundingClientRect())
+      .filter(r => r.width > 0 && r.bottom > gt.top + 1 && r.top < gt.bottom - 1)
+      .map(r => r.width);
+    plan = infoDropPlan(items, infoRowBudget(inner, pad, siblingW, parseFloat(tcs.columnGap) || 0), gap);
+  }
+  toolbar.classList.toggle('tb-2row', wideTouch && twoRows);
+  if (!plan) return;
+  plan.forEach(id => {
+    const it = items.find(x => x.id === id);
+    if (it) it.el.classList.add('rd-drop');
+  });
+}
+
+/** 合并同一帧内的多次请求: 行情每秒重写一遍读数, 没必要每次都量。 */
+let _fitInfoRaf = 0;
+function scheduleFitInfoRow() {
+  if (_fitInfoRaf) return;
+  if (typeof requestAnimationFrame !== 'function') { fitInfoRow(); return; }
+  _fitInfoRaf = requestAnimationFrame(() => { _fitInfoRaf = 0; fitInfoRow(); });
+}
+
+/** 尺寸一变就重算。window resize 能覆盖转屏/拖窗口, 但不覆盖所有情况 (字号回退、缩放、
+ *  顶栏内部重排) —— ResizeObserver 直接盯信息行本身, 不漏, 也和周期条那边一个路子。 */
+function wireInfoRowFit() {
+  if (typeof ResizeObserver === 'undefined') return;
+  const group = document.querySelector('#toolbar .info-group');
+  if (group) new ResizeObserver(() => scheduleFitInfoRow()).observe(group);
+}
+
 /** 面板里的名称: stock-info 未返回时用 K 线返回的 name 兜底 (实时行情会先到) */
 function panelStockName(d) {
   return (d && d.name) || (STATE.klineData && STATE.klineData.name) || '—';
@@ -2282,29 +2520,61 @@ function infoPanelRows(d) {
     ? (lastPrice > prevClose ? up : (lastPrice < prevClose ? down : gray))
     : gray;
   const p3 = pct(d.chg_3d), p5 = pct(d.chg_5d), p10 = pct(d.chg_10d);
+  // 股本结构: 个股看流通市值, ETF 看份额 —— 与顶栏 updateFundInfo 同一套算法与文案。
+  // 结构性缺失 (ETF 没有流通市值、指数两者都没有) 就不出行, 不画 — 的空行。
+  const fs = Number(d.float_shares);
+  const sharesRow = Number.isFinite(fs) && fs > 0
+    ? (d.is_etf
+      ? { label: '份额', text: (fs / 1e8).toFixed(2) + '亿份', color: null }
+      : (!d.is_index && Number.isFinite(lastPrice)
+        ? { label: '流通', text: fmtCN(fs * lastPrice), color: null } : null))
+    : null;
+  // 质押是股东属性: ETF/指数没有 (接口也返回 null), 结构性不适用就不出行
+  const pledgeRow = !d.is_etf && !d.is_index
+    && d.pledge_ratio != null && Number.isFinite(Number(d.pledge_ratio))
+    ? { label: '质押', text: Number(d.pledge_ratio).toFixed(2) + '%', color: null } : null;
+  // 溢价是 PE/PB 在 ETF 上的对应物 (两者按品种互斥), 所以排在估值块里;
+  // 值带涨跌色, 溢价缓存过期/未到时后缀「（待更新）」(与顶栏同文案), title 给计算时间。
+  const premiumRow = d.premium_pct != null && Number.isFinite(Number(d.premium_pct))
+    ? {
+      label: '溢价',
+      text: `${Number(d.premium_pct) >= 0 ? '+' : ''}${Number(d.premium_pct).toFixed(2)}%`
+        + (d.premium_stale ? '（待更新）' : ''),
+      color: Number(d.premium_pct) >= 0 ? up : down,
+      title: d.premium_at ? `计算时间：${new Date(d.premium_at * 1000).toLocaleString()}` : null,
+    }
+    : null;
+  // 排列分块: ①标识 ②价格边界 ③成交与资金 ④股本结构 ⑤估值 ⑥区间表现 ⑦状态 ——
+  // 涨停/跌停 是现价的价格边界, 所以紧跟现价; PE/PB 与 ETF 溢价 同属估值。
+  // 顺序被 test_side_panel_js / test_side_panel_shot_js 锁着 (名称/代码/现价 须在最前且连续)。
   return [
     { label: '名称', text: panelStockName(d), color: null },
     { label: '代码', text: panelStockCode(d), color: null },
     Object.assign({ label: '现价' }, px(d.last_price, priceColor)),
     { label: '行业', text: d.industry || '—', color: null },
+    Object.assign({ label: '涨停价' }, px(d.limit_up, up)),
+    Object.assign({ label: '跌停价' }, px(d.limit_down, down)),
     { label: '总手', text: fmtLots(d.volume), color: null },
     { label: '成交额', text: d.amount == null ? '—' : fmtCN(d.amount), color: null },
     { label: '换手', text: d.turnover_rate == null ? '—' : Number(d.turnover_rate).toFixed(2) + '%', color: null },
     { label: '量比', text: fixed(d.vol_ratio), color: null },
-    Object.assign({ label: '涨停价' }, px(d.limit_up, up)),
-    Object.assign({ label: '跌停价' }, px(d.limit_down, down)),
+    sharesRow,
+    pledgeRow,
+    { label: 'PE', text: fixed(d.pe), color: null },
+    { label: 'PB', text: fixed(d.pb), color: null },
+    premiumRow,
     { label: '3日涨幅', text: p3.text, color: p3.color },
     { label: '5日涨幅', text: p5.text, color: p5.color },
     { label: '10日涨幅', text: p10.text, color: p10.color },
-    { label: 'PE', text: fixed(d.pe), color: null },
-    { label: 'PB', text: fixed(d.pb), color: null },
     { label: '状态', text: d.trade_status_text || '—', color: statusColor },
-  ];
+  ].filter(r => r);
 }
 
 function stockInfoRowHtml(r) {
   const style = r.color ? ` style="color:${r.color}"` : '';
-  return `<div class="sp-row"><span class="sp-label">${escHtml(r.label)}</span>` +
+  // title 可选 (目前只有溢价用它给出计算时间); escHtml 不管引号, 这里自己补一下
+  const title = r.title ? ` title="${escHtml(r.title).replace(/"/g, '&quot;')}"` : '';
+  return `<div class="sp-row"${title}><span class="sp-label">${escHtml(r.label)}</span>` +
     `<span class="sp-val"${style}>${escHtml(r.text)}</span></div>`;
 }
 
@@ -2710,6 +2980,19 @@ function updateLiveStockInfo(q, symbol = STATE.symbol) {
     }
   }
   d.timestamp = q.timestamp || d.timestamp;
+  // 基本信息面板的 流通/份额 与 溢价 行: 元数据只在 kline 响应里 (float_shares/is_etf/is_index),
+  // 溢价缓存的「过期」还会随时间变 —— 都并进 stockInfo, 面板与截图共用这一份。
+  const kd = STATE.klineData;
+  if (kd && kd.symbol === symbol) {
+    d.is_etf = !!kd.is_etf;
+    d.is_index = !!kd.is_index;
+    if (kd.float_shares != null) d.float_shares = Number(kd.float_shares);
+  }
+  if (d.premium_pct != null) {
+    const cached = STATE.premium;
+    const matching = cached && cached.symbol === symbol && cached.period === STATE.period;
+    d.premium_stale = !matching || !!cached.stale || Date.now() >= cached.expiresAt;
+  }
   // 基本信息与报价来自不同资源，不能复用报价 revision；否则价格先到时会
   // 把稍后返回的行业/PE/涨跌停基础资料判成旧数据。
   d._revision = Number(d._revision) || 0;
@@ -3054,6 +3337,10 @@ function updateFundInfo(q) {
   } else {
     amountEl.style.display = 'none';
   }
+
+  // 读数写完 → 重算「一行放不放得下」(本函数被行情快照与换股/换周期两条路径调用,
+  // 现价/涨跌/开高低与溢价都在它之前写完, 所以一处挂钩就全覆盖)
+  scheduleFitInfoRow();
 }
 
 /** 东财股吧地址: 指数 zs+市场前缀, ETF 小写市场前缀, 个股裸 6 位代码。
@@ -3131,12 +3418,26 @@ function updateInfo(data) {
         ? `计算时间：${new Date(cached.generatedAt * 1000).toLocaleString()}` : '';
       document.getElementById('info-premium').className = pcls;
       document.getElementById('info-premium').style.display = '';
+      // 基本信息面板也有这一行 (顶栏挤不下时会收起): 并进 stockInfo, 面板/截图才能拿到。
+      // 用同一份 p / stale, 不另算一遍 —— 否则两处口径迟早漂移。
+      if (STATE.stockInfo && STATE.stockInfo.symbol === data.symbol) {
+        marketStore.accept('info', data.symbol, {
+          ...STATE.stockInfo, premium_pct: p, premium_stale: stale,
+          premium_at: matching && cached.generatedAt ? cached.generatedAt : null,
+        });
+      }
     } else {
       document.getElementById('info-premium').style.display = 'none';
+      if (STATE.stockInfo && STATE.stockInfo.symbol === data.symbol && STATE.stockInfo.premium_pct != null) {
+        marketStore.accept('info', data.symbol, { ...STATE.stockInfo, premium_pct: null, premium_stale: false });
+      }
     }
   } else {
     premLabel.style.display = 'none';
     document.getElementById('info-premium').style.display = 'none';
+    if (STATE.stockInfo && STATE.stockInfo.premium_pct != null) {
+      marketStore.accept('info', STATE.stockInfo.symbol, { ...STATE.stockInfo, premium_pct: null, premium_stale: false });
+    }
   }
 
   // 换手/流值/份额/成交额 (无 quote 时用末根收盘价兜底显示流值/份额)
@@ -4122,7 +4423,7 @@ function initPeriodScroller() {
   viewport.addEventListener('scroll', sync, { passive: true });
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(sync).observe(viewport);
   // 首帧布局就绪后再定宽 (按钮宽度此时才量得到); 换行宽/转屏/字体就绪都要重量
-  const relayout = () => { layoutPeriodViewport(); sync(); };
+  const relayout = () => { layoutPeriodViewport(); sync(); scheduleFitInfoRow(); };
   requestAnimationFrame(relayout);
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(relayout).observe(viewport.parentNode || viewport);
   window.addEventListener('resize', () => {
@@ -6814,9 +7115,25 @@ document.getElementById('dmi-name').addEventListener('keydown', (ev) => {
 // ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
+
+/** 搜索下拉的限位几何 (纯函数, 便于用例): 返回浮层相对搜索框左缘的 {width, left}。
+ *  搜索框在工具栏行里的左缘随入口按钮数/断点变化 (手机上行内左缘约 150px), 只靠 CSS 的
+ *  left:0 锚不住 —— 300px 的浮层必然把右缘顶出视口。名称过长由 CSS 省略号处理, 这里只管
+ *  让浮层整体落在 [pad, vw-pad] 内: 顶到右边就整体左移, 但不超过左边距 (两边都夹住)。
+ *  vw 取不到 (无 window) 时返回 null, 调用方回落 CSS。 */
+function dropdownBox(boxLeft, vw) {
+  const pad = 8, want = 360;
+  if (!(vw > 0)) return null;
+  const width = Math.min(want, vw - pad * 2);
+  let left = Math.min(0, (vw - pad) - (boxLeft + width));   // 右缘顶出 → 左移
+  if (boxLeft + left < pad) left = pad - boxLeft;           // 再夹回左边距内
+  return { width, left };
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   initPeriodScroller();
+  wireInfoRowFit();
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();
@@ -6892,15 +7209,25 @@ document.addEventListener('DOMContentLoaded', () => {
       });
   }
 
+  /** 浮层限位: 宽/左缘按 dropdownBox 的几何写内联 (CSS 那份是拿不到视口宽时的回落) */
+  function applyDropdownBox() {
+    const box = dropdownBox(symInput.getBoundingClientRect().left, window.innerWidth);
+    if (!box) return;
+    dropdown.style.width = box.width + 'px';
+    dropdown.style.minWidth = '0';   // CSS 的 min-width:300px 会盖掉更窄的宽度
+    dropdown.style.left = box.left + 'px';
+  }
+
   function renderDropdown() {
     dropdown.innerHTML = searchResults.map((r, i) => {
       const badge = searchBadge(r)
         ? `<span class="type-badge tb-${badgeType(r)}">${searchBadge(r)}</span>` : '';
       return `<div class="item${i === activeIdx ? ' active' : ''}" data-idx="${i}">
-        ${badge}${esc(r.name)}<span class="code">${esc(r.code)}</span>
+        ${badge}<span class="name">${esc(r.name)}</span><span class="code">${esc(r.code)}</span>
       </div>`;
     }).join('') + (searchNotice ? `<div class="search-status" role="status">${esc(searchNotice)}</div>` : '');
     dropdown.classList.add('show');
+    applyDropdownBox();
     // Click + hover handlers
     dropdown.querySelectorAll('.item').forEach(el => {
       el.addEventListener('click', (ev) => {
@@ -7160,6 +7487,13 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(syncSessionFlag, 60e3);
 
   // 选股后台扫描状态: 每 10s 轻量轮询, 运行中入口脉冲 + 进度
+  /** 只写入口的文字层: 图标是独立节点, 平板/手机由 CSS 只显示图标 ——
+   *  再用 innerHTML 整体覆写, 图标跟文字层都会被抹平, 那两个字符就又冒回平板上。 */
+  function setNavText(btn, text) {
+    const el = btn.querySelector('.nav-txt');
+    if (el) el.textContent = text;
+    else btn.textContent = text;   // 兜底: 模板改动漏了时至少还能看到进度
+  }
   async function refreshScreenerBadge() {
     if (document.hidden) return;
     try {
@@ -7169,13 +7503,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (s.running) {
         const pct = s.total ? Math.round((s.progress || 0) / s.total * 100) : 0;
         btn.classList.add("scanning");
-        btn.innerHTML = `🎯 ${pct}%`;
+        setNavText(btn, `${pct}%`);
         btn.title = `选股扫描中 ${s.progress || 0}/${s.total} (后台运行, 关页不中断)`;
         STATE._scanWasRunning = true;
       } else if (STATE._scanWasRunning) {
         STATE._scanWasRunning = false;
         btn.classList.remove("scanning");
-        btn.innerHTML = "🎯 选股";
+        setNavText(btn, '选股');
         btn.title = "条件选股: MACD金叉/MA20/筹码获利等";
         showToast(`选股扫描完成: 命中 ${(s.results || []).length} 只`);
       }

@@ -247,6 +247,32 @@ process.stdout.write(JSON.stringify(collect(JSON.parse(process.argv[1]))));"""
         self.assertLess(len(value["t"]), 12 * 4)
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_new_rows_reach_the_shot(self):
+        """流通/份额、质押、溢价 三行也要进截图 (DOM 面板与截图共用 infoPanelRows 的不变量)。"""
+        base = {"symbol": "000001.SZ", "name": "平安银行", "last_price": 11.5, "prev_close": 11.2,
+                "industry": "银行", "volume": 123456, "amount": 1.4e8, "turnover_rate": 0.51,
+                "vol_ratio": 1.2, "limit_up": 12.32, "limit_down": 10.08, "chg_3d": 1.5,
+                "chg_5d": -2.25, "chg_10d": 0, "pe": 5.5, "pb": 0.55,
+                "trade_status": "trading", "trade_status_text": "连续竞价"}
+        out = self._collect({"width": 204, "height": 720,
+                             "stockInfo": dict(base, float_shares=1.2e9, pledge_ratio=3.4)})
+        texts = [t["t"] for t in out["drawn"]]
+        for label in ("流通", "质押"):
+            self.assertIn(label, texts, f"截图缺 {label} 行")
+        self.assertIn("138.00亿", texts, "流通 = 份额 × 现价")
+        self.assertNotIn("份额", texts, "个股用 流通, 不用 份额")
+        self.assertNotIn("溢价", texts, "非 ETF 没有 溢价 行")
+        self.assertLess(out["model"]["content"], 720, "多两行后内容高度仍在面板内")
+        # ETF: 份额 + 溢价 (待更新) 上屏, 且不带 质押
+        etf = dict(base, is_etf=True, float_shares=2.38e10, premium_pct=-0.37, premium_stale=True)
+        etf_out = self._collect({"width": 204, "height": 720, "stockInfo": etf})
+        etf_texts = [t["t"] for t in etf_out["drawn"]]
+        self.assertIn("份额", etf_texts)
+        self.assertIn("-0.37%（待更新）", etf_texts)
+        self.assertNotIn("质押", etf_texts)
+        self.assertLess(etf_out["model"]["content"], 720)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_scale_multiplies_every_coordinate(self):
         one = self._collect({"width": 204, "height": 720, "scale": 1})
         two = self._collect({"width": 204, "height": 720, "scale": 2})
