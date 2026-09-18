@@ -1264,7 +1264,7 @@ function saveChartImage() {
     const finish = (url) => {
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${STATE.symbol}_${STATE.period}_${new Date().toISOString().slice(0, 10)}.png`;
+      a.download = `${STATE.symbol}_${STATE.period}_${localStampStr()}.png`;
       a.click();
       showToast('图表图片已保存');
     };
@@ -1430,6 +1430,16 @@ function localDayStr(now) {
   const d = now ? new Date(now) : new Date();
   const p = (v) => (v < 10 ? '0' : '') + v;
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 本地时钟的「日期_时分秒」(YYYY-MM-DD_HHMMSS), 给截图导出当文件名后缀。
+ *  只写到日期时, 同一天连拍多张会互相覆盖 (浏览器自动加 (1)(2) 后缀)。
+ *  跟 localDayStr 同一口径: 按本地时区拼, 不走 toISOString (那是 UTC)。
+ *  时分秒不写冒号 —— Windows 文件名不允许 ':'。now 只给测试注入用。 */
+function localStampStr(now) {
+  const d = now ? new Date(now) : new Date();
+  const p = (v) => (v < 10 ? '0' : '') + v;
+  return `${localDayStr(d)}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 /** 标题里的日期以本地时钟为准的情形: **正在看最新一根** (没有拖进历史区间) +

@@ -347,6 +347,29 @@ process.stdout.write(JSON.stringify({
             # 非 UTC 时区下, 本地午夜的 UTC 日期是前一天 —— 这正是不许用 toISOString 的原因
             self.assertNotEqual(out["got"], out["iso"], "本地午夜串到了 UTC 日期")
 
+    def test_local_stamp_str_has_seconds_and_no_colon(self):
+        """截图文件名后缀 = 日期_时分秒 (本地时区): 同一天连拍多张才不会互相覆盖。
+
+        时分秒不能带冒号 —— Windows 文件名不允许 ':' (拷贝到 NTFS 会失败)。
+        """
+        js = (_extract_fn(self.src, "localDayStr")
+              + "\n" + _extract_fn(self.src, "localStampStr"))
+        out = json.loads(run_node(js + """
+const d = new Date(2026, 8, 18, 9, 5, 3);          // 本地 2026-09-18 09:05:03
+const p = (v) => (v < 10 ? '0' : '') + v;
+const fromLocalParts = '2026-09-18_' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+process.stdout.write(JSON.stringify({
+  got: localStampStr(d),
+  fromLocalParts,
+  midnight: localStampStr(new Date(2026, 8, 18, 0, 0, 0)),
+  offsetMin: d.getTimezoneOffset(),
+}));
+"""))
+        self.assertEqual(out["got"], out["fromLocalParts"], "localStampStr 不是按本地时区拼的")
+        self.assertRegex(out["got"], r"^\d{4}-\d{2}-\d{2}_\d{6}$", "后缀必须是 日期_时分秒")
+        self.assertNotIn(":", out["got"], "文件名里不能有冒号")
+        self.assertEqual(out["midnight"], "2026-09-18_000000", "个位数时分秒要补零")
+
     def test_title_uses_local_clock_end_to_end(self):
         """chartTitleText 的整合口径: 最新一根且数据落后 → 本地当天; 否则用 bar 日期。"""
         js = (_extract_const_obj(self.src, "PERIOD_LABELS") + "\n"
