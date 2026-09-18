@@ -1,7 +1,12 @@
-"""探测 AlphaFeed Starter 套餐下监控所需接口的可用性与快照刷新频率。
+"""探测 AlphaFeed 套餐下监控所需接口的可用性与快照刷新频率。
 
 温和限速 (6 次/分钟), 不裸跑。盘中连续采样看 timestamp 前进间隔,
 据此决定 POLL_INTERVAL; 顺带探 instruments / depth / intraday_batch / WebSocket。
+
+另含第 7 节日K批量拉取限额实测 (默认跳过, 会真烧额度; 见 af_limits.py):
+    python -u visual/probe_feed.py                 # 只跑 1~6 节 (温和)
+    python -u visual/probe_feed.py --kline-batches 5      # 5 批 (500 只) 验速率
+    python -u visual/probe_feed.py --kline-batches 0      # 全市场 (≈79 批 ≈1.5min)
 
 运行:
     python -u visual/probe_feed.py
@@ -18,6 +23,8 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+
+import af_limits  # noqa: E402
 
 for env_dir in (SCRIPT_DIR, SCRIPT_DIR.parent):
     env_file = env_dir / ".env"
@@ -47,10 +54,128 @@ def _ok(name, ok, extra=""):
     print(f"  [{flag}] {name}{('  ' + extra) if extra else ''}", flush=True)
 
 
+def _universe_symbols(limit=None, af=None):
+    """标的池: 优先本地缓存列表 (零额度), 取不到再回退 AF 标的池查询。"""
+    try:
+        import market
+        syms = [s["symbol"] for s in (market._load_stock_list() or []) if s.get("symbol")]
+        if syms:
+            print(f"       标的池来自本地列表: {len(syms)} 只", flush=True)
+            return syms[:limit] if limit else syms
+    except Exception as e:
+        print(f"       本地列表不可用 ({e}), 回退 AF universe", flush=True)
+    if af is None:
+        return []
+    try:
+        df = af.quotes.get(universes=["CN_Stock"], to_dataframe=True)
+        syms = sorted(str(s) for s in (df.index if df is not None else []))
+        print(f"       标的池来自 AF universe: {len(syms)} 只 (消耗 1 次池查询)", flush=True)
+        return syms[:limit] if limit else syms
+    except Exception as e:
+        print(f"       AF universe 失败: {e}", flush=True)
+        return []
+
+
+def _kline_ceiling_check(af, symbols):
+    """7a. 「100 标的/次」是否硬约束: 用 150 只试一次 (一支额外请求)。"""
+    import feed as feed_mod
+    print("=== 7a. 单次批量上限 (文档: 100 标的/次) ===", flush=True)
+    if len(symbols) <= af_limits.BATCH_SIZE:
+        print(f"       标的不足 {af_limits.BATCH_SIZE + 1} 只, 跳过", flush=True)
+        return
+    t0 = time.time()
+    try:
+        dfs = af.klines.batch(symbols, period="1d", count=5, adjust="forward", to_dataframe=True)
+        n = len(dfs or {})
+        print(f"       {len(symbols)} 只/次: 通过, 返回 {n} 只 ({time.time() - t0:.2f}s) "
+              f"→ 实际上限比文档更宽; {af_limits.BATCH_SIZE} 仍是安全批量", flush=True)
+    except Exception as e:
+        wait = feed_mod._retry_after_ms(e)
+        extra = f" retry_after_ms={wait}" if wait is not None else ""
+        print(f"       {len(symbols)} 只/次: 被拒 [{type(e).__name__}] {str(e)[:120]}{extra} "
+              f"→ 证实单次上限 {af_limits.BATCH_SIZE} 只", flush=True)
+
+
+def _kline_batch_rate_probe(af, batches=0, count=130, ratio=af_limits.RESERVE_RATIO,
+                            chunk=af_limits.BATCH_SIZE):
+    """7. 日K批量拉取限额实测: 按 chunk 只/批 + 令牌桶, 看是否撞 429。
+
+    batches=0 表示全市场 (≈79 批); 其余按 batches×chunk 只取样。
+    chunk 小于 100 时单批延迟更低, 令牌桶才会真正成为瓶颈 (能压到目标速率跑)。
+    """
+    import feed as feed_mod
+    target = af_limits.bucket_rate("kline_daily_batch", ratio)
+    hard = af_limits.limit("kline_daily_batch")
+    interval = af_limits.bucket_interval("kline_daily_batch", ratio)
+    print(f"=== 7. 日K批量拉取限额实测 (Pro {hard}/min × {ratio:g} → 目标 {target}/min, "
+          f"批间隔 ≥{interval:.2f}s, 单批 {chunk} 只) ===", flush=True)
+    symbols = _universe_symbols(batches * chunk if batches else None, af)
+    chunks = [symbols[i:i + chunk] for i in range(0, len(symbols), chunk)]
+    if not chunks:
+        print("       无标的可测, 跳过", flush=True)
+        return
+    _kline_ceiling_check(af, symbols[:af_limits.BATCH_SIZE + 50])
+
+    print(f"       计划 {len(chunks)} 批 / {len(symbols)} 只, "
+          f"预计 {len(chunks) / target * 60:.0f}s", flush=True)
+    bucket = feed_mod.TokenBucket(rate_per_min=target)
+    ok = empty = err = limited = 0
+    lat = []
+    t_start = time.time()
+    for i, chunk in enumerate(chunks, 1):
+        while not bucket.try_acquire():
+            time.sleep(0.05)
+        t0 = time.time()
+        try:
+            dfs = af.klines.batch(chunk, period="1d", count=count, adjust="forward",
+                                  to_dataframe=True)
+            got = sum(1 for s in chunk
+                      if (dfs or {}).get(s) is not None and len(dfs[s]) > 0)
+            ok += got
+            empty += len(chunk) - got
+        except Exception as e:
+            wait = feed_mod._retry_after_ms(e)
+            if wait is not None:
+                limited += 1
+                print(f"       [{i}] 429 限流 retry_after_ms={wait}", flush=True)
+            else:
+                err += 1
+                print(f"       [{i}] 失败 {type(e).__name__}: {str(e)[:120]}", flush=True)
+        lat.append(time.time() - t0)
+        if i % 10 == 0 or i == len(chunks):
+            elapsed = time.time() - t_start
+            print(f"       批 {i}/{len(chunks)}  {elapsed:6.1f}s  实测 {i / elapsed * 60:5.1f} 批/min"
+                  f"  有效 {ok} 空 {empty} 错 {err} 限流 {limited}", flush=True)
+
+    elapsed = time.time() - t_start
+    eff = len(chunks) / elapsed * 60 if elapsed else 0
+    lat.sort()
+    print(f"       单批耗时 min={lat[0]:.2f}s median={lat[len(lat) // 2]:.2f}s max={lat[-1]:.2f}s", flush=True)
+    if limited:
+        print(f"       [FAIL] 出现 {limited} 次限流: {target}/min 超上游容忍 —— "
+              f"把 ratio 降到 {ratio * 0.7:.2f} 左右重测, 并把结论写进 docs/alphafeed-limits.md", flush=True)
+    elif err:
+        print(f"       [WARN] 无 429 但有 {err} 批异常 (非限流), 检查报文后重测", flush=True)
+    elif eff > hard:
+        print(f"       [FAIL] 实测 {eff:.1f} 批/min 高于文档 {hard}/min 却未被拒: 口径存疑", flush=True)
+    else:
+        print(f"       [OK] 无 429; 实测 {eff:.1f} 批/min ≤ 文档 {hard}/min "
+              f"(目标 {target}/min, 余量 {hard - eff:.1f}); 单批 {af_limits.BATCH_SIZE} 只可用", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=int, default=60, help="快照刷新探测时长")
     parser.add_argument("--interval", type=float, default=10.0, help="采样间隔秒 (温和, 远低于 60/min)")
+    parser.add_argument("--kline-batches", type=int, default=-1,
+                        help="日K批量限速实测的批数 (0=全市场; 默认 -1 = 跳过, 避免烧额度)")
+    parser.add_argument("--kline-count", type=int, default=130, help="实测每只拉取的日K根数")
+    parser.add_argument("--kline-chunk", type=int, default=af_limits.BATCH_SIZE,
+                        help="实测单批标的数 (默认 100; 取小值可让令牌桶真正成为瓶颈)")
+    parser.add_argument("--kline-ratio", type=float, default=af_limits.RESERVE_RATIO,
+                        help="实测额度比例 (默认 0.9 = Pro 限额的 90%%)")
+    parser.add_argument("--only-kline", action="store_true",
+                        help="只跑第 7 节日K批量限速实测 (跳过 1~6 节, 不占用快照采样时间)")
     args = parser.parse_args()
 
     key = os.environ.get("AF_API_KEY", "")
@@ -60,6 +185,13 @@ def main():
     from alphafeed import AlphaFeed
     import feed as feed_mod
     af = AlphaFeed(api_key=key)
+
+    if args.only_kline:
+        _kline_batch_rate_probe(af, batches=max(0, args.kline_batches),
+                                count=args.kline_count, ratio=args.kline_ratio,
+                                chunk=max(1, args.kline_chunk))
+        print("探测结束 (仅日K批量限速)。", flush=True)
+        return
 
     print("=== 1. quotes.get(symbols=) ===", flush=True)
     t0 = time.time()
@@ -203,6 +335,13 @@ def main():
             _ok("ws quotes channel", True, str(msg)[:180])
         except Exception as e:
             _ok("ws quotes channel", False, str(e))
+
+    if args.kline_batches >= 0:
+        _kline_batch_rate_probe(af, batches=args.kline_batches, count=args.kline_count,
+                                ratio=args.kline_ratio, chunk=max(1, args.kline_chunk))
+    else:
+        print("=== 7. 日K批量限速实测: 已跳过 (加 --kline-batches 5 试 500 只, 0 = 全市场) ===",
+              flush=True)
 
     print("探测结束。监控循环将使用 quotes.get(symbols=) + 令牌桶 6/min。", flush=True)
 
