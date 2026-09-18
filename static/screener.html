@@ -22,15 +22,35 @@ body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple
 #toolbar button { padding: 6px 12px; border: 1px solid var(--input-border); border-radius: 6px; background: transparent; color: var(--text); font-size: 13px; cursor: pointer; }
 #toolbar button:hover { background: var(--btn-hover); }
 #toolbar .spacer { flex: 1; }
-#main-view { padding: 18px 22px; max-width: 1100px; margin: 0 auto; }
+#main-view { padding: 18px 22px; max-width: 1240px; margin: 0 auto; }
 .cond-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
 .cond-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 13px; }
 .cond-row select, .cond-row input { padding: 5px 8px; border: 1px solid var(--input-border); border-radius: 4px; background: var(--input-bg); color: var(--text); font-size: 13px; }
-.cond-row input { width: 90px; }
+.cond-row input[type=number] { width: 92px; }
+.cond-row input[type=text] { width: 120px; }
+.cond-row button:disabled, .cond-row select:disabled, .cond-row input:disabled { opacity: .5; cursor: not-allowed; }
+.cond-row label { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); }
 button.primary { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
+.chip { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; margin: 0 6px 4px 0; }
+.chip.editing { border-color: var(--btn-active); color: var(--btn-active); }
+.chip a { text-decoration: none; }
+.chip.locked a { opacity: .35; cursor: not-allowed; }
 .progress { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin: 10px 0; }
 .progress .fill { height: 100%; background: var(--btn-active); width: 0; transition: width 0.3s; }
-.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); margin-top: 12px; }
+.hint { font-size: 12px; color: var(--text-secondary); }
+.hint.warn { color: var(--warn-text); }
+#factor-bar { margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+#factor-bar .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--up-text); margin-right: 5px; }
+#factor-bar.bad { color: var(--down-text); }
+#factor-bar.bad .dot { background: var(--down-text); }
+#factor-bar.busy .dot { background: var(--warn-text); }
+#run-meta { margin-top: 12px; font-size: 12px; color: var(--text-secondary); }
+#hist-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+#hist-row select { padding: 4px 8px; border: 1px solid var(--input-border); border-radius: 4px; background: var(--input-bg); color: var(--text); font-size: 12px; max-width: 380px; }
+#filter-row { margin-top: 10px; font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+#filter-row button { padding: 3px 10px; border: 1px solid var(--input-border); border-radius: 999px; background: transparent; color: var(--text); font-size: 12px; cursor: pointer; }
+#filter-row button.on { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); margin-top: 8px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
 th { background: var(--bg-panel); color: var(--text-secondary); }
@@ -38,6 +58,12 @@ tr:hover td { background: var(--btn-hover); }
 td.sym a { color: var(--btn-active); text-decoration: none; }
 .pos { color: var(--up-text); font-weight: 600; }
 .neg { color: var(--down-text); font-weight: 600; }
+.hits { color: var(--text-secondary); white-space: normal; max-width: 620px; }
+.hits .t { display: inline-block; margin-right: 8px; }
+.hits .ok { color: var(--up-text); }
+.hits .no { color: var(--text-secondary); opacity: .75; }
+.count { font-weight: 700; font-variant-numeric: tabular-nums; }
+.count.full { color: var(--up-text); }
 .empty { text-align: center; color: var(--text-secondary); padding: 26px 0; }
 #err { display: none; color: var(--down-text); font-size: 13px; margin: 8px 0; }
 </style>
@@ -52,26 +78,53 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
 <div id="main-view">
   <div class="cond-box">
     <div class="cond-row">
-      <select id="cond-metric">
-        <option value="macd_cross_up">MACD 金叉 (当日)</option>
-        <option value="above_ma20">收盘站上 MA20</option>
-        <option value="chip_profit_gt">筹码获利盘 &gt; %</option>
-        <option value="rsi6_lt">RSI6 &lt; 数值</option>
-        <option value="change_pct_gt">5日涨幅 &gt; %</option>
-      </select>
-      <input type="number" id="cond-value" step="any" placeholder="数值 (如 60)" style="display:none">
-      <button onclick="addCond()">+ 添加条件 (AND)</button>
-      <button onclick="runScan()" class="primary">开始扫描</button>
+      <label>模式
+        <select id="cond-mode">
+          <option value="and">AND · 全部满足</option>
+          <option value="or">OR · 满足任一项</option>
+        </select>
+      </label>
+      <select id="cond-metric"></select>
+      <span id="op-wrap"><select id="cond-op">
+        <option value=">=">≥</option><option value="<=">≤</option>
+        <option value=">">&gt;</option><option value="<">&lt;</option>
+        <option value="==">=</option>
+      </select></span>
+      <input type="number" id="cond-value" step="any" placeholder="数值">
+      <span id="range-wrap" style="display:none">~<input type="number" id="cond-value2" step="any" placeholder="上限"></span>
+      <input type="text" id="cond-text" list="cond-options" placeholder="取值" style="display:none">
+      <datalist id="cond-options"></datalist>
+      <button id="btn-add" onclick="saveCond()">+ 添加条件</button>
+      <button id="btn-cancel-edit" onclick="cancelEdit()" style="display:none">取消修改</button>
+      <button id="btn-run" onclick="runScan()" class="primary">开始扫描</button>
       <button id="btn-stop" onclick="stopScan()" style="display:none;color:var(--down-text)">取消扫描</button>
+      <label style="margin-left:auto">口径
+        <select id="cond-price">
+          <option value="close">收盘 (因子库)</option>
+          <option value="live">盘中实时</option>
+        </select>
+      </label>
     </div>
     <div id="cond-list" style="font-size:12px;color:var(--text-secondary)">未添加条件</div>
+    <div id="lock-hint" class="hint warn" style="display:none"></div>
     <div id="err"></div>
     <div class="progress" id="prog-wrap" style="display:none"><div class="fill" id="prog-fill"></div></div>
-    <div style="font-size:12px;color:var(--text-secondary)" id="scan-hint"></div>
+    <div class="hint" id="scan-hint"></div>
+    <div id="factor-bar"><span class="dot"></span><span id="factor-text">因子库状态加载中…</span></div>
+    <div id="hist-row" style="display:none">
+      <span>历史</span>
+      <select id="hist-select" onchange="showRun(this.value)"></select>
+      <button id="btn-load" onclick="loadRunConditions()">载入该次条件</button>
+    </div>
   </div>
+  <div id="run-meta"></div>
+  <div id="filter-row" style="display:none"></div>
   <div class="table-wrap" id="result-wrap" style="display:none">
     <table>
-      <thead><tr><th>代码</th><th>名称</th><th>现价</th><th title="扫描时计算的筛选指标">5日涨幅</th><th title="扫描时计算的筛选指标">筹码获利盘</th></tr></thead>
+      <thead><tr>
+        <th>代码</th><th>名称</th><th>现价</th><th>涨跌幅</th>
+        <th id="th-hit">命中</th><th>满足条件</th><th>筹码获利盘</th>
+      </tr></thead>
       <tbody id="result-tbody"></tbody>
     </table>
   </div>
@@ -79,20 +132,24 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
 <script src="/js/api.js"></script>
 <script src="/js/live-market.js"></script>
 <script src="/js/market-clock.js"></script>
-<script src="/vendor/vue-3.5.13.global.prod.js"></script>
-<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
 <script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
 <script src="/js/market-store.js"></script>
 <script>
-const METRIC_LABELS = {
-  macd_cross_up: "MACD 金叉", above_ma20: "收盘站上 MA20",
-  chip_profit_gt: "筹码获利盘 > %", rsi6_lt: "RSI6 < 数值", change_pct_gt: "5日涨幅 > %",
-};
-let conditions = [];
-let scanning = false;
-// 进度轮询的连败计数: 与 scanning 一起声明在顶部 —— pollStatus 由 runScan/initResume
-// 提前调用, 靠 "反正前面有 await" 来保证它已初始化太脆 (去掉那个 await 就是 TDZ)。
+let METRICS = {};           // key -> 指标定义 (来自 /api/screener/metrics)
+let metricGroups = [];      // [{group, metrics:[...]}]
+let conditions = [];        // 条件框 (编辑中的草稿)
+let editingIndex = null;
+let composed = false;       // 用户是否动过条件框 (动过就不再被回显覆盖)
+let busy = false;           // 本人是否有排队/运行中的任务 (锁条件框)
 let pollFailures = 0;
+let runs = {};              // 任务摘要 (每次 status 重建, 不含 results)
+let runCache = {};          // 任务详情 (含 results), 按 id 缓存且不随轮询清空
+let displayId = null;       // 结果区当前展示的任务 id
+let hitFilter = null;       // 命中数筛选 (null = 全部)
+let factorDay = null;       // 因子库数据版本
+// 现价订阅上限: 结果最多 SCREENER_RESULT_MAX 行, 全量订阅会让本页每 2.5s 发几十个
+// /api/quotes 批次并挤占监控/其它页面的共享额度 —— 只订阅命中最多的前 N 只。
+const LIVE_QUOTE_MAX = 200;
 
 function api(path, options = {}) {
   return VisualApi.api(path, options, {
@@ -101,65 +158,389 @@ function api(path, options = {}) {
 }
 function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 function showErr(m) { const e = document.getElementById("err"); e.textContent = m; e.style.display = m ? "block" : "none"; }
+function fmtTime(iso) { return iso ? String(iso).replace("T", " ").slice(5, 16) : "—"; }
+function statusText(r) {
+  if (r.status === "queued") return "排队中";
+  if (r.status === "running") return "扫描中";
+  if (r.status === "stopped") return "已取消";
+  if (r.status === "error") return "失败";
+  return "完成";
+}
+function specOf(key) { return METRICS[key] || {}; }
 
-function addCond() {
+/** 条件 → 可读文案, 如「RSI6 ≤ 20」「换手率 1 ~ 5」「站上 MA20」。 */
+function condLabel(c) {
+  const s = specOf(c.metric);
+  const unit = s.unit || "";
+  if (c.kind === "bool") return c.label || s.label || c.metric;
+  if (c.kind === "range") return `${c.label || s.label} ${c.value} ~ ${c.value2}${unit}`;
+  if (c.kind === "text") return `${c.label || s.label} = ${c.value}`;
+  const op = { ">=": "≥", "<=": "≤", ">": ">", "<": "<", "==": "=" }[c.op] || c.op;
+  return `${c.label || s.label} ${op} ${c.value}${unit}`;
+}
+
+// ── 指标目录 ──
+async function loadMetrics() {
+  const data = await api("/api/screener/metrics");
+  metricGroups = data.groups || [];
+  METRICS = {};
+  const sel = document.getElementById("cond-metric");
+  sel.innerHTML = metricGroups.map(g => `<optgroup label="${esc(g.group)}">` +
+    g.metrics.map(m => `<option value="${esc(m.key)}">${esc(m.label)}</option>`).join("") +
+    `</optgroup>`).join("");
+  metricGroups.forEach(g => g.metrics.forEach(m => { METRICS[m.key] = m; }));
+  syncInputs();
+  renderConds();
+  factorDay = data.data_version || null;
+}
+
+/** 指标变更 → 切换输入控件 (bool 无参 / num 单值+op / range 双值 / text 取值)。 */
+function syncInputs() {
+  const s = specOf(document.getElementById("cond-metric").value);
+  const kind = s.kind || (s.ops && s.ops[0] === "is" ? "bool" : "num");
+  document.getElementById("op-wrap").style.display = (kind === "num") ? "" : "none";
+  document.getElementById("cond-value").style.display =
+    (kind === "num" || kind === "range") ? "" : "none";
+  document.getElementById("range-wrap").style.display = (kind === "range") ? "" : "none";
+  document.getElementById("cond-text").style.display = (kind === "text") ? "" : "none";
+  if (kind === "num" && s.op) document.getElementById("cond-op").value = s.op;
+  const dl = document.getElementById("cond-options");
+  dl.innerHTML = (s.options || []).map(o => `<option value="${esc(o)}"></option>`).join("");
+}
+
+// ── 条件框 ──
+function readInputs() {
   const metric = document.getElementById("cond-metric").value;
-  const value = parseFloat(document.getElementById("cond-value").value);
-  const needsValue = metric !== "macd_cross_up" && metric !== "above_ma20";
-  if (needsValue && !Number.isFinite(value)) { showErr("请填写数值"); return; }
-  conditions.push({ metric, value: Number.isFinite(value) ? value : null });
+  const s = specOf(metric);
+  const item = { metric, label: s.label || metric, kind: s.kind, op: s.op || ">=" };
+  if (s.kind === "bool") return item;
+  if (s.kind === "text") {
+    item.value = document.getElementById("cond-text").value.trim();
+    if (!item.value) { showErr("请填写取值"); return null; }
+    return item;
+  }
+  item.op = document.getElementById("cond-op").value;
+  item.value = parseFloat(document.getElementById("cond-value").value);
+  if (!Number.isFinite(item.value)) { showErr("请填写数值"); return null; }
+  if (s.kind === "range") {
+    item.value2 = parseFloat(document.getElementById("cond-value2").value);
+    if (!Number.isFinite(item.value2)) { showErr("请填写区间上限"); return null; }
+  }
+  return item;
+}
+
+function saveCond() {
+  if (busy) return;
+  const item = readInputs();
+  if (!item) return;
+  if (editingIndex != null) conditions[editingIndex] = item;
+  else conditions.push(item);
+  composed = true;
+  cancelEdit();
+  showErr("");
   renderConds();
 }
-function delCond(i) { conditions.splice(i, 1); renderConds(); }
-function renderConds() {
-  document.getElementById("cond-list").innerHTML = conditions.length
-    ? conditions.map((c, i) => `<span style="display:inline-flex;gap:4px;align-items:center;border:1px solid var(--border);border-radius:6px;padding:2px 8px;margin-right:6px">
-        ${esc(METRIC_LABELS[c.metric])}${c.value != null ? " " + c.value : ""}
-        <a href="javascript:void(0)" onclick="delCond(${i})" style="color:var(--down-text)">✕</a></span>`).join("")
-    : "未添加条件";
+function editCond(i) {
+  if (busy) return;
+  const c = conditions[i];
+  if (!c) return;
+  editingIndex = i;
+  document.getElementById("cond-metric").value = c.metric;
+  syncInputs();
+  document.getElementById("cond-op").value = c.op || ">=";
+  document.getElementById("cond-value").value = c.value == null ? "" : c.value;
+  document.getElementById("cond-value2").value = c.value2 == null ? "" : c.value2;
+  document.getElementById("cond-text").value = c.kind === "text" ? (c.value || "") : "";
+  document.getElementById("btn-add").textContent = "保存修改";
+  document.getElementById("btn-cancel-edit").style.display = "";
+  renderConds();
 }
+function cancelEdit() {
+  editingIndex = null;
+  document.getElementById("btn-add").textContent = "+ 添加条件";
+  document.getElementById("btn-cancel-edit").style.display = "none";
+  renderConds();
+}
+function delCond(i) {
+  if (busy) return;
+  conditions.splice(i, 1);
+  if (editingIndex === i) cancelEdit();
+  else if (editingIndex != null && editingIndex > i) editingIndex -= 1;
+  composed = true;
+  renderConds();
+}
+function renderConds() {
+  const box = document.getElementById("cond-list");
+  if (!conditions.length) { box.textContent = "未添加条件"; return; }
+  box.innerHTML = conditions.map((c, i) => `<span class="chip${editingIndex === i ? " editing" : ""}${busy ? " locked" : ""}">
+      ${esc(condLabel(c))}
+      <a href="javascript:void(0)" title="修改" onclick="editCond(${i})" style="color:var(--btn-active)">✎</a>
+      <a href="javascript:void(0)" title="删除" onclick="delCond(${i})" style="color:var(--down-text)">✕</a></span>`).join("");
+}
+function setLocked(locked, hint) {
+  busy = locked;
+  ["cond-mode", "cond-metric", "cond-op", "cond-value", "cond-value2", "cond-text",
+   "btn-add", "btn-cancel-edit", "btn-run", "cond-price"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = locked;
+  });
+  document.getElementById("btn-stop").style.display = locked ? "" : "none";
+  const el = document.getElementById("lock-hint");
+  el.style.display = locked ? "" : "none";
+  el.textContent = locked ? (hint || "扫描中，取消后可修改条件") : "";
+  renderConds();
+}
+function fillComposerFrom(list) {
+  conditions = (list || []).map(c => ({
+    metric: c.metric, label: c.label, kind: c.kind, op: c.op,
+    value: c.value == null ? null : c.value,
+    value2: c.value2 == null ? null : c.value2,
+  }));
+  renderConds();
+}
+
+// ── 结果区 ──
+function loadRunConditions() {
+  const r = runs[displayId];
+  if (!r || busy) return;
+  fillComposerFrom(r.conditions);
+  composed = true;
+  showErr("");
+  cancelEdit();
+}
+function fillHistory(active, recent) {
+  const sel = document.getElementById("hist-select");
+  const ids = [];
+  if (active) ids.push(active.id);
+  recent.forEach(r => { if (!ids.includes(r.id)) ids.push(r.id); });
+  if (!ids.length) { document.getElementById("hist-row").style.display = "none"; return; }
+  document.getElementById("hist-row").style.display = "";
+  sel.innerHTML = ids.map(id => {
+    const r = runs[id];
+    const n = r.n_results == null ? "…" : `${r.n_results} 只`;
+    const mode = r.mode === "or" ? "OR" : "AND";
+    const live = r.price_mode === "live" ? "盘中" : "收盘";
+    return `<option value="${id}">${id === (active || {}).id ? "进行中 · " : ""}#${id} ${statusText(r)} ${mode}/${live} ${fmtTime(r.done_at || r.queued_at)} · ${n}</option>`;
+  }).join("");
+  sel.value = String(displayId ?? ids[0]);
+}
+function renderFilterRow(run) {
+  const row = document.getElementById("filter-row");
+  const results = run.results || [];
+  if (!run || run.status === "queued" || !results.length) { row.style.display = "none"; return; }
+  const counts = [...new Set(results.map(r => r.hit_count || 0))].sort((a, b) => b - a);
+  row.style.display = "";
+  row.innerHTML = `<span>命中数</span>` +
+    [`<button class="${hitFilter == null ? "on" : ""}" onclick="setHitFilter(null)">全部 ${results.length}</button>`]
+      .concat(counts.map(c => {
+        const n = results.filter(r => (r.hit_count || 0) === c).length;
+        return `<button class="${hitFilter === c ? "on" : ""}" onclick="setHitFilter(${c})">满足 ${c} 项 ${n}</button>`;
+      })).join("");
+}
+function setHitFilter(c) {
+  hitFilter = c;
+  const run = runCache[displayId];
+  if (run) { renderFilterRow(run); renderResults(run.results, run); }
+}
+function renderResults(results, run) {
+  let list = results || [];
+  document.getElementById("th-hit").textContent =
+    (run && run.mode === "or") ? "命中 (OR)" : "命中";
+  if (hitFilter != null) list = list.filter(r => (r.hit_count || 0) === hitFilter);
+  const quotes = list.slice(0, LIVE_QUOTE_MAX);
+  liveQuotes.setSymbols(quotes.map(r => r.symbol));
+  document.getElementById("result-wrap").style.display = "block";
+  if (!list.length) {
+    const status = run && run.status;
+    const text = status === "stopped" ? "已取消，无命中"
+      : (status === "queued" || status === "running") ? "扫描中，暂无结果" : "无命中";
+    document.getElementById("result-tbody").innerHTML =
+      `<tr><td colspan="7" class="empty">${text}</td></tr>`;
+    return;
+  }
+  const nCond = (run.conditions || []).length;
+  const rows = list.map(r => {
+    const hits = (r.hits || []).map(h => {
+      const v = h.value == null ? "" : (typeof h.value === "boolean" ? "" : ` ${h.value}${h.unit || ""}`);
+      return `<span class="t ${h.ok ? "ok" : "no"}">${h.ok ? "✅" : "❌"}${esc(h.label || "")}${esc(v)}</span>`;
+    }).join("");
+    const chip = r.chip_profit == null ? "—" : r.chip_profit.toFixed(1) + "%";
+    const cnt = r.hit_count == null ? "—" : `${r.hit_count}/${nCond}`;
+    const full = (r.hit_count != null && r.hit_count === nCond) ? " full" : "";
+    return `<tr>
+      <td class="sym"><a href="/?symbol=${encodeURIComponent(r.symbol)}">${esc(r.symbol)}</a></td>
+      <td>${esc(r.name)}</td>
+      <td data-live-price="${esc(r.symbol)}">${VisualLive.price(liveQuotes.get(r.symbol)?.last_price ?? r.close)}</td>
+      <td class="${(r.change_pct || 0) >= 0 ? "pos" : "neg"}">${r.change_pct == null ? "—" : r.change_pct.toFixed(2) + "%"}</td>
+      <td class="count${full}">${cnt}</td>
+      <td class="hits">${hits}</td>
+      <td>${chip}</td></tr>`;
+  }).join("");
+  document.getElementById("result-tbody").innerHTML = rows;
+  document.getElementById("th-hit").textContent = (run.mode === "or") ? "命中 (OR)" : "命中";
+}
+function renderRun(run) {
+  const meta = document.getElementById("run-meta");
+  if (!run) {
+    meta.textContent = "";
+    document.getElementById("result-wrap").style.display = "none";
+    document.getElementById("filter-row").style.display = "none";
+    return;
+  }
+  const conds = (run.conditions || []).map(condLabel).join(run.mode === "or" ? " 或 " : " 且 ") || "—";
+  const n = run.n_results == null ? (run.results || []).length : run.n_results;
+  const modeTxt = run.mode === "or" ? "满足任一" : "全部满足";
+  const state = run.status === "stopped"
+    ? `已取消，保留部分结果（命中 ${n} 只）`
+    : run.status === "error" ? `失败：${esc(run.error || "扫描失败")}`
+    : `命中 <b>${n}</b> 只`
+      + (run.truncated ? `（已达单次上限，仅保留前 ${n} 只）` : "");
+  meta.innerHTML = `条件（${modeTxt}）：${esc(conds)} · ${state}`
+    + (run.data_version ? ` · 数据 ${esc(run.data_version)}` : "")
+    + (run.done_at ? ` · ${fmtTime(run.done_at)}` : "");
+  renderFilterRow(run);
+  renderResults(run.results, run);
+}
+async function showRun(id) {
+  displayId = id == null || id === "" ? null : Number(id);
+  if (displayId == null) return;
+  let full = runCache[displayId];
+  if (!full) {
+    try {
+      full = await api("/api/screener/runs/" + displayId);
+      runCache[displayId] = full;
+    } catch (e) { showErr(e.message || String(e)); return; }
+  }
+  hitFilter = null;
+  renderRun(full);
+}
+
+// ── 因子库状态 ──
+async function refreshFactorBar() {
+  try {
+    const s = await api("/api/factors/status");
+    const bar = document.getElementById("factor-bar");
+    const txt = document.getElementById("factor-text");
+    bar.classList.remove("bad", "busy");
+    if (s.state === "running") {
+      bar.classList.add("busy");
+      txt.textContent = `因子库构建中 ${s.percent || 0}%（${s.phase || "bars"}）… 完成后才能按最新数据扫描`;
+    } else if (s.state === "error" && !s.snapshot_day) {
+      bar.classList.add("bad");
+      txt.textContent = `因子库构建失败：${s.error || "未知原因"}（管理员可在管理页手动重建）`;
+    } else if (!s.snapshot_day) {
+      bar.classList.add("bad");
+      txt.textContent = "因子库尚未构建 —— 交易日 18:00 自动更新，或由管理员手动重建";
+    } else {
+      const rows = s.snapshot_rows == null ? "" : ` · ${s.snapshot_rows} 只`;
+      let extra = "";
+      if (s.state === "error") { bar.classList.add("bad"); extra = ` · 今日更新失败：${s.error || ""}`; }
+      txt.textContent = `因子库 ${s.snapshot_day}${rows}${extra}`;
+      factorDay = s.snapshot_day;
+    }
+  } catch (e) { /* 状态条失败不影响扫描 */ }
+}
+
+// ── 扫描 ──
 async function runScan() {
-  if (scanning) return;
+  if (busy) return;
+  if (editingIndex != null) { showErr("请先保存或取消修改"); return; }
   if (!conditions.length) { showErr("请先添加条件"); return; }
   showErr("");
   document.getElementById("prog-wrap").style.display = "block";
-  scanning = true;
-  setStopBtn(true);
   try {
-    const r = await api("/api/screener/run", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conditions }) });
-    if (!r.ok) { showErr(r.error || "启动失败"); scanning = false; setStopBtn(false); return; }
+    const r = await api("/api/screener/run", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conditions,
+        mode: document.getElementById("cond-mode").value,
+        price_mode: document.getElementById("cond-price").value,
+      }) });
+    if (!r.ok) { document.getElementById("prog-wrap").style.display = "none"; showErr(r.error || "启动失败"); return; }
+    composed = false;
+    displayId = null;
+    hitFilter = null;
+    await refreshStatus();
+    if (r.from_cache) {
+      document.getElementById("scan-hint").textContent =
+        `同日同条件已扫过，直接复用结果（命中 ${r.n_results} 只）`
+        + (r.truncated ? "（已达单次上限截断）" : "");
+      return;
+    }
     pollStatus();
-  } catch (e) { showErr(e.message || e); scanning = false; setStopBtn(false); }
+  } catch (e) { showErr(e.message || e); }
 }
-
 async function stopScan() {
   try { await api("/api/screener/stop", { method: "POST" }); } catch (e) { /* ignore */ }
+  await refreshStatus();
 }
+async function refreshStatus() {
+  const s = await api("/api/screener/status");
+  applyStatus(s);
+  return s;
+}
+function applyStatus(s) {
+  const active = s.active;
+  runs = {};
+  (s.recent || []).forEach(r => { runs[r.id] = r; });
+  if (active) runs[active.id] = active;
+  // /status 默认不带 results: 只有拿到结果的响应才写进详情缓存, 否则交给 showRun 按需取;
+  // 状态从"进行中"变终态时丢弃旧缓存 (那份是空结果, 不能让页面一直显示"扫描中")。
+  if (s.current) {
+    const id = s.current.id;
+    if (s.current.results) runCache[id] = s.current;
+    else if (runCache[id] && runCache[id].status !== s.current.status) delete runCache[id];
+  }
 
-function setStopBtn(on) {
-  document.getElementById("btn-stop").style.display = on ? "" : "none";
+  setLocked(!!active, active && active.status === "queued"
+    ? `排队中（前面还有 ${active.position} 个任务），取消后可修改条件`
+    : "扫描中，取消后可修改条件");
+  if (active) {
+    document.getElementById("prog-wrap").style.display = "block";
+    document.getElementById("prog-fill").style.width =
+      active.total ? Math.round((active.progress || 0) / active.total * 100) + "%" : "0%";
+    document.getElementById("scan-hint").textContent = active.status === "queued"
+      ? `排队中（前面还有 ${active.position} 个任务）…`
+      : `扫描中 ${active.progress || 0}/${active.total || "?"}…（关页不中断）`;
+  } else {
+    document.getElementById("prog-wrap").style.display = "none";
+    document.getElementById("scan-hint").textContent = "";
+  }
+
+  const source = active || s.current;
+  if (source && !composed && editingIndex == null) fillComposerFrom(source.conditions);
+  if (active) {
+    document.getElementById("cond-mode").value = active.mode || "and";
+    document.getElementById("cond-price").value = active.price_mode || "close";
+  } else if (s.current && !composed) {
+    document.getElementById("cond-mode").value = s.current.mode || "and";
+  }
+
+  if (active) displayId = active.id;
+  else if (!displayId || !runs[displayId]) displayId = s.current ? s.current.id : null;
+  fillHistory(active, s.recent || []);
+  if (displayId == null) renderRun(null);
+  else if (runCache[displayId]) renderRun(runCache[displayId]);
+  else showRun(displayId);
+}
+async function pollStatus() {
+  try {
+    const s = await api("/api/screener/status");
+    pollFailures = 0;
+    applyStatus(s);
+    if (s.active) { setTimeout(pollStatus, 1500); return; }
+  } catch (e) {
+    pollFailures += 1;
+    setTimeout(pollStatus, Math.min(1500 * pollFailures, 15000));
+  }
 }
 
 // ── 市场时段时钟 (唯一来源, 见 static/js/market-clock.js) ──
-// 结果表的现价靠 LiveMarket 刷新。盘外服务端只会返回收盘快照, 轮询毫无收益 ——
-// 这里原来没有任何门控, 选股页开着就全天每 2.5s 轮询一次 /api/quotes, 比整个
-// 行情链路的探测预算还高。现在按交易时段门控 (盘外 0 请求), 开盘由服务端给的
-// 相对秒数精确唤醒。
 const marketClock = new VisualMarketClock.MarketClock({
-  onChange: (state, kind) => {
-    // 与其余三页同一套: 休眠/后台节流后时间已脱节, 现价立刻重来一次
-    if (kind === 'resume') liveQuotes.refresh();
-  },
+  onChange: (state, kind) => { if (kind === 'resume') liveQuotes.refresh(); },
 });
-/** 该不该自动刷新现价 (时段口径来自时钟; 标签页隐藏时停机)。 */
-function canAutoRefresh() {
-  return !document.hidden && marketClock.live();
-}
-/** 该不该维持行情流: 比 canAutoRefresh 宽 —— 交易日 09:00 起即可建流 (只保活不取数)。 */
-function canStreamQuotes() {
-  return !document.hidden && marketClock.streamAllowed();
-}
+function canAutoRefresh() { return !document.hidden && marketClock.live(); }
+function canStreamQuotes() { return !document.hidden && marketClock.streamAllowed(); }
 
 const liveQuotes = new VisualLive.LiveMarket({
   streamStatus: true,
@@ -167,81 +548,30 @@ const liveQuotes = new VisualLive.LiveMarket({
   streamActive: () => canStreamQuotes(),
   onMarket: payload => marketClock.applyMarketFrame(payload),
   onStreamState: open => marketClock.setStreamConnected(open),
-  onQuote: (symbol, q) => {
-    VisualMarketStore.store.accept('quote', symbol, q);
-  },
+  onQuote: (symbol, q) => { VisualMarketStore.store.accept('quote', symbol, q); },
 });
 marketClock.start();
 VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
   if (!change || change.kind !== 'quote') return;
   const { symbol, value: q } = change;
-    document.querySelectorAll('[data-live-price]').forEach(el => {
-      if (el.dataset.livePrice === symbol) el.textContent = VisualLive.price(q.last_price);
-    });
+  document.querySelectorAll('[data-live-price]').forEach(el => {
+    if (el.dataset.livePrice === symbol) el.textContent = VisualLive.price(q.last_price);
+  });
 });
 
-// 页面加载: 恢复进行中的扫描或最近一次结果 (与后台任务解耦, 关页不中断)
+document.getElementById("cond-metric").addEventListener("change", syncInputs);
+renderConds();
+setInterval(refreshFactorBar, 60000);
+
+// 页面加载: 指标目录 + 因子库状态 + 进行中的任务/最近一次结果
 (async function initResume() {
   try {
-    const s = await api("/api/screener/status");
-    if (s.running) {
-      scanning = true;
-      setStopBtn(true);
-      document.getElementById("prog-wrap").style.display = "block";
-      pollStatus();
-    } else if (s.results && s.results.length) {
-      renderResults(s.results);
-      document.getElementById("scan-hint").textContent =
-        (s.stopped ? "上次扫描已取消, " : "上次扫描 ") +
-        `命中 ${s.results.length} 只` + (s.done_at ? " · " + new Date(s.done_at * 1000).toLocaleString() : "");
-    }
+    await loadMetrics();
+    await refreshFactorBar();
+    const s = await refreshStatus();
+    if (s.active) pollStatus();
   } catch (e) { /* ignore */ }
 })();
-async function pollStatus() {
-  try {
-    const s = await api("/api/screener/status");
-    pollFailures = 0;
-    document.getElementById("prog-fill").style.width =
-      s.total ? Math.round(s.progress / s.total * 100) + "%" : "0%";
-    document.getElementById("scan-hint").textContent = s.running
-      ? `扫描中 ${s.progress}/${s.total}… (关页不中断, 数据源限频约 6 只/分钟)`
-      : s.stopped ? `已取消: 扫描了 ${s.progress}/${s.total}, 命中 ${s.results.length} 只 (保留部分结果)`
-      : (s.done_at ? `完成: 命中 ${s.results.length} 只` : "");
-    if (s.running) { setTimeout(pollStatus, 1500); return; }
-    scanning = false;
-    setStopBtn(false);
-    renderResults(s.results);
-  } catch (e) {
-    // 单次失败不能让进度永久冻住: 原实现置 scanning=false, 而兜底轮询的
-    // `if (scanning)` 也随之失效 —— 一次状态请求抖动就再也回不来, 只能刷新页面。
-    // 改为保持扫描态并退避重试 (服务端任务本来就与页面解耦, 关页都不中断)。
-    pollFailures += 1;
-    setTimeout(pollStatus, Math.min(1500 * pollFailures, 15000));
-  }
-}
-function renderResults(results) {
-  liveQuotes.setSymbols(results.map(r => r.symbol));
-  const wrap = document.getElementById("result-wrap");
-  if (!results.length) {
-    wrap.style.display = "block";
-    document.getElementById("result-tbody").innerHTML = '<tr><td colspan="5" class="empty">无命中</td></tr>';
-    return;
-  }
-  wrap.style.display = "block";
-  document.getElementById("result-tbody").innerHTML = results.map(r => `<tr>
-    <td class="sym"><a href="/?symbol=${encodeURIComponent(r.symbol)}">${esc(r.symbol)}</a></td>
-    <td>${esc(r.name)}</td><td data-live-price="${esc(r.symbol)}">${VisualLive.price(liveQuotes.get(r.symbol)?.last_price ?? r.close)}</td>
-    <td class="${(r.change_pct || 0) >= 0 ? "pos" : "neg"}">${r.change_pct == null ? "—" : r.change_pct.toFixed(2) + "%"}</td>
-    <td>${r.chip_profit == null ? "—" : r.chip_profit.toFixed(1) + "%"}</td></tr>`).join("");
-}
-document.getElementById("cond-metric").addEventListener("change", (e) => {
-  const m = e.target.value;
-  document.getElementById("cond-value").style.display =
-    (m === "macd_cross_up" || m === "above_ma20") ? "none" : "";
-});
-// 进度轮询由 pollStatus 自己按 1.5s / 退避续排; 这里原来还有一个 3s 的兜底
-// interval, 但它同样以 `if (scanning)` 为条件 —— 失败时 scanning 已被置假, 兜底
-// 根本不生效, 只是扫描期间白多一倍请求 (1.5s 链 + 3s 链)。已删除。
 </script>
 </body>
 </html>

@@ -8073,18 +8073,27 @@ document.addEventListener('DOMContentLoaded', () => {
       const s = await api("/api/screener/status");
       const btn = document.getElementById("screener-entry");
       if (!btn) return;
-      if (s.running) {
-        const pct = s.total ? Math.round((s.progress || 0) / s.total * 100) : 0;
+      const active = s.active;
+      if (active) {
+        const pct = active.total ? Math.round((active.progress || 0) / active.total * 100) : 0;
         btn.classList.add("scanning");
-        setNavText(btn, `${pct}%`);
-        btn.title = `选股扫描中 ${s.progress || 0}/${s.total} (后台运行, 关页不中断)`;
+        setNavText(btn, active.status === "queued" ? "排队" : `${pct}%`);
+        btn.title = active.status === "queued"
+          ? `选股任务排队中 (前面还有 ${active.position || 0} 个)`
+          : `选股扫描中 ${active.progress || 0}/${active.total} (后台运行, 关页不中断)`;
         STATE._scanWasRunning = true;
       } else if (STATE._scanWasRunning) {
         STATE._scanWasRunning = false;
         btn.classList.remove("scanning");
         setNavText(btn, '选股');
         btn.title = "条件选股: MACD金叉/MA20/筹码获利等";
-        showToast(`选股扫描完成: 命中 ${(s.results || []).length} 只`);
+        const last = (s.recent || [])[0];
+        if (last) {
+          const n = last.n_results == null ? 0 : last.n_results;
+          showToast(last.status === "stopped"
+            ? `选股已取消: 保留 ${n} 只 (可到选股页看条件与结果)`
+            : `选股完成: 命中 ${n} 只 (可到选股页看条件与结果)`);
+        }
       }
     } catch (e) { /* ignore */ }
   }

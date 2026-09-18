@@ -22,6 +22,8 @@ tr:hover td { background: var(--btn-hover); }
 .badge.open { background: rgba(var(--up-rgb), 0.12); color: var(--up-text); }
 .badge.closed { background: rgba(var(--down-rgb), 0.12); color: var(--down-text); }
 .reason-cell { max-width: 260px; white-space: normal; font-size: 12px; color: var(--text-secondary); }
+.progress { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin: 0 0 10px; }
+.progress .fill { height: 100%; background: var(--btn-active); width: 0; transition: width 0.3s; }
 .empty { text-align: center; color: var(--text-secondary); padding: 30px 0; }
 </style>
 <script src="/js/theme.js"></script>
@@ -62,6 +64,46 @@ tr:hover td { background: var(--btn-hover); }
         <tr><th>用户名</th><th>角色</th><th>监控</th><th>创建时间</th><th style="width:180px">操作</th></tr>
       </thead>
       <tbody id="admin-tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="section-title" id="factors"><span class="bar"></span>因子库
+    <span style="flex:1"></span>
+    <span id="fac-updated" style="font-size:12px;color:var(--text-secondary)"></span>
+    <button onclick="rebuildFactors(false)">手动重建</button>
+    <button onclick="rebuildFactors(true)">强制重建</button>
+  </div>
+  <div class="hint" id="fac-status" style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">加载中…</div>
+  <div class="progress" id="fac-prog-wrap" style="display:none"><div class="fill" id="fac-prog-fill"></div></div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>交易日</th><th>状态</th><th>入表</th><th>拉取</th><th>缺失</th>
+            <th>进度</th><th>完成时间</th><th>异常</th></tr>
+      </thead>
+      <tbody id="fac-tbody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-title" id="screener-queue"><span class="bar"></span>选股队列
+    <span style="flex:1"></span>
+    <span id="sq-updated" style="font-size:12px;color:var(--text-secondary)"></span>
+  </div>  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>用户</th><th>条件</th><th>状态</th><th>进度</th><th>入队</th><th>开始</th><th style="width:90px">操作</th></tr>
+      </thead>
+      <tbody id="sq-tbody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-title"><span class="bar"></span>最近完成的选股</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>用户</th><th>条件</th><th>状态</th><th>命中</th><th>完成时间</th></tr>
+      </thead>
+      <tbody id="sr-tbody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -116,6 +158,8 @@ async function checkAuth() {
     document.getElementById('btn-logout').style.display = '';
     document.getElementById('main-view').style.display = '';
     await loadUsers();
+    loadScreenerQueue();
+    loadFactors();
     applyHash();
   } catch (e) {
     redirectToLogin();
@@ -242,6 +286,139 @@ bindEnter('au-reset-password', saveAdminAction);
 
 function bindEnter(id, fn) {
   document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
+}
+
+// ═══════════════ 选股队列 (全用户可见性, 仅管理员) ═══════════════
+const COND_LABELS = {
+  macd_cross_up: "MACD 金叉", above_ma20: "收盘站上 MA20",
+  chip_profit_gt: "筹码获利盘", rsi6_lt: "RSI6", change_pct_gt: "5日涨幅",
+};
+
+function condText(list) {
+  return (list || []).map(c => {
+    const label = c.label || COND_LABELS[c.metric] || c.metric;
+    return c.value == null ? String(label) : `${label} ${c.value}`;
+  }).join(' 且 ') || '—';
+}
+
+function fmtTs(v) {
+  return v ? escHtml(String(v).replace('T', ' ').slice(5, 16)) : '—';
+}
+
+function runStatusText(r) {
+  return { queued: '排队中', running: '扫描中', done: '完成',
+           stopped: '已取消', error: '失败' }[r.status] || r.status;
+}
+
+let sqTimer = null;
+
+async function loadScreenerQueue() {
+  clearTimeout(sqTimer);
+  let delay = 30000;
+  try {
+    const d = await api('/api/admin/screener/runs');
+    const queue = d.queue || [];
+    delay = queue.length ? 5000 : 30000;   // 有排队才需要密一点刷新
+    document.getElementById('sq-tbody').innerHTML = queue.length ? queue.map(r => `
+      <tr>
+        <td>${escHtml(r.username)}</td>
+        <td class="reason-cell">${escHtml(condText(r.conditions))}</td>
+        <td>${runStatusText(r)}${r.status === 'queued' && r.position ? ` (前面 ${r.position} 个)` : ''}</td>
+        <td>${r.total ? `${r.progress || 0}/${r.total}` : '—'}</td>
+        <td>${fmtTs(r.queued_at)}</td>
+        <td>${fmtTs(r.started_at)}</td>
+        <td>${r.status === 'queued' || r.status === 'running'
+              ? `<button class="danger" onclick="stopRun(${r.id})">取消</button>` : ''}</td>
+      </tr>`).join('') : '<tr><td colspan="7" class="empty">当前没有排队或运行中的任务</td></tr>';
+
+    const recent = d.recent || [];
+    document.getElementById('sr-tbody').innerHTML = recent.length ? recent.map(r => `
+      <tr>
+        <td>${escHtml(r.username)}</td>
+        <td class="reason-cell">${escHtml(condText(r.conditions))}</td>
+        <td>${runStatusText(r)}${r.error ? `: ${escHtml(r.error)}` : ''}</td>
+        <td>${r.n_results == null ? '—' : r.n_results}</td>
+        <td>${fmtTs(r.done_at)}</td>
+      </tr>`).join('') : '<tr><td colspan="5" class="empty">暂无记录</td></tr>';
+    document.getElementById('sq-updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('sq-tbody').innerHTML =
+      `<tr><td colspan="7" class="empty">加载失败：${escHtml(e.message)}</td></tr>`;
+  }
+  sqTimer = setTimeout(loadScreenerQueue, delay);
+}
+
+async function stopRun(runId) {
+  if (!confirm(`确认取消任务 #${runId}？`)) return;
+  try {
+    await api('/api/screener/stop', { method: 'POST', body: JSON.stringify({ run_id: runId }) });
+  } catch (e) {
+    alert('取消失败：' + e.message);
+  }
+  await loadScreenerQueue();
+}
+
+// ═══════════════ 因子库 (交易日 18:00 构建; 选股扫描读的就是它) ═══════════════
+const FAC_STATE_TEXT = { idle: "未构建", running: "构建中", done: "完成",
+                         error: "失败", missing: "未构建" };
+
+let facTimer = null;
+
+async function loadFactors() {
+  clearTimeout(facTimer);
+  let delay = 60000;
+  try {
+    const s = await api('/api/factors/status');
+    const running = s.state === 'running';
+    delay = running ? 5000 : 60000;
+    const el = document.getElementById('fac-status');
+    const prog = document.getElementById('fac-prog-wrap');
+    if (running) {
+      prog.style.display = '';
+      document.getElementById('fac-prog-fill').style.width = (s.percent || 0) + '%';
+      el.textContent = `构建中 ${s.percent || 0}%（阶段 ${s.phase || '-'}，第 ${s.attempts || 1} 次尝试）`
+        + ` · 计划时刻 ${s.build_at} · 交易日自动更新`;
+    } else {
+      prog.style.display = 'none';
+      const parts = [
+        `最新快照：${s.snapshot_day || '（无）'}`,
+        `入表 ${s.n_rows == null ? '-' : s.n_rows} 只`,
+        `自动构建 ${s.build_at}（仅交易日）`,
+        `单次拉 ${s.bars_count} 根日K`,
+      ];
+      if (s.state === 'error') parts.push(`⚠ 今日失败：${s.error || ''}（已重试 ${s.attempts || 0} 次）`);
+      el.textContent = parts.join(' · ');
+    }
+    document.getElementById('fac-tbody').innerHTML = (s.last_days || []).map(r => `
+      <tr>
+        <td>${escHtml(r.day)}</td>
+        <td>${FAC_STATE_TEXT[r.state] || escHtml(r.state)}</td>
+        <td>${r.n_rows == null ? '—' : r.n_rows}</td>
+        <td>${r.n_symbols == null ? '—' : r.n_symbols}</td>
+        <td>${r.n_missing == null ? '—' : r.n_missing}</td>
+        <td>${r.percent == null ? '—' : r.percent + '%'}</td>
+        <td>${fmtTs(r.done_at)}</td>
+        <td class="reason-cell">${escHtml(r.error || '')}</td>
+      </tr>`).join('') || '<tr><td colspan="8" class="empty">暂无记录</td></tr>';
+    document.getElementById('fac-updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('fac-status').textContent = '因子库状态加载失败：' + e.message;
+  }
+  facTimer = setTimeout(loadFactors, delay);
+}
+
+async function rebuildFactors(force) {
+  const tip = force
+    ? '强制重建因子库（忽略"只在 18:00 后构建"与今日已完成，会重新拉全市场价格）？'
+    : '立即构建因子库？未到 18:00 会被拒绝（需用「强制重建」）';
+  if (!confirm(tip)) return;
+  try {
+    const r = await api('/api/factors/rebuild', { method: 'POST', body: JSON.stringify({ force }) });
+    if (r && r.ok === false) alert(r.reason || '未能触发构建');
+    await loadFactors();
+  } catch (e) {
+    alert('触发失败：' + e.message);
+  }
 }
 
 // ── 键盘可达性: Esc 关闭已打开的模态框; 打开模态自动聚焦首输入框 ──

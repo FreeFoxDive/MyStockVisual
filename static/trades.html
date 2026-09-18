@@ -1164,7 +1164,13 @@ function fmtGapPct(level, last) {
 
 function formatRiskPrices(t, curPrice) {
   const status = riskSetStatus(t);
-  if (status === 'empty') return { html: '—', warn: false };
+  // 持仓中且三者全空: 直接给出「未设风控」—— 该持仓不会被监控预警,
+  // 与每日 09:35 的提醒 (monitor.check_risk_missing) 同口径
+  if (status === 'empty') {
+    return t.status === 'open'
+      ? { html: '未设风控', warn: true }
+      : { html: '—', warn: false };
+  }
   const showGap = t.status === 'open' && status === 'ok';
   const last = showGap ? curPrice : null;
   const rows = [
