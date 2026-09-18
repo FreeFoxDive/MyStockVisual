@@ -274,7 +274,8 @@ class TabletLayoutTest(unittest.TestCase):
         """进度只写文字层: innerHTML 整体覆写会把图标/文字两层抹平, 平板上又冒出「选股」两字。"""
         fn = _extract_fn(self.src, "refreshScreenerBadge")
         self.assertNotIn("innerHTML", fn)
-        self.assertIn("setNavText(btn, `${pct}%`)", fn)
+        self.assertIn("`${pct}%`", fn, "扫描中显示百分比")
+        self.assertIn('"排队"', fn, "排队中显示「排队」(任务化后本人任务才有徽章)")
         self.assertIn("setNavText(btn, '选股')", fn)
         self.assertIn('classList.add("scanning")', fn, "扫描态仍要驱动 CSS 把进度露出来")
         setter = _extract_fn(self.src, "setNavText")

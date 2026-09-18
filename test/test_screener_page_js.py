@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""选股页 (screener.html) 的时段门控与进度轮询回归测试。
+"""选股页 (screener.html): 时段门控 + 条件锁定/编辑/回显 + 命中数(OR)/明细 + 因子库状态条。
 
-两起真实问题:
-  * 结果表现价由 LiveMarket 刷新, 但本页**没有任何 active 门控** —— 选股页开着
-    就全天每 2.5s 轮询一次 /api/quotes (盘外服务端只返回收盘快照, 纯浪费), 比
-    整条行情链路的探测预算还高;
-  * pollStatus 的 catch 里置 scanning=false, 而兜底 interval 又以 `if (scanning)`
-    为条件 —— 一次 /api/screener/status 抖动就永久冻住进度, 只能刷新页面。
+覆盖的真实问题:
+  * 结果表现价由 LiveMarket 刷新, 但本页曾没有任何 active 门控 —— 选股页开着就
+    全天每 2.5s 轮询 /api/quotes (盘外服务端只返回收盘快照);
+  * pollStatus 的 catch 里曾置 scanning=false, 一次 status 抖动就永久冻住进度;
+  * 任务化后的行为: 扫描中锁定条件、重新登录回显上次条件与结果、0 命中/已取消也
+    要显示、历史最多 3 条、取消后解锁;
+  * 第二批: OR 模式「满足 N 项」筛选 + 逐条件明细 + 因子库状态条。
 
 运行:
-    python -m unittest discover -s test -p "test_screener_page_js.py"
+    python -m unittest visual/test/test_screener_page_js.py -v
 """
 from __future__ import annotations
 
@@ -23,6 +24,13 @@ from pathlib import Path
 
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
 SCREENER_HTML = _VISUAL_DIR / "static" / "screener.html"
+
+_FNS = (
+    "specOf", "condLabel", "fmtTime", "statusText", "readInputs", "saveCond",
+    "editCond", "cancelEdit", "delCond", "renderConds", "setLocked", "syncInputs",
+    "fillComposerFrom", "loadRunConditions", "fillHistory", "renderFilterRow",
+    "setHitFilter", "renderResults", "renderRun", "showRun", "applyStatus",
+)
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -41,13 +49,73 @@ def _extract_fn(src: str, name: str) -> str:
     raise AssertionError(f"function {name} 大括号不配对")
 
 
+_PRELUDE = """
+const METRICS = {
+  above_ma20: { key: "above_ma20", label: "站上 MA20", group: "技术指标", kind: "bool",
+                unit: "", ops: ["is"], hint: "" },
+  rsi6: { key: "rsi6", label: "RSI6", group: "技术指标", kind: "num", unit: "",
+          op: "<=", ops: [">=", "<="], hint: "" },
+  turnover: { key: "turnover", label: "换手率", group: "量价", kind: "range", unit: "%",
+              ops: ["between"], hint: "" },
+  industry: { key: "industry", label: "所处行业", group: "基本面/估值", kind: "text",
+              unit: "", ops: ["=="], options: ["银行", "白酒"], hint: "" },
+  main_net_inflow_wan: { key: "main_net_inflow_wan", label: "主力净流入",
+                         group: "资金与筹码", kind: "num", unit: "万元", op: ">=",
+                         ops: [">="], hint: "" },
+};
+let metricGroups = [];
+let conditions = [];
+let editingIndex = null;
+let composed = false;
+let busy = false;
+let pollFailures = 0;
+let runs = {};
+let runCache = {};
+let displayId = null;
+let hitFilter = null;
+let factorDay = null;
+const LIVE_QUOTE_MAX = 200;
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, value: "", textContent: "", innerHTML: "",
+                            disabled: false, style: {}, classList: { add(){}, remove(){} } };
+  return els[id];
+}
+const document = { getElementById: el, hidden: false };
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+const errors = [];
+function showErr(m) { errors.push(m); }
+const liveQuotes = { setSymbols: () => {}, get: () => null, refresh: () => {} };
+const VisualLive = { price: v => (v == null ? "—" : String(v)) };
+const VisualMarketClock = { MarketClock: function () {
+  this.start = () => {}; this.live = () => false; this.streamAllowed = () => false;
+  this.applyMarketFrame = () => {}; this.setStreamConnected = () => {};
+} };
+const VisualMarketStore = { store: { accept: () => {} }, watch: () => {} };
+const marketClock = new VisualMarketClock.MarketClock();
+const apiCalls = [];
+function api(path) { apiCalls.push(path); return Promise.resolve(globalThis.__apiResult || {}); }
+// 现价订阅要记下来: 结果可达数千行, 全量订阅会打出几十个 /api/quotes 批次
+const quoteSyms = [];
+liveQuotes.setSymbols = syms => { quoteSyms.push(syms); };
+"""
+
+
+def _run_page_script(extra: str) -> dict:
+    src = SCREENER_HTML.read_text(encoding="utf-8")
+    fns = "\n".join(_extract_fn(src, name) for name in _FNS)
+    proc = subprocess.run(["node", "-e", _PRELUDE + fns + "\n" + extra],
+                          capture_output=True, check=True, text=True, encoding="utf-8")
+    return json.loads(proc.stdout)
+
+
 class ScreenerPageStaticTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.src = SCREENER_HTML.read_text(encoding="utf-8")
 
     def test_quotes_are_session_gated(self):
-        """盘外不该持续轮询现价 (服务端那会儿只返回收盘快照)。"""
         self.assertIn("/js/market-clock.js", self.src, "要用共享时段口径")
         self.assertIn("new VisualMarketClock.MarketClock(", self.src)
         self.assertIn("marketClock.start()", self.src)
@@ -58,40 +126,351 @@ class ScreenerPageStaticTest(unittest.TestCase):
             self.assertIn("document.hidden", body, "隐藏标签页必须停机")
             self.assertIn("marketClock.", body, "时段口径只来自时钟")
 
-    def test_clock_state_reaches_the_page(self):
-        self.assertIn("onMarket: payload => marketClock.applyMarketFrame(payload)", self.src)
-        self.assertIn("onStreamState: open => marketClock.setStreamConnected", self.src)
-        # 与其他三页同一套: 恢复事件要立刻重刷现价
-        clock = self.src[self.src.index("new VisualMarketClock.MarketClock("):]
-        clock = clock[:clock.index("});")]
-        self.assertIn("kind === 'resume'", clock)
-        self.assertIn("liveQuotes.refresh()", clock)
-
     def test_poll_state_declared_before_use(self):
-        """pollStatus 会被 runScan/initResume 提前调用, 计数必须在它们之前声明。
-
-        (原实现把它放在 pollStatus 上方靠后的位置, 只靠"调用点前面正好有 await"
-        侥幸不炸 —— 去掉那个 await 就是 TDZ 报错。)
-        """
-        src = self.src
-        decl = src.index("let pollFailures = 0;")
+        decl = self.src.index("let pollFailures = 0;")
         for caller in ("async function runScan(", "(async function initResume()"):
-            self.assertLess(decl, src.index(caller),
+            self.assertLess(decl, self.src.index(caller),
                             f"pollFailures 必须声明在 {caller} 之前")
-        self.assertEqual(src.count("let pollFailures"), 1, "只能声明一次")
+        self.assertEqual(self.src.count("let pollFailures"), 1)
 
-    def test_no_duplicate_status_poller(self):
-        """1.5s 自排链已经覆盖扫描期; 再来一个 3s interval 只是白多一倍请求。"""
-        self.assertNotIn("setInterval(() => { if (scanning) pollStatus(); }, 3000)", self.src)
-
-    def test_poll_status_keeps_scanning_on_error(self):
+    def test_poll_status_keeps_task_state_on_error(self):
         body = _extract_fn(self.src, "pollStatus")
         catch = body[body.index("} catch"):]
-        self.assertNotIn("scanning = false", catch,
-                         "取状态失败不代表扫描结束: 置假会让进度永久冻住")
+        self.assertNotIn("busy = false", catch, "失败不能解锁条件")
         self.assertIn("setTimeout(pollStatus", catch, "要退避重试")
 
+    def test_metrics_come_from_backend_catalog(self):
+        """指标下拉必须由 /api/screener/metrics 渲染, 不能在前端硬编码。"""
+        self.assertIn('/api/screener/metrics', self.src)
+        self.assertIn("optgroup", self.src)
+        self.assertNotIn("METRIC_LABELS", self.src, "旧硬编码标签表应已移除")
+        body = _extract_fn(self.src, "syncInputs")
+        for kind in ("bool", "num", "range", "text"):
+            self.assertIn(kind, body, f"输入控件要区分 {kind}")
 
+    def test_factor_status_bar(self):
+        self.assertIn('/api/factors/status', self.src)
+        self.assertIn('id="factor-bar"', self.src)
+        body = _extract_fn(self.src, "refreshFactorBar")
+        self.assertIn("snapshot_day", body)
+        self.assertIn("构建中", body)
+
+    def test_no_legacy_global_job_fields(self):
+        self.assertNotIn("s.running", self.src)
+        self.assertNotIn("s.results", self.src)
+        self.assertIn("s.active", self.src)
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
+class ScreenerComposerTest(unittest.TestCase):
+    """条件框: 锁定/编辑/回显 + 四种 kind 的取值控件。"""
+
+    def test_lock_disables_composer_and_unlocks(self):
+        out = _run_page_script("""
+const r = {};
+conditions = [{ metric: "above_ma20", label: "站上 MA20", kind: "bool" }];
+setLocked(true, "扫描中，取消后可修改条件");
+r.locked = { add: el("btn-add").disabled, metric: el("cond-metric").disabled,
+             mode: el("cond-mode").disabled, price: el("cond-price").disabled,
+             run: el("btn-run").disabled, stop: el("btn-stop").style.display,
+             hint: el("lock-hint").textContent, chip: el("cond-list").innerHTML };
+setLocked(false);
+r.unlocked = { add: el("btn-add").disabled, stop: el("btn-stop").style.display,
+               hint: el("lock-hint").style.display };
+console.log(JSON.stringify(r));
+""")
+        for k in ("add", "metric", "mode", "price", "run"):
+            self.assertTrue(out["locked"][k], f"{k} 扫描中应禁用")
+        self.assertEqual(out["locked"]["stop"], "")
+        self.assertIn("取消后可修改", out["locked"]["hint"])
+        self.assertIn("chip locked", out["locked"]["chip"])
+        self.assertFalse(out["unlocked"]["add"])
+        self.assertEqual(out["unlocked"]["stop"], "none")
+
+    def test_edit_replaces_condition_in_place(self):
+        out = _run_page_script("""
+const r = {};
+conditions = [{ metric: "above_ma20", label: "站上 MA20", kind: "bool" },
+              { metric: "rsi6", label: "RSI6", kind: "num", op: "<=", value: 30 }];
+editCond(1);
+r.btn = el("btn-add").textContent;
+el("cond-value").value = "25";
+saveCond();
+r.conditions = conditions;
+r.editing = editingIndex;
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["btn"], "保存修改")
+        self.assertEqual(len(out["conditions"]), 2, "编辑是替换不是追加")
+        self.assertEqual(out["conditions"][1]["value"], 25)
+        self.assertEqual(out["conditions"][0]["metric"], "above_ma20")
+        self.assertIsNone(out["editing"])
+
+    def test_kind_switches_inputs(self):
+        out = _run_page_script("""
+const r = {};
+const probe = key => {
+  el("cond-metric").value = key;
+  syncInputs();
+  return { op: el("op-wrap").style.display, value: el("cond-value").style.display,
+           range: el("range-wrap").style.display, text: el("cond-text").style.display,
+           options: el("cond-options").innerHTML };
+};
+r.bool = probe("above_ma20");
+r.num = probe("rsi6");
+r.range = probe("turnover");
+r.text = probe("industry");
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["bool"]["value"], "none")
+        self.assertEqual(out["bool"]["op"], "none")
+        self.assertEqual(out["num"]["value"], "")
+        self.assertEqual(out["num"]["op"], "")
+        self.assertEqual(out["range"]["range"], "")
+        self.assertEqual(out["text"]["text"], "")
+        self.assertIn("银行", out["text"]["options"])
+
+    def test_range_condition_label_and_validation(self):
+        out = _run_page_script("""
+const r = {};
+el("cond-metric").value = "turnover";
+syncInputs();
+el("cond-value").value = "1";
+el("cond-value2").value = "5";
+saveCond();
+r.conditions = conditions;
+r.label = condLabel(conditions[0]);
+r.errs = errors.slice();
+// 缺上限 → 报错且不入列
+el("cond-value2").value = "";
+saveCond();
+r.afterBad = conditions.length;
+r.errs = errors.slice();
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["conditions"][0]["kind"], "range")
+        self.assertEqual((out["conditions"][0]["value"], out["conditions"][0]["value2"]),
+                         (1.0, 5.0))
+        self.assertEqual(out["label"], "换手率 1 ~ 5%")
+        self.assertEqual(out["afterBad"], 1)
+        self.assertIn("请填写区间上限", out["errs"])
+
+    def test_cond_label_variants(self):
+        out = _run_page_script("""
+const r = {};
+r.bool = condLabel({ metric: "above_ma20", kind: "bool", label: "站上 MA20" });
+r.num = condLabel({ metric: "rsi6", kind: "num", op: "<=", value: 20, label: "RSI6" });
+r.unit = condLabel({ metric: "main_net_inflow_wan", kind: "num", op: ">=",
+                     value: 5000, label: "主力净流入" });
+r.text = condLabel({ metric: "industry", kind: "text", value: "银行", label: "所处行业" });
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["bool"], "站上 MA20")
+        self.assertEqual(out["num"], "RSI6 ≤ 20")
+        self.assertEqual(out["unit"], "主力净流入 ≥ 5000万元")
+        self.assertEqual(out["text"], "所处行业 = 银行")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
+class ScreenerResultsTest(unittest.TestCase):
+    """结果区: 回显 / 历史 / 0 命中 / 已取消 / OR 命中数筛选与明细。"""
+
+    def _run(self, status, results, extra="", conditions=None):
+        conds = conditions or [{"metric": "above_ma20", "label": "站上 MA20", "kind": "bool"},
+                              {"metric": "rsi6", "label": "RSI6", "kind": "num",
+                               "op": "<=", "value": 20}]
+        return _run_page_script(f"""
+const r = {{}};
+applyStatus({{
+  active: null,
+  recent: [{{ id: 7, status: "{status}", mode: "or", n_results: {len(results)},
+             conditions: {json.dumps(conds, ensure_ascii=False)}, total: 10, progress: 10,
+             done_at: "2026-09-18T14:30:00", price_mode: "close",
+             data_version: "2026-09-18" }}],
+  current: {{ id: 7, status: "{status}", mode: "or", n_results: {len(results)},
+             conditions: {json.dumps(conds, ensure_ascii=False)}, total: 10, progress: 10,
+             done_at: "2026-09-18T14:30:00", price_mode: "close",
+             data_version: "2026-09-18",
+             results: {json.dumps(results, ensure_ascii=False)} }},
+}});
+{extra}
+console.log(JSON.stringify(r));
+""")
+
+    @staticmethod
+    def _row(symbol, hits, close=10.0, chg=1.0):
+        return {"symbol": symbol, "name": symbol[:6], "close": close, "change_pct": chg,
+                "chip_profit": 66.6, "hit_count": sum(1 for h in hits if h["ok"]), "hits": hits}
+
+    def test_or_results_with_hits_and_detail(self):
+        hits_full = [{"metric": "above_ma20", "label": "站上 MA20", "ok": True, "value": True, "unit": ""},
+                     {"metric": "rsi6", "label": "RSI6", "ok": True, "value": 15.0, "unit": ""}]
+        hits_one = [{"metric": "above_ma20", "label": "站上 MA20", "ok": False, "value": False, "unit": ""},
+                    {"metric": "rsi6", "label": "RSI6", "ok": True, "value": 18.0, "unit": ""}]
+        out = self._run("done", [self._row("600000.SH", hits_full),
+                                 self._row("000001.SZ", hits_one)],
+                        extra="r.rows = el('result-tbody').innerHTML;"
+                              "r.filter = el('filter-row').innerHTML;"
+                              "r.conditions = conditions;"
+                              "r.meta = el('run-meta').innerHTML;")
+        self.assertIn("2/2", out["rows"])
+        self.assertIn("1/2", out["rows"])
+        self.assertIn("✅站上 MA20", out["rows"])
+        self.assertIn("❌站上 MA20", out["rows"])
+        self.assertIn("RSI6 18", out["rows"])
+        self.assertIn("满足 2 项 1", out["filter"])
+        self.assertIn("全部 2", out["filter"])
+        self.assertIn("满足任一", out["meta"])
+        self.assertIn("数据 2026-09-18", out["meta"])
+        self.assertEqual(out["conditions"][0]["metric"], "above_ma20", "回显条件到条件框")
+
+    def test_hit_filter_narrows_rows(self):
+        hits_full = [{"metric": "above_ma20", "label": "站上 MA20", "ok": True, "value": True, "unit": ""},
+                     {"metric": "rsi6", "label": "RSI6", "ok": True, "value": 15.0, "unit": ""}]
+        hits_one = [{"metric": "above_ma20", "label": "站上 MA20", "ok": False, "value": False, "unit": ""},
+                    {"metric": "rsi6", "label": "RSI6", "ok": True, "value": 18.0, "unit": ""}]
+        out = self._run("done", [self._row("600000.SH", hits_full),
+                                 self._row("000001.SZ", hits_one)],
+                        extra="setHitFilter(1); r.rows = el('result-tbody').innerHTML;"
+                              "r.hit = hitFilter;")
+        self.assertEqual(out["hit"], 1)
+        self.assertIn("000001.SZ", out["rows"])
+        self.assertNotIn("600000.SH", out["rows"])
+
+    def test_empty_and_stopped_states(self):
+        out = self._run("done", [], extra="r.rows = el('result-tbody').innerHTML;")
+        self.assertIn("无命中", out["rows"])
+        out2 = self._run("stopped", [], extra="r.rows = el('result-tbody').innerHTML;"
+                                              "r.meta = el('run-meta').innerHTML;")
+        self.assertIn("已取消，无命中", out2["rows"])
+        self.assertIn("已取消，保留部分结果", out2["meta"])
+        out3 = self._run("running", [], extra="r.rows = el('result-tbody').innerHTML;")
+        self.assertIn("扫描中", out3["rows"])
+
+    def test_queue_and_lock_from_active_run(self):
+        out = _run_page_script("""
+const r = {};
+applyStatus({
+  active: { id: 9, status: "queued", mode: "and", progress: 0, total: 0, position: 2,
+            price_mode: "live",
+            conditions: [{ metric: "above_ma20", label: "站上 MA20", kind: "bool" }] },
+  recent: [], current: null,
+});
+r.locked = busy;
+r.hint = el("lock-hint").textContent;
+r.scanHint = el("scan-hint").textContent;
+r.conditions = conditions;
+r.mode = el("cond-mode").value;
+r.price = el("cond-price").value;
+console.log(JSON.stringify(r));
+""")
+        self.assertTrue(out["locked"])
+        self.assertIn("前面还有 2 个任务", out["hint"])
+        self.assertIn("排队中", out["scanHint"])
+        self.assertEqual(out["conditions"][0]["metric"], "above_ma20")
+        self.assertEqual(out["mode"], "and")
+        self.assertEqual(out["price"], "live")
+
+    def test_history_lists_active_plus_three_recent(self):
+        out = _run_page_script("""
+const r = {};
+const mk = (id, status) => ({ id, status, mode: "and", n_results: id, progress: 1,
+                              total: 1, conditions: [], queued_at: "2026-09-18T09:00:00" });
+applyStatus({ active: mk(10, "running"),
+              recent: [mk(9, "done"), mk(8, "stopped"), mk(7, "done")],
+              current: { ...mk(10, "running"), results: [] } });
+r.options = el("hist-select").innerHTML;
+r.count = (el("hist-select").innerHTML.match(/<option/g) || []).length;
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["count"], 4, "进行中 1 条 + 历史最多 3 条")
+        self.assertIn("进行中", out["options"])
+
+    def test_history_switch_fetches_details_on_demand(self):
+        out = _run_page_script("""
+(async () => {
+  const r = {};
+  globalThis.__apiResult = { id: 5, status: "done", mode: "and", n_results: 1,
+                             conditions: [], done_at: "2026-09-18T14:30:00",
+                             results: [{ symbol: "600519.SH", name: "贵州茅台", close: 1.0,
+                                         change_pct: 0.5, hit_count: 1, hits: [] }] };
+  applyStatus({ active: null,
+                recent: [{ id: 5, status: "done", mode: "and", n_results: 1, conditions: [],
+                           results: null },
+                         { id: 4, status: "stopped", mode: "and", n_results: 2,
+                           conditions: [], results: null }],
+                current: { id: 6, status: "done", mode: "and", n_results: 0, conditions: [],
+                           results: [] } });
+  el("hist-select").value = "5";
+  await showRun(el("hist-select").value);
+  r.paths = apiCalls;
+  r.rows = el("result-tbody").innerHTML;
+  r.histVal = el("hist-select").value;
+  console.log(JSON.stringify(r));
+})();
+""")
+        self.assertIn("/api/screener/runs/5", out["paths"])
+        self.assertIn("600519.SH", out["rows"])
+        self.assertEqual(out["histVal"], "5")
+
+    def test_quote_subscription_is_capped(self):
+        """回归: 结果全量订阅现价 → 每 tick 几十个批次, 挤占监控/其它页面额度。"""
+        out = _run_page_script("""
+const r = {};
+const results = Array.from({ length: 500 }, (_, i) => ({
+  symbol: "60" + String(i).padStart(4, "0") + ".SH", name: "X", close: 1.0,
+  change_pct: 0.0, chip_profit: 1.0, hit_count: 1, hits: [] }));
+renderResults(results, { mode: "or", status: "done", conditions: [], results });
+r.calls = quoteSyms.map(s => s.length);
+r.rows = (el("result-tbody").innerHTML.match(/<tr>/g) || []).length;
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["rows"], 500, "表格仍显示全部结果")
+        self.assertTrue(out["calls"], "应当订阅现价")
+        self.assertLessEqual(max(out["calls"]), 200, "订阅数要封顶")
+        self.assertEqual(out["calls"], [200])
+
+    def test_header_updated_even_when_empty(self):
+        """回归: 0 命中时 early-return 曾让表头残留上一个任务的「命中 (OR)」。"""
+        out = _run_page_script("""
+const r = {};
+renderResults([{ symbol: "600000.SH", name: "X", close: 1, change_pct: 0, hit_count: 1,
+                 hits: [] }], { mode: "or", status: "done", conditions: [], results: [] });
+r.or = el("th-hit").textContent;
+renderResults([], { mode: "and", status: "done", conditions: [] });
+r.and = el("th-hit").textContent;
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["or"], "命中 (OR)")
+        self.assertEqual(out["and"], "命中")
+
+    def test_truncated_run_shows_hint(self):
+        out = _run_page_script("""
+const r = {};
+renderRun({ id: 1, status: "done", mode: "or", n_results: 3000, truncated: true,
+            conditions: [], results: [], data_version: "2026-09-18" });
+r.meta = el("run-meta").innerHTML;
+console.log(JSON.stringify(r));
+""")
+        self.assertIn("单次上限", out["meta"])
+
+    def test_user_edits_win_over_restore(self):
+        out = _run_page_script("""
+const r = {};
+conditions = [{ metric: "above_ma20", label: "站上 MA20", kind: "bool" }];
+composed = true;
+applyStatus({ active: null, recent: [],
+              current: { id: 3, status: "done", mode: "and", results: [],
+                         conditions: [{ metric: "rsi6", label: "RSI6", kind: "num",
+                                        op: "<=", value: 30 }] } });
+r.conditions = conditions;
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["conditions"][0]["metric"], "above_ma20",
+                         "用户动过条件框后不得被回显覆盖")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
 class ScreenerPollStatusBehaviorTest(unittest.TestCase):
     """用 stub 跑真实 pollStatus, 断言重排节奏与失败后的自愈。"""
 
@@ -101,18 +480,14 @@ class ScreenerPollStatusBehaviorTest(unittest.TestCase):
         cls.fn = _extract_fn(src, "pollStatus")
 
     def _run(self, responses, drain=0):
-        """responses: 依次返回的状态载荷, 'throw' 表示该次请求失败。
-        drain: 轮询自己排下的重试再执行几次 (0 = 只看第一次)。"""
+        body = self.fn.replace("applyStatus(s);", "globalThis.__applied.push(s);")
         script = (
             "const results = {};\n"
             "globalThis.__scheduled = [];\n"
             "globalThis.__queue = [];\n"
+            "globalThis.__applied = [];\n"
             "globalThis.setTimeout = (fn, ms) => { globalThis.__scheduled.push(ms);"
             " globalThis.__queue.push(fn); return 1; };\n"
-            "globalThis.scanning = true;\n"
-            "globalThis.setStopBtn = () => { results.stopBtn = (results.stopBtn || 0) + 1; };\n"
-            "globalThis.renderResults = (r) => { results.rendered = r; };\n"
-            "globalThis.document = { getElementById: () => ({ style: {}, textContent: '' }) };\n"
             "const seq = " + json.dumps(responses) + ";\n"
             "let i = 0;\n"
             "globalThis.api = async () => {\n"
@@ -121,47 +496,41 @@ class ScreenerPollStatusBehaviorTest(unittest.TestCase):
             "  return r;\n"
             "};\n"
             "globalThis.pollFailures = 0;\n"
-            + self.fn + "\n"
+            + body + "\n"
             + "(async () => {\n"
             + "  await pollStatus();\n"
             + f"  for (let k = 0; k < {drain} && globalThis.__queue.length; k++) {{\n"
             + "    await globalThis.__queue.shift()();\n"
             + "  }\n"
             + "  process.stdout.write(JSON.stringify({ scheduled: globalThis.__scheduled,"
-            + " scanning: globalThis.scanning, failures: globalThis.pollFailures,"
-            + " stopBtn: results.stopBtn || 0, rendered: results.rendered || null }));\n"
+            + " failures: globalThis.pollFailures,"
+            + " applied: globalThis.__applied.length }));\n"
             + "})();"
         )
         proc = subprocess.run(["node", "-e", script], capture_output=True,
                               check=True, text=True, encoding="utf-8")
         return json.loads(proc.stdout)
 
-    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
-    def test_running_reschedules_fast(self):
-        out = self._run([{"running": True, "progress": 3, "total": 10, "results": []}])
+    def test_active_run_reschedules_fast(self):
+        out = self._run([{"active": {"id": 1, "status": "running", "progress": 3, "total": 10},
+                          "recent": [], "current": None}])
         self.assertEqual(out["scheduled"], [1500])
-        self.assertTrue(out["scanning"], "扫描中不得改状态")
+        self.assertEqual(out["applied"], 1)
 
-    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
-    def test_finished_renders_and_stops(self):
-        out = self._run([{"running": False, "progress": 10, "total": 10,
-                          "results": [{"symbol": "600000.SH"}]}])
-        self.assertEqual(out["scheduled"], [], "扫描结束不再轮询")
-        self.assertFalse(out["scanning"])
-        self.assertEqual(out["stopBtn"], 1)
-        self.assertEqual(out["rendered"], [{"symbol": "600000.SH"}])
+    def test_finished_run_stops_polling(self):
+        out = self._run([{"active": None, "recent": [], "current": None}])
+        self.assertEqual(out["scheduled"], [], "任务结束不再轮询")
+        self.assertEqual(out["applied"], 1)
 
-    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
     def test_error_backs_off_and_recovers(self):
-        """两次失败仍算扫描中且间隔递增; 之后成功 → 复位回 1.5s 节奏。"""
         out = self._run(
-            ["throw", "throw", {"running": True, "progress": 1, "total": 4, "results": []}],
+            ["throw", "throw",
+             {"active": {"id": 1, "status": "running"}, "recent": [], "current": None}],
             drain=2)
-        self.assertTrue(out["scanning"], "取状态失败不该判成扫描结束")
         self.assertEqual(out["scheduled"], [1500, 3000, 1500],
                          "失败退避 1.5s→3s, 恢复后回到 1.5s")
         self.assertEqual(out["failures"], 0, "成功即复位失败计数")
-        self.assertEqual(out["stopBtn"], 0, "还在扫描, 不该把停止按钮收掉")
+        self.assertEqual(out["applied"], 1)
 
 
 if __name__ == "__main__":

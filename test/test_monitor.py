@@ -34,18 +34,36 @@ import dingtalk  # noqa: E402
 import feed as feed_mod  # noqa: E402
 import market_hours  # noqa: E402
 import monitor  # noqa: E402
+import notify  # noqa: E402
 import ntfy  # noqa: E402
 import trades  # noqa: E402
 
 FIXTURE_DIR = Path(_VISUAL_DIR) / "test" / "fixtures"
 
 
+_RAW_NOTIFY = notify.notify  # patch 之前的原函数 (同步消费用, 避免自递归)
+
+
+def _sync_notify(title, text, **kwargs):
+    """同步版 notify(): 入队后立即在调用线程消费, 保证断言时序确定。
+
+    生产路径是异步队列 (见 notify.py, 保序/不阻塞由 test_notify.py 覆盖);
+    这里只把「线程调度的不确定性」换成确定性, 入队与投递仍是真实实现。
+    """
+    _RAW_NOTIFY(title, text, **kwargs)
+    while notify.drain_once(0):
+        pass
+    return True
+
+
 @contextmanager
 def _notify_mocks(dingtalk_return=True, ntfy_return=True):
-    """Patch monitor's DingTalk + ntfy senders; yield (ding_send, ntfy_send)."""
+    """Patch DingTalk + ntfy senders; yield (ding_send, ntfy_send)."""
     with mock.patch.object(dingtalk, "send_markdown", return_value=dingtalk_return) as ding:
         with mock.patch.object(ntfy, "send_markdown", return_value=ntfy_return) as nf:
-            yield ding, nf
+            with mock.patch.object(notify, "_start_worker", lambda: None), \
+                 mock.patch.object(notify, "notify", _sync_notify):
+                yield ding, nf
 
 
 def _load_fixture(name):
@@ -917,6 +935,130 @@ class TestPollPipeline(PollPipelineTestCase):
         self.assertIn("起算 2026-08-19", fired[0]["alert"]["detail"])
         send.assert_called_once()
         got.assert_called_once()
+
+
+class TestRiskMissing(PollPipelineTestCase):
+    """未设止盈/保本/止损的持仓: 每日提醒一次, 授权口径与监控一致。"""
+
+    def test_selects_only_open_without_risk_prices(self):
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        bob = trades.create_user("bob", "secret123")
+        self._open(admin, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
+        self._open(admin, "300750.SZ", "宁德")           # 未设风控 → 命中
+        self._open(bob, "000001.SZ", "平安")             # 未授权 → 不命中
+        trades.create_trade(admin, {
+            "type": "reverse_repo", "symbol": "204001.SH", "name": "GC001",
+            "entry_price": 100.0, "quantity": "1000", "entry_date": "2026-08-20",
+            "entry_reason": "逆回购", "repo_days": 1, "repo_rate": 1.8,
+        })
+        rows = trades.list_positions_missing_risk_prices()
+        self.assertEqual({r["symbol"] for r in rows}, {"300750.SZ"})
+        trades.set_user_monitor(bob, True)
+        rows = trades.list_positions_missing_risk_prices()
+        self.assertEqual({r["symbol"] for r in rows}, {"300750.SZ", "000001.SZ"})
+        # 只看自己
+        rows = trades.list_positions_missing_risk_prices(user_id=bob)
+        self.assertEqual({r["symbol"] for r in rows}, {"000001.SZ"})
+
+    def test_fires_once_per_day_then_again_next_day(self):
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        self._open(admin, "300750.SZ", "宁德")
+        with _notify_mocks() as (send, got):
+            first = monitor.check_risk_missing(now_dt=self.now)
+            second = monitor.check_risk_missing(now_dt=self.now)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [], "同一天不重复提醒")
+        send.assert_called_once()
+        got.assert_called_once()
+        self.assertIn("持仓未设风控价", send.call_args.args[0])
+        self.assertIn("300750.SZ", send.call_args.args[1])
+        alerts = trades.list_monitor_alerts(admin)
+        self.assertEqual(alerts[0]["alert_type"], "risk_missing")
+        self.assertEqual(alerts[0]["symbol"], "300750.SZ")
+        self.assertIn("未设置止盈/保本/止损", alerts[0]["detail"])
+        # 次日再来一条
+        tmrw = datetime(2026, 8, 24, 9, 40)
+        with _notify_mocks() as (send2, _g2):
+            again = monitor.check_risk_missing(now_dt=tmrw)
+        self.assertEqual(len(again), 1)
+        send2.assert_called_once()
+
+    def test_two_positions_same_symbol_each_reminded(self):
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        self._open(admin, "300750.SZ", "宁德", entry=100.0)
+        self._open(admin, "300750.SZ", "宁德", entry=110.0)
+        with _notify_mocks():
+            fired = monitor.check_risk_missing(now_dt=self.now)
+        self.assertEqual(len(fired), 2, "同标的两笔持仓各自提醒, 互不遮挡")
+        self.assertEqual(len(trades.list_monitor_alerts(admin)), 2)
+
+    def test_nothing_to_remind_no_push(self):
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        self._open(admin, "600000.SH", "浦发", take_profit=12.0, breakeven=10.5, stop_loss=9.5)
+        with _notify_mocks() as (send, got):
+            self.assertEqual(monitor.check_risk_missing(now_dt=self.now), [])
+        send.assert_not_called()
+        got.assert_not_called()
+
+    def test_notify_off_still_persists(self):
+        admin = trades.create_user("admin", "secret123", is_admin=True)
+        self._open(admin, "300750.SZ", "宁德")
+        with _notify_mocks() as (send, _g):
+            fired = monitor.check_risk_missing(now_dt=self.now, notify=False)
+        self.assertEqual(len(fired), 1)
+        send.assert_not_called()
+        self.assertEqual(len(trades.list_monitor_alerts(admin)), 1)
+
+
+class _StopLoop(Exception):
+    """在 sleep 处打断调度循环。"""
+
+
+class TestRiskReminderScheduler(unittest.TestCase):
+    """交易日到点触发一次; 非交易日/未到点不触发。"""
+
+    def _run_loop(self, now, trading=True, at=(9, 35)):
+        calls = []
+
+        def fake_sleep(_sec):
+            raise _StopLoop()
+
+        with mock.patch.object(monitor.market_hours, "now", lambda: now), \
+             mock.patch.object(monitor.market_hours, "is_trading_day", lambda v=None: trading), \
+             mock.patch.object(monitor, "_risk_reminder_at", lambda: at), \
+             mock.patch.object(monitor, "check_risk_missing",
+                               lambda now_dt=None: calls.append(now_dt) or []), \
+             mock.patch.object(monitor.time, "sleep", side_effect=fake_sleep):
+            with self.assertRaises(_StopLoop):
+                monitor._risk_reminder_loop()
+        return calls
+
+    def test_fires_after_configured_time(self):
+        calls = self._run_loop(datetime(2026, 8, 21, 9, 40))
+        self.assertEqual(len(calls), 1)
+
+    def test_skips_before_time_and_non_trading_day(self):
+        self.assertEqual(self._run_loop(datetime(2026, 8, 21, 9, 0)), [])
+        self.assertEqual(self._run_loop(datetime(2026, 8, 22, 10, 0), trading=False), [])
+
+    def test_invalid_env_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"RISK_REMINDER_AT": "25:99"}):
+            self.assertEqual(monitor._risk_reminder_at(), monitor.RISK_REMINDER_DEFAULT_AT)
+        with mock.patch.dict(os.environ, {"RISK_REMINDER_AT": "07:05"}):
+            self.assertEqual(monitor._risk_reminder_at(), (7, 5))
+
+    def test_window_blocks_late_evening_restart(self):
+        """回归: 只判"不早于 09:35"会让晚间重启在 20:00 推一条提醒。"""
+        self.assertTrue(monitor._risk_reminder_due(datetime(2026, 8, 21, 9, 40)))
+        self.assertTrue(monitor._risk_reminder_due(datetime(2026, 8, 21, 11, 30)))
+        self.assertFalse(monitor._risk_reminder_due(datetime(2026, 8, 21, 9, 0)))
+        self.assertFalse(monitor._risk_reminder_due(datetime(2026, 8, 21, 20, 0)))
+        self.assertFalse(monitor._risk_reminder_due(datetime(2026, 8, 21, 15, 10)))
+
+    def test_window_end_follows_env(self):
+        with mock.patch.dict(os.environ, {"RISK_REMINDER_WINDOW_MIN": "60"}):
+            self.assertTrue(monitor._risk_reminder_due(datetime(2026, 8, 21, 10, 20)))
+            self.assertFalse(monitor._risk_reminder_due(datetime(2026, 8, 21, 10, 40)))
 
 
 class TestRestFeedMock(unittest.TestCase):

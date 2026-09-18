@@ -29,8 +29,11 @@ MONITOR_PY = _VISUAL_DIR / "monitor.py"
 EXPECTED_ALERT_TYPES = {
     "sl_breached", "tp_reached", "breakeven_hit", "be_broken", "limit_up_sealed",
     "hold_exit_am", "hold_exit_pm", "accel_down", "accel_up",
-    "trendline_break", "price_alert",
+    "trendline_break", "price_alert", "risk_missing",
 }
+# 选股任务的通知类型 (写库在 api/screener.py, 与持仓告警同一张 monitor_alerts 表)
+SCREENER_ALERT_TYPES = {"screener_start", "screener_progress", "screener_done",
+                        "screener_error"}
 # 历史遗留标签 (从未落库的旧类型), 允许保留以示兼容
 LEGACY_LABEL_KEYS = {"hold_expire"}
 
@@ -93,10 +96,17 @@ class MonitorPageStaticTest(unittest.TestCase):
 
     def test_alert_labels_cover_backend_types(self):
         keys = _object_keys(_extract_const(self.src, "ALERT_LABELS"))
-        missing = EXPECTED_ALERT_TYPES - keys
+        missing = (EXPECTED_ALERT_TYPES | SCREENER_ALERT_TYPES) - keys
         self.assertFalse(missing, f"ALERT_LABELS 缺少后端会落库的告警类型: {sorted(missing)}")
-        self.assertLessEqual(keys - EXPECTED_ALERT_TYPES, LEGACY_LABEL_KEYS,
+        self.assertLessEqual(keys - EXPECTED_ALERT_TYPES - SCREENER_ALERT_TYPES,
+                             LEGACY_LABEL_KEYS,
                              "ALERT_LABELS 出现未知类型 (拼写错误?)")
+
+    def test_screener_alert_types_exist_in_backend(self):
+        # 选股通知写库在 api/screener.py, 标签表与后端同样不能漂移
+        py = (_VISUAL_DIR / "api" / "screener.py").read_text(encoding="utf-8")
+        for t in SCREENER_ALERT_TYPES:
+            self.assertIn(f'"{t}"', py, f"api/screener.py 中找不到告警类型 {t}")
 
     def test_expected_types_actually_exist_in_monitor_py(self):
         # 防止标签表与后端实现漂移: 每个预期类型都必须出现在 monitor.py 源码中

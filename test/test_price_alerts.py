@@ -23,6 +23,7 @@ if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
 import trades  # noqa: E402
+import notify  # noqa: E402
 
 
 def _csrf(client):
@@ -158,8 +159,9 @@ class MonitorEvalTest(unittest.TestCase):
                 "rule": rule, "note": note, "last_fired_at": last_fired_at}
 
     def _patch_notify(self):
-        return (mock.patch("monitor.dingtalk.send_markdown"),
-                mock.patch("monitor.ntfy.send_markdown"))
+        # 推送走 notify 异步队列: 断言前必须 flush (见 notify.py)
+        return (mock.patch("dingtalk.send_markdown"),
+                mock.patch("ntfy.send_markdown"))
 
     def test_and_combination(self):
         rule = [{"metric": "price", "op": ">=", "value": 100},
@@ -171,6 +173,7 @@ class MonitorEvalTest(unittest.TestCase):
                 [self._alert(rule)], {self.SYM: {"last_price": 101.0, "change_pct": -3.0}}, now)
             miss = self.monitor._evaluate_price_alerts(
                 [self._alert(rule)], {self.SYM: {"last_price": 101.0, "change_pct": -1.0}}, now)
+            notify.flush(5.0)
         self.assertEqual(len(hit), 1)
         self.assertEqual(hit[0]["price"], 101.0)
         self.assertEqual(miss, [])
@@ -188,6 +191,7 @@ class MonitorEvalTest(unittest.TestCase):
                 [self._alert(rule)], {self.SYM: {"last_price": None}}, now), [])
             self.assertEqual(self.monitor._evaluate_price_alerts(
                 [self._alert(rule)], {self.SYM: {"change_pct": 5.0}}, now), [])
+            notify.flush(5.0)
         d.assert_not_called()
         n.assert_not_called()
 
@@ -201,6 +205,7 @@ class MonitorEvalTest(unittest.TestCase):
             outside = self._alert(rule, last_fired_at=(now - timedelta(seconds=1801)).isoformat())
             self.assertEqual(self.monitor._evaluate_price_alerts([inside], quotes, now), [])
             self.assertEqual(len(self.monitor._evaluate_price_alerts([outside], quotes, now)), 1)
+            notify.flush(5.0)
 
     def test_persist_marks_fired_and_records_alert(self):
         rule = [{"metric": "price", "op": ">=", "value": 1}]
@@ -209,6 +214,7 @@ class MonitorEvalTest(unittest.TestCase):
         dt, nt = self._patch_notify()
         with dt, nt:
             fired = self.monitor._evaluate_price_alerts([a], {self.SYM: {"last_price": 12.5}}, now)
+            notify.flush(5.0)
         self.assertEqual(len(fired), 1)
         row = next(r for r in trades.list_price_alerts(self.uid) if r["id"] == a["id"])
         self.assertIsNotNone(row["last_fired_at"], "触发后应记冷却时间")
@@ -227,6 +233,7 @@ class MonitorEvalTest(unittest.TestCase):
         with dt as d, nt as n:
             fired = self.monitor._evaluate_price_alerts(
                 [a], {self.SYM: {"last_price": 12.5}}, now, persist=False, notify=False)
+            notify.flush(5.0)
         self.assertEqual(len(fired), 1)
         self.assertEqual(len(trades.list_monitor_alerts(self.uid)), before)
         row = next(r for r in trades.list_price_alerts(self.uid) if r["id"] == a["id"])

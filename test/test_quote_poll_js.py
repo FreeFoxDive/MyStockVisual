@@ -78,7 +78,8 @@ class QuotePollJsTest(unittest.TestCase):
 
     def test_inline_scripts_parse(self):
         parser = InlineScriptParser()
-        for name in ("index.html", "monitor.html", "trades.html", "screener.html", "quant.html"):
+        for name in ("index.html", "monitor.html", "trades.html", "screener.html",
+                     "quant.html", "admin.html"):
             parser.feed((INDEX_HTML.parent / name).read_text(encoding="utf-8"))
         blocks = parser.blocks
         self.assertTrue(blocks, "未找到 inline script")

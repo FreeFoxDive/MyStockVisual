@@ -260,5 +260,44 @@ global.setTimeout = (fn) => { fn(); return 0; };
         self.assertEqual(el["setSymbols"], [[]])
 
 
+class RiskCellJsTest(unittest.TestCase):
+    """交易列表「止盈/保本/止损」列: 持仓中且三者全空要显示「未设风控」(不能只显示 —)。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.trades = _TRADES_HTML.read_text(encoding="utf-8")
+
+    def test_risk_cell_states(self):
+        script = """
+const results = {};
+const VisualLive = { price: v => (v == null ? '—' : String(v)) };
+%(fmt_price)s
+%(risk_set_status)s
+%(fmt_gap)s
+%(format_risk)s
+results.openEmpty = formatRiskPrices({ status: 'open' }, 10.0);
+results.closedEmpty = formatRiskPrices({ status: 'closed' }, null);
+results.ok = formatRiskPrices(
+  { status: 'open', take_profit: 12.0, breakeven: 10.5, stop_loss: 9.5 }, 10.2);
+results.warn = formatRiskPrices(
+  { status: 'open', take_profit: 12.0, breakeven: 13.0, stop_loss: 9.5 }, 10.2);
+console.log(JSON.stringify(results));
+""" % {
+            "risk_set_status": _extract_fn(self.trades, "riskSetStatus"),
+            "fmt_price": _extract_fn(self.trades, "fmtPrice"),
+            "fmt_gap": _extract_fn(self.trades, "fmtGapPct"),
+            "format_risk": _extract_fn(self.trades, "formatRiskPrices"),
+        }
+        data = json.loads(run_node(script))
+
+        self.assertEqual(data["openEmpty"]["html"], "未设风控")
+        self.assertTrue(data["openEmpty"]["warn"])
+        self.assertEqual(data["closedEmpty"]["html"], "—")
+        self.assertFalse(data["closedEmpty"]["warn"])
+        self.assertIn("止盈", data["ok"]["html"])
+        self.assertFalse(data["ok"]["warn"])
+        self.assertTrue(data["warn"]["warn"], "止盈/保本顺序不合法仍要高亮")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

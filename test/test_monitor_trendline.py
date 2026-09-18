@@ -25,6 +25,7 @@ if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
 import trades  # noqa: E402
+import notify  # noqa: E402
 
 
 def _dates(n):
@@ -147,8 +148,9 @@ class LineMonitorEvalTest(unittest.TestCase):
         trades.save_chart_drawings(self.uid, symbol or self.SYM, period, drawings)
 
     def _patch_notify(self):
-        return (mock.patch("monitor.dingtalk.send_markdown"),
-                mock.patch("monitor.ntfy.send_markdown"))
+        # 推送走 notify 异步队列: 断言前必须 flush (见 notify.py)
+        return (mock.patch("dingtalk.send_markdown"),
+                mock.patch("ntfy.send_markdown"))
 
     def test_load_filters_disabled_and_types(self):
         self._save([_drawing("d1"), _drawing("d2", enabled=False),
@@ -238,8 +240,8 @@ class LineMonitorEvalTest(unittest.TestCase):
         now = datetime(2026, 9, 13, 10, 0, 0)
         with mock.patch.object(self.mon, "_load_bar_dates",
                                return_value=(_dates(120), 120)) as lbd, \
-             mock.patch("monitor.dingtalk.send_markdown"), \
-             mock.patch("monitor.ntfy.send_markdown"):
+             mock.patch("dingtalk.send_markdown"), \
+             mock.patch("ntfy.send_markdown"):
             self.mon._evaluate_trendline_monitors(
                 mons, {self.SYM: {"last_price": 20.4}}, now)
         lbd.assert_called_once_with(self.SYM, "1d", "none")
@@ -254,6 +256,7 @@ class LineMonitorEvalTest(unittest.TestCase):
             dt, nt = self._patch_notify()
             with dt as d, nt as n:
                 fired = self.mon._evaluate_trendline_monitors(mons, quotes, now)
+                notify.flush(5.0)
             self.assertEqual(len(fired), 1)
             self.assertAlmostEqual(fired[0]["price"], 20.4)
             d.assert_called_once()
@@ -263,6 +266,7 @@ class LineMonitorEvalTest(unittest.TestCase):
             with dt as d2, nt as n2:
                 self.assertEqual(
                     self.mon._evaluate_trendline_monitors(mons, quotes, now), [])
+                notify.flush(5.0)
             d2.assert_not_called()
             n2.assert_not_called()
         # 落库: monitor_alerts + 触发状态
@@ -285,6 +289,7 @@ class LineMonitorEvalTest(unittest.TestCase):
                     self.mon._evaluate_trendline_monitors(mons, {}, now), [])
                 self.assertEqual(self.mon._evaluate_trendline_monitors(
                     mons, {self.SYM: {"last_price": None}}, now), [])
+                notify.flush(5.0)
         d.assert_not_called()
         n.assert_not_called()
 
@@ -302,6 +307,7 @@ class LineMonitorEvalTest(unittest.TestCase):
                     len(self.mon._evaluate_trendline_monitors(mons, quotes, day1)), 1)
                 self.assertEqual(
                     len(self.mon._evaluate_trendline_monitors(mons, quotes, day2)), 1)
+                notify.flush(5.0)
 
     def test_no_persist_no_notify(self):
         self._save([_drawing("d1")])
@@ -315,6 +321,7 @@ class LineMonitorEvalTest(unittest.TestCase):
             with dt as d, nt as n:
                 fired = self.mon._evaluate_trendline_monitors(
                     mons, quotes, now, persist=False, notify=False)
+                notify.flush(5.0)
         self.assertEqual(len(fired), 1)
         self.assertEqual(len(trades.list_monitor_alerts(self.uid)), before)
         self.assertIsNone(trades.get_trendline_fired(self.uid, "d1"))
@@ -367,9 +374,10 @@ class PollOnceIntegrationTest(unittest.TestCase):
         now = datetime(2026, 9, 13, 10, 0, 0)
         with mock.patch.object(self.mon, "_load_bar_dates",
                                return_value=(_dates(120), 120)):
-            with mock.patch("monitor.dingtalk.send_markdown") as d, \
-                 mock.patch("monitor.ntfy.send_markdown") as n:
+            with mock.patch("dingtalk.send_markdown") as d, \
+                 mock.patch("ntfy.send_markdown") as n:
                 self.mon._poll_once(feed_obj, now_dt=now)
+                notify.flush(5.0)
         # _poll_once 返回值只含持仓告警 (与价格预警同约定), 趋势线触发看落库与推送
         alerts = trades.list_monitor_alerts(self.uid)
         self.assertEqual(len(alerts), 1)

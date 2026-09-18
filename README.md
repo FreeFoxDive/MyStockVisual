@@ -49,6 +49,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 安全 | CSP、同源 Cookie 会话、CSRF 双提交、登录爆破锁定；SQL 参数化；日志密钥脱敏 |
 | 交易记录 | 多账户登录，买卖记录增删改查；录入校验日期/日K振幅/成交量；按周/月/年统计盈亏与胜率（默认周，详见 [docs/trades.md](docs/trades.md)） |
 | 持仓监控 | 授权用户填齐止盈/保本/止损（止盈>保本>止损）后盘中监控，钉钉 + ntfy 推送；关联模型的持仓在推荐周期到期日 10:00/14:00 提醒平仓 |
+| 风控价缺失提醒 | 每个交易日 09:35（`RISK_REMINDER_AT` 可调）检查授权用户的持仓中**三者都没填**的记录，每人每笔每日一次：写 `monitor_alerts`（`risk_missing`，监控中心「最近告警」可见）+ 钉钉/ntfy；交易记录列表里这类持仓的风控列直接显示「未设风控」。口径与持仓监控一致（管理员恒开 / `monitor_enabled=1`），逆回购除外 |
 | 持仓风控线 | 主页当前代码持仓中时，代码/名称旁显示「持仓中」徽章（悬停或点击看买入均价/数量/模型建议持仓交易日，填了风控价时并列出止盈/保本/止损），主图画三条同款虚线 + 名称标签，面板栏「风控线」勾选框一键显隐（跟账号同步）；取「有风控价的最新一笔持仓」（排除已平仓/逆回购）；配色在 `theme.css` 的 `--risk-tp/--risk-be/--risk-sl` 定义亮暗两套 |
 | 代码·名称入口 | 工具栏的代码·名称整体是东财股吧链接（悬停「去股吧」，只在名称下画下划线：点名称跳股吧）；点代码则是复制代码（悬停「点击复制代码」；可 Tab 聚焦 + Enter 复制，已阻止冒泡避免连带跳转）；无股吧地址的标的不挂链接，也不显示可点暗示。股吧地址口径：指数 `zs`+市场前缀、ETF 小写市场前缀、个股裸 6 位；取不到代码（如指数无代码）时摘掉链接，名称不可点 |
 | 贴线标签避让 | 同一列的贴线标签（现价签「现价 10.42」/风控三签/画线的水平线价格签与 🔔 名称签）按「最小位移」纵向错开：现价签优先级最高（钉在自己的线上，每 1.25s 随快照重排一次），让位的是风控签，画线注解给行情签让位；挤不下时该签只留虚线不留字（数值在徽章悬停里）。左右两列各排一次，缩放/切周期/分时/盘中快照都会重算 |
@@ -63,7 +64,8 @@ venv/Scripts/python.exe -u visual/server.py
 | 搜索增强 | 覆盖 A股/ETF/指数/港股/美股，结果带类型徽标（指数/ETF/港/美）；排序 股票(含港/美) > ETF > 指数，下拉最多 50 条。查询先按 NFKC + 交易所标记（后缀/前缀）归一成「完整 symbol / 裸代码 / 原串」多个比对键再取最高分，避免完整代码被自己的打分过滤掉 |
 | 价格预警 | 自定义条件（现价/涨跌幅 ≥/≤ 数值，AND 组合），监控循环盘中评估，30 分钟冷却，钉钉/ntfy 推送；工具栏 🔔 管理。`change_pct` 全线统一为百分数（AF 官方小数在 `feed._row_to_quote` 出口 ×100，见 docs/known-issues.md §5） |
 | 趋势线监控 | 选中趋势线/射线/水平线 → 画线菜单「🔔监控」→ 强制命名 + 跌破幅度%（默认 个股 2 / ETF·指数 3）→ 现价跌破线值×(1−pct%) 时盘中推送钉钉/ntfy，每条线每日一次；监控配置随画线保存（含复权口径），拖动即跟随，预警弹窗可总览；日/周/月K 支持。监控中心「去图表」跳回该监控线所在周期（`/?symbol=…&period=1w`） |
-| 条件选股 | `/screener.html`：MACD金叉 / 站上MA20 / 筹码获利盘 / RSI / 5日涨幅 条件组合后台扫描（`SCREENER_MAX_SYMBOLS` 控制范围）。结果表现价按交易时段门控刷新（盘外不轮询，服务端那会儿只返回收盘快照）；后台任务与页面解耦，进度轮询失败会退避重试而不是冻住 |
+| 条件选股 | `/screener.html`：**40+ 指标**（技术指标 / 量价 / 基本面估值 / 资金与筹码四组，见 [docs/screener.md](docs/screener.md)）任意组合。**AND / OR 两种模式**：OR 时结果带「命中 N 项」并可按满足项数筛选，每行展开逐条件 ✅/❌ 与实测值。**扫的是因子库**（交易日 18:00 全市场构建，见 [docs/factors.md](docs/factors.md)）→ 秒级、不再逐只拉K；**同日同条件不重扫**（cache_key 命中直接复用结果）。任务化 + FIFO 队列：按用户隔离，看不到也停不了别人的（管理员在 `/admin.html` 有队列视图与因子库面板）。条件框扫描中锁定、支持 ✎ 修改；历史最多 3 次（含 0 命中与「已取消（保留部分结果）」）；开始/阶段（默认 50%）/完成各推一次钉钉/ntfy + 站内告警 |
+| 因子库 | 交易日 18:00 自动构建全市场日K级因子（技术/量价/筹码本地计算 + 基本面/资金/龙虎榜/质押/ETF溢价外部快照），开始/完成/异常通知管理员，页面可见进度与**最近 5 个交易日**完成情况；失败 30 分钟退避重试最多 3 次，管理员可手动/强制重建（开不了跑会如实回报原因）。存储 `.cache/factors.db` + `snapshot_<交易日>.pkl.gz`，详见 [docs/factors.md](docs/factors.md) |
 | 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存）；麦蕊源：交易所公告（日期倒序）、主力净流入（当前股单票键值视图 + 全市场排名）、股东户数变化、十大股东、十大流通股东、解禁限售（含解禁市值/占流通股%） |
 
 ## 文件结构
@@ -80,7 +82,9 @@ visual/
 │   ├── kline.py       # /api/kline|kline/tail|chips|intraday
 │   ├── trades.py      # /api/trades*|fees|trade-reasons|repo-maturity
 │   ├── models.py      # /api/models*
-│   ├── admin.py       # /api/admin/users*
+│   ├── admin.py       # /api/admin/users*、/api/admin/screener/runs (选股队列视图)
+│   ├── screener.py    # /api/screener/* 条件选股任务 (队列 worker + 因子库扫描 + 通知)
+│   ├── factors.py     # /api/factors/status|rebuild (因子库状态与手动重建)
 │   ├── me.py          # /api/me/search-history (GET/PUT/DELETE)、/api/me/panel-config、/api/monitor/status
 │   └── drawings.py    # /api/drawings 画线同步 (用户+代码+周期)
 ├── security.py        # CSP / 限流 / 登录锁定 / 会话 Cookie / CSRF
@@ -89,11 +93,16 @@ visual/
 ├── logger.py          # 日志配置 + 密钥脱敏
 ├── indicators.py      # 指标计算
 ├── chips.py           # 东财筹码分布 (CYQ 算法移植 + 取数/缓存)
-├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计)
-├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 钉钉/ntfy)
+├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计 / 选股任务表)
+├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 风控价缺失提醒 + 钉钉/ntfy)
+├── factors.py         # 每日因子库 (交易日 18:00 全市场构建; 调度/存储/外部快照)
+├── screener_metrics.py# 选股条件注册表 (指标目录 + 判定, 前后端共用)
+├── af_limits.py       # AlphaFeed Pro 限额表与取数预算折算
 ├── feed.py            # AlphaFeed REST 行情接入 (令牌桶)
 ├── dingtalk.py        # 钉钉薄包装 (myappnotify)
 ├── ntfy.py            # ntfy 薄包装 (myappnotify)
+├── notify.py          # 有序非阻塞业务通知队列 (单线程 FIFO + 进度去重)
+├── error_notify.py    # 脱敏错误告警 (按 source 聚合 + 预算)
 ├── market_hours.py    # A 股交易日历与时段
 ├── probe_feed.py      # 探测快照刷新频率 / 接口权限
 ├── smoke_server.py    # 冒烟测试工具 (临时 DB + 8899 端口完整服务)
@@ -167,6 +176,14 @@ visual/
 | `DELETE /api/admin/users/{id}` | 删除用户（仅管理员） |
 | `POST /api/admin/users/{id}/reset-password` | 重置密码 `{password}`（仅管理员） |
 | `POST /api/admin/users/{id}/monitor` | `{enabled}` 授权持仓监控（仅管理员） |
+| `GET /api/admin/screener/runs` | 选股队列 + 最近完成（全用户，仅管理员；`limit` 默认 20） |
+| `GET /api/factors/status` | 因子库状态：当前构建（state/phase/percent/attempts/error）+ 最近 5 个交易日完成情况 + 最新快照日 |
+| `POST /api/factors/rebuild` | 手动构建因子库 `{force, day}`（仅管理员，后台线程执行，进度看 status） |
+| `GET /api/screener/metrics` | 指标目录（四组 + 每种类型的取值方式；文本类带可选值） |
+| `POST /api/screener/run` | 提交选股任务 `{conditions,mode,price_mode}`；同日同条件命中缓存时直接返回 `from_cache`；本人已有排队/运行中返回 409 |
+| `GET /api/screener/status` | 本人当前任务（`active`）+ 最近 3 次历史（`recent`）+ 当前展示的 `current`（默认**不含** `results`，用 `?full=1` 或 `/runs/{id}` 取详情）+ 因子库版本 |
+| `GET /api/screener/runs/{id}` | 单条任务详情（本人或管理员，含 conditions/results） |
+| `POST /api/screener/stop` | 取消任务 `{run_id}`（缺省取消自己的当前任务；管理员可停任意） |
 | `GET /api/monitor/status` | 监控线程状态 + 当前用户最近告警 |
 | `GET /api/trades` | 交易记录列表（需登录，`status/symbol/q/from/to/model_id/limit/offset`） |
 | `POST /api/trades` | 新建交易记录 |
@@ -235,7 +252,7 @@ visual/
 - Waitress 多线程处理请求；行情与交易 API 并行互不阻塞
 
 ### 限流
-- AlphaFeed 30次/分钟硬限制
+- AlphaFeed Pro 套餐限额见 [docs/alphafeed-limits.md](docs/alphafeed-limits.md)（单一来源 `af_limits.py`）：快照按标的 120/min、日K批量 60/min、分钟K批量 30/min、盘口批量 30/min，批量单次 100 标的
 - 服务端缓存减少 API 调用
 - 前端交易时段30秒刷新间隔 → 安全范围
 - 麦蕊快照回退预算 `MR_QUOTE_RATE_PER_MIN`（默认 20/min）: AF 未配置/故障时的兜底路径同样限速，桶空本轮沿用缓存；磁盘缓存清理（24h/50MB）除启动外每 6h 周期执行
@@ -302,7 +319,7 @@ NTFY_PASSWORD=...
 - `LOG_LEVEL`：DEBUG / INFO / WARNING / ERROR，默认 INFO
 - `LOG_FILE`：设了则额外写本地文件（RotatingFileHandler，5MB×3 轮转），便于非 Docker 持久化
 
-监控只用 `quotes.get(symbols=...)` 按代码查询，令牌桶 6 次/分钟（额度 60/min 的 10%），不走 `universes=` 池查询。管理员在 `/admin.html` 给普通用户打开「监控」开关。
+监控只用 `quotes.get(symbols=...)` 按代码查询，令牌桶 6 次/分钟（Pro 快照按标的 120/min 的 5%，自己收紧的预算），不走 `universes=` 池查询。管理员在 `/admin.html` 给普通用户打开「监控」开关。
 
 校准 / 探测 / 测试：
 
