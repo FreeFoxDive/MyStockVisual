@@ -259,6 +259,32 @@ CREATE TABLE IF NOT EXISTS trendline_monitor_state (
 );
 CREATE INDEX IF NOT EXISTS idx_trendline_state_symbol
     ON trendline_monitor_state(symbol);
+
+-- 选股任务 (排队/运行/历史): 每用户只见自己的, 管理员另走 /api/admin/screener/runs
+CREATE TABLE IF NOT EXISTS screener_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL,
+    status       TEXT NOT NULL,           -- queued/running/done/stopped/error
+    mode         TEXT NOT NULL DEFAULT 'and',
+    conditions   TEXT NOT NULL,           -- JSON 数组 (含 label 快照, 便于回显)
+    universe     TEXT NOT NULL DEFAULT 'stock+etf',
+    count_limit  INTEGER,                 -- 兼容旧 count 参数; NULL = 不限
+    price_mode   TEXT NOT NULL DEFAULT 'close',   -- close=收盘口径 / live=盘中补当日bar
+    progress     INTEGER NOT NULL DEFAULT 0,
+    total        INTEGER NOT NULL DEFAULT 0,
+    truncated    INTEGER NOT NULL DEFAULT 0,  -- 结果被 SCREENER_RESULT_MAX 截断
+    results      TEXT,                    -- JSON 数组
+    data_version TEXT,                    -- 因子/行情数据版本 (第二批启用)
+    cache_key    TEXT,                    -- 结果去重键 (第二批启用)
+    error        TEXT,
+    queued_at    TEXT NOT NULL,
+    started_at   TEXT,
+    done_at      TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_screener_runs_user ON screener_runs(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_screener_runs_status ON screener_runs(status, id);
+CREATE INDEX IF NOT EXISTS idx_screener_runs_cache ON screener_runs(cache_key, status);
 """
 
 
@@ -339,6 +365,10 @@ def init_db(db_path=None):
         # 迁移: 旧库 trades 表补逆回购计息天数列 (可空, 老数据零改动)
         if "repo_days" not in tcols:
             conn.execute("ALTER TABLE trades ADD COLUMN repo_days INTEGER")
+        # 迁移: 旧库 screener_runs 补 truncated 列 (结果被上限截断的标记; 老数据零改动)
+        scols = {r[1] for r in conn.execute("PRAGMA table_info(screener_runs)")}
+        if scols and "truncated" not in scols:
+            conn.execute("ALTER TABLE screener_runs ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0")
         # 迁移: 旧库 models 表补 hold_days; 仅在刚加列时回填 A–D 默认值, 之后不覆盖人工修改
         mcols = {r[1] for r in conn.execute("PRAGMA table_info(models)")}
         if "hold_days" not in mcols:
@@ -2648,6 +2678,38 @@ def list_monitored_positions(user_id=None):
         conn.close()
 
 
+def list_positions_missing_risk_prices(user_id=None):
+    """授权用户的 open 持仓, 且止盈/保本/止损三者都未设置 (每日提醒用)。
+
+    口径与 list_monitored_positions 完全对齐 (管理员恒开 / monitor_enabled=1):
+    未授权用户不进监控, 其持仓也不该出现在推到共用群的提醒里。
+    reverse_repo (逆回购) 到期还本付息, 不需要风控价, 排除。
+    三者全空 = 界面上的「未设置」; 风控价按 all-or-none 校验, 部分为空不会出现,
+    这里仍用 AND 三条件而不是任一为空, 以免把单边填写的异常数据当未设置。
+    """
+    conn = get_conn()
+    try:
+        sql = (
+            "SELECT t.id, t.user_id, t.symbol, t.name, t.status, t.entry_date, "
+            "t.entry_price, t.quantity, t.take_profit, t.stop_loss, t.breakeven, "
+            "u.username, u.is_admin, u.monitor_enabled "
+            "FROM trades t JOIN users u ON u.id = t.user_id "
+            "WHERE t.status='open' "
+            "AND t.type != 'reverse_repo' "
+            "AND (u.is_admin=1 OR u.monitor_enabled=1) "
+            "AND t.take_profit IS NULL AND t.breakeven IS NULL AND t.stop_loss IS NULL "
+        )
+        args = []
+        if user_id is not None:
+            sql += "AND t.user_id=? "
+            args.append(user_id)
+        sql += "ORDER BY t.user_id, t.symbol"
+        rows = conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def list_hold_expire_positions():
     """授权用户的 open 持仓, 且关联模型填了 hold_days。不要求风控价。
 
@@ -2744,6 +2806,239 @@ def list_monitor_alerts(user_id, limit=20):
     finally:
         conn.close()
 
+
+
+# ── 选股任务 (排队 + 历史) ──
+SCREENER_RUN_KEEP = 10            # 每用户保留的已结束任务数 (页面显示最近 3 条)
+SCREENER_ACTIVE = ("queued", "running")
+_SCREENER_JSON = {"conditions", "results"}
+
+
+def _screener_run_row(row):
+    """行 → dict, 解析 JSON 字段 (脏数据退化为空, 不抛)。"""
+    d = dict(row)
+    for k in _SCREENER_JSON:
+        raw = d.get(k)
+        if raw is None:
+            d[k] = [] if k == "conditions" else None
+            continue
+        try:
+            d[k] = json.loads(raw)
+        except (TypeError, ValueError):
+            d[k] = [] if k == "conditions" else None
+    if d.get("conditions") is None:
+        d["conditions"] = []
+    return d
+
+
+def create_screener_run(user_id, conditions, *, mode="and", universe="stock+etf",
+                        count_limit=None, price_mode="close", status="queued",
+                        results=None, data_version=None, cache_key=None,
+                        progress=0, total=0, error=None, truncated=0):
+    """插入一条选股任务, 返回 run id (status=queued 由 worker 认领)。"""
+    now = _now_iso()
+    finished = status not in SCREENER_ACTIVE
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO screener_runs(user_id, status, mode, conditions, universe, "
+            "count_limit, price_mode, progress, total, truncated, results, data_version, "
+            "cache_key, error, queued_at, started_at, done_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (user_id, status, mode, json.dumps(conditions or [], ensure_ascii=False),
+             universe, count_limit, price_mode, progress, total, int(bool(truncated)),
+             None if results is None else json.dumps(results, ensure_ascii=False),
+             data_version, cache_key, error, now,
+             now if status == "running" else None,
+             now if finished else None))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_screener_run(run_id):
+    """单条任务 (含 username: 推送文案与管理员视图都要显示是谁的任务)。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT r.*, u.username FROM screener_runs r JOIN users u ON u.id=r.user_id "
+            "WHERE r.id=?", (run_id,)).fetchone()
+        return _screener_run_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def active_screener_run(user_id=None):
+    """最早的 queued/running 任务 (user_id 为空 = 全局队列头), 无则 None。"""
+    conn = get_conn()
+    try:
+        sql = ("SELECT * FROM screener_runs WHERE status IN ('queued','running') ")
+        args = []
+        if user_id is not None:
+            sql += "AND user_id=? "
+            args.append(user_id)
+        sql += "ORDER BY id LIMIT 1"
+        row = conn.execute(sql, args).fetchone()
+        return _screener_run_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_screener_runs(user_id, limit=3, include_active=False):
+    """该用户最近的任务 (新→旧)。默认只含已结束的 (历史), 界面上限 3 条。"""
+    limit = _clamp_int(limit, 1, 50, 3)
+    conn = get_conn()
+    try:
+        sql = "SELECT * FROM screener_runs WHERE user_id=?"
+        if not include_active:
+            sql += " AND status NOT IN ('queued','running')"
+        sql += " ORDER BY id DESC LIMIT ?"
+        rows = conn.execute(sql, (user_id, limit)).fetchall()
+        return [_screener_run_row(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def claim_screener_run(run_id):
+    """queued → running (原子, 并发只有一个 worker 能抢到)。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE screener_runs SET status='running', started_at=?, progress=0, error=NULL "
+            "WHERE id=? AND status='queued'", (_now_iso(), run_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def update_screener_run(run_id, **fields):
+    """更新白名单字段; JSON 字段自动序列化。返回是否改到行。"""
+    allowed = {"status", "progress", "total", "results", "error", "done_at",
+               "started_at", "data_version", "cache_key", "mode", "conditions",
+               "universe", "count_limit", "price_mode", "truncated"}
+    sets, args = [], []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        if k in _SCREENER_JSON and v is not None:
+            v = json.dumps(v, ensure_ascii=False)
+        sets.append(f"{k}=?")
+        args.append(v)
+    if not sets:
+        return False
+    args.append(run_id)
+    conn = get_conn()
+    try:
+        cur = conn.execute(f"UPDATE screener_runs SET {', '.join(sets)} WHERE id=?", args)
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def stop_screener_run(run_id):
+    """停止任务。返回值:
+
+    'cancelled'  排队中 → 已直接置 stopped (无需 worker 介入)
+    'stopping'   运行中 → 已置内存取消标志, 由 worker 收尾 (保留部分结果)
+    'done'/'stopped'/'error'  已结束的现状 (调用方提示「任务已结束」)
+    None         任务不存在
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT status FROM screener_runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        status = row["status"]
+        if status == "queued":
+            conn.execute("UPDATE screener_runs SET status='stopped', done_at=? "
+                         "WHERE id=? AND status='queued'", (_now_iso(), run_id))
+            conn.commit()
+            return "cancelled"
+        if status == "running":
+            return "stopping"
+        return status
+    finally:
+        conn.close()
+
+
+def prune_screener_runs(user_id, keep=SCREENER_RUN_KEEP):
+    """每用户只保留最近 keep 条已结束任务 (排队/运行中的不动)。返回删除行数。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM screener_runs WHERE user_id=? "
+            "AND status NOT IN ('queued','running') AND id NOT IN ("
+            "  SELECT id FROM screener_runs WHERE user_id=? "
+            "  AND status NOT IN ('queued','running') ORDER BY id DESC LIMIT ?)",
+            (user_id, user_id, _clamp_int(keep, 1, 200, SCREENER_RUN_KEEP)))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def screener_queue_position(run_id):
+    """该任务前面还有几个排队任务 (不含自己); 非排队返回 0。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM screener_runs WHERE status='queued' AND id<?",
+            (run_id,)).fetchone()
+        return int(row["n"]) if row else 0
+    finally:
+        conn.close()
+
+
+def find_screener_run_by_cache(cache_key, exclude_id=None):
+    """同 cache_key 且已完成的最近一条任务 (跨用户: 结果只由条件+数据版本决定)。
+
+    用于「当日收盘后同样条件不再扫」——命中即复用其结果, 只落一条新的完成记录。
+    """
+    if not cache_key:
+        return None
+    conn = get_conn()
+    try:
+        sql = ("SELECT * FROM screener_runs WHERE cache_key=? AND status='done' ")
+        args = [cache_key]
+        if exclude_id is not None:
+            sql += "AND id != ? "
+            args.append(int(exclude_id))
+        sql += "ORDER BY id DESC LIMIT 1"
+        row = conn.execute(sql, args).fetchone()
+        return _screener_run_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_screener_queue(limit=50):
+    """管理员: 全部排队/运行中的任务 (含用户名, 按入队顺序)。"""
+    limit = _clamp_int(limit, 1, 500, 50)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT r.*, u.username FROM screener_runs r JOIN users u ON u.id=r.user_id "
+            "WHERE r.status IN ('queued','running') ORDER BY r.id LIMIT ?",
+            (limit,)).fetchall()
+        return [_screener_run_row(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_recent_screener_runs(limit=20):
+    """管理员: 全部用户最近结束的任务 (新→旧)。"""
+    limit = _clamp_int(limit, 1, 200, 20)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT r.*, u.username FROM screener_runs r JOIN users u ON u.id=r.user_id "
+            "WHERE r.status NOT IN ('queued','running') ORDER BY r.id DESC LIMIT ?",
+            (limit,)).fetchall()
+        return [_screener_run_row(r) for r in rows]
+    finally:
+        conn.close()
 
 
 # ── 图表画线 (主面板画线模式, 按 用户+代码+周期 整体同步) ──

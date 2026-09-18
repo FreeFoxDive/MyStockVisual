@@ -16,6 +16,7 @@ from api import cn_data  # noqa: E402,F401
 from api import alerts  # noqa: E402,F401
 from api import auth  # noqa: E402,F401
 from api import drawings  # noqa: E402,F401
+from api import factors  # noqa: E402,F401
 from api import ignores  # noqa: E402,F401
 from api import kline  # noqa: E402,F401
 from api import market  # noqa: E402,F401

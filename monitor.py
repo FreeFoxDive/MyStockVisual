@@ -21,9 +21,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import dingtalk  # noqa: E402
-import ntfy  # noqa: E402
 import error_notify  # noqa: E402
+# 别名 notify_mod: 本模块多个函数带 `notify` 布尔参数 (是否推送), 会遮蔽同名模块
+import notify as notify_mod  # noqa: E402
 import feed as feed_mod  # noqa: E402
 import market_hours  # noqa: E402
 import trades  # noqa: E402
@@ -54,10 +54,12 @@ BUFFER_SECONDS = 30 * 60
 COOLDOWN_ACCEL_SEC = 30 * 60
 DAILY_ONCE = frozenset({
     "breakeven_hit", "be_broken", "sl_breached", "tp_reached", "limit_up_sealed",
-    "hold_exit_am", "hold_exit_pm",
+    "hold_exit_am", "hold_exit_pm", "risk_missing",
 })
 ACCEL_TYPES = frozenset({"accel_down", "accel_up"})
 HOLD_EXIT_TYPES = frozenset({"hold_exit_am", "hold_exit_pm"})
+# 去重键带 trade_id 的类型: 同一标的的多笔持仓各自提醒, 互不遮挡
+PER_TRADE_TYPES = HOLD_EXIT_TYPES | {"risk_missing"}
 HOLD_EXIT_AM = (10, 0)         # 到期日上午提醒
 HOLD_EXIT_AM_END = (11, 30)
 HOLD_EXIT_PM = (14, 0)         # 到期日下午提醒
@@ -457,14 +459,15 @@ _UNSET = object()
 def should_fire(user_id, symbol, alert_type, now_dt=None, last=_UNSET, trade_id=None):
     """节流: 每日一次 / 30 分钟冷却。last 可注入便于单测; 显式 None 表示无历史。
 
-    hold_exit_* 按 (user, symbol, type, trade_id) 去重, 避免同股两笔持仓互相挡住。
+    hold_exit_* 与 risk_missing 按 (user, symbol, type, trade_id) 去重, 避免同股
+    两笔持仓互相挡住。
     """
     now_dt = now_dt or market_hours.now()
     today = now_dt.strftime("%Y-%m-%d")
     if last is _UNSET:
         last = trades.last_monitor_alert(
             user_id, symbol, alert_type,
-            trade_id=trade_id if alert_type in HOLD_EXIT_TYPES else None,
+            trade_id=trade_id if alert_type in PER_TRADE_TYPES else None,
         )
     if last is None:
         return True
@@ -547,9 +550,131 @@ def _check_hold_expire(now_dt=None, persist=True, notify=True):
             })
     if fired and notify:
         md = _build_hold_message(fired, now_dt)
-        dingtalk.send_markdown("持仓到期提醒", md)
-        ntfy.send_markdown("持仓到期提醒", md)
+        notify_mod.notify("持仓到期提醒", md)
     return fired
+
+
+RISK_REMINDER_DEFAULT_AT = (9, 35)   # 交易日提醒时刻 (北京时间, 可被 env 覆盖)
+# 提醒窗口长度 (分钟): 只在 [时刻, 时刻+窗口) 内触发。只判"不早于"的话, 进程若在
+# 晚间启动/重启就会在 20:00 推一条"未设风控价", 与"每个交易日 09:35 检查"不符。
+RISK_REMINDER_WINDOW_MIN = max(1, int(os.environ.get("RISK_REMINDER_WINDOW_MIN", "330")))
+
+
+def _risk_reminder_at():
+    """RISK_REMINDER_AT=HH:MM → (hour, minute); 非法值回落默认 09:35。"""
+    raw = os.environ.get("RISK_REMINDER_AT", "").strip()
+    if raw:
+        try:
+            h, m = raw.split(":")
+            h, m = int(h), int(m)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return (h, m)
+        except (TypeError, ValueError):
+            pass
+        log.warning("RISK_REMINDER_AT 无效 (%s), 回落默认 09:35", raw)
+    return RISK_REMINDER_DEFAULT_AT
+
+
+def _risk_reminder_due(now):
+    """当前是否落在提醒窗口内 (交易日由调用方判定)。窗口长度可运行时覆盖。"""
+    try:
+        window = max(1, int(os.environ.get("RISK_REMINDER_WINDOW_MIN",
+                                           str(RISK_REMINDER_WINDOW_MIN))))
+    except (TypeError, ValueError):
+        window = RISK_REMINDER_WINDOW_MIN
+    h, m = _risk_reminder_at()
+    start = h * 60 + m
+    now_min = now.hour * 60 + now.minute
+    return start <= now_min < start + window
+
+
+def _build_risk_missing_message(fired, now_dt):
+    """未设风控价提醒 markdown (按用户名分组)。"""
+    groups = defaultdict(list)
+    for item in fired:
+        pos = item["position"]
+        groups[item["username"]].append(
+            f"- **{pos['symbol']} {pos.get('name') or ''}**: "
+            f"{item['alert']['detail']}"
+        )
+    lines = [
+        f"## 持仓未设风控价 {now_dt.strftime('%Y-%m-%d')}",
+        "",
+        f"共 {len(fired)} 笔持仓未设置止盈/保本/止损, 监控不会预警, 请在「交易记录」补全:",
+        "",
+    ]
+    for u in sorted(groups):
+        lines.append(f"**{u}**")
+        lines.extend(groups[u])
+    return "\n".join(lines)
+
+
+def check_risk_missing(now_dt=None, persist=True, notify=True):
+    """交易日提醒: open 持仓未设置止盈/保本/止损。不拉行情。返回 fired 列表。
+
+    每 (用户, 标的, 持仓) 每交易日一次。先写 monitor_alerts (站内为准) 再入队推送 ——
+    推送失败/未配置不影响站内可见性。
+    """
+    now_dt = now_dt or market_hours.now()
+    positions = trades.list_positions_missing_risk_prices()
+    if not positions:
+        return []
+    today = now_dt.strftime("%Y-%m-%d")
+    fired = []
+    for pos in positions:
+        if not should_fire(pos["user_id"], pos["symbol"], "risk_missing",
+                           now_dt=now_dt, trade_id=pos["id"]):
+            continue
+        detail = f"未设置止盈/保本/止损 (买入 {(pos.get('entry_date') or '-')[:10]})"
+        if persist:
+            trades.insert_monitor_alert(
+                pos["user_id"], pos["id"], pos["symbol"], "risk_missing",
+                today, price=None, detail=detail,
+            )
+        fired.append({
+            "username": pos.get("username") or str(pos["user_id"]),
+            "position": pos,
+            "alert": {"alert_type": "risk_missing", "detail": detail},
+        })
+    if fired and notify:
+        notify_mod.notify("持仓未设风控价", _build_risk_missing_message(fired, now_dt))
+    return fired
+
+
+def _risk_reminder_loop():
+    """交易日到点检查一次 (默认 09:35, 见 RISK_REMINDER_AT / RISK_REMINDER_WINDOW_MIN)。
+
+    重启后同一交易日不会重复提醒: 是否已发由 monitor_alerts 落库决定 (should_fire)。
+    """
+    fired_day = None
+    while True:
+        try:
+            now = market_hours.now()
+            day = now.date().isoformat()
+            if day != fired_day and market_hours.is_trading_day(now) \
+                    and _risk_reminder_due(now):
+                check_risk_missing(now_dt=now)
+                fired_day = day
+        except Exception as e:
+            log.warning(f"未设风控价提醒失败: {e}")
+            error_notify.notify_exception("risk-reminder", e)
+        time.sleep(60)
+
+
+_risk_thread = None
+_risk_thread_lock = threading.Lock()
+
+
+def start_risk_reminder():
+    """启动未设风控价每日提醒线程 (daemon, 重复调用只起一次)。"""
+    global _risk_thread
+    with _risk_thread_lock:
+        if _risk_thread is not None and _risk_thread.is_alive():
+            return _risk_thread
+        _risk_thread = threading.Thread(
+            target=_risk_reminder_loop, name="risk-reminder", daemon=True)
+        _risk_thread.start()
+        return _risk_thread
 
 
 PRICE_ALERT_COOLDOWN_SEC = 1800  # 同一条预警 30 分钟冷却
@@ -609,8 +734,7 @@ def _evaluate_price_alerts(alerts, quotes, now_dt, persist=True, notify=True):
             for f in fired
         ]
         md = "价格预警触发\n" + "\n".join(lines)
-        dingtalk.send_markdown("价格预警", md)
-        ntfy.send_markdown("价格预警", md)
+        notify_mod.notify("价格预警", md)
     return fired
 
 
@@ -809,8 +933,7 @@ def _evaluate_trendline_monitors(monitors, quotes, now_dt, persist=True, notify=
         now_str = now_dt.strftime("%Y-%m-%d %H:%M")
         lines = [f"- **{f['monitor']['symbol']}**: {f['detail']}" for f in fired]
         md = f"## 趋势线跌破预警 {now_str}\n" + "\n".join(lines)
-        dingtalk.send_markdown("趋势线跌破预警", md)
-        ntfy.send_markdown("趋势线跌破预警", md)
+        notify_mod.notify("趋势线跌破预警", md)
     return fired
 
 
@@ -935,8 +1058,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
 
     if fired and notify:
         md = _build_message(fired, now_dt)
-        dingtalk.send_markdown("持仓监控", md)
-        ntfy.send_markdown("持仓监控", md)
+        notify_mod.notify("持仓监控", md)
     return fired
 
 

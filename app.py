@@ -323,8 +323,25 @@ def start_background_jobs():
         import monitor as _mon
         _mon.start_background(market.get_af, fallback_quotes=market.fetch_quotes)
         log.info("持仓监控线程已启动")
+        # 交易日到点提醒「未设止盈/保本/止损」的持仓 (独立线程, 不拉行情)
+        _mon.start_risk_reminder()
+        log.info("未设风控价提醒线程已启动")
     except Exception as e:
         log.warning(f"持仓监控启动失败: {e}")
+
+    try:
+        from api import screener as _scr
+        _scr.start_worker()
+        log.info("选股任务 worker 已启动")
+    except Exception as e:
+        log.warning(f"选股 worker 启动失败: {e}")
+
+    try:
+        import factors as _fac
+        _fac.start_scheduler()
+        log.info("因子库调度线程已启动")
+    except Exception as e:
+        log.warning(f"因子库调度启动失败: {e}")
 
     try:
         import watchdog as _wd

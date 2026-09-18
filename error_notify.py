@@ -27,7 +27,7 @@ from collections import deque
 
 log = logging.getLogger("error_notify")
 
-_PREFIXES = ("error_notify", "dingtalk", "ntfy", "myappnotify")
+_PREFIXES = ("error_notify", "notify", "dingtalk", "ntfy", "myappnotify")
 
 WINDOW_SEC = max(1.0, float(os.environ.get("ERROR_NOTIFY_WINDOW_SEC", "300")))
 BUDGET_PER_MIN = max(1, int(os.environ.get("ERROR_NOTIFY_BUDGET_PER_MIN", "5")))
