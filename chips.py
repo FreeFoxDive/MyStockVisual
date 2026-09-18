@@ -36,6 +36,7 @@ import time
 
 import requests
 
+from indicators import volume_shares_mult
 from logger import redact_message
 
 log = logging.getLogger("chips")
@@ -156,23 +157,11 @@ def fetch_chip_bars(symbol, count=WINDOW):
 def _volume_to_shares_mult(df):
     """判断 AF 日K volume 单位: 100=手(×100 为股), 1=股。
 
-    用 amount/(volume*close) 的中位数: ≈100 → 手, ≈1 → 股。
+    判据本体在 indicators.volume_shares_mult (分时均价线也用同一条: 单位猜错会
+    让均价整体差 100 倍), 这里只固定「看最后 10 根日K」的窗口。
     """
-    ratios = []
-    for _, row in df.tail(10).iterrows():
-        try:
-            v = float(row["volume"])
-            a = float(row.get("amount") or 0.0)
-            c = float(row["close"])
-        except (ValueError, TypeError, KeyError):
-            continue
-        if v > 0 and a > 0 and c > 0:
-            ratios.append(a / (v * c))
-    if not ratios:
-        return 100  # 无成交额可判: 默认按「手」(AF 股票口径)
-    ratios.sort()
-    med = ratios[len(ratios) // 2]
-    return 100 if med > 10 else 1
+    amount = df["amount"] if "amount" in df.columns else None
+    return volume_shares_mult(df["close"], df["volume"], amount, tail=10)
 
 
 def fetch_af_chip_bars(symbol, count=WINDOW):

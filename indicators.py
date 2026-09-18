@@ -112,6 +112,83 @@ def compute_impulse(close, macd_params=None):
     return impulse
 
 
+# 一手 = 多少股/张: 股票·基金·指数·港美股 100 (手), 可转债 10 (1手=10张), 已是股则 1。
+# 只按量级取最近的一档 (对数距离), 所以不需要知道标的是什么, 也不受价格/复权系数缩放影响。
+_LOT_FACTORS = (1, 10, 100)
+
+
+def volume_shares_mult(close, volume, amount=None, tail=10):
+    """成交量单位系数: 1 = volume 已经是股/张, 10 = 可转债手, 100 = 手 (股票/基金/指数)。
+
+    判据 (与筹码/日K 同口径): amount/(volume*close) 的中位数落在哪个手数档 ——
+    股票/ETF/指数/港美股 ≈100, 可转债 ≈10, 源直接给股则 ≈1。前复权价配未复权
+    成交额会让比值略微偏离, 但量级差不受影响。
+    没有可用样本 (源不带成交额, market._normalize 会填 0.0) 时按「手」—— 股票
+    分钟/日K 源 (AlphaFeed / 麦蕊 fsjy / 东财) 都是手, 是更常见的口径。
+
+    tail: 只看最后 tail 个样本 (日K 用 10 根防更早的除权/停牌数据干扰); 传 None 看全部。
+    """
+    def _vals(seq):
+        if seq is None:
+            return []
+        # 非数值 (空串/占位符) 一律按缺值跳过 —— object dtype 直接 astype(float) 会抛
+        return pd.to_numeric(pd.Series(list(seq)), errors="coerce").tolist()
+
+    c, v, a = _vals(close), _vals(volume), _vals(amount)
+    n = len(c)
+    start = 0 if not tail else max(0, n - tail)
+    ratios = []
+    for i in range(start, n):
+        if i >= len(v) or i >= len(a):
+            break
+        try:
+            vi, ai, ci = float(v[i]), float(a[i]), float(c[i])
+        except (TypeError, ValueError):
+            continue
+        if vi > 0 and ai > 0 and ci > 0:
+            ratios.append(ai / (vi * ci))
+    if not ratios:
+        return 100
+    ratios.sort()
+    med = ratios[len(ratios) // 2]
+    if med <= 0 or not np.isfinite(med):
+        return 100
+    # 取对数距离最近的手数档: ≈100 → 手 (股票/ETF/指数/港美股), ≈10 → 可转债, ≈1 → 已是股
+    return min(_LOT_FACTORS, key=lambda f: abs(float(np.log(med)) - float(np.log(f))))
+
+
+def intraday_avg_price(close, volume, amount):
+    """分时均线 (均价) = 当日累计成交额 / 累计成交量, 东财分时图那条黄线。
+
+    从当日第一根 bar 起累计 (调用方已把 df 截到当日), 单位系数见 volume_shares_mult。
+    **只累加量额都有效的 bar**: 某根缺成交额 (源给 0/NaN, 停牌首根常见) 时若把它的
+    成交量算进分母, 之后每一根均价都会偏低且偏差一直带到收盘 —— 宁可让这一根不参与。
+    还没有有效 bar 时该点记 None (全 None 时前端不画线), 而不是画一条贴地的 0 元线
+    把价格轴拉开。
+    """
+    c = pd.to_numeric(pd.Series(list(close)), errors="coerce")
+    v = pd.to_numeric(pd.Series(list(volume)), errors="coerce").fillna(0.0)
+    n = len(c)
+    if amount is None or n == 0:
+        return [None] * n
+    a = pd.to_numeric(pd.Series(list(amount)), errors="coerce").fillna(0.0)
+    if len(a) < n or len(v) < n:   # 三个序列等长是调用方契约; 短了就只算到最短的
+        n = min(n, len(a), len(v))
+        c, v, a = c.iloc[:n], v.iloc[:n], a.iloc[:n]
+    mult = volume_shares_mult(c, v, a, tail=None)
+    valid = (v > 0) & (a > 0)
+    cum_v = v.where(valid, 0.0).cumsum() * mult
+    cum_a = a.where(valid, 0.0).cumsum()
+    out = []
+    for i in range(n):
+        if cum_v.iloc[i] > 0 and cum_a.iloc[i] > 0:
+            val = cum_a.iloc[i] / cum_v.iloc[i]
+            out.append(float(val) if np.isfinite(val) else None)
+        else:
+            out.append(None)
+    return out
+
+
 def compute_all_indicators(df, period="1d",
                            with_rsi=True, with_kdj=True, with_atr_val=True):
     """Compute all indicators on OHLCV DataFrame

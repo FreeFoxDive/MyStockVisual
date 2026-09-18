@@ -99,6 +99,23 @@ class ChartColorTest(unittest.TestCase):
         self.assertIn("const maColors = maLineColors();", html, "updateChart 应改用共享取色")
         self.assertNotIn("const maColors = [C().ma5", html, "旧的内联取色应已移除")
 
+    def test_avg_price_line_uses_own_token(self):
+        """分时均价线: 线色与提示框「均价」读数必须是同一个 token (防图/文两套色)。"""
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        self.assertRegex(html, r"avgPrice:\s*'--chart-amber'",
+                         "CHART_VAR_MAP 未把 avgPrice 映射到 --chart-amber (东财均线黄)")
+        # 取色只有 C().avgPrice 一处来源, 不许在分时建图里写死颜色
+        self.assertIn("name: '均价', type: 'line'", html, "分时均价线没有建成 line series")
+        self.assertIn("lineStyle: { color: C().avgPrice, width: 1 }", html,
+                      "均价线没有走 C().avgPrice")
+        self.assertIn('<div>均价 <span style="color:${C().avgPrice}">', html,
+                      "分时提示框的均价读数没用同一个 token")
+        self.assertIn("text: intradayAvgText", html, "分时左上角缺少均价读数行")
+        readout = html[html.index("text: intradayAvgText"):]
+        readout = readout[:readout.index("});")]
+        self.assertIn("fill: C().avgPrice", readout,
+                      "左上角均价读数与均价线/提示框必须同色 (三处一个 token)")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

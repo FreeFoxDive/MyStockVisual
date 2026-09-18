@@ -1369,6 +1369,119 @@ const MINUTE_COUNTS = { '1m': 1200, '5m': 480, '15m': 320, '30m': 320, '60m': 10
 // 日K: 3年可见 (3×252) + RSI 收敛 warmup 250
 const DAILY_COUNT = 3 * 252 + 250; // 1006
 const ALL_PERIODS = ['1d', '1w', '1M', 'intraday', ...MINUTE_PERIODS];
+// 周期中文名: 图表左上角的周期标题与 #btn-<period> 按钮文案共用一张表
+// (周期只体现在按钮高亮上时, 截图导出/窄屏都认不出当前看的是哪个周期)。
+const PERIOD_LABELS = {
+  '1d': '日K', '1w': '周K', '1M': '月K', intraday: '分时',
+  '1m': '1分', '5m': '5分', '15m': '15分', '30m': '30分', '60m': '60分',
+};
+
+function periodLabel(period) {
+  return PERIOD_LABELS[period] || String(period || '').toUpperCase();
+}
+
+// ── 主图左上角两行 (周期标题 / MA·BOLL 图例) 的行位与字号 ──
+// 图表顶部 2..18px 是 dataZoom 滑块 (建图处 slider: top 2 + height 16, 横跨整宽),
+// 所以两行只能画在主图网格内。K 线主图网格顶只有 2% (calcGridLayout topGap), 矮屏上
+// 网格顶到滑块下沿的像素差不足一行 —— 标题行按「距网格顶 15px」与「滑块下沿再让出
+// 自身盒高」取较大者, 图例行再往下 ROW_PITCH, 于是标题永不被滑块压住、也永远与
+// MA5/MA10 图例不同行。分时网格顶 12% 时 title 恒为 15px, 与面板名标签 (gridTop+15)
+// 同一坐标口径。
+// 标题字号比图例 (11px) 大一档, 是"标题"而不是又一行读数; 盒高/行距都跟着它走
+// (MAIN_TITLE_BOX_TOP = 字号 + 1, 与 paintLabels 的底衬推导同一条规则)。
+const CHART_SLIDER_BOTTOM = 18;                  // dataZoom slider 下沿 (见建图处 top: 2, height: 16)
+const MAIN_TITLE_FONT = 'bold 13px monospace';
+const MAIN_TITLE_BOX_TOP = 14;                   // 标题盒上沿 = 基线 - 14 (13px + 1)
+const ROW_PITCH = 23;                            // 两行行距: 标题盒 18px + 5px 空隙
+
+function mainRowOffsets(gridTopPx) {
+  const title = Math.max(15, CHART_SLIDER_BOTTOM + MAIN_TITLE_BOX_TOP - gridTopPx);
+  return { title, legend: title + ROW_PITCH };
+}
+
+/** 当前**可见末根** bar 的下标 (dataZoom.endValue; 未交互过/拿不到时退到最后一根)。
+ *  MA·BOLL 图例的数值、标题的日期、分时均价读数共用它 —— 几行说的必须是同一根 bar。
+ *  逐帧路径: 走 chartModel() 取 dataZoom 组件, **不能**用 chart.getOption()
+ *  (后者每次深拷贝整份 option, 见 chartModel 处的说明; 标题/读数是函数文本, 每帧都求值)。
+ *  endValue 实测会超出数据范围 (用户滑到右端后读到过 1012/1005), 也可能不是有限数,
+ *  所以统一钳进 [0, n-1]。 */
+function visibleBarIndex(n) {
+  if (!n) return null;
+  let endValue = null;
+  try {
+    const model = chartModel();
+    const dz = model && model.getComponent ? model.getComponent('dataZoom', 0) : null;
+    endValue = dz && dz.option ? dz.option.endValue : null;
+  } catch (e) { endValue = null; /* model 未建/组件缺失: 用最新 bar */ }
+  // 缺席要单独判: Number(null) === 0 会把它当成"第 0 根", 于是标题日期跳到最早那根
+  if (endValue == null || endValue === '') return n - 1;
+  const v = Number(endValue);
+  if (!Number.isFinite(v)) return n - 1;
+  return Math.max(0, Math.min(n - 1, Math.round(v)));
+}
+
+// 主图窄到这个宽度就换成不带年份的日期: 手机 + 侧栏展开时主图只剩 ~140px,
+// 「5分 · 2026-09-18 10:05」会顶出网格
+const TITLE_NARROW_GRID_PX = 200;
+
+/** 本地时钟的当天 (YYYY-MM-DD)。必须按本地时区拼, 不能走 toISOString —— 那是 UTC,
+ *  北京时间 08:00 之前会串到前一天。now 只给测试注入用。 */
+function localDayStr(now) {
+  const d = now ? new Date(now) : new Date();
+  const p = (v) => (v < 10 ? '0' : '') + v;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 标题里的日期以本地时钟为准的情形: **正在看最新一根** (没有拖进历史区间) +
+ *  服务器没说过今天是休市 + 本地当天已经走到数据前面 —— 当日 bar 还没从数据源补上来
+ *  时 (日K 常见, 实测 09-18 盘中标题还写着 09-17), 用本地当天, 否则标题比工具栏的
+ *  实时行情慢一天。其余情况一律用 bar 自带的日期:
+ *    * 拖缩放看历史区间 (atLatest=false): 本地当天不是这张图在画的那天;
+ *    * 周末/节假日 (isTradingDay=false): 那天根本没有 bar, 写上去是假日期。
+ *  rawDate 是 "YYYY-MM-DD" (日/周/月K) 或 "YYYY-MM-DD HH:MM" (分钟K), 只换日期段。
+ *  today 只给测试注入用, 运行时不传 (取本地时钟)。 */
+function titleDateWithLocalClock(rawDate, atLatest, today) {
+  if (!rawDate || !atLatest) return rawDate;
+  const st = (typeof marketClock !== 'undefined' && marketClock) ? marketClock.state : null;
+  if (st && st.isTradingDay === false) return rawDate;
+  const day = today || localDayStr();
+  return day > rawDate.slice(0, 10) ? day + rawDate.slice(10) : rawDate;
+}
+
+/** 主图左上角标题 =「周期 · 日期」。日期取当前可见末根 bar (见 visibleBarIndex),
+ *  并按 titleDateWithLocalClock 决定是否改成本地时钟的当天。
+ *  窄网格**整段去掉年份**而不是按宽度截断 —— 截断会把日期切成「2026-09-…」。
+ *  交给 paintLabels 当 text 函数用: overlay 每帧重绘, 标题日期才跟着缩放/平移走。 */
+function chartTitleText() {
+  const label = periodLabel(STATE.period);
+  const intraday = STATE.period === 'intraday';
+  const bars = intraday
+    ? ((STATE.intradayData && STATE.intradayData.bars) || [])
+    : ((STATE.klineData && STATE.klineData.klines) || []);
+  const n = bars.length;
+  const i = visibleBarIndex(n);
+  const bar = i == null ? null : bars[i];
+  // 分时的 bar 只有 HH:MM, 日期由后端随响应给 (后端按交易日截当日, 客户端不该自己推);
+  // 分时只画一天, 时间不必上标题 (那是分钟 K 才需要, 它们跨天)。旧缓存 payload 没这个
+  // 字段时降级成只写周期名 —— 宁可少写一半, 也不要「分时 · 11:30」这种半截口径
+  const iDate = intraday && STATE.intradayData ? STATE.intradayData.date : '';
+  const raw = intraday ? (iDate || '') : ((bar && bar.date) || '');
+  if (!raw) return label;
+  const shown = titleDateWithLocalClock(raw, i != null && i === n - 1);
+  const g = STATE._gridRects && STATE._gridRects[0];
+  const narrow = g ? (g.right - g.left) < TITLE_NARROW_GRID_PX : false;
+  return `${label} · ${(narrow && shown.length > 5) ? shown.slice(5) : shown}`;
+}
+
+/** 分时左上角的均价读数 (与均价线同色): 取当前可见末根 bar 的 avg_price。
+ *  和 K 线那边的 MA 图例同一口径 (visibleBarIndex) —— 均价线随快照刷新/缩放/平移
+ *  变化时这个数字跟着走 (60s 刷新重建标签, overlay 每帧重绘时求值)。 */
+function intradayAvgText() {
+  const bars = (STATE.intradayData && STATE.intradayData.bars) || [];
+  const i = visibleBarIndex(bars.length);
+  const bar = i == null ? null : bars[i];
+  return `均价 ${fmtPrice3(bar ? bar.avg_price : null)}`;
+}
 // 分钟 K / 分时历史按数据源周期刷新；快照、五档、日周月指标由 LiveMarket 管理。
 const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3, '60m': 3600e3 };
 const INTRADAY_REFRESH_MS = 60e3;
@@ -1452,6 +1565,8 @@ const CHART_VAR_MAP = {
   ma5: '--chart-ink', macdDif: '--chart-ink', kdjK: '--chart-ink', rsi6: '--chart-ink', obv: '--chart-ink',
   ma10: '--chart-amber', macdDea: '--chart-amber', kdjD: '--chart-amber', rsi12: '--chart-amber',
   maobv: '--chart-amber', chipAvg: '--chart-amber',
+  // 分时均价线 (东财分时那条黄线): 与 MA10 同色系是刻意的 —— 东财的均线黄就这一支
+  avgPrice: '--chart-amber',
   ma20: '--chart-rose', kdjJ: '--chart-rose', rsi24: '--chart-rose',
   atr: '--chart-atr',
   boll: '--chart-boll',
@@ -4166,6 +4281,17 @@ function renderIntraday(data) {
       itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
       markLine: buildKlineMarkLines(bars) },
   ];
+  // 分时均线 (均价): 当日累计成交额/累计成交量, 口径同东财分时那条黄线 (后端算好随 bar 下发)。
+  // hasAvg 守卫两种空数据: 源不带成交额、以及浏览器里 ≤120s 的旧缓存 payload 没有该字段 ——
+  // 这时不画线、左上角也不出那个读数行, 而不是画一条全 0 的线把价格轴拉开。
+  const hasAvg = bars.some(b => b.avg_price != null);
+  if (hasAvg) {
+    series.push({
+      name: '均价', type: 'line', xAxisIndex: 0, yAxisIndex: 0,
+      data: bars.map(b => b.avg_price), symbol: 'none', smooth: false,
+      lineStyle: { color: C().avgPrice, width: 1 }, itemStyle: { color: C().avgPrice },
+    });
+  }
   const zoomIndices = [0];
   let gi = 1;
   let xAxisShowBase = false; // 最后才设 true
@@ -4284,6 +4410,7 @@ function renderIntraday(data) {
         h += isPhoneUi()
           ? `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)}</div><div>低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`
           : `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`;
+        h += `<div>均价 <span style="color:${C().avgPrice}">${b.avg_price==null?'—':fmtPrice3(b.avg_price)}</span></div>`;
         h += `<div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?C().overbought:v<20?C().oversold:clr}">${v.toFixed(2)}</span>`;
@@ -4328,6 +4455,25 @@ function renderIntraday(data) {
   };
   if (showVolume) pushILabel(1, 'VOL', C().macdDif);
   subList.forEach((p, pi) => pushILabel((showVolume ? 2 : 1) + pi, iLabels[p] || p, iColors[p] || C().text));
+  // 主图左上角周期标题 (分时): 与 K 线周期共用 mainRowOffsets 的行位, 在 VOL/MACD 等
+  // 面板名之上、不压 dataZoom 滑块
+  // 主图左上角两行: 周期标题 + (有均价时) 均价读数 —— 行位与 K 线周期的
+  // 「标题 / MA 图例」两行同一套 mainRowOffsets, 所以两个视图版式一致。
+  // 读数与均价线同色 + 取可见末根 bar 的值, 线一动这个数字就跟着动。
+  const iMainTop = spanPx(grids[0].top, iCh, false);
+  const iRows = mainRowOffsets(iMainTop);
+  igraphics.push({
+    text: chartTitleText, x: spanPx(grids[0].left, iCw, false) + 6,
+    y: iMainTop + iRows.title,
+    fill: C().text, font: MAIN_TITLE_FONT, bg: true,
+  });
+  if (hasAvg) {
+    igraphics.push({
+      text: intradayAvgText, x: spanPx(grids[0].left, iCw, false) + 6,
+      y: iMainTop + iRows.legend,
+      fill: C().avgPrice, font: '11px monospace', bg: true,
+    });
+  }
   // 分时无画线层: 先同步清掉上一个周期残留的画线 (标签随后由 redrawDrawings 按帧重绘,
   // drawOverlayCtx 每帧也会清一次, 这里只为消掉"清屏前的一帧残留")
   const ov = document.getElementById('draw-overlay');
@@ -5552,6 +5698,14 @@ function updateChart(reTheme) {
       fill: C().macdDif, font: 'bold 11px monospace',
     });
   }
+  // 主图左上角周期标题: 在 MA 图例上一行 (行位见 mainRowOffsets —— 不压 dataZoom
+  // 滑块、也不与 MA5/MA10 同行), 截图导出后仍能一眼看出当前周期
+  const mainRow = mainRowOffsets(spanPx(grids[0].top, ch, false));
+  graphics.push({
+    text: chartTitleText, x: spanPx(grids[0].left, cw, false) + 6,
+    y: spanPx(grids[0].top, ch, false) + mainRow.title,
+    fill: C().text, font: MAIN_TITLE_FONT, bg: true,
+  });
   // 筹码分布摘要 (筹码条正下方右侧空白窄带): 两列, 标签左对齐 + 数值右对齐成列。
   // 字号自适应 13→10: 基准 13px, 窄窗/矮带逐级减小以免超宽或超出画布。
   // 标题行比明细大 2px 且加粗, 单独占一行。
@@ -6033,12 +6187,31 @@ function paintTagLayer(c2, tags, P) {
   tags.filter(t => t.col === 'free').forEach(t => paintTag(c2, t.text, t.x, t.y, t.bg));
 }
 
+/** 从 'bold 13px monospace' 取字号。底衬尺寸的唯一来源: 上沿 = 基线 −(字号+1),
+ *  盒高 = 字号+5 (11px → [y-12, y+4], 与图例 putSegs 的盒子同一规则)。 */
+function labelFontSize(fontSpec) {
+  const m = /(\d+(?:\.\d+)?)px/.exec(String(fontSpec || ''));
+  return m ? parseFloat(m[1]) : 11;
+}
+
 function paintLabels(c2, labels) {
   (labels || []).forEach(l => {
     c2.font = l.font || 'bold 11px monospace';
+    // text 可以是函数: overlay 每帧都重绘, 周期标题的日期要跟着可见 bar 走
+    const text = typeof l.text === 'function' ? l.text() : l.text;
+    if (text == null || text === '') return;
+    // 可选底衬 (周期标题用): 与图例 putSegs 同款 —— 文字画在最上层永远清晰,
+    // 底衬只把压在下方的蜡烛压暗, 不追求把蜡烛挪开 (图内左上角做不到硬避让)。
+    if (l.bg) {
+      const fs = labelFontSize(c2.font);
+      c2.fillStyle = C().bg;
+      c2.globalAlpha = 0.65;
+      c2.fillRect(l.x - 4, l.y - (fs + 1), c2.measureText(text).width + 10, fs + 5);
+      c2.globalAlpha = 1;
+    }
     c2.fillStyle = l.fill;
     c2.textAlign = l.align || 'left';   // 支持右对齐列 (筹码摘要数值列)
-    c2.fillText(l.text, l.x, l.y);
+    c2.fillText(text, l.x, l.y);
   });
   c2.textAlign = 'left';
   c2.font = '12px monospace';
@@ -6049,11 +6222,7 @@ function paintLegend(c2, dctx) {
   if (!STATE.klineData || !STATE.klineData.klines) return;
   const klines = STATE.klineData.klines;
   const n = klines.length;
-  let endIdx = n - 1;
-  try {
-    const dz = STATE.chart.getOption().dataZoom[0];
-    if (dz && dz.endValue != null) endIdx = Math.max(0, Math.min(n - 1, Math.round(dz.endValue)));
-  } catch (e) { /* 用最新 bar */ }
+  const endIdx = visibleBarIndex(n);   // 与左上角标题的日期同一根 bar
   const k = klines[endIdx];
   if (!k) return;
   const fmt3 = fmtPrice3;
@@ -6139,7 +6308,8 @@ function paintLegend(c2, dctx) {
       fill: C().boll,
     });
   }
-  putSegs(0, mainSegs, 31);
+  // 主图图例行在周期标题之下 (行位共用 mainRowOffsets: 标题占上面一行, 这里留 5px 空隙)
+  putSegs(0, mainSegs, mainRowOffsets(STATE._gridRects[0].top).legend);
 
   // 面板图例: 段色与各 series 的 lineStyle.color 一一对应 (见 updateChart 里的指标构建)
   const valSegs = {

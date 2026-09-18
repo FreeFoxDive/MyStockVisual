@@ -14,7 +14,7 @@ import premium
 from api import api_bp
 from api.common import _error, _json
 from chips import get_chips
-from indicators import compute_all_indicators
+from indicators import compute_all_indicators, intraday_avg_price
 from logger import sanitize_error as _sanitize_error
 from market import (
     MINUTE_COUNTS,
@@ -458,6 +458,12 @@ def intraday():
         if len(df) == 0:
             return _error("无分时数据", 404)
         df, indicators = compute_all_indicators(df, period="1d", with_atr_val=True)
+        # 分时均线 (均价): 当日累计成交额/累计成交量, 口径同东财分时那条黄线。
+        # 必须用「截当日之后」的 df 累计 —— 从前一日接着累加不是分时均价。
+        avgs = intraday_avg_price(
+            df["close"], df["volume"],
+            df["amount"] if "amount" in df.columns else None,
+        )
         bars = []
         for i, (idx, row) in enumerate(df.iterrows()):
             ts = idx.strftime("%H:%M") if hasattr(idx, "strftime") else str(idx)[-8:-3]
@@ -469,6 +475,7 @@ def intraday():
                 "close": _safe_float(row.get("close")),
                 "volume": _safe_int(row.get("volume")),
                 "amount": _safe_float(row.get("amount")),
+                "avg_price": avgs[i],
                 "macd_dif": indicators["macd"]["dif"][i],
                 "macd_dea": indicators["macd"]["dea"][i],
                 "macd_hist": indicators["macd"]["hist"][i],
@@ -485,7 +492,14 @@ def intraday():
                 "vol_ma10": _safe_float(row.get("vol_ma10")),
                 "vol_ma20": _safe_float(row.get("vol_ma20")),
             })
-        return _json({"symbol": symbol, "period": period, "bars": bars})
+        return _json({
+            "symbol": symbol,
+            "period": period,
+            # 当日日期: bar 只有 HH:MM, 而图表左上角标题要「分时 · 2026-09-18」这种口径;
+            # 不能让客户端用本地时钟推"今天" —— 周末/节假日打开时会说错日子。
+            "date": last_day.strftime("%Y-%m-%d"),
+            "bars": bars,
+        })
     except Exception as e:
         log.warning("获取分钟线失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("获取分钟线失败，请稍后重试", 500)

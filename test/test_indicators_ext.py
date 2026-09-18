@@ -18,7 +18,10 @@ _VISUAL_DIR = Path(__file__).resolve().parents[1]
 if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
-from indicators import boll, wr, cci, bias, dmi, compute_all_indicators  # noqa: E402
+from indicators import (  # noqa: E402
+    boll, wr, cci, bias, dmi, compute_all_indicators,
+    volume_shares_mult, intraday_avg_price,
+)
 
 
 def _ohlcv(n=60):
@@ -151,6 +154,92 @@ class ComputeAllContractTest(unittest.TestCase):
         pdi, mdi, adx = dmi(h, l, c, 14, 6)
         self.assertAlmostEqual(self.ind["dmi"]["pdi"][-1], float(pdi.iloc[-1]), places=6)
         self.assertAlmostEqual(self.ind["dmi"]["adx"][-1], float(adx.iloc[-1]), places=6)
+
+
+class VolumeSharesMultTest(unittest.TestCase):
+    """成交量单位系数: 只按量级取最近的手数档 (1/10/100)。判错会让均价整体差一个量级。"""
+
+    def test_lots_shares_and_convertible_bond(self):
+        # amount = close × volume × 手数: 比值就是手数, 与价格无关
+        for lot, want in ((100, 100), (10, 10), (1, 1)):
+            close = [10.0, 20.0, 8.0]
+            vol = [1000.0, 500.0, 800.0]
+            amount = [c * v * lot for c, v in zip(close, vol)]
+            self.assertEqual(volume_shares_mult(close, vol, amount, tail=None), want,
+                             f"1手={lot} 的标的应识别为系数 {want}")
+
+    def test_forward_adjusted_price_does_not_flip_factor(self):
+        # 前复权价配未复权成交额: 比值按复权系数整体缩放, 量级档不能变
+        close = [10.0, 10.5, 11.0]
+        vol = [100.0, 200.0, 150.0]
+        amount = [c * v * 100 * 1.37 for c, v in zip(close, vol)]
+        self.assertEqual(volume_shares_mult(close, vol, amount, tail=None), 100)
+
+    def test_tail_window_and_fallback(self):
+        # 只有最后 tail 根参与: 前面的脏数据不影响判定
+        close = [1.0] * 20
+        vol = [100.0] * 20
+        amount = [1.0] * 10 + [c * v * 100 for c, v in zip(close[10:], vol[10:])]
+        self.assertEqual(volume_shares_mult(close, vol, amount, tail=10), 100)
+        # 无有效样本 (源不带成交额, _normalize 填 0.0) → 按「手」
+        self.assertEqual(volume_shares_mult(close, vol, [0.0] * 20), 100)
+        self.assertEqual(volume_shares_mult(close, vol, None), 100)
+        self.assertEqual(volume_shares_mult([], [], []), 100)
+
+    def test_non_numeric_values_are_skipped_not_raised(self):
+        """源里混进空串/占位符时按缺值跳过 —— object dtype 直接 astype(float) 会抛。"""
+        close = ["10.0", "", "  ", 10.0]
+        vol = ["100", 0, "", 200.0]
+        amount = ["100000", 5, 7, 10.0 * 200 * 100]
+        self.assertEqual(volume_shares_mult(close, vol, amount, tail=None), 100,
+                         "空串既不该抛异常, 也不该被当成 0 参与判定")
+
+
+class IntradayAvgPriceTest(unittest.TestCase):
+    """分时均价 = 当日累计成交额 / 累计成交量 (只累加量额都有效的 bar)。"""
+
+    def test_matches_vwap(self):
+        close = [10.0, 10.2, 9.8]
+        vol = [100.0, 200.0, 300.0]          # 手
+        amount = [c * v * 100 for c, v in zip(close, vol)]
+        got = intraday_avg_price(close, vol, amount)
+        want = [10.0, (10 * 100 + 10.2 * 200) / 300, (10 * 100 + 10.2 * 200 + 9.8 * 300) / 600]
+        for g, w in zip(got, want):
+            self.assertAlmostEqual(g, w, places=9)
+
+    def test_missing_amount_bar_is_excluded_from_denominator(self):
+        """某根缺成交额: 它的成交量不能进分母 (否则之后每根均价都偏低, 偏差带到收盘)。"""
+        close = [10.0, 10.2, 10.1, 10.3, 10.0]
+        vol = [100.0, 200.0, 150.0, 300.0, 250.0]
+        amount = [c * v * 100 for c, v in zip(close, vol)]
+        amount[0] = 0.0            # 首根 (开盘集合竞价) 缺成交额
+        got = intraday_avg_price(close, vol, amount)
+        self.assertIsNone(got[0], "首根无有效成交额 → 该点 None")
+        for i in range(1, len(close)):
+            cv = sum(vol[1:i + 1])
+            ca = sum(amount[1:i + 1])
+            self.assertAlmostEqual(got[i], ca / (cv * 100), places=9,
+                                   msg=f"第 {i} 根被缺额那根的成交量带偏了")
+        # 对照: 若把缺额那根的量算进分母, 末根会明显偏低
+        naive = sum(amount) / (sum(vol) * 100)
+        self.assertGreater(got[-1], naive + 0.05, "偏差没被挡住")
+
+    def test_middle_missing_amount_does_not_move_later_points(self):
+        """中间某根缺成交额: 之后的均价只由有效 bar 决定, 不因缺额那根的量而下移。"""
+        close = [10.0] * 5
+        vol = [100.0] * 5
+        amount = [100.0 * 100.0] * 5
+        amount[2] = 0.0
+        got = intraday_avg_price(close, vol, amount)
+        self.assertAlmostEqual(got[1], 10.0, places=9)
+        self.assertAlmostEqual(got[2], 10.0, places=9, msg="缺额那根沿用前值, 不引入量")
+        self.assertAlmostEqual(got[4], 10.0, places=9)
+
+    def test_all_missing_amount_is_none(self):
+        close, vol = [10.0, 10.1], [100.0, 200.0]
+        self.assertEqual(intraday_avg_price(close, vol, [0.0, 0.0]), [None, None])
+        self.assertEqual(intraday_avg_price(close, vol, None), [None, None])
+        self.assertEqual(intraday_avg_price([], [], []), [])
 
 
 if __name__ == "__main__":

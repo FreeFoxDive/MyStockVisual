@@ -642,7 +642,8 @@ process.stdout.write(JSON.stringify(cases.map(c => {
 const C = () => new Proxy({}, { get: () => '#000000' });
 const STATE = { hoveredGrid: 0 };
 const BAR = { time: '09:31', open: 10, high: 10.5, low: 9.9, close: 10.4,
-              volume: 12345, amount: 1.5e8, vol_ma5: 10000, vol_ma10: 20000, vol_ma20: 30000,
+              volume: 12345, amount: 1.5e8, avg_price: 10.21,
+              vol_ma5: 10000, vol_ma10: 20000, vol_ma20: 30000,
               macd_dif: 0.012, macd_dea: 0.008, macd_hist: 0.004,
               kdj_k: 45.2, kdj_d: 52.1, kdj_j: 31.4,
               rsi6: 61.2, rsi12: 55.0, rsi24: 50.1, atr14: 0.123 };
@@ -687,7 +688,9 @@ process.stdout.write(JSON.stringify(cases.map(c => {
 
         self.assertIn("开 10.00", out[0])
         self.assertIn("收 10.40", out[0])
+        self.assertIn("均价 10.21", out[0], "K 线面板要报分时均线 (均价) 读数")
         self.assertNotIn("成交量", out[0], "K 线面板不该出现成交量面板的专属行")
+        self.assertNotIn("均价", out[1], "成交量面板只报成交量/成交额")
 
         self.assertEqual(out[1], "09:31成交量 1万VOL MA5 1万 MA10 2万 MA20 3万成交额 1.50亿")
         self.assertNotIn("开", out[1], "成交量面板只报成交量/成交额")
