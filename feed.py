@@ -15,6 +15,8 @@ import time
 import logging
 from datetime import datetime
 
+import af_intraday
+
 
 log = logging.getLogger("feed")
 
@@ -81,6 +83,19 @@ def _retry_after_ms(exc):
 def _chunks(items, size):
     for i in range(0, len(items), size):
         yield items[i:i + size]
+
+
+def _by_market(symbols):
+    """按市场 (cn/hk/us) 分组, 保持首次出现的顺序。
+
+    权限与当日熔断都是按市场记的, 而批量接口一次只认一个市场的权限 —— 分时相关的
+    批量请求 (日内走势批量、分钟K批量兜底) 都要先分组, 否则一只没权限的港/美股会把
+    整批 (含 A股) 一起 403 掉。
+    """
+    groups = {}
+    for s in symbols:
+        groups.setdefault(af_intraday.market_of(s), []).append(s)
+    return groups
 
 
 def depth_get_batch(af, symbols, bucket: TokenBucket, *, log_skip: bool = True):
@@ -297,28 +312,54 @@ class RestFeed:
         """用当日 1m 分时补种序列。返回 {symbol: [{ts, price, volume}, ...]}。
 
         volume 转为当日累计 (与快照 volume 口径一致)。
+
+        优先日内走势接口, 并**按市场分组**请求: 权限是按市场授权的, 而 intraday_batch
+        是一次 HTTP 带多只 (≤100 只时单分片的异常会原样抛出), 混一只没权限的港/美股就
+        会让整批 403 —— 所以不能像早先那样"一批被拒就把所有市场都标记成当日不可用"
+        (那会把 A股 的日内走势偏好一起关掉)。原接口兜底同样按市场分组: 混合批一旦被
+        市场权限拒, 整批都拿不到数据, 分组才能保住有权限的那部分。
         """
         symbols = list(dict.fromkeys(s for s in symbols if s))
         if not symbols:
             return {}
         try:
             af = self._get_af()
-            dfs = af.klines.intraday_batch(symbols, to_dataframe=True) or {}
         except Exception as e:
-            log.warning(f"intraday_batch 失败, 回退 klines.batch 1m: {e}")
-            try:
-                af = self._get_af()
-                dfs = af.klines.batch(
-                    symbols, period="1m", count=240, adjust="none", to_dataframe=True
-                ) or {}
-            except Exception as e2:
-                log.warning(f"klines.batch 1m 失败: {e2}")
-                return {}
+            log.warning(f"补种取不到 AF 客户端: {e}")
+            return {}
         out = {}
-        for sym, df in dfs.items():
-            samples = _df_to_samples(df)
-            if samples:
-                out[sym] = samples
+        missing = []
+        for group in _by_market(symbols).values():
+            if not af_intraday.available(group[0]):
+                missing.extend(group)
+                continue
+            try:
+                dfs = af.klines.intraday_batch(group, to_dataframe=True) or {}
+            except Exception as e:
+                if af_intraday.is_permission_error(e):
+                    af_intraday.note_denied(e, group[0])   # 只关这一组所属的市场
+                else:
+                    log.warning(f"intraday_batch 失败 ({group[0]} 等 {len(group)} 只), "
+                                f"回退 klines.batch 1m: {e}")
+                missing.extend(group)
+                continue
+            for sym, df in dfs.items():
+                samples = _df_to_samples(df)
+                if samples:
+                    out[sym] = samples
+            missing.extend(s for s in group if s not in out)
+        for group in _by_market(missing).values():
+            try:
+                more = af.klines.batch(
+                    group, period="1m", count=240, adjust="none", to_dataframe=True
+                ) or {}
+            except Exception as e:
+                log.warning(f"klines.batch 1m 兜底失败 ({group[0]} 等 {len(group)} 只): {e}")
+                continue
+            for sym, df in more.items():
+                samples = _df_to_samples(df)
+                if samples:
+                    out[sym] = samples
         return out
 
 

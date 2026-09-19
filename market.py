@@ -24,6 +24,8 @@ PROJECT_DIR = SCRIPT_DIR.parent
 log = logging.getLogger("market")
 
 from logger import redact_message, sanitize_error as _sanitize_error  # noqa: E402
+import af_intraday  # noqa: E402  (日内走势接口的当日可用性, 分时/监控共用)
+import af_limits  # noqa: E402  (AlphaFeed Pro 限额单一来源, 新增取数路径按 90% 折算)
 import datetime as dt_mod
 import decimal as dec_mod
 import feed
@@ -31,6 +33,7 @@ import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_sour
 import market_hours  # noqa: E402
 import perf  # noqa: E402
 import search_index  # noqa: E402
+import source_alert  # noqa: E402  (数据源熔断/429 退避告警, 每源每天一条)
 
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
@@ -109,16 +112,42 @@ def _mr_is_429(e):
     return code == 429
 
 
-def _mr_note_429(e):
-    """记录 429 并开启进程级退避窗口。"""
+def _mr_note_429(e, detail=""):
+    """记录 429 并开启进程级退避窗口。
+
+    detail 是"这次请求打的哪只票/哪个接口", 只用于告警文案 —— 由调用方保证不含证书
+    key (SDK 路径给方法名+标的, 直连路径给去掉末段的 URL)。
+    """
     global _mr_backoff_until
     sec = max(1.0, _mr_retry_after_sec(e) or MAIRUI_BACKOFF_SEC)
     with _mr_backoff_lock:
         _mr_backoff_until = max(_mr_backoff_until, time.time() + sec)
     perf.bump("mr_429")
     payload = getattr(e, "payload", None)
-    detail = f" payload={redact_message(payload)}" if payload is not None else ""
-    log.warning(f"麦蕊触发 429 限流, 退避 {sec:.0f}s (窗口内不再请求, 走回退){detail}")
+    detail_txt = f" payload={redact_message(payload)}" if payload is not None else ""
+    log.warning(f"麦蕊触发 429 限流, 退避 {sec:.0f}s (窗口内不再请求, 走回退){detail_txt}")
+    # 退避窗口内的后续 429 会被当日闸门挡下 (每源每天最多一条); 别占着退避锁推送
+    source_alert.notify("mairui", "429 限流退避", detail=detail, cooldown_sec=sec)
+
+
+_MR_SYMBOL_RE = re.compile(r"^[0-9A-Za-z.]{2,12}$")
+
+
+def _mr_call_detail(name, args):
+    """SDK 调用的告警上下文: 方法名 + (看起来像标的的)第一个位置参数。
+
+    只认"纯代码"形态的字符串, 避免把 URL/dict/带 key 的串照抄进通知。
+    """
+    label = f"{name}()" if name else "SDK 调用"
+    if args and isinstance(args[0], str) and _MR_SYMBOL_RE.match(args[0]):
+        label += f" {args[0]}"
+    return label
+
+
+def _mr_url_detail(url):
+    """直连 URL 的告警上下文: 去掉最后一段(证书 key), 例如 .../hszbl/fsjy/600519.SH。"""
+    base = str(url).split("?", 1)[0].rstrip("/")
+    return base.rsplit("/", 1)[0] if "/" in base else base
 
 
 class _MairuiClient:
@@ -147,7 +176,7 @@ class _MairuiClient:
                 return attr(*args, **kwargs)
             except Exception as e:
                 if _mr_is_429(e):
-                    _mr_note_429(e)
+                    _mr_note_429(e, detail=_mr_call_detail(name, args))
                 raise
 
         return _guarded
@@ -164,7 +193,7 @@ def _mr_urlopen_json(url, timeout=8):
             return json.loads(resp.read().decode("utf-8", "ignore"))
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            _mr_note_429(e)
+            _mr_note_429(e, detail=_mr_url_detail(url))
         raise
 
 
@@ -662,6 +691,10 @@ _quote_budget = PacedBudget(QUOTE_RATE_PER_MIN)
 # 计数粒度 = 麦蕊 HTTP 调用次数 (指数/ETF 单只 1 次, 股票批量 20 只 1 次)。
 MR_QUOTE_RATE_PER_MIN = max(1, int(os.environ.get("MR_QUOTE_RATE_PER_MIN", "20")))
 _mr_quote_budget = PacedBudget(MR_QUOTE_RATE_PER_MIN)
+# 日内走势接口 (分时取数) 预算: 60/min 按 90% 折算 = 54/min, 与「分钟K批量 30/min」
+# 互相独立。按 af_limits 折算而不是吃满额度, 留 10% 给网页/监控链路; 桶空时本次
+# 直接走原接口 (分钟K批量), 不熔断。
+_intraday_budget = PacedBudget(af_limits.bucket_rate("intraday_symbol"))
 _quote_fetch_lock = threading.Lock()
 _quote_fetch_condition = threading.Condition()
 _quote_fetch_inflight = False
@@ -1011,15 +1044,86 @@ def _af_adjust(adj):
     return "backward" if adj == kline_source.ADJUST_HFQ else adj
 
 
-def _fetch_minute_kline(symbol, period, count, adjust="forward"):
-    """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
+def _fetch_intraday_kline(symbol, period, count, adjust="forward"):
+    """分时取数: 优先日内走势接口 (/v1/klines/intraday), 不可用则退回分钟K批量。
+
+    两个接口的差异 (2026-09-18 实测, 见 docs/alphafeed-limits.md 的日内走势实测一节;
+    复跑: probe_feed.py --only-intraday):
+      * intraday 只回当日、无 adjust 参数; 当日 qfq 与 raw 本就相同, 实测与
+        `klines.batch(period, adjust=forward)` 重叠 240 根逐列差 0 —— 所以分时图
+        口径不变, 换的是额度账本: intraday 60/min 与「分钟K批量 30/min」互相独立,
+        分时轮询不再和 1m/5m/15m/30m/60m 分钟K视图抢同一份额度。
+      * 权限被拒 (403 等) 记**该市场**当日熔断, 之后同一市场一律走原接口, 不反复重试;
+        其余异常/空数据只本次回退 —— 开盘前、偶发超时不该把一整天都降级。
+        (权限按市场分级: 实测本套餐 A股可日内走势、港/美股 403, 所以熔断按市场记,
+        免得自选表里一只美股把 A股 的这条路径一起关掉。)
+
+    **能力缺口要抛 SourceSkip, 不能返回 None**: 分时默认链只有这一个源, 返回 None 会被
+    路由记成"源故障", 连记 3 次整源冷却 60s —— 而冷却与市场无关, 于是港/美股(403 是常态)
+    或某个当日没数据的代码, 就能把 A股 的分时一起打成 404。判据: 上游**答了**(HTTP 200,
+    哪怕 0 根) 或**明确没权限**, 都算能力缺口; 只有真出错/超时才返回 None 记故障。
+    """
+    denied = not af_intraday.available(symbol)
+    # 「上游答了」的两个标记: 只有答了(而不是抛错/超时)才说明"是没这个市场/没这根数据"
+    answered = [False, False]
+    if not denied:
+        # 港/美股 K线类请求合计仍受 _hkus_kline_bucket (额度 10/min 的 4/5) 约束:
+        # "分时优先" 不是绕开它的理由。桶空则本次直接走原接口 —— 那里还会再判一次。
+        allowed = True
+        if _symbol_market(symbol) in ("hk", "us"):
+            with _hkus_lock:
+                allowed = _hkus_kline_bucket.try_acquire()
+                if not allowed:
+                    log.warning(f"港美股K线限频跳过 {symbol} {period} (日内走势)")
+        # 新增取数路径按 af_limits 折算取令牌 (90% × 60 = 54/min), 桶空则本次用原接口
+        if allowed and _intraday_budget.try_acquire():
+            try:
+                af = get_af()
+                df = af.klines.intraday(symbol, period=period, count=count,
+                                        to_dataframe=True)
+                answered[0] = True          # 上游答了 (可能是 0 根)
+            except Exception as e:
+                if af_intraday.is_permission_error(e):
+                    af_intraday.note_denied(e, symbol)
+                else:
+                    log.warning(f"AlphaFeed 日内走势失败 {symbol} {period}: "
+                                f"{redact_message(e)}")
+                df = None
+            if df is not None and len(df) > 0:
+                out = _normalize(df, prefer_time=True)
+                if out is not None:
+                    return out
+                # 开盘头几分钟只有 1~4 根: _normalize 的「>=5 根」门槛会判无数据,
+                # 而日内走势接口不带前一日尾巴, 永远凑不够。交给原接口 —— 它带回
+                # 前一日的尾部能过门槛, 路由再截当日, 于是 09:31 也能画出一根 bar。
+                log.info(f"日内走势当日仅 {len(df)} 根 (太少), 回退分钟K批量")
+            else:
+                log.info(f"日内走势无当日数据 {symbol} {period}, 回退分钟K批量")
+        else:
+            perf.bump("intraday_budget_skip")
+    out, answered[1] = _fetch_af_minute(symbol, period, count, adjust=adjust)
+    if out is not None:
+        return out
+    if denied or all(answered):
+        raise kline_source.SourceSkip(
+            f"{'本市场当日无日内走势权限' if denied else '上游答复但该标的无数据'}"
+            f" (symbol={symbol} {period})")
+    return None
+
+
+def _fetch_af_minute(symbol, period, count, adjust="forward"):
+    """分钟K批量取数, 返回 (标准 df 或 None, 上游是否答复)。
+
+    第二个返回值给分时源用来区分"能力缺口"与"上游故障": 异常/超时 → False (要记故障),
+    HTTP 200 但 0 根 → True (这个标的没数据, 不该惩罚源)。分钟K视图只要取到没取到。
+    """
     adj = _af_adjust(adjust)
     # 港/美股 K线限频 (额度 10/min 的 4/5); 桶空返回 None 走缓存/回退
     if _symbol_market(symbol) in ("hk", "us"):
         with _hkus_lock:
             if not _hkus_kline_bucket.try_acquire():
                 log.warning(f"港美股K线限频跳过 {symbol} {period}")
-                return None
+                return None, False
     try:
         af = get_af()
         dfs = af.klines.batch(
@@ -1027,11 +1131,17 @@ def _fetch_minute_kline(symbol, period, count, adjust="forward"):
         )
         df = dfs.get(symbol) if dfs else None
     except Exception as e:
-        log.warning(f"AlphaFeed 获取分钟K线失败 {symbol} {period}: {e}")
-        return None
+        log.warning(f"AlphaFeed 获取分钟K线失败 {symbol} {period}: "
+                    f"{redact_message(e)}")
+        return None, False
     if df is None or len(df) == 0:
-        return None
-    return _normalize(df, prefer_time=True)
+        return None, True
+    return _normalize(df, prefer_time=True), True
+
+
+def _fetch_minute_kline(symbol, period, count, adjust="forward"):
+    """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
+    return _fetch_af_minute(symbol, period, count, adjust=adjust)[0]
 
 
 def _fetch_af_kline(symbol, period, count, adjust="forward"):

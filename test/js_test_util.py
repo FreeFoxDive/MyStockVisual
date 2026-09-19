@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from html.parser import HTMLParser
 
@@ -27,8 +29,11 @@ def require_node():
         raise unittest.SkipTest("需要 node 才能跑前端镜像测试")
 
 
-def run_node(script: str, *args: str) -> str:
-    """执行 node -e script，额外 argv 传入 process.argv。"""
+def run_node(script: str, *args: str, timeout: float = 30) -> str:
+    """执行 node -e script，额外 argv 传入 process.argv。
+
+    timeout 是关键字参数: 真 echarts 的用例会跑几十次 init/setOption, 30s 可能不够。
+    """
     require_node()
     proc = subprocess.run(
         ["node", "-e", script, *args],
@@ -36,12 +41,28 @@ def run_node(script: str, *args: str) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=30,
+        timeout=timeout,
         check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr or proc.stdout or f"node exit {proc.returncode}")
     return proc.stdout.strip()
+
+
+def run_node_json(script: str, payload, *args: str, timeout: int = 120) -> str:
+    """同上, 但 payload 走临时文件传 (脚本里用 `process.argv[1]` 读它)。
+
+    分钟级 fixture 一大就撞 Windows 的 32K 命令行上限, 报
+    `WinError 206: 文件名或扩展名太长` —— 240 根 bar 的 JSON 有 ~25KB, 再叠上脚本
+    本体就超了。凡是"整批 bar"这类 payload 都走这里。
+    """
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        return run_node(script, path, *args, timeout=timeout)
+    finally:
+        os.unlink(path)
 
 
 class InlineScriptParser(HTMLParser):

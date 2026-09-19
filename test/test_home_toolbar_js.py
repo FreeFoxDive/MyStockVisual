@@ -616,7 +616,7 @@ process.stdout.write(JSON.stringify(cases.map(c => {
 
         # 面板分支必须提前 return, 不能拼在 K 线全套后面
         branches = intra[intra.index("const ihdr = "):
-                         intra.index("const prevBar = idx > 0 ? data.bars[idx - 1] : null;")]
+                         intra.index("const prevBar = intradayBarAtOrBefore(slot - 1);")]
         self.assertEqual(branches.count("return ihdr"), 5,
                          "成交量 + MACD/KDJ/RSI/ATR 五个面板分支")
         self.assertNotIn("tip-", branches,
@@ -640,14 +640,22 @@ process.stdout.write(JSON.stringify(cases.map(c => {
         """
         script = _extract_formatter(_extract_fn(self.src, "renderIntraday")) + """
 const C = () => new Proxy({}, { get: () => '#000000' });
-const STATE = { hoveredGrid: 0 };
+const STATE = { hoveredGrid: 0, intradayData: { bars: [] } };
 const BAR = { time: '09:31', open: 10, high: 10.5, low: 9.9, close: 10.4,
               volume: 12345, amount: 1.5e8, avg_price: 10.21,
               vol_ma5: 10000, vol_ma10: 20000, vol_ma20: 30000,
               macd_dif: 0.012, macd_dea: 0.008, macd_hist: 0.004,
               kdj_k: 45.2, kdj_d: 52.1, kdj_j: 31.4,
               rsi6: 61.2, rsi12: 55.0, rsi24: 50.1, atr14: 0.123 };
-const data = { bars: [] };
+// 固定窗口下 formatter 按**槽位**从 STATE.intradayData 取 bar (未启用固定窗口时
+// 槽位即下标, 这里就是那条老口径); 未启用的情形另见 test_intraday_window_js.py
+function intradayBarAt(slot) {
+  if (slot == null) return null;
+  return (STATE.intradayData.bars || [])[slot] || null;
+}
+function intradayBarAtOrBefore(slot) {
+  return intradayBarAt(slot);
+}
 function fmtVolume(v) {
   if (v == null) return '';
   const a = Math.abs(v);
@@ -668,7 +676,7 @@ process.stdout.write(JSON.stringify(cases.map(c => {
   showMacd = c.macd;
   subList = [c.macd && 'macd', c.kdj && 'kdj', c.rsi && 'rsi', c.atr && 'atr'].filter(Boolean);
   STATE.hoveredGrid = c.g;
-  data.bars = c.nobar ? [] : [BAR];
+  STATE.intradayData.bars = c.nobar ? [] : [BAR];
   return formatter([{ dataIndex: 0 }]).replace(/<[^>]+>/g, '');
 })));
 """

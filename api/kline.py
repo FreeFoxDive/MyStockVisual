@@ -446,9 +446,12 @@ def intraday():
     except ValueError:
         count = 120
     try:
-        # 分钟源经 kline_source 路由 (默认 alphafeed, 失败自动回退), df 已标准化前复权
+        # 分时走 "intraday" 类别: 优先 AlphaFeed 日内走势接口 (只回当日, 权限不可用
+        # 当日退回分钟K批量), 失败继续沿链回退; df 已标准化前复权。
+        # 注意不能挂到 "minute" 类别 —— 那是跨天分钟K历史视图 (1m 要 1200 根),
+        # 换成只回当日的接口会把 1m/5m/15m/30m/60m 视图打坏。
         df, _src = kline_source.fetch_kline_df(
-            "minute", symbol, period, count, adjust="forward"
+            "intraday", symbol, period, count, adjust="forward"
         )
         if df is None or len(df) == 0:
             return _error(f"无法获取 {symbol} 的分钟线", 404)

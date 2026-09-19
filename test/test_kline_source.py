@@ -167,6 +167,10 @@ class KlineSourceTestBase(unittest.TestCase):
             mock.patch.object(market, "_lookup_name", return_value="测试名"),
             mock.patch.object(market, "_is_etf", return_value=False),
             mock.patch.object(market, "_is_index_symbol", return_value=False),
+            # 熔断会推告警: 单个文件单跑时这套是唯一兜底 (discover 跑由 test_source_alert
+            # 在模块级默认置 SOURCE_ALERT_DISABLED 兜底), 不打桩就会真发钉钉/ntfy。
+            # 需要验证"确实通知了"的用例在自己的 with 里再 patch 一层即可。
+            mock.patch.object(kline_source.source_alert, "notify", return_value=True),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -461,6 +465,48 @@ class TestSourceTimeoutAndBreaker(KlineSourceTestBase):
             kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)  # af 失败(计数=1)
         self.assertFalse(kline_source._in_cooldown("alphafeed"),
                          "成功后应清零, 不该熔断")
+
+    def test_source_skip_is_not_counted_as_failure(self):
+        """能力缺口 (SourceSkip) 不计源故障: 别的市场没权限/别的标的没数据, 不该把这个
+        源在**有数据**的市场上一并冷却 —— 分时链只有这一个源, 冷却它等于全市场 404。"""
+        def _skip(*_a, **_k):
+            raise kline_source.SourceSkip("本市场无此功能")
+
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed,mairui"), \
+             mock.patch.object(kline_source, "SOURCE_FAIL_THRESHOLD", 2), \
+             mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()), \
+             mock.patch.object(kline_source.AlphaFeedSource, "fetch", side_effect=_skip) as af:
+            for _ in range(4):        # 远超阈值
+                _df, src = kline_source.fetch_kline_df("stock", "AAPL.US", "1d", 10)
+                self.assertEqual(src, "mairui", "SourceSkip 后应正常下沉到下一源")
+            self.assertEqual(af.call_count, 4, "跳过不是故障, 不该进冷却而拒绝再试")
+            self.assertFalse(kline_source._in_cooldown("alphafeed"),
+                             "能力缺口把源打进冷却 → 有数据的市场会跟着 404")
+
+    def test_cooldown_notifies_once_per_source_per_day(self):
+        """进冷却要推一条告警 (带最后失败的标的/周期), 且同一源当天只推一条。
+
+        回归点: 源熔断原来只在日志里, 没人盯日志就等于没发生; 而"冷却→probe 失败→再冷却"
+        能反复触发, 所以必须有当日闸门, 否则一次故障会刷一整天通知。
+        """
+        seen = []
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed,mairui"), \
+             mock.patch.object(kline_source, "SOURCE_FAIL_THRESHOLD", 2), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=None), \
+             mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()), \
+             mock.patch.object(kline_source.source_alert, "notify",
+                               side_effect=lambda src, reason, **kw: (
+                                   seen.append((src, reason, kw)), True)[1]):
+            kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)   # 失败 1
+            self.assertEqual(seen, [], "没到阈值不该告警")
+            for _ in range(4):                                            # 触发 + 反复再触发
+                kline_source.fetch_kline_df("stock", "600519.SH", "1d", 10)
+        self.assertEqual(len(seen), 1, "同一个源当天只该推一条")
+        src, reason, kw = seen[0]
+        self.assertEqual(src, "alphafeed")
+        self.assertIn("连续失败", reason)
+        self.assertEqual(kw.get("detail"), "600519.SH 1d (stock)",
+                         "要带最后失败的那次请求的标的与周期")
 
     def test_all_sources_in_cooldown_does_not_bypass(self):
         """全部冷却也不得无条件突破熔断。"""

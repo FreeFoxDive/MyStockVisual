@@ -6,11 +6,16 @@ volume/amount, 升序)。图表默认前复权 (forward); 成交校验等可显�
 
 回退链用 .env 配置 (逗号分隔, 依次尝试, 未配置用默认链):
     KLINE_SOURCE_MINUTE=alphafeed,akshare
+    KLINE_SOURCE_INTRADAY=alphafeed_intraday
     KLINE_SOURCE_STOCK=mairui,alphafeed,akshare
     KLINE_SOURCE_INDEX=mairui,akshare
     KLINE_SOURCE_FUND=alphafeed,akshare
 
-默认链 = 券商/付费源优先, akshare 只兜底。基金默认不含麦蕊 (jj/lskx 无复权)。
+day-only 的 "intraday" 类别 (分时图) 与 "minute" 类别分开: 后者是跨天分钟K历史,
+前者只回当日 (日内走势接口优先, 权限不可用当日退回分钟K批量)。
+
+默认链 = 券商/付费源优先, akshare 只兜底 (分时是例外: 默认只走 alphafeed_intraday,
+不兜 akshare —— 见 DEFAULT_CHAINS 里的说明)。基金默认不含麦蕊 (jj/lskx 无复权)。
 主源失败自动切换下一源并记日志。分钟数据带新鲜度守卫: 末根 bar 距今超过
 MINUTE_STALE_DAYS 天视为该源失败 (防止滞后窗口的旧数据被当成功渲染)。
 """
@@ -26,6 +31,7 @@ from datetime import timedelta
 
 import market_hours
 import perf
+import source_alert
 
 log = logging.getLogger("kline_source")
 
@@ -52,6 +58,20 @@ class SourceBusy(Exception):
     """本地容量不足，不计作上游故障。"""
 
 
+class SourceSkip(Exception):
+    """本源明确不服务这个标的 (能力缺口)，不计作上游故障。
+
+    由 `KlineSource.fetch` 抛出, 用于区分两种"没拿到数据":
+      * **能力缺口** —— 上游正常答了, 只是这个市场/标的没有这个功能或没有数据
+        (典型: 本套餐的港/美股日内分时 403; 或某代码当日一根 bar 都没有)。
+        这不是故障, 记进源健康计数只会让**同一源**在别的市场/标的上一起被冷却。
+      * **上游故障** —— 异常/超时, 该记失败 (返回 None)。
+
+    与 SourceBusy 同一路子: 释放 probe 标记、`perf.bump("src_skip_<name>")`, 不记失败。
+    单源链 (如分时的 alphafeed_intraday) 尤其依赖这条 —— 冷却整个源等于全市场 404。
+    """
+
+
 def _admit(name):
     with _health_lock:
         ent = _health.setdefault(name, {"fails": 0, "until": 0.0,
@@ -70,9 +90,14 @@ def _current(name, token):
 
 
 def reset_health():
-    """清空源级健康状态 (测试隔离用)。"""
+    """清空源级健康状态 (测试隔离用)。
+
+    连数据源告警的当日闸门一起清: "每源每天一条"是进程级状态, 用例之间不清会串味
+    (前一个用例发过通知, 后一个断言"该发"就永远不成立)。
+    """
     with _health_lock:
         _health.clear()
+    source_alert.reset()
 
 
 def _in_cooldown(name):
@@ -87,8 +112,12 @@ def _note_ok(name, token=None):
             _health.pop(name, None)
 
 
-def _note_fail(name, token=None):
-    """连续失败计一次; 达阈值则进入冷却窗口。"""
+def _note_fail(name, token=None, detail=""):
+    """连续失败计一次; 达阈值则进入冷却窗口。
+
+    detail 是"最后失败的那一次"的上下文 (标的/周期/类别), 只用于熔断通知文案 ——
+    进冷却时推一条 (每源每天最多一条), 便于不翻日志就知道是哪个市场/周期在坏。
+    """
     now = time.monotonic()
     entered = False
     with _health_lock:
@@ -107,6 +136,9 @@ def _note_fail(name, token=None):
         perf.bump(f"src_cooldown_{name}")
         log.warning("数据源 %s 连续失败 %d 次, 冷却 %.0fs 内跳过",
                     name, SOURCE_FAIL_THRESHOLD, SOURCE_COOLDOWN_SEC)
+        # 通知放在锁外 (推送含入队 + 日志, 别占着健康锁); 失败也只记日志
+        source_alert.notify(name, f"连续失败 {SOURCE_FAIL_THRESHOLD} 次",
+                            detail=detail, cooldown_sec=SOURCE_COOLDOWN_SEC)
 
 
 def _fetch_bounded(src, symbol, period, count, adj, name):
@@ -167,10 +199,20 @@ def _try_source(name, symbol, period, count, adj, category, idx, chain):
                 token[0]["probe"] = False
         perf.bump(f"src_busy_{name}")
         return None
+    except SourceSkip as e:
+        # 本源的"能力缺口": 它自己说清了这个市场/标的它服务不了。与 SourceBusy 同理,
+        # 不记失败 —— 否则单源链会被"别的市场没权限/别的标的没数据"打进冷却, 连带
+        # 让有数据的市场一起 404。
+        with _health_lock:
+            if _current(name, token):
+                token[0]["probe"] = False
+        perf.bump(f"src_skip_{name}")
+        log.info("数据源 %s 不服务 %s %s (%s), 直接下沉", name, symbol, period, e)
+        return None
     except Exception as e:  # 单源异常不拖垮整条链
         log.warning("数据源 %s 获取 %s %s 异常: %s", name, symbol, period, e)
         df = None
-    if df is not None and category == "minute" and not _minute_fresh(df):
+    if df is not None and category in ("minute", "intraday") and not _minute_fresh(df):
         log.warning("数据源 %s 分钟K数据过旧 (末根 %s), 视为失败",
                     name, df.index[-1])
         perf.bump(f"src_stale_{name}")
@@ -183,7 +225,7 @@ def _try_source(name, symbol, period, count, adj, category, idx, chain):
         return df
     # 该源本次未取到数据 (异常/空/过旧/超时): 计健康计数, 用于确认慢请求是否
     # 集中在个别坏源上 (回退链会把其耗时叠加到用户请求上)
-    _note_fail(name, token)
+    _note_fail(name, token, detail=f"{symbol} {period} ({category})")
     perf.bump(f"src_fail_{name}")
     if idx < len(chain) - 1:
         log.warning("数据源 %s 获取 %s %s 失败, 回退 %s",
@@ -283,6 +325,27 @@ class AlphaFeedSource(KlineSource):
         return market._fetch_af_kline(symbol, period, count, adjust=adj)
 
 
+class AlphaFeedIntradaySource(AlphaFeedSource):
+    """分时 (日内走势) 源: /v1/klines/intraday 优先, 权限不可用则当日退回分钟K批量。
+
+    与 "minute" 类别分开的原因: 分钟K视图 (1m/5m/15m/30m/60m) 是跨天历史
+    (前端 1m 要 1200 根 ≈ 5 个交易日), 而日内走势只回当日 —— 两者不能共用一条链,
+    分开后回退链、源健康计数、chain_tag 缓存 key 都天然隔离。
+    真正"日内走势优先"的取舍与当日熔断在 market._fetch_intraday_kline 里。
+    """
+
+    name = "alphafeed_intraday"
+
+    def supports(self, category, period, adjust=ADJUST_FORWARD):
+        import market
+        return category == "intraday" and period in market.MINUTE_PERIODS
+
+    def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
+        import market
+        return market._fetch_intraday_kline(symbol, period, count,
+                                            adjust=normalize_adjust(adjust))
+
+
 class AkshareSource(KlineSource):
     """akshare(东财) 免费兜底: 日/周/月K + 分钟K, 无需 key。
 
@@ -301,7 +364,10 @@ class AkshareSource(KlineSource):
 
     def supports(self, category, period, adjust=ADJUST_FORWARD):
         import market
-        if category == "minute":
+        if category in ("minute", "intraday"):
+            # intraday 类别自带"只回当日"语义, 本源的分钟接口返回多日, 由路由层按当日
+            # 截断 (口径与原来一致), 所以能服务该类目 —— 但**不在默认分时链里**
+            # (实测其分钟数据不稳), 只有显式配置 KLINE_SOURCE_INTRADAY=...,akshare 才用。
             return period in market.MINUTE_PERIODS
         return category in ("stock", "index", "fund", "hk", "us") and period in ("1d", "1w", "1M")
 
@@ -397,10 +463,12 @@ class AkshareSource(KlineSource):
         return df.rename(columns={date_col: date_as, **cls._CN_COLS})
 
 
-SOURCES = {cls.name: cls() for cls in (MairuiSource, AlphaFeedSource, AkshareSource)}
+SOURCES = {cls.name: cls() for cls in (MairuiSource, AlphaFeedSource,
+                                       AlphaFeedIntradaySource, AkshareSource)}
 
 CATEGORY_ENV = {
     "minute": "KLINE_SOURCE_MINUTE",
+    "intraday": "KLINE_SOURCE_INTRADAY",
     "stock": "KLINE_SOURCE_STOCK",
     "index": "KLINE_SOURCE_INDEX",
     "fund": "KLINE_SOURCE_FUND",
@@ -414,6 +482,12 @@ CATEGORY_ENV = {
 # 基金默认 alphafeed,akshare: 麦蕊 jj/lskx 无前复权。
 DEFAULT_CHAINS = {
     "minute": "alphafeed,akshare",
+    # 分时: 只走日内走势源 —— 默认**不**兜 akshare (实测其分钟数据不稳: 东财限流期可能
+    # 整段失败, 而且是静默换供应商, 图上数据的出处会变)。AF 分来源内部已自带
+    # 「无权限/无当日数据 → 退回 klines.batch」(见 market._fetch_intraday_kline),
+    # A股 恒有数据; 港/美股本套餐两个接口都 403, 会直接报无数据。要老行为就显式配
+    # KLINE_SOURCE_INTRADAY=alphafeed_intraday,akshare。
+    "intraday": "alphafeed_intraday",
     "stock": "mairui,alphafeed,akshare",
     "index": "mairui,akshare",
     "fund": "alphafeed,akshare",

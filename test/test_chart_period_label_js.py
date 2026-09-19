@@ -24,7 +24,7 @@ _VISUAL_DIR = Path(__file__).resolve().parents[1]
 if str(_VISUAL_DIR / "test") not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR / "test"))
 
-from js_test_util import require_node, run_node  # noqa: E402
+from js_test_util import require_node, run_node, run_node_json  # noqa: E402
 
 INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
 
@@ -62,6 +62,31 @@ def _extract_fn(src: str, name: str) -> str:
             if depth == 0:
                 return src[m.start():i + 1]
     raise AssertionError(f"function {name} 大括号不配对")
+
+
+def _intraday_axis_fns(src: str) -> str:
+    """分时的「按槽位取数」那一套 (固定窗口 240 槽)。
+
+    分时启用固定窗口后, 可见末位是**槽位**坐标而不是 bars 下标 (中间夹着未走到的空槽),
+    所以标题日期与均价读数都要经这组函数落到槽位上, 不能再拿 bars[i] 直接取。
+    """
+    return "\n".join(_extract_fn(src, n) for n in (
+        "intradaySlotCount", "intradayBarAt", "intradayBarAtOrBefore",
+        "intradayVisibleBar"))
+
+
+def _session_bars(n: int):
+    """当日分时 payload 的前 n 根 (末相位: 09:31-11:30 + 13:01-15:00), 标题用例只要 time。
+
+    按槽位顺序生成, 所以 120 根就是"午休半场"、121 根是第一根下午的数据。
+    """
+    times = []
+    for start, end in (((9, 31), (11, 30)), ((13, 1), (15, 0))):
+        m, stop = start[0] * 60 + start[1], end[0] * 60 + end[1]
+        while m <= stop:
+            times.append(f"{m // 60:02d}:{m % 60:02d}")
+            m += 1
+    return [{"time": t} for t in times[:n]]
 
 
 def _extract_const_obj(src: str, name: str) -> str:
@@ -187,6 +212,7 @@ process.stdout.write(JSON.stringify(cases.map(c => {
               + _extract_fn(self.src, "titleDateWithLocalClock") + "\n"
               + _extract_fn(self.src, "chartModel") + "\n"
               + _extract_fn(self.src, "visibleBarIndex") + "\n"
+              + _intraday_axis_fns(self.src) + "\n"
               + _extract_fn(self.src, "chartTitleText"))
         cases = [
             # 日/周/月 K: date 只有日期
@@ -231,6 +257,66 @@ process.stdout.write(JSON.stringify(cases.map(c => {
         for c, got in zip(cases, out):
             self.assertEqual(got, c["want"], f"周期 {c['period']} 的标题格式不对")
 
+    def test_intraday_title_across_session_phases(self):
+        """分时标题的日期 = 响应下发的那天 (也就是图上那批 bar 的日子), 与本地时钟无关。
+
+        日K 的「本地时钟升级」是为"盘中当日 bar 还没补上来, 标题别慢一天"设计的; 分时
+        不存在这种滞后 —— 后端的 date 就是它截出来的那批 bar 的日期。所以盘前 / 非交易日
+        看到的上一交易日那批, 标题必须写那一天, 不能改写成今天。
+        """
+        js = (_extract_const_obj(self.src, "PERIOD_LABELS") + "\n"
+              + _extract_const_line(self.src, "TITLE_NARROW_GRID_PX") + "\n"
+              + _extract_fn(self.src, "periodLabel") + "\n"
+              + _extract_fn(self.src, "localDayStr") + "\n"
+              + _extract_fn(self.src, "titleDateWithLocalClock") + "\n"
+              + _extract_fn(self.src, "chartModel") + "\n"
+              + _extract_fn(self.src, "visibleBarIndex") + "\n"
+              + _extract_fn(self.src, "intradaySessionSlots") + "\n"
+              + _intraday_axis_fns(self.src) + "\n"
+              + _extract_fn(self.src, "chartTitleText"))
+        cases = [
+            # 盘前 (交易日 09:15-09:31): 源里当日还没有 bar, 图上还是上一交易日那批
+            {"phase": "盘前", "date": "2026-09-17", "bars": 240, "isTradingDay": True,
+             "want": "分时 · 2026-09-17"},
+            # 长假后首个交易日盘前: 数据是节前最后一天
+            {"phase": "长假后盘前", "date": "2026-09-30", "bars": 240, "isTradingDay": True,
+             "want": "分时 · 2026-09-30"},
+            # 盘中 (数据就是今天)
+            {"phase": "盘中", "date": "2026-09-18", "bars": 60, "isTradingDay": True,
+             "want": "分时 · 2026-09-18"},
+            # 午休 (半场)
+            {"phase": "午休", "date": "2026-09-18", "bars": 120, "isTradingDay": True,
+             "want": "分时 · 2026-09-18"},
+            # 盘后 (全天)
+            {"phase": "盘后", "date": "2026-09-18", "bars": 240, "isTradingDay": True,
+             "want": "分时 · 2026-09-18"},
+            # 非交易日 (周六): 服务端已说今天不是交易日, 一律用数据日期
+            {"phase": "非交易日", "date": "2026-09-11", "bars": 240, "isTradingDay": False,
+             "want": "分时 · 2026-09-11"},
+        ]
+        for c in cases:
+            c["bars"] = _session_bars(c["bars"])
+        out = json.loads(run_node_json(CHART_STUB_JS + js + """
+const cases = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+let STATE = {};
+let marketClock = { state: { isTradingDay: true } };
+// chartTitleText 内部无参调用 localDayStr(): 固定"今天"为 2026-09-18, 让用例与跑测试的
+// 日期无关 (周中/周末/跨月跑都是同一组期望值)
+function localDayStr() { return '2026-09-18'; }
+process.stdout.write(JSON.stringify(cases.map(c => {
+  STATE.period = 'intraday';
+  STATE.intradayData = { date: c.date, bars: c.bars };
+  STATE.intradayAxis = intradaySessionSlots('002472.SZ', c.bars);
+  STATE._gridRects = [{ left: 0, right: 800, top: 0, bottom: 300 }];
+  STATE.chart = mkChart(null);
+  marketClock.state = { isTradingDay: c.isTradingDay };
+  return chartTitleText();
+})));
+""", cases))
+        for c, got in zip(cases, out):
+            self.assertEqual(got, c["want"],
+                             f"{c['phase']} 的分时标题日期不对 (图上数据是 {c['date']})")
+
     def test_intraday_avg_readout_follows_line(self):
         """分时左上角均价读数: 取可见末根 bar 的 avg_price, 线一动数字就跟着动。"""
         # fmtPrice3 在真页面上走 VisualLive.price, 这里按同口径给个等价替身
@@ -238,6 +324,7 @@ process.stdout.write(JSON.stringify(cases.map(c => {
                 "? '—' : String(Number(Number(v).toFixed(3))); }\n")
         js = (stub + _extract_fn(self.src, "chartModel")
               + "\n" + _extract_fn(self.src, "visibleBarIndex")
+              + "\n" + _intraday_axis_fns(self.src)
               + "\n" + _extract_fn(self.src, "intradayAvgText"))
         cases = [
             # 可见末端 = 最后一根
@@ -379,6 +466,7 @@ process.stdout.write(JSON.stringify({
               + _extract_fn(self.src, "titleDateWithLocalClock") + "\n"
               + _extract_fn(self.src, "chartModel") + "\n"
               + _extract_fn(self.src, "visibleBarIndex") + "\n"
+              + _intraday_axis_fns(self.src) + "\n"
               + _extract_fn(self.src, "chartTitleText"))
         out = json.loads(run_node(CHART_STUB_JS + js + """
 let STATE = {};

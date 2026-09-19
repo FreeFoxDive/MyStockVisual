@@ -1328,6 +1328,7 @@ const STATE = {
   _foregroundLoading: false,
   _premiumTask: null,
   depth: null,           // 五档盘口 (/api/depth, 所有周期)
+  intradayAxis: null,    // 分时固定窗口槽位表 {slots, barAt} (见 intradaySessionSlots); null = 未启用
   stockInfo: null,
   chart: null,
   hoveredGrid: 0,        // which grid panel the mouse is on (via zrender)
@@ -1458,6 +1459,103 @@ function titleDateWithLocalClock(rawDate, atLatest, today) {
   return day > rawDate.slice(0, 10) ? day + rawDate.slice(10) : rawDate;
 }
 
+/** 分时横轴的固定槽位表 (东财口径): 全天 240 个 1 分钟槽, 未走到的槽位留空。
+ *
+ *  只对 A股/ETF/指数生效 —— 港股 (330 分钟) / 美股 (390 分钟) 的会话长度不同,
+ *  且 AlphaFeed 给它们的时间戳口径没实测过, 一律返回 null 走旧的「只画已出现分钟」。
+ *
+ *  相位 = **能装下全部 bar 的那个槽位表**, 不是"看首根":
+ *    * 末相位 09:31-11:30 + 13:01-15:00 (AlphaFeed 实测口径, 优先),
+ *    * 起相位 09:30-11:29 + 13:00-14:59 (另一套命名约定)。
+ *  两套的槽位互不包含 (只差一分钟的相位), 所以"装得下"就是判据。早先按首根判定,
+ *  首根不是整点第一分钟 (低流动性开盘无成交、停牌后中途复牌、源不补空分钟) 的标的
+ *  会被静默判为"不合口径", 观感又回到柱宽随分钟数变 —— 那些标的现在也能进固定窗口。
+ *
+ *  护栏: 没有任何相位装得下 (时间戳口径意外/半天市) 或 bar 比槽位还多 → 返回 null
+ *  (退回旧行为)。宁可观感照旧, 也不能把 bar 悄悄丢掉。
+ */
+function intradaySessionSlots(symbol, bars) {
+  const s = String(symbol || '').toUpperCase();
+  if (!/\.(SH|SZ|BJ)$/.test(s)) return null;   // 港/美股等: 不启用固定窗口
+  if (!bars || !bars.length || bars.length > 240) return null;
+  const range = (from, to) => {
+    const min = (hm) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5));
+    const out = [];
+    for (let m = min(from); m <= min(to); m++) {
+      out.push(String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'));
+    }
+    return out;
+  };
+  const PHASES = [
+    range('09:31', '11:30').concat(range('13:01', '15:00')),   // 末相位 (实测口径, 优先)
+    range('09:30', '11:29').concat(range('13:00', '14:59')),   // 起相位
+  ];
+  let slots = null;
+  for (const cand of PHASES) {
+    const at = new Map(cand.map((t, i) => [t, i]));
+    if (bars.every(b => at.has(b.time))) { slots = cand; break; }
+  }
+  if (!slots) return null;   // 两套都装不下: 不猜, 退回旧行为
+  const at = new Map(slots.map((t, i) => [t, i]));
+  const barAt = new Array(slots.length).fill(null);
+  for (const b of bars) barAt[at.get(b.time)] = b;
+  return { slots, barAt };
+}
+
+/** 固定窗口里空槽的取值: candlestick **不能**吃 null/undefined。
+ *
+ *  ECharts 5.5.0 实测: candlestick 的 data 里出现 null/undefined 会在建图时抛
+ *  `TypeError: Cannot read properties of null (reading 'value')` (整张图不出来),
+ *  而 '-' 是它认的空值标记 (槽宽一切正常)。line/bar 两种都吃, 统一用 null 更直白 ——
+ *  所以空值按 series 类型分别传 (见 renderIntraday 里 K 线那处调用)。
+ */
+const INTRADAY_EMPTY_CANDLE = '-';
+
+/** 把 bar 序列按固定窗口的槽位对齐: 未走到的槽位留空 (empty)。
+ *
+ *  K线/均价/成交量/各指标面板**必须全部**走它, 否则均价线与 K 线会错位。
+ *  axis 为 null (港美股/时间戳不合口径) 时原样映射, 等价于原来的 bars.map(fn)。
+ */
+function intradayPad(axis, bars, fn, empty) {
+  if (!axis) return bars.map(fn);
+  const blank = empty === undefined ? null : empty;
+  return axis.slots.map((_, i) => (axis.barAt[i] ? fn(axis.barAt[i], i) : blank));
+}
+
+/** 分时横轴槽位数 (固定窗口 = 240; 未启用固定窗口 = 已出现 bar 数)。 */
+function intradaySlotCount() {
+  const ax = STATE.intradayAxis;
+  if (ax) return ax.slots.length;
+  return ((STATE.intradayData && STATE.intradayData.bars) || []).length;
+}
+
+/** 按**槽位**取分时 bar; 未启用固定窗口时槽位即 bar 下标。空槽返回 null。 */
+function intradayBarAt(slot) {
+  if (slot == null) return null;
+  const ax = STATE.intradayAxis;
+  if (ax) return ax.barAt[slot] || null;
+  return ((STATE.intradayData && STATE.intradayData.bars) || [])[slot] || null;
+}
+
+/** 该槽位之前 (含) 最近一根**已出现**的 bar: 固定窗口里"上一槽"可能是空的,
+ *  涨跌配色要比的是上一根真 bar, 均价读数也要落到真 bar 上。 */
+function intradayBarAtOrBefore(slot) {
+  const ax = STATE.intradayAxis;
+  if (!ax) return intradayBarAt(slot);
+  for (let k = Math.min(slot == null ? ax.barAt.length - 1 : slot, ax.barAt.length - 1); k >= 0; k--) {
+    if (ax.barAt[k]) return ax.barAt[k];
+  }
+  return null;
+}
+
+/** 当前**可见**的那根分时 bar (均价读数用): 可见末位落在空槽时回退到该槽位之前最近
+ *  一根真 bar —— 与「取已出现序列的末根」旧口径等价。 */
+function intradayVisibleBar() {
+  const i = visibleBarIndex(intradaySlotCount());
+  if (i == null) return null;
+  return intradayBarAtOrBefore(i);
+}
+
 /** 主图左上角标题 =「周期 · 日期」。日期取当前可见末根 bar (见 visibleBarIndex),
  *  并按 titleDateWithLocalClock 决定是否改成本地时钟的当天。
  *  窄网格**整段去掉年份**而不是按宽度截断 —— 截断会把日期切成「2026-09-…」。
@@ -1468,28 +1566,33 @@ function chartTitleText() {
   const bars = intraday
     ? ((STATE.intradayData && STATE.intradayData.bars) || [])
     : ((STATE.klineData && STATE.klineData.klines) || []);
-  const n = bars.length;
+  // 分时固定窗口下可见末位是**槽位**坐标 (中间可能夹空槽), 与 bars 下标不是一回事:
+  // 槽位数另有来源 (bar 本身用不上 —— 分时的日期取自响应, 见下)。
+  const n = intraday ? intradaySlotCount() : bars.length;
   const i = visibleBarIndex(n);
-  const bar = i == null ? null : bars[i];
+  const bar = intraday ? null : (i == null ? null : bars[i]);
+  // 分时不走「本地时钟升级」(titleDateWithLocalClock 的第二个参数): 那条规则是为日K
+  // "盘中当日 bar 还没补上来, 标题别慢一天" 设计的; 而分时的 date **就是图上那批 bar
+  // 的日期** (后端按交易日截当日下发), 不存在这种滞后。盘前 (09:15-09:31) 与非交易日
+  // 看到的是上一交易日那批, 标题必须跟着它 —— 让本地时钟改写会把"昨天的分时"标成今天。
+  const atLatest = !intraday && i != null && i === n - 1;
   // 分时的 bar 只有 HH:MM, 日期由后端随响应给 (后端按交易日截当日, 客户端不该自己推);
   // 分时只画一天, 时间不必上标题 (那是分钟 K 才需要, 它们跨天)。旧缓存 payload 没这个
   // 字段时降级成只写周期名 —— 宁可少写一半, 也不要「分时 · 11:30」这种半截口径
   const iDate = intraday && STATE.intradayData ? STATE.intradayData.date : '';
   const raw = intraday ? (iDate || '') : ((bar && bar.date) || '');
   if (!raw) return label;
-  const shown = titleDateWithLocalClock(raw, i != null && i === n - 1);
+  const shown = titleDateWithLocalClock(raw, atLatest);
   const g = STATE._gridRects && STATE._gridRects[0];
   const narrow = g ? (g.right - g.left) < TITLE_NARROW_GRID_PX : false;
   return `${label} · ${(narrow && shown.length > 5) ? shown.slice(5) : shown}`;
 }
 
-/** 分时左上角的均价读数 (与均价线同色): 取当前可见末根 bar 的 avg_price。
+/** 分时左上角的均价读数 (与均价线同色): 取当前可见那根 bar 的 avg_price。
  *  和 K 线那边的 MA 图例同一口径 (visibleBarIndex) —— 均价线随快照刷新/缩放/平移
  *  变化时这个数字跟着走 (60s 刷新重建标签, overlay 每帧重绘时求值)。 */
 function intradayAvgText() {
-  const bars = (STATE.intradayData && STATE.intradayData.bars) || [];
-  const i = visibleBarIndex(bars.length);
-  const bar = i == null ? null : bars[i];
+  const bar = intradayVisibleBar();
   return `均价 ${fmtPrice3(bar ? bar.avg_price : null)}`;
 }
 // 分钟 K / 分时历史按数据源周期刷新；快照、五档、日周月指标由 LiveMarket 管理。
@@ -2820,6 +2923,19 @@ async function fetchStockInfo(enrich = false, retry = 0) {
   }
 }
 
+/** 五档「量」的显示口径 (东财): 不足 1 万手按原数, 过万 → `x.x万` (一位小数)。
+ *
+ *  列头已经写着「量」, 所以数值**不带单位**(东财五档也是列头带单位、数字不带);
+ *  手机右缘那栏 `.dp-vol` 只有 40px, 过万改成万位反而比 5~6 位原数更短。
+ *  量不可能为负, 但和本仓其它格式化函数一样按绝对值判档, 免得脏数据打乱分支。 */
+function fmtDepthVol(v) {
+  if (v == null) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 1e8) return (v / 1e8).toFixed(2) + '亿';   // 五档实际到不了, 保持函数总覆盖
+  if (abs >= 1e4) return (v / 1e4).toFixed(1) + '万';
+  return String(Math.round(v));
+}
+
 /** 五档行规格, 返回 [{kind:'row',label,price,vol,priceColor} | {kind:'sep'}] (无数据返回 null)。
  *
  *  与 infoPanelRows 同一约定: HTML 渲染与截图绘制共用, 避免截图缺行/价格不同步。
@@ -2830,7 +2946,7 @@ function depthPanelRows(depth) {
   const rows = [];
   const row = (label, price, vol, color) => rows.push({
     kind: 'row', label, price: fmtPrice3(price),
-    vol: (vol == null ? '—' : String(vol)), priceColor: color,
+    vol: fmtDepthVol(vol), priceColor: color,
   });
   const asks = depth.ask_prices || [];
   const av = depth.ask_volumes || [];
@@ -4260,16 +4376,25 @@ function renderIntraday(data) {
   applySidePanels();
   if (sidePanelOn() && !STATE.stockInfo) fetchStockInfo();
   if (STATE.depth) renderDepth(STATE.depth);
-  if (!chart) return; // echarts 兜底: 图表不可用时仍保证侧栏可用
+  if (!chart) { STATE.intradayAxis = null; return; } // echarts 兜底: 图表不可用时仍保证侧栏可用 (槽位表描述的是"这张图", 没图就别留着旧的)
   const gridLeft = panelGridLeft();
   const gridRight = panelGridRight() || '2%';   // 手机五档栏占右缘时让位
   const bars = data.bars;
-  const times = bars.map(b => b.time);
-  const ohlc = bars.map(b => {
+  // 固定窗口 (东财口径): 横轴固定 240 个 1 分钟槽, bar 按时间落到槽上, 未走到的槽留空,
+  // 于是槽宽全天不变、右侧空白随开盘推进; 拿不到槽位表 (港美股/时间戳不合口径) 时
+  // axis 为 null, 退回「只画已出现分钟」的旧行为。
+  const axis = intradaySessionSlots(data.symbol || STATE.symbol, bars);
+  STATE.intradayAxis = axis;
+  const times = axis ? axis.slots : bars.map(b => b.time);
+  // 每个 series 都按槽位对齐 (空槽留空): K线/均价/成交量/各指标必须共用同一份槽位,
+  // 否则均价线与 K 线会错位。axis 为 null 时等价于原来的 bars.map(fn)。
+  // K 线那处的空槽要用 '-' (candlestick 吃 null 会抛, 见 INTRADAY_EMPTY_CANDLE)。
+  const pad = (fn, empty) => intradayPad(axis, bars, fn, empty);
+  const ohlc = pad((b) => {
     const value = [b.open, b.close, b.low, b.high];
     if (isHaltBar(b)) return { value, itemStyle: haltCandleStyle() };
     return value;
-  });
+  }, INTRADAY_EMPTY_CANDLE);
 
   const showVolume = document.getElementById('chk-volume').checked;
   const showMacd = document.getElementById('chk-macd').checked;
@@ -4298,7 +4423,7 @@ function renderIntraday(data) {
   if (hasAvg) {
     series.push({
       name: '均价', type: 'line', xAxisIndex: 0, yAxisIndex: 0,
-      data: bars.map(b => b.avg_price), symbol: 'none', smooth: false,
+      data: pad(b => b.avg_price), symbol: 'none', smooth: false,
       lineStyle: { color: C().avgPrice, width: 1 }, itemStyle: { color: C().avgPrice },
     });
   }
@@ -4308,7 +4433,7 @@ function renderIntraday(data) {
 
   // 成交量（可关闭）
   if (showVolume) {
-    const vols = bars.map(b => {
+    const vols = pad((b) => {
       if (isHaltBar(b)) return { value: b.volume || 0, itemStyle: { color: C().halt } };
       const up = (b.close || 0) >= (b.open || 0);
       return { value: b.volume || 0, itemStyle: { color: up ? C().up : C().down } };
@@ -4331,25 +4456,25 @@ function renderIntraday(data) {
     zoomIndices.push(gi);
     if (p === 'macd') {
       series.push(
-        { name: 'DIF', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.macd_dif), symbol: 'none', lineStyle: { color: C().macdDif, width: 1 } },
-        { name: 'DEA', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.macd_dea), symbol: 'none', lineStyle: { color: C().macdDea, width: 1 } },
-        { name: 'MACD柱', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => ({ value: b.macd_hist, itemStyle: { color: (b.macd_hist || 0) >= 0 ? C().up : C().down } })) },
+        { name: 'DIF', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.macd_dif), symbol: 'none', lineStyle: { color: C().macdDif, width: 1 } },
+        { name: 'DEA', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.macd_dea), symbol: 'none', lineStyle: { color: C().macdDea, width: 1 } },
+        { name: 'MACD柱', type: 'bar', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => ({ value: b.macd_hist, itemStyle: { color: (b.macd_hist || 0) >= 0 ? C().up : C().down } })) },
       );
     } else if (p === 'kdj') {
       series.push(
-        { name: 'K', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.kdj_k), symbol: 'none', lineStyle: { color: C().kdjK, width: 1 } },
-        { name: 'D', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.kdj_d), symbol: 'none', lineStyle: { color: C().kdjD, width: 1 } },
-        { name: 'J', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.kdj_j), symbol: 'none', lineStyle: { color: C().kdjJ, width: 1 } },
+        { name: 'K', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.kdj_k), symbol: 'none', lineStyle: { color: C().kdjK, width: 1 } },
+        { name: 'D', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.kdj_d), symbol: 'none', lineStyle: { color: C().kdjD, width: 1 } },
+        { name: 'J', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.kdj_j), symbol: 'none', lineStyle: { color: C().kdjJ, width: 1 } },
       );
     } else if (p === 'rsi') {
       series.push(
-        { name: 'RSI1', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.rsi6), symbol: 'none', lineStyle: { color: C().rsi6, width: 1 } },
-        { name: 'RSI2', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.rsi12), symbol: 'none', lineStyle: { color: C().rsi12, width: 1 } },
-        { name: 'RSI3', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.rsi24), symbol: 'none', lineStyle: { color: C().rsi24, width: 1 } },
+        { name: 'RSI1', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.rsi6), symbol: 'none', lineStyle: { color: C().rsi6, width: 1 } },
+        { name: 'RSI2', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.rsi12), symbol: 'none', lineStyle: { color: C().rsi12, width: 1 } },
+        { name: 'RSI3', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.rsi24), symbol: 'none', lineStyle: { color: C().rsi24, width: 1 } },
       );
     } else if (p === 'atr') {
       series.push(
-        { name: 'ATR(14)', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: bars.map(b => b.atr14), symbol: 'none', areaStyle: { color: 'rgba(144,164,174,0.08)' }, lineStyle: { color: C().atr, width: 1 } },
+        { name: 'ATR(14)', type: 'line', xAxisIndex: gi, yAxisIndex: gi, data: pad(b => b.atr14), symbol: 'none', areaStyle: { color: 'rgba(144,164,174,0.08)' }, lineStyle: { color: C().atr, width: 1 } },
       );
     }
     gi++;
@@ -4383,8 +4508,10 @@ function renderIntraday(data) {
       borderColor: C().tipBorder,
       textStyle: { color: C().tipText, fontSize: isPhoneUi() ? 11 : 12, fontFamily: 'monospace' },
       formatter: function(ps) {
-        const idx = ps[0] && ps[0].dataIndex;
-        const b = data.bars[idx];
+        // dataIndex 是**槽位**下标 (固定窗口下与 bars 下标不是一回事, 中间夹着空槽):
+        // 空槽没有 bar, 直接不出提示框 (与东财一致, 鼠标划到未走到的时段不弹数据)。
+        const slot = ps[0] && ps[0].dataIndex;
+        const b = intradayBarAt(slot);
         if (!b) return '';
         const ihdr = `<div><b>${b.time}</b>${haltLabel(b)}</div>`;
         // 悬停在子面板 → 只报该面板数据 (文案/配色与日K 对应分支同口径)。此前一律落到下面的
@@ -4412,7 +4539,7 @@ function renderIntraday(data) {
         if (panel === 'atr') {
           return ihdr + `<div>ATR(14) ${b.atr14?.toFixed(3)||'—'}</div>`;
         }
-        const prevBar = idx > 0 ? data.bars[idx - 1] : null;
+        const prevBar = intradayBarAtOrBefore(slot - 1);
         const pc = prevBar ? prevBar.close : b.open;
         const cFn = v => v == null ? '—' : `<span style="color:${v>pc?C().up:v<pc?C().down:C().tipText}">${fmtPrice3(v)}</span>`;
         // 手机: 开/高 与 低/收 分两行 (一行四字段在窄屏会溢出)
@@ -5826,6 +5953,8 @@ function switchPeriod(period) {
   if (period === 'intraday') {
     fetchIntraday({ retainChart: true });
   } else {
+    // 离开分时就把固定窗口的槽位表清掉: 它描述的是分时的横轴, 别的周期不该看见
+    STATE.intradayAxis = null;
     fetchData({ retainPanels: true });
   }
 }
@@ -5897,6 +6026,7 @@ function loadCurrent() {
   refreshSymbolPanels(); // 市场数据抽屉/预警弹窗随换股刷新
   if (STATE.period === 'intraday') {
     STATE.intradayData = null; // 清缓存，强制重新加载分时
+    STATE.intradayAxis = null; // 固定窗口槽位表同属上一只股票的数据
     fetchIntraday();
   } else {
     fetchData();
