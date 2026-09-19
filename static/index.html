@@ -878,6 +878,12 @@ body {
   padding: 4px 0; border-bottom: 1px dashed var(--border); }
 #cn-body .cn-kv-label { color: var(--text-secondary); white-space: nowrap; }
 #cn-body .cn-kv-val { text-align: right; font-family: monospace; }
+/* 股东变化: 折线图在上, 明细表 (全部记录) 在下 */
+#cn-body .cn-chart { width: 100%; height: 260px; }
+#cn-body .cn-cap { color: var(--text-secondary); margin-bottom: 8px; }
+#cn-body .cn-chart-empty { height: 90px; display: flex; align-items: center;
+  justify-content: center; color: var(--text-secondary); }
+#cn-body .cn-holder-tbl { margin-top: 4px; }
 
 /* ═══ 画线模式 ═══ */
 #draw-palette {
@@ -1685,6 +1691,8 @@ const CHART_VAR_MAP = {
   boll: '--chart-boll',
   overbought: '--chart-overbought', oversold: '--chart-oversold',
   impulse_neutral: '--chart-impulse',
+  // 抽屉「股东变化」单序列折线: 户数无涨跌方向, 借用主图 ink 色而不复用 up/down
+  holder: '--chart-ink',
   ch_1atr: '--chart-ch1', ch_2atr: '--chart-ch2', ch_3atr: '--chart-ch3',
   chipProfit: '--up-color', chipTrapped: '--down-color', chipMedian: '--chart-chip-median',
   zeroLine: '--chart-cross',
@@ -2153,6 +2161,8 @@ function applyTheme(theme) {
   STATE.theme = theme;
   VisualTheme.apply(theme, { buttonId: 'btn-theme', auto: STATE._themeAuto });
   VisualTheme.save(theme, STATE._themeAuto);
+  // 抽屉「股东变化」折线图按主题取色: 就地重绘, 不重新请求数据
+  if (_cnChart && _cnHolderPoints) renderHolderChart();
 }
 
 function toggleTheme() {
@@ -6506,21 +6516,43 @@ async function api(path, options = {}) {
 // ── A股市场数据抽屉 ──
 let _cnTab = "fund-flow";
 let _cnSeq = 0;   // 请求序号: 丢弃过期响应, 防止旧 tab/旧股票的数据覆盖新内容
+let _cnChart = null;        // 「股东变化」折线图实例 (切 tab/换股/重绘前先销毁)
+let _cnHolderPoints = null; // 近三年点位 [{date, count, chg}]: 切主题时据此就地重绘
+const CN_HOLDER_YEARS = 3;  // 折线图窗口: 近三年
+// 单序列折线的宽度下限: 近三年约 12 个「截止日期」刻度在 660px 下可全显示且不重叠
+const CN_CHART_MIN_W = 660;
 function toggleCnDrawer() {
   const d = document.getElementById("cn-drawer");
   const show = d.style.display !== "block";
   d.style.display = show ? "block" : "none";
   if (show) showCnTab(_cnTab);
 }
-/** 抽屉宽度按表格内容自适应 (下限 440, 上限 92vw); 无表格时回落到 CSS clamp */
+/** 抽屉宽度按内容自适应 (表格内容/图表取较宽者, 上限 92vw); 两者都不可见时回落 CSS clamp */
 function fitCnDrawer() {
   const drawer = document.getElementById('cn-drawer');
   if (!drawer) return;
   const table = document.querySelector('#cn-body table');
-  if (!table) { drawer.style.width = ''; return; }
+  const chart = document.querySelector('#cn-body .cn-chart');
+  if (!table && !chart) { drawer.style.width = ''; return; }
   const maxW = Math.round(window.innerWidth * 0.92);
-  const need = Math.ceil(table.scrollWidth) + 26;   // 左右 padding + 边框
-  drawer.style.width = Math.min(Math.max(need, 440), maxW) + 'px';
+  const need = table ? cnTableContentWidth(table) + 26 : 0;   // 左右 padding + 边框
+  // 表格缺失或内容很窄时, 宽度由图表下限兜底 (近三年 12 个刻度不重叠)
+  const floor = chart ? CN_CHART_MIN_W : 440;
+  drawer.style.width = Math.min(Math.max(need, floor), maxW) + 'px';
+  // 宽度变了要同步画布尺寸; 抽屉关着时容器宽度为 0, resize 会把画布清成 0×0, 跳过
+  if (_cnChart && drawer.style.display !== 'none') _cnChart.resize();
+}
+
+/** 表格「内容宽」(列宽之和): 不能直接量 #cn-body table 的 scrollWidth ——
+    它是 width:100%, 量到的是抽屉当前内容宽, 代回宽度公式就成了自我引用
+    (need = 抽屉宽 + 2 → 每次调用长 2px, 一路涨到 92vw, 实测已验证)。
+    临时切 max-content 量出真实需求宽再还原; 单元格都是 nowrap, 即各列内容宽之和。 */
+function cnTableContentWidth(table) {
+  const prev = table.style.width;
+  table.style.width = 'max-content';
+  const width = Math.ceil(table.scrollWidth);
+  table.style.width = prev;
+  return width;
 }
 
 function showCnTab(tab) {
@@ -6531,6 +6563,9 @@ function showCnTab(tab) {
     if (b.getAttribute("onclick") === `showCnTab('${tab}')`) b.classList.add("active");
   });
   const body = document.getElementById("cn-body");
+  // 旧图实例的容器马上会被 innerHTML 丢掉: 先销毁, 否则切 tab/换股会留下孤儿实例
+  if (_cnChart) { try { _cnChart.dispose(); } catch (e) { /* 已销毁 */ } _cnChart = null; }
+  _cnHolderPoints = null;   // 点位与实例同生命周期: 不清会残留上一只股票的数据 (主题重绘时误用)
   body.innerHTML = '<div style="color:var(--text-secondary)">加载中…</div>';
   const symbol = STATE.symbol;
   const url = `/api/cn/${tab}?symbol=${encodeURIComponent(symbol)}`;
@@ -6555,6 +6590,8 @@ function showCnTab(tab) {
       return;
     }
     if (!rows.length) { body.innerHTML = hint + '<div style="color:var(--text-secondary)">暂无数据</div>'; return; }
+    // 股东变化: 近三年折线图 + 常显的全部记录明细表 (不走通用表格)
+    if (tab === 'holder-change') { renderHolderChangeTab(data, body); return; }
     const cols = Object.keys(rows[0]).slice(0, 7);
     const hl = data.highlight_symbol ? String(data.highlight_symbol) : "";
     body.innerHTML = hint + `<table><thead><tr>${cols.map(c => `<th>${escHtml(c)}</th>`).join("")}</tr></thead>
@@ -6578,6 +6615,108 @@ function showCnTab(tab) {
 }
 
 window.addEventListener('resize', fitCnDrawer);
+
+// ── 股东变化: 折线图 (近三年) + 明细表 (全部记录, 常显) ──
+
+/** 折线图窗口起点 (ISO 日期, 与接口给的「截止日期」字符串直接可比); 明细表不受此限制。
+    now 可注入 (测试用); 闰日先退到当月最后一天, 免得 Date 归一成 3/1 而多排掉一天。 */
+function cnHolderCutoff(now) {
+  const d = now || new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const y = d.getFullYear() - CN_HOLDER_YEARS;
+  const m = d.getMonth() + 1;
+  const lastDay = new Date(y, m, 0).getDate();   // 该年该月的最后一天 (2 月自动区分闰年)
+  return `${y}-${p(m)}-${p(Math.min(d.getDate(), lastDay))}`;
+}
+
+/** 股东户数刻度: 450712 → 45.07万 (五位数直接上轴会挤在一起) */
+function fmtHolders(v) {
+  if (typeof v !== 'number' || !isFinite(v)) return '—';
+  return Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(2) + '万' : String(Math.round(v));
+}
+
+/** 千分位整数 (明细表用); 非数值给 '—' */
+function fmtHolderInt(v) {
+  return (typeof v === 'number' && isFinite(v))
+    ? String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '—';
+}
+
+/** 按 _cnHolderPoints 画折线 (首次渲染与切主题共用) */
+function renderHolderChart() {
+  const el = document.getElementById('cn-holder-chart');
+  const pts = _cnHolderPoints || [];
+  // 响应到达前抽屉被关掉时容器宽度为 0, ECharts 取不到尺寸: 跳过, 重开抽屉会走 showCnTab 重画
+  if (!el || !pts.length || !window.echarts || !el.clientWidth) return;
+  if (_cnChart) { try { _cnChart.dispose(); } catch (e) { /* 已销毁 */ } _cnChart = null; }
+  const c = C();
+  _cnChart = echarts.init(el, null, { renderer: 'canvas' });
+  _cnChart.setOption({
+    animation: false,                                   // 抽屉内小图, 主题重绘时不闪
+    grid: { left: 58, right: 16, top: 16, bottom: 52 }, // 底部留给旋转 45° 的日期刻度
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: c.tipBg, borderColor: c.tipBorder,
+      textStyle: { color: c.tipText, fontSize: 12, fontFamily: 'monospace' },
+      formatter: (ps) => {
+        const p = pts[ps[0].dataIndex];
+        if (!p) return '';
+        return `${escHtml(p.date)}<br/>股东户数 ${fmtHolders(p.count)}` +
+               (p.chg ? `<br/>${escHtml(p.chg)}` : '');
+      },
+    },
+    xAxis: {
+      type: 'category', data: pts.map(p => p.date), boundaryGap: false,
+      // 刻度就是每一期公布的截至日期: interval 0 一个记录一个刻度, 不抽稀
+      axisLabel: { color: c.axisText, fontSize: 10, rotate: 45, interval: 0, margin: 6 },
+      axisLine: { lineStyle: { color: c.gridLine } },
+      axisTick: { lineStyle: { color: c.gridLine } },
+    },
+    yAxis: {
+      type: 'value', scale: true,
+      axisLabel: { color: c.axisText, fontSize: 10, formatter: fmtHolders },
+      splitLine: { lineStyle: { color: c.gridLine } },
+    },
+    series: [{
+      name: '股东户数', type: 'line', data: pts.map(p => p.count),
+      symbol: 'circle', symbolSize: 5,
+      lineStyle: { color: c.holder, width: 1.6 },
+      itemStyle: { color: c.holder },
+    }],
+  });
+}
+
+/** 「股东变化」页: 折线图 (近三年) 在上, 明细表 (全部记录) 在下 */
+function renderHolderChangeTab(data, body) {
+  const hint = data.hint ? `<div class="cn-cap">${escHtml(data.hint)}</div>` : '';
+  const rows = (data.rows || []).filter(r => r && r['截止日期']);
+  if (!rows.length) { body.innerHTML = hint + '<div style="color:var(--text-secondary)">暂无数据</div>'; return; }
+  // 上游顺序不作数: 统一按「截止日期」升序 (ISO 字符串可直接比较)
+  const asc = rows.slice().sort((a, b) => String(a['截止日期']).localeCompare(String(b['截止日期'])));
+  // 只有折线图限近三年; 下面的明细表列出全部记录
+  const recent = asc.filter(r => String(r['截止日期']) >= cnHolderCutoff());
+  const pts = recent.filter(r => typeof r['股东户数'] === 'number')
+    .map(r => ({ date: String(r['截止日期']), count: r['股东户数'],
+                 chg: r['增减'] == null ? '' : String(r['增减']) }));
+  let cap = `折线图（近三年 ${recent.length} 期）`;
+  if (pts.length) cap += ` · 最新 ${pts[pts.length - 1].date} ${fmtHolders(pts[pts.length - 1].count)} 户`;
+  if (pts.length > 1) {
+    const d = pts[pts.length - 1].count - pts[pts.length - 2].count;
+    cap += ` · 较上期 ${d >= 0 ? '+' : ''}${fmtHolderInt(d)}`;
+  }
+  const chartHtml = pts.length >= 2
+    ? '<div id="cn-holder-chart" class="cn-chart"></div>'
+    : '<div class="cn-chart-empty">近三年披露不足两期, 无法成线</div>';
+  const tbl = `<table><thead><tr><th>截止日期</th><th>股东户数</th><th>增减</th></tr></thead><tbody>`
+    + asc.slice().reverse().map(r =>   // 最新在上 (与上游一致)
+        `<tr><td>${escHtml(String(r['截止日期']))}</td>` +
+        `<td>${fmtHolderInt(r['股东户数'])}</td>` +
+        `<td>${escHtml(r['增减'] == null ? '—' : String(r['增减']))}</td></tr>`).join('')
+    + `</tbody></table>`;
+  body.innerHTML = hint + `<div class="cn-cap">${escHtml(cap)}</div>` + chartHtml
+    + `<div class="cn-cap cn-holder-tbl">明细（全部 ${rows.length} 期）</div>` + tbl;
+  _cnHolderPoints = pts;
+  renderHolderChart();
+}
 
 /** 换股: 同步「按需打开」的 symbol 相关面板 (市场数据抽屉/预警弹窗) */
 function refreshSymbolPanels() {

@@ -144,6 +144,34 @@ class MrDataRouteTest(unittest.TestCase):
         self.assertEqual(data["rows"][0]["股东户数"], 450712, "字符串户数 → int")
         self.assertEqual(data["rows"][0]["增减"], "减少6898", "增减文本原样保留")
 
+    def test_holder_change_sorted_newest_first(self):
+        # 上游顺序不作契约: 接口保证按截止日期倒序 (前端折线图自行升序)
+        mr = self._fake(company_holder_change=lambda code: [
+            {"jzrq": "2025-12-31", "gdhs": "1", "bh": "增加1"},
+            {"jzrq": "2026-06-30", "gdhs": "3", "bh": "增加1"},
+            {"jzrq": "2026-03-31", "gdhs": "2", "bh": "增加1"},
+        ])
+        with mock.patch.object(market, "get_mr", return_value=mr):
+            data = self.client.get("/api/cn/holder-change?symbol=000001.SZ").get_json()
+        self.assertEqual([r["截止日期"] for r in data["rows"]],
+                         ["2026-06-30", "2026-03-31", "2025-12-31"])
+
+    def test_holder_change_normalizes_non_iso_dates(self):
+        # 前端的「近三年」窗口是按 ISO 字符串比较的: 数据源换格式时必须卡在出口归一,
+        # 否则窗口判断会静默失效 (例如 "2025/01/05" >= "2025-09-19" 为真)。
+        mr = self._fake(company_holder_change=lambda code: [
+            {"jzrq": "2025/01/05", "gdhs": "1", "bh": "增加1"},
+            {"jzrq": "20250630", "gdhs": "3", "bh": "增加1"},
+            {"jzrq": "2025-03-31 00:00:00", "gdhs": "2", "bh": "增加1"},
+            {"jzrq": "—", "gdhs": "4", "bh": "增加1"},
+            {"jzrq": "2025-13-45", "gdhs": "5", "bh": "增加1"},
+        ])
+        with mock.patch.object(market, "get_mr", return_value=mr):
+            data = self.client.get("/api/cn/holder-change?symbol=000001.SZ").get_json()
+        self.assertEqual([r["截止日期"] for r in data["rows"]],
+                         ["2025-06-30", "2025-03-31", "2025-01-05", None, None],
+                         "斜杠/紧凑/带时间都要归一成 ISO; 认不出的给 None 并排到末尾")
+
     def test_top_holders_flatten_latest_report(self):
         reports = [
             {"jzrq": "2026-06-30", "ggrq": "2026-08-15", "sdgd": [

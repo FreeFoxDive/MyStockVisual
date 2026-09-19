@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import datetime
 import logging
+import re
 
 from flask import request
 
@@ -20,6 +22,21 @@ def _yi(v):
     """元 → 亿元 (保留 2 位); None 原样返回。"""
     f = market._safe_float(v)
     return round(f / 1e8, 2) if f is not None else None
+
+
+def _iso_date(v):
+    """日期归一成 YYYY-MM-DD; 认不出的格式返回 None (调用方按空值处理)。
+
+    数据源可能给 2025/01/05、20250105 或带时间的串; 前端「近三年」窗口是按 ISO
+    字符串直接比较的, 格式不归一就会静默把窗口外的期数纳进来, 所以卡在出口这一层。
+    """
+    m = re.match(r"(\d{4})[-/.]?(\d{2})[-/.]?(\d{2})", str(v or "").strip())
+    if not m:
+        return None
+    try:
+        return datetime.date(*(int(g) for g in m.groups())).isoformat()
+    except ValueError:
+        return None
 
 
 def _cn_ctx(require_market=True):
@@ -115,12 +132,14 @@ def cn_holder_change():
         return _json({"rows": [], "hint": "数据源暂时不可用"})
     rows = [
         {
-            "截止日期": r.get("jzrq"),
+            "截止日期": _iso_date(r.get("jzrq")),
             "股东户数": market._safe_int(r.get("gdhs")),
             "增减": r.get("bh"),
         }
         for r in raw if isinstance(r, dict)
     ]
+    # 上游顺序不作契约: 显式按截止日期倒序 (最新在上), 与公告路由同做法
+    rows.sort(key=lambda x: str(x["截止日期"] or ""), reverse=True)
     return _json({"rows": rows, "hint": "" if rows else "暂无数据"})
 
 

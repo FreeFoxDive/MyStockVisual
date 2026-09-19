@@ -64,7 +64,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 价格预警 | 自定义条件（现价/涨跌幅 ≥/≤ 数值，AND 组合），监控循环盘中评估，30 分钟冷却，钉钉/ntfy 推送；工具栏 🔔 管理。`change_pct` 全线统一为百分数（AF 官方小数在 `feed._row_to_quote` 出口 ×100，见 docs/known-issues.md §5） |
 | 趋势线监控 | 选中趋势线/射线/水平线 → 画线菜单「🔔监控」→ 强制命名 + 跌破幅度%（默认 个股 2 / ETF·指数 3）→ 现价跌破线值×(1−pct%) 时盘中推送钉钉/ntfy，每条线每日一次；监控配置随画线保存（含复权口径），拖动即跟随，预警弹窗可总览；日/周/月K 支持。监控中心「去图表」跳回该监控线所在周期（`/?symbol=…&period=1w`） |
 | 条件选股 | `/screener.html`：MACD金叉 / 站上MA20 / 筹码获利盘 / RSI / 5日涨幅 条件组合后台扫描（`SCREENER_MAX_SYMBOLS` 控制范围）。结果表现价按交易时段门控刷新（盘外不轮询，服务端那会儿只返回收盘快照）；后台任务与页面解耦，进度轮询失败会退避重试而不是冻住 |
-| 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存）；麦蕊源：交易所公告（日期倒序）、主力净流入（当前股单票键值视图 + 全市场排名）、股东户数变化、十大股东、十大流通股东、解禁限售（含解禁市值/占流通股%） |
+| 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存）；麦蕊源：交易所公告（日期倒序）、主力净流入（当前股单票键值视图 + 全市场排名）、股东户数变化（上方近三年折线图，横轴刻度=每期公布的截至日期，纵轴=股东户数；下方明细表常显并列出全部记录，抽屉按图表/表格较宽者自适应）、十大股东、十大流通股东、解禁限售（含解禁市值/占流通股%） |
 
 ## 文件结构
 
@@ -146,7 +146,7 @@ visual/
 | `GET /api/cn/announcements?symbol=` | 公告（巨潮/akshare，近 90 天，30min 缓存） |
 | `GET /api/cn/exchange-announcement?symbol=` | 交易所公告（麦蕊 `/hsstock/announcement`，源升序→按日期倒序展示，30min 缓存） |
 | `GET /api/cn/zljlr?symbol=` | 当前股票主力净流入（单票键值视图：主力净额/率、主力流入/流出、净额/率、量价换手、全市场排名；麦蕊 `/higg/zljlr` 全市场快照，10min 缓存） |
-| `GET /api/cn/holder-change?symbol=` | 股东户数变化趋势（麦蕊 `/hscp/gdbh`，6h 缓存） |
+| `GET /api/cn/holder-change?symbol=` | 股东户数变化趋势（麦蕊 `/hscp/gdbh`，6h 缓存；`截止日期`在出口归一成 ISO，认不出的给 `null`；按截止日期倒序，前端取近三年作图、表格列全部记录） |
 | `GET /api/cn/top-holders?symbol=` | 十大股东（最新报告期展平，麦蕊 `/hscp/sdgd`，6h 缓存） |
 | `GET /api/cn/float-holders?symbol=` | 十大流通股东（麦蕊 `/hscp/ltgd`，6h 缓存） |
 | `GET /api/cn/unlock?symbol=` | 解禁限售（麦蕊 `/hscp/jjxs`，12h 缓存；附 解禁市值(亿)、解禁均价(元)=市值÷数量、占流通股% = 解禁数量÷流通股本） |
