@@ -13,6 +13,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import market as market_mod
+import perf
 
 
 def _af_row(symbol, **kw):
@@ -325,6 +326,42 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
              mock.patch.object(market_mod, "get_af", return_value=af):
             self.assertIsNone(market_mod.fetch_depth("600519.SH"))
 
+    def test_fetch_depth_zero_padded_levels_become_empty(self):
+        """上游缺档位时补 0.0, 不是少给几项 —— 0 价必须变空档, 不能画成报价。
+
+        payload 用 588200.SH 2026-09-18 14:59:14 的实测形状 (收盘集合竞价)。
+        """
+        af = mock.Mock()
+        af.depth.get.return_value = {
+            "symbol": "588200.SH", "timestamp": 1789714754000,
+            "bid_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+            "bid_volumes": [174867, 656, 0, 0, 0],
+            "ask_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+            "ask_volumes": [174867, 0, 0, 0, 0],
+        }
+        with _depth_iso(), \
+             mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af):
+            out = market_mod.fetch_depth("588200.SH")
+        self.assertEqual(out["bid_prices"], [1.184, None, None, None, None])
+        self.assertEqual(out["ask_prices"], [1.184, None, None, None, None])
+        # 买2 那 656 手挂在 0 价上, 是无主数据, 跟价一起置空
+        self.assertEqual(out["bid_volumes"], [174867, None, None, None, None])
+
+    def test_fetch_depth_all_zero_book_is_no_data(self):
+        """全 0 的盘口 (停牌/未开盘上游占位) 不是"五档是空的", 要回退而不是下发。"""
+        af = mock.Mock()
+        af.depth.get.return_value = {
+            "symbol": "600519.SH", "timestamp": 1,
+            "bid_prices": [0.0] * 5, "bid_volumes": [0] * 5,
+            "ask_prices": [0.0] * 5, "ask_volumes": [0] * 5,
+        }
+        with _depth_iso(), \
+             mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "MAIRUI_API_KEY", ""), \
+             mock.patch.object(market_mod, "get_af", return_value=af):
+            self.assertIsNone(market_mod.fetch_depth("600519.SH"))
+
     def test_fetch_depth_falls_back_to_mairui_five(self):
         market_mod._mr_depth_bucket = market_mod.PacedBudget(24)
         mr = mock.Mock()
@@ -480,6 +517,73 @@ class DepthDayCacheTest(unittest.TestCase):
             self.assertEqual(market_mod.fetch_depth("002472.SZ"), first)
         af.depth.get.assert_called_once()
 
+    def test_closing_auction_snapshot_does_not_replace_replayable_book(self):
+        """14:57-15:00 的塌陷盘口不覆盖当天最后一份完整五档 (588200.SH 的坏法)。
+
+        实时看的是当时的真相 (竞价队列), 但收盘后回放必须还是 14:56 那份。
+        """
+        af = mock.Mock()
+        af.depth.get.side_effect = [
+            {"symbol": "588200.SH", "timestamp": 1789714574000,
+             "bid_prices": [1.183, 1.182, 1.181, 1.18, 1.179],
+             "bid_volumes": [30354, 30831, 27963, 39576, 15446],
+             "ask_prices": [1.184, 1.185, 1.186, 1.187, 1.188],
+             "ask_volumes": [21647, 59151, 33397, 22978, 30883]},
+            {"symbol": "588200.SH", "timestamp": 1789714754000,
+             "bid_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+             "bid_volumes": [174867, 656, 0, 0, 0],
+             "ask_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+             "ask_volumes": [174867, 0, 0, 0, 0]},
+        ]
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True):
+            # 五档限频桶 24/min = 每 2.5s 才放一个令牌, 连续两次取数第二次会被节流成
+            # None (与本次要验的缓存语义无关) —— 这里放宽成全放行
+            market_mod._depth_bucket = mock.Mock(try_acquire=mock.Mock(return_value=True))
+            before = datetime(2026, 9, 18, 14, 56, 30)
+            with mock.patch.object(market_mod.market_hours, "now", return_value=before), \
+                 mock.patch.object(market_mod.market_hours, "is_live", return_value=True):
+                first = market_mod.fetch_depth("588200.SH")
+            self.assertTrue(market_mod._depth_day_cache_date, "14:56 的完整五档入库")
+            market_mod._depth_cache._cache.clear()
+            auction = datetime(2026, 9, 18, 14, 59, 14)
+            with mock.patch.object(market_mod.market_hours, "now", return_value=auction), \
+                 mock.patch.object(market_mod.market_hours, "is_live", return_value=True):
+                live = market_mod.fetch_depth("588200.SH")
+        # 实时下发的是竞价当时的盘口, 空档位已是 None (不再画出 0 价)
+        self.assertEqual(live["bid_prices"], [1.184, None, None, None, None])
+        self.assertEqual(live["bid_volumes"], [174867, None, None, None, None])
+        # 当日快照没被这份残缺盘口顶掉
+        replay = market_mod._depth_day_cache["588200.SH"]
+        self.assertEqual(replay["bid_prices"], first["bid_prices"])
+        self.assertEqual(replay["bid_volumes"], first["bid_volumes"])
+
+    def test_stale_disk_entry_with_zero_levels_is_cleaned_on_read(self):
+        """修复前写盘的补零盘口, 读出时清洗 (不靠"等它自己过期"来治)。"""
+        market_mod._depth_day_cache_date = "2026-09-18"
+        market_mod._depth_day_cache["588200.SH"] = {
+            "symbol": "588200.SH", "timestamp": 1789714754000,
+            "bid_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+            "bid_volumes": [174867, 656, 0, 0, 0],
+            "ask_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+            "ask_volumes": [174867, 0, 0, 0, 0],
+            "_revision": 1,
+        }
+        market_mod._depth_day_cache["000001.SZ"] = {
+            "symbol": "000001.SZ", "timestamp": 1,
+            "bid_prices": [0.0] * 5, "bid_volumes": [0] * 5,
+            "ask_prices": [0.0] * 5, "ask_volumes": [0] * 5,
+            "_revision": 1,
+        }
+        saturday = datetime(2026, 9, 19, 12, 0)
+        with mock.patch.object(market_mod.market_hours, "now", return_value=saturday), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=False):
+            cleaned = market_mod._depth_day_get("588200.SH")
+            self.assertEqual(cleaned["bid_prices"], [1.184, None, None, None, None])
+            self.assertEqual(cleaned["_revision"], 1, "清洗不动时间戳等其它字段")
+            self.assertIsNone(market_mod._depth_day_get("000001.SZ"), "全 0 的旧条目直接丢弃")
+
     def test_next_trading_day_expires_previous_depth(self):
         af = self._af()
         friday = datetime(2026, 9, 11, 14, 30)
@@ -495,6 +599,306 @@ class DepthDayCacheTest(unittest.TestCase):
              mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
              mock.patch.object(market_mod.market_hours, "is_live", return_value=False):
             self.assertIsNone(market_mod._depth_day_get("002472.SZ"))
+
+
+class DepthCollapsedBookTest(unittest.TestCase):
+    """塌陷盘口不入当日快照 —— 与时段无关的第二道判据 (`_is_collapsed_depth`)。
+
+    第一道是时段 (`depth_book_replayable`, 见 test_market_hours.ClosingAuctionTest);
+    这道按**形态**兜底, 覆盖上游在任何时刻给出的"不是五档"的东西 (偶发单档、临停复牌)。
+    用例里的 payload 是**清洗后**的形状 (空档位已 None), 与 `_depth_day_set` 收到的一致。
+    """
+
+    def setUp(self):
+        market_mod._depth_cache._cache.clear()
+        market_mod._depth_day_cache.clear()
+        market_mod._depth_day_cache_date = None
+        market_mod._depth_bucket = mock.Mock(try_acquire=mock.Mock(return_value=True))
+        fake_file = mock.Mock()
+        fake_file.read_text.side_effect = FileNotFoundError()
+        self.file_patch = mock.patch.object(market_mod, "_DEPTH_DAY_CACHE_FILE", fake_file)
+        self.file_patch.start()
+        self.addCleanup(self.file_patch.stop)
+        perf.reset_counters()
+
+    def test_is_collapsed_depth_truth_table(self):
+        def book(bids, asks):
+            return {"bid_prices": bids, "ask_prices": asks,
+                    "bid_volumes": [1] * len(bids), "ask_volumes": [1] * len(asks)}
+
+        cases = [
+            ("正常五档",
+             book([10.0, 9.99, 9.98, 9.97, 9.96], [10.01, 10.02, 10.03, 10.04, 10.05]), False),
+            ("同价塌陷 (竞价虚拟价挂两侧)",
+             book([1.184, None, None, None, None], [1.184, None, None, None, None]), True),
+            ("同价带浮点噪声也算塌陷",
+             book([1.184, None], [1.1840000000000002, None]), True),
+            ("相邻档的浮点噪声不是塌陷",
+             book([17.650000000000002, 17.64], [17.66, 17.67]), False),
+            ("有效档只有 1 个",
+             book([10.0, None, None, None, None], [None] * 5), True),
+            # 封板票一侧全空 (上游补 0 → 清洗成 None), 有效档数正常, 必须能入库
+            ("涨停单边空",
+             book([10.0, 9.99, 9.98, 9.97, 9.96], [None] * 5), False),
+            ("跌停单边空",
+             book([None] * 5, [10.0, 10.01, 10.02, 10.03, 10.04]), False),
+            ("空盘口", book([], []), True),
+        ]
+        for label, payload, expected in cases:
+            with self.subTest(label=label):
+                self.assertEqual(market_mod._is_collapsed_depth(payload), expected)
+        self.assertTrue(market_mod._is_collapsed_depth(None), "非 dict 一律当塌陷")
+
+    def _fetch_at(self, hhmm, payload, symbol):
+        """在指定时刻取一次五档 (时段门放行: 连续竞价 + is_live)。"""
+        af = mock.Mock()
+        af.depth.get.return_value = payload
+        when = datetime(2026, 9, 18, hhmm[0], hhmm[1])
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod.market_hours, "now", return_value=when), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day", return_value=True), \
+             mock.patch.object(market_mod.market_hours, "is_live", return_value=True):
+            return market_mod.fetch_depth(symbol)
+
+    def test_collapsed_book_rejected_in_regular_session(self):
+        """时段门放行 (14:30 是连续竞价) 但形态塌陷 —— 第二道判据必须挡住。"""
+        out = self._fetch_at((14, 30), {
+            "symbol": "588200.SH", "timestamp": 1789714754000,
+            "bid_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+            "bid_volumes": [174867, 656, 0, 0, 0],
+            "ask_prices": [1.184, 0.0, 0.0, 0.0, 0.0],
+            "ask_volumes": [174867, 0, 0, 0, 0],
+        }, "588200.SH")
+        # 实时下发不变 (仍是当时的真相, 只是空档位已 None)
+        self.assertEqual(out["bid_prices"], [1.184, None, None, None, None])
+        self.assertNotIn("588200.SH", market_mod._depth_day_cache, "塌陷盘口不得进当日快照")
+        counters = perf.counters()
+        self.assertEqual(counters.get("depth_day_reject"), 1)
+        self.assertIsNone(counters.get("depth_day_write"))
+
+    def test_one_sided_limit_up_book_still_cached(self):
+        """涨停封板 (卖侧全空) 必须照常入库 —— 判据写错会让所有封板票没有当日快照。"""
+        out = self._fetch_at((14, 30), {
+            "symbol": "603169.SH", "timestamp": 1789714574000,
+            "bid_prices": [10.0, 9.99, 9.98, 9.97, 9.96],
+            "bid_volumes": [1, 2, 3, 4, 5],
+            "ask_prices": [0.0] * 5, "ask_volumes": [0] * 5,
+        }, "603169.SH")
+        self.assertEqual(out["ask_prices"], [None] * 5)
+        self.assertIn("603169.SH", market_mod._depth_day_cache)
+        counters = perf.counters()
+        self.assertEqual(counters.get("depth_day_write"), 1)
+        self.assertIsNone(counters.get("depth_day_reject"))
+
+
+class DepthStaleSnapshotRefreshTest(unittest.TestCase):
+    """盘后/午休读到"早上看过的"那份快照时, 花一个令牌回源换一份更接近收盘的。
+
+    实测盘后上游给的就是当天最后一份连续竞价盘口 (000070.SZ 快照 14:44 是 17.66/17.67,
+    盘后上游给 17.70/17.71 且量已变), 所以这不是"多打一次上游", 是换掉手里那份旧的。
+    """
+
+    # 判据是条目自己的 _revision (抓取时刻, time_ns()//1000 微秒) 是否落在所属交易日的 15:00 之前:
+    # 10:14 抓的那份 / 15:30 抓的那份 (盘后) / 盘后抓的但上游 timestamp 还停在 14:56 的那份
+    # 2026-09-18 15:30 CEST 的纳秒值: 测试里把写入时刻钉死在这里, 免得断言跟着跑套件的钟点变
+    CLOSE_FETCH_NS = 1789716600 * 10 ** 9
+    MORNING = {
+        "symbol": "300943.SZ", "timestamp": 1789697640000,
+        "bid_prices": [33.13, 33.12, 33.11, 33.09, 33.06], "bid_volumes": [10, 20, 30, 40, 50],
+        "ask_prices": [33.14, 33.15, 33.16, 33.17, 33.18], "ask_volumes": [60, 70, 80, 90, 100],
+        "_revision": 1789697640000000,
+    }
+    CLOSE = {
+        "symbol": "300943.SZ", "timestamp": 1789716600000,
+        "bid_prices": [33.20, 33.19, 33.18, 33.17, 33.16], "bid_volumes": [11, 21, 31, 41, 51],
+        "ask_prices": [33.21, 33.22, 33.23, 33.24, 33.25], "ask_volumes": [61, 71, 81, 91, 101],
+        "_revision": 1789716600000000,
+    }
+    # 盘后抓的, 但上游 timestamp 还停在 14:56 —— 判据必须认"抓取时刻"而不是上游 timestamp,
+    # 否则这种条目会被反复回源 (每个视图一个令牌)
+    POST_CLOSE_PRE_STAMP = {
+        "symbol": "300943.SZ", "timestamp": 1789714574000,
+        "bid_prices": [33.19, 33.18, 33.17, 33.16, 33.15], "bid_volumes": [12, 22, 32, 42, 52],
+        "ask_prices": [33.20, 33.21, 33.22, 33.23, 33.24], "ask_volumes": [62, 72, 82, 92, 102],
+        "_revision": 1789716600000000,
+    }
+
+    def setUp(self):
+        market_mod._depth_cache._cache.clear()
+        market_mod._depth_day_cache.clear()
+        market_mod._depth_day_cache_date = None
+        market_mod._depth_bucket = mock.Mock(try_acquire=mock.Mock(return_value=True))
+        fake_file = mock.Mock()
+        fake_file.read_text.side_effect = FileNotFoundError()
+        self.file_patch = mock.patch.object(market_mod, "_DEPTH_DAY_CACHE_FILE", fake_file)
+        self.file_patch.start()
+        self.addCleanup(self.file_patch.stop)
+        perf.reset_counters()
+
+    def _seed(self, symbol, payload, date="2026-09-18"):
+        market_mod._depth_day_cache_date = date
+        market_mod._depth_day_cache[symbol] = payload
+        market_mod._depth_cache._cache.clear()
+
+    def _af(self, payload=None, error=None):
+        af = mock.Mock()
+        if error:
+            af.depth.get.side_effect = error
+        else:
+            af.depth.get.return_value = payload
+        return af
+
+    def _read(self, symbol, af, when, live=False):
+        """在指定时刻读一次五档; **抓取时刻钉死**在 2026-09-18 15:30 (收盘后)。
+
+        写入的 `_revision` 取自 `time.time_ns()`, 若用真实时钟, 落档那份的"抓取时刻"就跟着
+        跑套件时的钟点变 —— 15:00 之前跑 `test_morning_snapshot_refreshed_to_close_book` 的
+        "收敛"断言就会挂 (曾经如此)。这里把 time 换成 wraps 真模块的 Mock, 只钉死 time_ns,
+        其余 (time.time 等) 仍走真实实现。
+        """
+        fake_time = mock.Mock(wraps=market_mod.time)
+        fake_time.time_ns = mock.Mock(return_value=self.CLOSE_FETCH_NS)
+        with mock.patch.object(market_mod, "AF_API_KEY", "k"), \
+             mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod, "time", fake_time), \
+             mock.patch.object(market_mod.market_hours, "now", return_value=when), \
+             mock.patch.object(market_mod.market_hours, "is_trading_day",
+                               return_value=when.weekday() < 5), \
+             mock.patch.object(market_mod.market_hours, "is_live", return_value=live):
+            return market_mod.fetch_depth(symbol)
+
+    def test_morning_snapshot_refreshed_to_close_book(self):
+        """周末读到 10:14 那份 → 回源换 15:30 那份, 并且顶掉内存与磁盘上那份。"""
+        self._seed("300943.SZ", self.MORNING)
+        af = self._af(self.CLOSE)
+        out = self._read("300943.SZ", af, datetime(2026, 9, 19, 16, 0))
+        self.assertEqual(out["timestamp"], self.CLOSE["timestamp"])
+        self.assertEqual(out["bid_prices"], self.CLOSE["bid_prices"])
+        af.depth.get.assert_called_once()
+        self.assertEqual(market_mod._depth_day_cache["300943.SZ"]["timestamp"],
+                         self.CLOSE["timestamp"], "刷新出来的那份要留在快照里 (下次不再花令牌)")
+        self.assertEqual(market_mod._depth_day_cache_date, "2026-09-18", "周末刷新不改交易日 key")
+        # 落档的这份是"收盘后抓的" → 之后所有视图都直接回放, 不会再换 (收敛)
+        self.assertFalse(market_mod._depth_snapshot_stale(
+            market_mod._depth_day_cache["300943.SZ"], market_mod._depth_day_cache_date))
+
+    def test_weekend_morning_refresh_converges(self):
+        """周末**上午**刷新出来的那份也必须收敛 (第 3 次读不该再打上游)。
+
+        旧判据只看"时分 < 15:00", 于是周六 10:00 抓的那份永远算"收盘前抓的", 连看 3 次
+        = 3 次上游调用 (每个视图一个令牌, 永不收敛)。判据必须带上日期: 抓取日期晚于所属
+        交易日 (= 上一个交易日收盘之后) 就是"收盘后那份"。
+        """
+        self._seed("300943.SZ", self.MORNING)
+        af = self._af(self.CLOSE)
+        sat_morning = datetime(2026, 9, 19, 10, 0)
+        for _ in range(3):
+            market_mod._depth_cache._cache.clear()      # 每次都走当日快照那条路径, 不靠 TTL 缓存
+            out = self._read("300943.SZ", af, sat_morning)
+            self.assertEqual(out["timestamp"], self.CLOSE["timestamp"])
+        self.assertEqual(af.depth.get.call_count, 1, "第一次换到收盘那份后就不该再回源")
+
+    def test_post_close_fetched_snapshot_not_refetched(self):
+        """盘后抓的那份不再回源 —— 判据是抓取时刻, 不是上游 timestamp。
+
+        上游盘后给的 timestamp 是它自己的刷新时刻 (实测 15:30), 但那是供应商行为; 只要
+        认"我们抓它的时候过了 15:00 没有", 就不会因为上游给的时间戳旧而反复回源。
+        """
+        self._seed("300943.SZ", self.POST_CLOSE_PRE_STAMP)
+        af = self._af(self.CLOSE)
+        out = self._read("300943.SZ", af, datetime(2026, 9, 19, 16, 0))
+        self.assertEqual(out["timestamp"], self.POST_CLOSE_PRE_STAMP["timestamp"])
+        af.depth.get.assert_not_called()
+
+    def test_no_cache_file_on_non_trading_day_still_persists(self):
+        """非交易日 + 缓存文件缺失 (全新进程/删过文件): 刷新结果要挂到最近一个交易日上。
+
+        否则 key 是 None → `_depth_day_set` 直接 early-return → 既不落盘也不进内存,
+        每次查看都要重新回源。
+        """
+        market_mod._depth_day_cache.clear()
+        market_mod._depth_day_cache_date = None
+        af = self._af(self.CLOSE)
+        for _ in range(2):
+            market_mod._depth_cache._cache.clear()
+            out = self._read("300943.SZ", af, datetime(2026, 9, 19, 16, 0))
+            self.assertEqual(out["timestamp"], self.CLOSE["timestamp"])
+        self.assertEqual(market_mod._depth_day_cache_date, "2026-09-18",
+                         "挂到最近一个已收盘的交易日 (周五)")
+        self.assertIn("300943.SZ", market_mod._depth_day_cache)
+        self.assertEqual(af.depth.get.call_count, 1, "第二次读直接用落档那份")
+
+    def test_stored_entry_decoupled_from_returned_payload(self):
+        """落档那份必须与下发给 /api/depth 的对象解耦 (否则别人就地改一下就改掉了缓存)。"""
+        out = self._read("300943.SZ", self._af(self.CLOSE), datetime(2026, 9, 18, 14, 30), live=True)
+        out["bid_prices"][0] = 999.0
+        out["injected"] = True
+        stored = market_mod._depth_day_cache["300943.SZ"]
+        self.assertNotEqual(stored["bid_prices"][0], 999.0)
+        self.assertNotIn("injected", stored)
+
+    def test_corrupt_row_does_not_raise(self):
+        """脏行 (非序列的档位) 只是"没有档位", 不能让 /api/depth 打 500。"""
+        self._seed("BAD.SZ", {"symbol": "BAD.SZ", "timestamp": 1,
+                              "bid_prices": 1.0, "bid_volumes": None,
+                              "ask_prices": "x", "ask_volumes": {}, "_revision": 1})
+        self.assertIsNone(market_mod._depth_day_get("BAD.SZ"))
+        self.assertTrue(market_mod._is_collapsed_depth({"bid_prices": 1.0, "ask_prices": "x"}))
+        self.assertEqual(market_mod._clean_depth_payload({"bid_prices": 1.0, "ask_prices": []}), None)
+
+    def test_legacy_entry_without_revision_uses_upstream_timestamp(self):
+        """老条目没有可用的 _revision → 退回上游 timestamp 判陈旧 (10:14 那份要换掉)。"""
+        legacy = {k: v for k, v in self.MORNING.items() if k != "_revision"}
+        legacy["_revision"] = 1     # 认不出的值
+        self._seed("300943.SZ", legacy)
+        af = self._af(self.CLOSE)
+        out = self._read("300943.SZ", af, datetime(2026, 9, 19, 16, 0))
+        self.assertEqual(out["timestamp"], self.CLOSE["timestamp"])
+        af.depth.get.assert_called_once()
+
+    def test_stale_snapshot_kept_when_upstream_unavailable(self):
+        """回源失败 (AF 抛错 + 无麦蕊 key) 时退回手里那份, 不能变成空。"""
+        self._seed("300943.SZ", self.MORNING)
+        af = self._af(error=RuntimeError("af down"))
+        out = self._read("300943.SZ", af, datetime(2026, 9, 19, 16, 0))
+        self.assertEqual(out["timestamp"], self.MORNING["timestamp"])
+        self.assertEqual(out["bid_prices"], self.MORNING["bid_prices"])
+
+    def test_hk_symbol_not_refreshed(self):
+        """港美股不按 A股 时段口径判陈旧 (它们的盘中在本口径里本就不是 live)。"""
+        hk = {**self.MORNING, "symbol": "00700.HK"}
+        self._seed("00700.HK", hk)
+        af = self._af(self.CLOSE)
+        out = self._read("00700.HK", af, datetime(2026, 9, 19, 16, 0))
+        self.assertEqual(out["timestamp"], self.MORNING["timestamp"])
+        af.depth.get.assert_not_called()
+
+    def test_collapsed_snapshot_also_refreshed(self):
+        """修复前写盘的塌陷条目 (线上那条 14:59 补零盘口) 也要被换掉。
+
+        它按时刻算是"收盘尾巴", 但内容根本不是五档 —— 不回源就会把竞价那一刻摆一晚上。
+        """
+        self._seed("588200.SH", {
+            "symbol": "588200.SH", "timestamp": 1789714754000,
+            "bid_prices": [1.184, None, None, None, None], "bid_volumes": [174867, None, None, None, None],
+            "ask_prices": [1.184, None, None, None, None], "ask_volumes": [174867, None, None, None, None],
+            "_revision": 1,
+        })
+        af = self._af(self.CLOSE)
+        out = self._read("588200.SH", af, datetime(2026, 9, 19, 16, 0))
+        self.assertEqual(out["timestamp"], self.CLOSE["timestamp"])
+        af.depth.get.assert_called_once()
+
+    def test_older_book_does_not_overwrite_newer(self):
+        """一次滞后的响应不该把更好的那份顶掉 (只新不旧)。"""
+        self._seed("300943.SZ", self.POST_CLOSE_PRE_STAMP)
+        stale_af = self._af({**self.MORNING, "timestamp": 1789713000000})  # 14:30
+        out = self._read("300943.SZ", stale_af, datetime(2026, 9, 18, 14, 56), live=True)
+        self.assertEqual(out["timestamp"], 1789713000000, "下发的仍是这次取到的值")
+        self.assertEqual(market_mod._depth_day_cache["300943.SZ"]["timestamp"],
+                         self.POST_CLOSE_PRE_STAMP["timestamp"], "但快照没被这份更旧的顶掉")
+        self.assertEqual(perf.counters().get("depth_day_stale_skip"), 1)
 
 
 if __name__ == "__main__":

@@ -110,6 +110,66 @@ class LiveGateTest(unittest.TestCase):
         self.assertFalse(self._gates("2026-09-14 12:00")[1], "午休不算 in_session")
 
 
+class ClosingAuctionTest(unittest.TestCase):
+    """盘口留档窗口: 除两个集合竞价窗口与盘前, 取到的完整盘口都留档。
+
+    588200.SH 2026-09-18 的事故坏在 14:59 (收盘集合竞价) 也被当成"盘中最后一份", 覆盖了
+    14:56 那份完整五档; 反过来盘后/午休/非交易日取到的正是"当天最后一份连续竞价盘口",
+    实测 (000070.SZ 14:44 → 盘后 15:30 的对照) 比手里那份新, 所以也要留。
+    """
+
+    def _gates(self, when: str, trading=True):
+        dt = datetime.strptime(when, "%Y-%m-%d %H:%M")
+        with mock.patch.object(market_hours, "is_trading_day", return_value=trading):
+            return (market_hours.in_closing_auction(dt),
+                    market_hours.depth_book_replayable(dt))
+
+    def test_boundaries(self):
+        cases = {
+            "2026-09-14 09:05": (False, False),   # 盘前: 上游手里还是上一个交易日的盘口
+            "2026-09-14 09:20": (False, False),   # 开盘集合竞价 (虚拟撮合队列)
+            "2026-09-14 09:30": (False, True),
+            "2026-09-14 11:31": (False, True),    # 午休: 11:30 那份正是当天最后一份
+            "2026-09-14 12:00": (False, True),
+            "2026-09-14 14:56": (False, True),    # 最后一分钟真实五档
+            "2026-09-14 14:57": (True, False),    # 收盘集合竞价开始
+            "2026-09-14 14:59": (True, False),
+            "2026-09-14 15:00": (True, False),    # 整点仍算竞价
+            "2026-09-14 15:01": (False, True),    # 收盘后: 上游给的正是收盘那份, 要留档
+            "2026-09-14 20:00": (False, True),
+        }
+        for when, expected in cases.items():
+            with self.subTest(when=when):
+                self.assertEqual(self._gates(when), expected)
+
+    def test_non_trading_day_can_still_be_stored(self):
+        # 周末/假期取到的还是上一个交易日那份, 留档能顶掉手里那份旧的 (快照 key 沿用原交易日)
+        self.assertEqual(self._gates("2026-09-19 12:00", trading=False), (False, True))
+
+
+class LastTradingDayTest(unittest.TestCase):
+    """最近一个已收盘的交易日 —— 非交易日给"当天最后一份盘口"找归属交易日用。"""
+
+    def test_inclusive_and_walks_back(self):
+        days = ("2026-09-11", "2026-09-14", "2026-09-15")   # 周五 / 周一 / 周二
+        with mock.patch.object(market_hours, "_xshg_sorted", return_value=days):
+            # 当天是交易日 → 就是它自己 (含当天)
+            self.assertEqual(market_hours.last_trading_day(datetime(2026, 9, 15, 10, 0)),
+                             datetime(2026, 9, 15))
+            # 周六/周日 → 退到周五 (跨周末)
+            self.assertEqual(market_hours.last_trading_day(datetime(2026, 9, 12, 10, 0)),
+                             datetime(2026, 9, 11))
+            self.assertEqual(market_hours.last_trading_day("2026-09-13"), datetime(2026, 9, 11))
+            # 假期 (日历里整天缺档) → 继续往前退
+            self.assertEqual(market_hours.last_trading_day(datetime(2026, 9, 14, 7, 0)),
+                             datetime(2026, 9, 14))
+
+    def test_weekday_fallback_when_calendar_missing(self):
+        with mock.patch.object(market_hours, "_xshg_sorted", side_effect=RuntimeError("no cal")):
+            self.assertEqual(market_hours.last_trading_day(datetime(2026, 9, 12, 10, 0)),
+                             datetime(2026, 9, 11))
+
+
 class NextOpenTest(unittest.TestCase):
     """下一次开盘/开始取数的时刻 (长假与跨日都算准)。"""
 
