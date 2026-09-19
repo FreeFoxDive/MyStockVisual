@@ -399,13 +399,46 @@ docker compose down
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | 端口 | `127.0.0.1:8888` | 仅本地访问 |
-| 缓存卷 | `.cache` | Docker volume 持久化 |
-| 数据卷 | `data` | 交易记录数据库 `trades.db` 持久化 |
+| 缓存卷 | `.cache` | bind mount 挂载宿主机 `visual/.cache` |
+| 数据卷 | `data` | bind mount 挂载宿主机 `visual/data`（交易记录 `trades.db`） |
 | 环境变量 | `.env` | 通过 `env_file` 注入 |
 | 管理员账号 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 无管理员则自动创建；已有则启动时同步口令 |
 | 用户 | `appuser` (非 root) | 降低容器逃逸风险 |
 
 > 注：部署主机 `visual/data`、`visual/.cache` 的属主需为 UID 1000（绝大多数 Linux 首个用户即 1000）；否则构建时用 `--build-arg UID=$(id -u)` 对齐。
+
+### 镜像体积与磁盘清理
+
+构建上下文就是 `visual/` 目录本身，`.dockerignore` 只放行运行时代码与静态资源（`venv/`、`.cache/`、`data/`、`test/`、`docs/`、`.github/`、`*.log` 均已排除）。**不要在 `visual/` 里放宿主虚拟环境**：`run.sh` 会在 `visual/` 下建 `venv/`，一旦漏排除就会被 `COPY . .` 整个打进镜像（约 305MB）。
+
+预期分层（`docker history mystockvisual-stock-visual:latest`）：
+
+| 层 | 大小 |
+|---|---|
+| `python:3.12-slim` 基础层 | ≈130MB |
+| `RUN pip install` | ≈280MB |
+| `COPY --chown . .` | ≈3MB |
+| `RUN mkdir/chown .cache data` | ≈0MB |
+| **合计** | **≈400MB** |
+
+频繁 `docker compose build` 时旧镜像会变成 `<none>:<none>` 悬空镜像，这是磁盘被吃满最常见的原因。排查与清理：
+
+```bash
+docker system df -v         # 先看谁在占: 镜像 / build cache / 容器日志
+docker image prune -f       # 清悬空镜像 (不碰在用的 :latest, 也不碰卷)
+docker builder prune -f     # 清未被引用的构建缓存 —— 日常用这个
+docker builder prune -a -f  # 磁盘告急才用: 连被镜像引用的缓存一起清, 下次构建要重装依赖
+```
+
+**不要**随手跑 `docker system prune -a --volumes`：`-a` 会删掉所有未被使用的镜像；`--volumes` 会删掉宿主机上所有**命名卷**（本 compose 用的是 bind mount，`visual/data`、`visual/.cache` 不受影响，但同机其他项目的命名卷会被一并清掉）。
+
+容器日志是另一个口子：docker 的 json-file 默认无上限，`docker-compose.yml` 里已设 10MB×3 的轮转上限。
+
+改 Dockerfile / .dockerignore 时的注意点：
+
+- **不要写 `chown -R appuser:appuser /app`。** OverlayFS 上对整棵树 chown 会触发 copy-up，等于把 `COPY` 层再复制一份（每次构建 +305MB）。正确做法是 `COPY --chown=appuser:appuser . .`，只对不在构建上下文里的 `.cache`/`data` 做非递归 `chown`。
+- Dockerfile 里有一道**构建守卫**：上下文混入 `venv/`、`.venv/`、`.cache/`、`data/` 会直接构建失败。看到那条 `ERROR: 上下文混入宿主机目录` 就是 `.dockerignore` 被改坏或 build context 指错了目录。
+- 在 `visual/` 新增本机专用的大目录（缓存、数据集、日志）时，同步加进 `.dockerignore`。
 
 ## 配色
 

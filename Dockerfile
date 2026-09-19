@@ -7,10 +7,22 @@ RUN groupadd -r appuser && useradd -r -g appuser -u ${UID} -m -d /app appuser
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
 
-# 确保 .cache / data 目录可写
-RUN mkdir -p .cache data && chown -R appuser:appuser /app
+# 放在 pip 之后: site-packages 里已编好的 pyc 保留 (启动快), 只是不再让运行期
+# 往容器可写层新写 __pycache__
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# 构建守卫: 上下文混进宿主机目录就直接失败, 而不是静静产出一个 +300MB 的层
+# (正常由 .dockerignore 拦掉; 这里防的是排除规则被改坏, 或 build context 指错目录)
+RUN test ! -e venv && test ! -e .venv && test ! -e .cache && test ! -e data || \
+    (echo "ERROR: 上下文混入宿主机目录 (venv/ .venv/ .cache/ data/), 检查 .dockerignore" >&2; exit 1)
+
+# --chown 在复制时即确定属主。不要改回 "COPY . . + RUN chown -R appuser:appuser /app":
+# OverlayFS 对整棵树 chown 会触发 copy-up, 每次构建多出一份与 COPY 等大的层 (实测 ≈305MB)。
+COPY --chown=appuser:appuser . .
+
+# 只补构建上下文里没有的两个目录 (运行期由 compose 的 bind mount 覆盖)
+RUN mkdir -p .cache data && chown appuser:appuser .cache data
 
 EXPOSE 8888
 # 健康检查只提供可见性 (docker ps 的 health 列); restart: unless-stopped 只响应
