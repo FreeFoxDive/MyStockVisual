@@ -23,6 +23,7 @@ import gzip
 import logging
 import os
 import pickle
+import re
 import sqlite3
 import threading
 import time
@@ -228,6 +229,28 @@ def _row_to_df(row):
     return df.set_index("date").iloc[:n]
 
 
+def load_bars_many(symbols):
+    """一次连接读多只日K → {symbol: df}。
+
+    盘中口径要给全市场补 bar, 逐只 load_bars 会开约 7800 次连接 (每次都跑 PRAGMA)。
+    """
+    if not symbols:
+        return {}
+    conn = _conn()
+    try:
+        marks = ",".join("?" * len(symbols))
+        rows = conn.execute(
+            f"SELECT * FROM bars WHERE symbol IN ({marks})", list(symbols)).fetchall()
+    finally:
+        conn.close()
+    out = {}
+    for row in rows:
+        df = _row_to_df(row)
+        if df is not None:
+            out[row["symbol"]] = df
+    return out
+
+
 def iter_bars(symbols=None):
     """遍历全部 (或指定) 标的的日K; 逐行读避免一次性载入全市场。"""
     conn = _conn()
@@ -382,9 +405,14 @@ def _limit_flags(symbol, name, change_pct, close):
         return False, False
     if code.startswith(("15", "16", "50", "51", "52", "56", "58")):   # ETF/LOF
         return False, False
-    pct = 19.8 if code.startswith(("300", "301", "688", "689")) else 9.8
-    if "ST" in str(name or "").upper():
-        pct = 4.8
+    st = "ST" in str(name or "").upper()
+    # 北交所 (83/87/88/43/82, 以及 2025 起的 92 新代码) ±30%, ST 同样 30%。
+    if code.startswith(("83", "87", "88", "43", "82", "92")):
+        pct = 29.8
+    elif code.startswith(("300", "301", "688", "689")):
+        pct = 19.8          # 创业板/科创板注册制 ±20%, ST 也是 20% 不是 5%
+    else:
+        pct = 4.8 if st else 9.8
     return bool(change_pct >= pct), bool(change_pct <= -pct)
 
 
@@ -515,16 +543,21 @@ def compute_chip_factors(df, float_shares, mult):
         return {}
     try:
         from chips import compute_chips
-        bars = []
-        for idx, row in df.iterrows():
-            vol = _f(row.get("volume"))
-            bars.append({
-                "date": str(idx)[:10],
-                "open": _f(row.get("open"), 0.0), "close": _f(row.get("close"), 0.0),
-                "high": _f(row.get("high"), 0.0), "low": _f(row.get("low"), 0.0),
-                "volume": vol or 0.0, "amount": _f(row.get("amount"), 0.0) or 0.0,
-                "hsl": (vol or 0.0) * mult / float_shares * 100.0,
-            })
+        # 直接用 numpy 数组拼 bars: iterrows 在全市场 7800 只上是主要开销之一
+        vol = np.nan_to_num(df["volume"].to_numpy(dtype=float))
+        amount = (np.nan_to_num(df["amount"].to_numpy(dtype=float))
+                  if "amount" in df.columns else np.zeros(len(df)))
+        opens = np.nan_to_num(df["open"].to_numpy(dtype=float))
+        closes = np.nan_to_num(df["close"].to_numpy(dtype=float))
+        highs = np.nan_to_num(df["high"].to_numpy(dtype=float))
+        lows = np.nan_to_num(df["low"].to_numpy(dtype=float))
+        dates = [str(i)[:10] for i in df.index]
+        scale = mult / float_shares * 100.0
+        bars = [{
+            "date": dates[i], "open": opens[i], "close": closes[i],
+            "high": highs[i], "low": lows[i], "volume": vol[i], "amount": amount[i],
+            "hsl": vol[i] * scale,
+        } for i in range(len(df))]
         res = compute_chips(bars)
     except Exception as e:
         log.warning("筹码计算失败: %s", e)
@@ -549,37 +582,107 @@ def universe():
     return [(r["symbol"], r.get("name") or r["symbol"]) for r in rows if r.get("symbol")]
 
 
+_kline_rate_warned = False
+
+
 def kline_rate():
     """拉日K的令牌速率 (次/分钟): AlphaFeed 日K批量额度的 90% = 54/min。
 
-    单只日K在 visual 里也走批量接口, 与全市场批量共用这一份额度 (见 af_limits);
-    env ``SCREENER_KLINE_PER_MIN`` 可覆盖 (调试/临时降速用)。
+    单只日K在 visual 里也走批量接口, 与全市场批量共用这一份额度 (见 af_limits)。
+    覆盖用 ``FACTORS_KLINE_PER_MIN``。``SCREENER_KLINE_PER_MIN`` 是旧逐只扫描的
+    限速 (默认 6), 留下这个值会把全市场构建从约 87 秒拖到十几分钟, 这里不再读取。
+    """
+    global _kline_rate_warned
+    import af_limits
+    default = af_limits.bucket_rate("kline_daily_batch")
+    raw = os.environ.get("FACTORS_KLINE_PER_MIN", "").strip()
+    legacy = os.environ.get("SCREENER_KLINE_PER_MIN", "").strip()
+    if not raw and legacy and not _kline_rate_warned:
+        _kline_rate_warned = True
+        log.warning("SCREENER_KLINE_PER_MIN=%s 不再控制因子库拉K, 请改用 "
+                    "FACTORS_KLINE_PER_MIN (当前仍按 %d/min)", legacy, default)
+    if not raw:
+        return max(1, default)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        log.warning("FACTORS_KLINE_PER_MIN 无效 (%s), 回落 %d", raw, default)
+        return max(1, default)
+
+
+def live_quote_rate():
+    """盘中补 bar 的快照速率。与 feed.QUOTES_RATE_PER_MIN 分用同一份 120/min 额度,
+    不能再按 90% (108/min) 单独开桶, 否则和监控/图表叠在一起会打满限额。
+
+    默认 20/min (全市场约 79 批, 4 分钟量级), 且不超过额度的 90%。
     """
     import af_limits
-    return max(1, int(os.environ.get(
-        "SCREENER_KLINE_PER_MIN", str(af_limits.bucket_rate("kline_daily_batch")))))
+    cap = af_limits.bucket_rate("quotes_symbol")
+    raw = os.environ.get("FACTORS_LIVE_QUOTES_PER_MIN", "20").strip()
+    try:
+        rate = int(raw)
+    except (TypeError, ValueError):
+        rate = 20
+    return max(1, min(rate, cap))
+
+
+# 日K批量额度是全进程共享的 (图表的单只日K也走同一接口): 构建按 kline_rate()
+# 取令牌, 图表取不到令牌时直接走回退源, 避免两边合计打出 429 后整批标的丢失。
+_daily_kline_bucket = None
+_daily_kline_bucket_rate = None
+_daily_kline_bucket_lock = threading.Lock()
+FETCH_BARS_RETRIES = 2          # 失败批次的额外重试次数
+FETCH_BARS_RETRY_SLEEP = 2.0   # 每次重试前的等待 (秒)
+
+
+def daily_kline_bucket():
+    """进程内共享的日K批量令牌桶 (速率随 kline_rate(), 改环境变量即重建)。"""
+    global _daily_kline_bucket, _daily_kline_bucket_rate
+    rate = kline_rate()
+    with _daily_kline_bucket_lock:
+        if _daily_kline_bucket is None or _daily_kline_bucket_rate != rate:
+            import feed as feed_mod
+            _daily_kline_bucket = feed_mod.TokenBucket(rate_per_min=rate)
+            _daily_kline_bucket_rate = rate
+        return _daily_kline_bucket
+
+
+def _fetch_bars_chunk(af, chunk, count):
+    """拉一批日K; 失败返回 None (调用方决定重试)。"""
+    return af.klines.batch(list(chunk), period="1d", count=count,
+                           adjust="forward", to_dataframe=True)
 
 
 def fetch_bars(symbols, count=BARS_COUNT, progress_cb=None):
-    """批量拉日K (前复权) → {symbol: df}; 令牌桶按 kline_rate() 限速。
+    """批量拉日K (前复权) → ({symbol: df}, 统计)。
 
+    令牌桶按 kline_rate() 限速, 与图表共用 (见 daily_kline_bucket)。
+    失败批次退避重试 FETCH_BARS_RETRIES 次; 仍失败的批次数记在 stats["failed_batches"],
+    由构建写进 sources, 页面能看到丢了多少, 而不是静默缺失。
     progress_cb(done_batches, total_batches) 用于落库进度。
     """
-    import feed as feed_mod
     import market
     af = market.get_af()
-    bucket = feed_mod.TokenBucket(rate_per_min=kline_rate())
+    bucket = daily_kline_bucket()
     chunks = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
     out = {}
+    failed = 0
     for i, chunk in enumerate(chunks, 1):
-        while not bucket.try_acquire():
-            time.sleep(0.05)
-        try:
-            dfs = af.klines.batch(list(chunk), period="1d", count=count,
-                                  adjust="forward", to_dataframe=True)
-        except Exception as e:
-            log.warning("批量拉K失败 (%d/%d): %s", i, len(chunks), e)
-            dfs = None
+        dfs = None
+        for attempt in range(FETCH_BARS_RETRIES + 1):
+            while not bucket.try_acquire():
+                time.sleep(0.05)
+            try:
+                dfs = _fetch_bars_chunk(af, chunk, count)
+                break
+            except Exception as e:
+                log.warning("批量拉K失败 (%d/%d, 第 %d 次): %s",
+                            i, len(chunks), attempt + 1, e)
+                dfs = None
+                if attempt < FETCH_BARS_RETRIES:
+                    time.sleep(FETCH_BARS_RETRY_SLEEP)
+        if dfs is None:
+            failed += 1
         for sym in chunk:
             df = (dfs or {}).get(sym)
             if df is None or len(df) == 0:
@@ -593,7 +696,7 @@ def fetch_bars(symbols, count=BARS_COUNT, progress_cb=None):
                 progress_cb(i, len(chunks))
             except Exception:
                 pass
-    return out
+    return out, {"batches": len(chunks), "failed_batches": failed}
 
 
 def _fetch_shares(symbols):
@@ -640,32 +743,64 @@ def _src_spot():
     return out
 
 
-def _src_yjbb(day):
-    """东财业绩报表 (按最新报告期): ROE + 所处行业 (+ 每股收益/每股净资产)。"""
-    import akshare as ak
+# 业绩报表: 报告期刚切换时只有少量公司已披露。行数不到这个阈值就看更早的完整期,
+# 避免 1–4 月误用“只有几百家的年报”而丢掉已完整披露的三季报。
+YJBB_MIN_ROWS = 3000
+
+
+def _yjbb_candidates(day):
+    """报告期结束日早于 day 的候选, 新→旧 (未结束的季度不取)。"""
     year = int(str(day)[:4])
-    candidates = [f"{year}0930", f"{year}0630", f"{year}0331", f"{year - 1}1231"]
+    stamp = str(day).replace("-", "")
+    periods = []
+    for y, md in ((year, "0930"), (year, "0630"), (year, "0331"),
+                  (year - 1, "1231"), (year - 1, "0930"), (year - 1, "0630")):
+        period = f"{y}{md}"
+        if period < stamp:
+            periods.append(period)
+    return periods
+
+
+def _parse_yjbb(df, period):
+    out = {"_period": period, "rows": {}}
+    if df is None or len(df) == 0:
+        return out
+    rows = out["rows"]
+    for _i, r in df.iterrows():
+        code = str(r.get("股票代码") or "").zfill(6)
+        if code and code not in rows:      # 同一代码多行时取首行 (最新)
+            rows[code] = {
+                "roe": _f(r.get("净资产收益率")),
+                "industry": str(r.get("所处行业") or "").strip() or None,
+                "eps": _f(r.get("每股收益")), "bps": _f(r.get("每股净资产")),
+            }
+    return out
+
+
+def _src_yjbb(day):
+    """东财业绩报表: ROE + 所处行业 (+ 每股收益/每股净资产)。
+
+    从新到旧找第一个覆盖不少于 ``YJBB_MIN_ROWS`` 的报告期; 都不够时用行数最多的那期。
+    """
+    import akshare as ak
     last_err = None
-    for period in candidates:
+    best = None
+    for period in _yjbb_candidates(day):
         try:
             df = ak.stock_yjbb_em(date=period)
         except Exception as e:
             last_err = e
             continue
-        if df is None or len(df) == 0:
+        parsed = _parse_yjbb(df, period)
+        n = len(parsed["rows"])
+        if n == 0:
             continue
-        out = {"_period": period, "rows": {}}
-        for _i, r in df.iterrows():
-            code = str(r.get("股票代码") or "").zfill(6)
-            rows = out["rows"]
-            if code and code not in rows:      # 同一代码多行时取首行 (最新)
-                rows[code] = {
-                    "roe": _f(r.get("净资产收益率")),
-                    "industry": str(r.get("所处行业") or "").strip() or None,
-                    "eps": _f(r.get("每股收益")), "bps": _f(r.get("每股净资产")),
-                }
-        if out["rows"]:
-            return out
+        if best is None or n > best[0]:
+            best = (n, parsed)
+        if n >= YJBB_MIN_ROWS:
+            return parsed
+    if best:
+        return best[1]
     if last_err:
         raise last_err
     return {"_period": None, "rows": {}}
@@ -773,6 +908,8 @@ def external_meta(day, symbols):
 def _notify_state(kind, day, extra=""):
     """开始/完成/异常: 站内通知管理员 + 钉钉/ntfy (先落库再入队)。"""
     titles = {"start": "因子库更新开始", "done": "因子库更新完成", "error": "因子库更新失败"}
+    alert_types = {"start": "factors_build_start", "done": "factors_build_done",
+                   "error": "factors_build_error"}
     title = titles.get(kind, "因子库更新")
     text = f"## {title} {day}\n\n{extra}"
     try:
@@ -780,7 +917,7 @@ def _notify_state(kind, day, extra=""):
         for u in trades.list_users() or []:
             if u.get("is_admin"):
                 trades.insert_monitor_alert(
-                    u["id"], None, "", f"factors_build_{kind}", day, price=None,
+                    u["id"], None, "", alert_types.get(kind, "factors_build_error"), day, price=None,
                     detail=f"{title} {day}: {extra}".strip()[:400])
     except Exception as e:
         log.warning("因子库通知落库失败: %s", e)
@@ -792,12 +929,49 @@ def _notify_state(kind, day, extra=""):
         log.warning("因子库通知推送失败: %s", e)
 
 
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _check_day(day):
+    """显式日期: YYYY-MM-DD, 且是不晚于最近已收盘交易日的交易日。非法返回原因。"""
+    text = str(day or "")
+    if not _DAY_RE.match(text):
+        return "日期格式应为 YYYY-MM-DD"
+    import market_hours
+    if not market_hours.is_trading_day(text):
+        return f"{text} 不是交易日"
+    latest = last_closed_trading_day()
+    if text > latest:
+        return f"{text} 晚于最近已收盘交易日 {latest}"
+    return None
+
+
+def _is_provisional_row(row):
+    return bool(row) and "_provisional" in str(row.get("sources") or "")
+
+
+def _provisional_needs_rebuild(row, now=None):
+    """18:00 前强制产出的当日快照, 到点后还要再覆盖一次 (龙虎榜/质押那时才齐)。"""
+    return _is_provisional_row(row) and not before_build_at(now)
+
+
+def _should_mark_provisional(day, now=None):
+    now = now or _now_dt()
+    return str(day) == now.date().isoformat() and before_build_at(now)
+
+
 def build(day=None, force=False, notify=True):
     """构建因子库 → 结果 dict。**只允许 18:00 后开跑** (force 或显式 day 例外)。
 
-    已在跑/当日已成功 (且非 force) 时直接返回现状。
+    已在跑/当日已成功 (且非 force) 时直接返回现状。显式 day 必须是已收盘交易日;
+    K 线会截到该日, 最后一根不是该日的标的 (停牌) 不进因子表。
+    交易日 18:00 前的强制构建记为 provisional, 到点后调度会再覆盖一次。
     """
     global _build_state
+    if day is not None:
+        err = _check_day(day)
+        if err:
+            return {"ok": False, "reason": "bad_day", "day": str(day), "message": err}
     if not force and day is None and before_build_at():
         return {"ok": False, "reason": "before_build_at", "day": None,
                 "message": "因子库只在 %02d:%02d 后构建" % build_at()}
@@ -806,7 +980,7 @@ def build(day=None, force=False, notify=True):
         if _build_state["running"]:
             return {"ok": False, "reason": "running", "day": _build_state["day"]}
         row = _ensure_build_row(day)
-        if row["state"] == "done" and not force:
+        if row["state"] == "done" and not force and not _provisional_needs_rebuild(row):
             return {"ok": True, "reason": "already", "day": day, "n_rows": row["n_rows"]}
         if not force and int(row["attempts"] or 0) >= MAX_ATTEMPTS:
             return {"ok": False, "reason": "attempts_exhausted", "day": day}
@@ -816,19 +990,22 @@ def build(day=None, force=False, notify=True):
 
     attempts = 0
     try:
-        if notify:
-            _notify_state("start", day, f"全市场日K + 因子计算 (第 {attempts + 1} 次尝试)")
         with _build_lock:
             attempts = _bump_attempts(day)
             _update_build(day, state="running", phase="bars", percent=0, error=None,
                           started_at=_iso(), done_at=None)
+        if notify:
+            _notify_state("start", day, f"全市场日K + 因子计算 (第 {attempts} 次尝试)")
         result = _build_inner(day)
+        sources = dict(result["sources"] or {})
+        if _should_mark_provisional(day):
+            sources["_provisional"] = True
         with _build_lock:
             _update_build(day, state="done", phase="done", percent=100,
                           done_at=_iso(), error=None,
                           n_symbols=result["n_symbols"], n_rows=result["n_rows"],
                           n_missing=result["n_missing"],
-                          sources=_json_sources(result["sources"]))
+                          sources=_json_sources(sources))
         if notify:
             _notify_state("done", day,
                           f"{result['n_rows']} 只入因子表 (拉取 {result['n_symbols']} 只, "
@@ -871,6 +1048,10 @@ def _error_detail(e):
 
 def build_blocked_reason(day=None, force=False):
     """现在能不能开跑 (给"手动重建"如实回报): None = 可以, 否则给拒绝原因。"""
+    if day is not None:
+        err = _check_day(day)
+        if err:
+            return err
     if not force and day is None and before_build_at():
         return "因子库只在 %02d:%02d 后构建（可用「强制重建」立即执行）" % build_at()
     day = day or due_day() or last_closed_trading_day()
@@ -878,11 +1059,21 @@ def build_blocked_reason(day=None, force=False):
         return f"已有构建在进行中（{_build_state['day'] or '日期未知'}）"
     row = get_build(day)
     if row:
-        if row["state"] == "done" and not force:
+        if row["state"] == "done" and not force and not _provisional_needs_rebuild(row):
             return f"{day} 已构建完成（可用「强制重建」覆盖）"
         if not force and int(row["attempts"] or 0) >= MAX_ATTEMPTS:
             return f"{day} 今日已失败 {row['attempts']} 次（可用「强制重建」覆盖）"
     return None
+
+
+def _bars_as_of(df, day):
+    """截到 day (含) 为止。最后一根不是该日 (停牌/缺口) 返回 None, 避免把旧因子标成当天。"""
+    if df is None or len(df) == 0:
+        return None
+    cut = df[pd.to_datetime(df.index) <= pd.Timestamp(day)]
+    if len(cut) == 0 or str(cut.index[-1])[:10] != str(day):
+        return None
+    return cut
 
 
 def _build_inner(day):
@@ -897,7 +1088,7 @@ def _build_inner(day):
         pct = lo + int((hi - lo) * done / max(1, total))
         _update_build(day, percent=pct, phase="bars")
 
-    frames = fetch_bars(symbols, progress_cb=on_bars)
+    frames, bar_stats = fetch_bars(symbols, progress_cb=on_bars)
     missing = len(symbols) - len(frames)
 
     # 股本: 7 天刷新一次 (股本变动少)
@@ -918,24 +1109,29 @@ def _build_inner(day):
     conn = _conn()
     try:
         for i, (sym, df) in enumerate(frames.items(), 1):
+            view = _bars_as_of(df, day)
             try:
+                # bars 表存最新拉取的序列 (盘中补 bar 要用); 因子按 day 截断后的 view 算
                 save_bars(conn, sym, names.get(sym), df)
             except Exception as e:
                 log.warning("写K线失败 %s: %s", sym, e)
                 continue
             tags["bars"] += 1
+            if view is None:
+                missing += 1          # 停牌或该日没有 bar, 不把上一交易日的因子标成当天
+                continue
             fs = (shares.get(sym) or (None, None))[0]
-            feats = compute_factors(df, sym, names.get(sym), float_shares=fs)
+            feats = compute_factors(view, sym, names.get(sym), float_shares=fs)
             if not feats:
                 missing += 1
                 continue
             if fs:
                 try:
                     from indicators import volume_shares_mult
-                    mult = volume_shares_mult(df["close"], df["volume"],
-                                              df["amount"] if "amount" in df.columns else None,
+                    mult = volume_shares_mult(view["close"], view["volume"],
+                                              view["amount"] if "amount" in view.columns else None,
                                               tail=10)
-                    feats.update(compute_chip_factors(df, fs, mult))
+                    feats.update(compute_chip_factors(view, fs, mult))
                 except Exception as e:
                     log.warning("筹码因子失败 %s: %s", sym, e)
             feats["trade_date"] = day
@@ -956,6 +1152,10 @@ def _build_inner(day):
     # 外部快照 (基本面/资金/筹码) — 失败只记 sources
     _update_build(day, phase="meta", percent=PHASE_WEIGHTS["meta"][0])
     ext, sources = external_meta(day, [r["symbol"] for r in rows])
+    # 拉K失败的批次: 写进 sources, 页面能看到丢了多少只 (否则只是 n_missing 变大)
+    if bar_stats["failed_batches"]:
+        sources["bars"] = (f"fail:{bar_stats['failed_batches']}/"
+                           f"{bar_stats['batches']}批")
 
     # ETF/个股的市值兜底: 无 spot 时用 股本 × 收盘 估
     for rec in rows:
@@ -1042,7 +1242,7 @@ _live_lock = threading.Lock()
 _live_cache = {"day": None, "ts": 0.0, "df": None, "version": None}
 
 
-def live_snapshot(max_age_sec=None):
+def live_snapshot(max_age_sec=None, progress_cb=None):
     """盘中口径因子表: 用批量快照补当日 bar 后重算; 不可用返回 (None, None)。
 
     只在**连续竞价与午休** (``trading``/``break``) 生效: 集合竞价 (09:15-09:30) 与
@@ -1068,20 +1268,26 @@ def live_snapshot(max_age_sec=None):
             return _live_cache["df"], _live_cache["version"]
 
     today = now.date().isoformat()
-    quotes = _fetch_quotes(list(base["symbol"]))
+    quotes = _fetch_quotes(list(base["symbol"]), progress_cb=progress_cb)
     if not quotes:
         return None, None
+    # 先筛出有当日有效快照的标的, 只为它们读K/重算 (其余直接沿用收盘因子)
+    usable = {}
+    for sym, q in quotes.items():
+        if _f(q.get("last_price")) is not None and _quote_is_today(q, today):
+            usable[sym] = q
     shares = load_shares()          # 一次性读, 别在逐只循环里查库
+    bars_by_sym = load_bars_many(list(usable)) if usable else {}
     rows = []
     t0 = time.time()
     for rec in base.to_dict("records"):
         sym = rec.get("symbol")
-        q = quotes.get(sym) or {}
-        last = _f(q.get("last_price"))
-        if last is None:
+        q = usable.get(sym)
+        if q is None:
             rows.append(rec)
             continue
-        bars = load_bars(sym)
+        last = _f(q.get("last_price"))
+        bars = bars_by_sym.get(sym)
         if bars is None or len(bars) == 0:
             rec = dict(rec)
             rec["close"] = last
@@ -1111,13 +1317,37 @@ def live_snapshot(max_age_sec=None):
     return df, version
 
 
+def _quote_is_today(quote, today):
+    """快照能当今日 bar: 成交量 > 0; 带时间戳时日期必须是 today。
+
+    与 market._daily_bar_from_quote 同一口径。停牌/上一交易日残留 (volume=0 或
+    时间戳不是今天) 不能拼上去, 否则量比、振幅、KDJ 会失真。
+    """
+    import datetime as dt_mod
+    ts = (quote or {}).get("timestamp")
+    if ts is not None:
+        try:
+            ts_date = dt_mod.datetime.fromtimestamp(
+                float(ts), dt_mod.timezone(dt_mod.timedelta(hours=8))
+            ).date().isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            ts_date = None
+        if ts_date is not None and ts_date != str(today)[:10]:
+            return False
+    vol = _f((quote or {}).get("volume"))
+    return vol is not None and vol > 0
+
+
 def _patch_last_bar(bars, today, quote, last):
-    """把当日实时价并进最后一根日K (同日替换, 新日追加)。"""
+    """把当日实时价并进最后一根日K (同日替换, 新日追加)。不可用则原样返回。"""
+    if not _quote_is_today(quote, today):
+        return bars
     df = bars.copy()
     high = _f(quote.get("high")) or last
     low = _f(quote.get("low")) or last
     openp = _f(quote.get("open")) or last
     volume = _f(quote.get("volume"))
+    amount = _f(quote.get("amount"))
     last_day = str(df.index[-1])[:10]
     if last_day == today:
         df.iloc[-1, df.columns.get_loc("close")] = last
@@ -1125,24 +1355,30 @@ def _patch_last_bar(bars, today, quote, last):
         df.iloc[-1, df.columns.get_loc("low")] = min(low, last)
         if volume is not None:
             df.iloc[-1, df.columns.get_loc("volume")] = volume
+        if amount is not None and "amount" in df.columns:
+            df.iloc[-1, df.columns.get_loc("amount")] = amount
     else:
         row = {c: 0.0 for c in ("open", "high", "low", "close", "volume", "amount")}
         row.update({"open": openp, "high": max(high, last), "low": min(low, last),
                     "close": last, "volume": volume or 0.0,
-                    "amount": (_f(quote.get("amount")) or 0.0)})
+                    "amount": amount or 0.0})
         df = pd.concat([df, pd.DataFrame([row], index=pd.to_datetime([today]))])
     return df
 
 
-def _fetch_quotes(symbols):
-    """批量快照 (按 af_limits 的实时快照额度独立限速) → {symbol: quote}。"""
+def _fetch_quotes(symbols, progress_cb=None):
+    """批量快照 (live_quote_rate 限速, 不占满实时快照额度) → {symbol: quote}。
+
+    progress_cb(done, total) 给选股任务写进度: 全市场约 79 批、要几分钟,
+    不回报的话页面一直显示「扫描中 0/?」。
+    """
     import feed as feed_mod
     import market
     af = market.get_af()
-    bucket = feed_mod.TokenBucket(rate_per_min=af_limits.bucket_rate("quotes_symbol"))
+    bucket = feed_mod.TokenBucket(rate_per_min=live_quote_rate())
     out = {}
     chunks = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks, 1):
         while not bucket.try_acquire():
             time.sleep(0.05)
         try:
@@ -1158,6 +1394,11 @@ def _fetch_quotes(symbols):
             except Exception:
                 continue
             out[str(d.get("symbol") or sym)] = d
+        if progress_cb:
+            try:
+                progress_cb(i, len(chunks))
+            except Exception:
+                pass
     return out
 
 
@@ -1227,9 +1468,10 @@ def should_build(now=None):
     if not day:
         return False, "before_build_at"
     row = get_build(day)
-    if row and row["state"] == "done":
+    # 18:00 前强制构建的当日快照会缺龙虎榜/质押, 到点后必须再覆盖, 不能当 already_done
+    if row and row["state"] == "done" and not _provisional_needs_rebuild(row, now):
         return False, "already_done"
-    if (current_version() or "") >= day:
+    if (current_version() or "") >= day and not _provisional_needs_rebuild(row, now):
         # 目标日已有快照 (构建记录被清理/由旧版本产出) → 视为已完成
         return False, "already_done"
     if row and int(row["attempts"] or 0) >= MAX_ATTEMPTS:
@@ -1247,18 +1489,36 @@ def should_build(now=None):
     return True, "due"
 
 
+def _spawn_build(day):
+    """在子进程里跑构建, 返回 Popen。
+
+    全市场因子 + 筹码计算实测约 2 分钟纯 CPU, 放在 Web 进程里会占住 GIL,
+    图表/推送/监控在这段时间全部变慢。数据库与快照照旧落盘, 状态接口不变。
+    """
+    import subprocess
+    import sys
+    cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--build", "--day", day]
+    log.info("因子库构建子进程: %s", " ".join(cmd))
+    return subprocess.Popen(cmd, cwd=str(SCRIPT_DIR.parent))
+
+
 def _loop():
     init_store()
     log.info("因子库调度线程已启动 (交易日 %02d:%02d, 间隔 %ds, 失败退避 %d 分钟, 最多 %d 次)",
              build_at()[0], build_at()[1], SCHED_INTERVAL_SEC, RETRY_MIN_SEC // 60, MAX_ATTEMPTS)
+    child = None
     while True:
         try:
-            now = _now_dt()
-            ok, why = should_build(now)
-            if ok:
-                day = due_day(now)      # 到点后即今天 (未到点 should_build 已拦下)
-                log.info("因子库开始构建 (%s, day=%s)", why, day)
-                build(day=day)
+            if child is not None and child.poll() is None:
+                pass                      # 上一轮构建还在跑, 不重复拉起
+            else:
+                child = None
+                now = _now_dt()
+                ok, why = should_build(now)
+                if ok:
+                    day = due_day(now)    # 到点后即今天 (未到点 should_build 已拦下)
+                    log.info("因子库开始构建 (%s, day=%s)", why, day)
+                    child = _spawn_build(day)
         except Exception as e:
             log.warning("因子库调度异常: %s", e)
         time.sleep(SCHED_INTERVAL_SEC)
@@ -1279,6 +1539,7 @@ def start_scheduler():
 def main():
     """手动入口: python -u visual/factors.py --build [--force] [--day YYYY-MM-DD]"""
     import argparse
+    import json
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     ap = argparse.ArgumentParser(description="每日因子库")
     ap.add_argument("--build", action="store_true", help="立即构建")
@@ -1288,7 +1549,6 @@ def main():
     args = ap.parse_args()
     init_store()
     if args.status or not args.build:
-        import json
         print(json.dumps(status(), ensure_ascii=False, indent=2))
         return
     print(json.dumps(build(day=args.day, force=args.force), ensure_ascii=False, default=str))

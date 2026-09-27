@@ -273,6 +273,7 @@ CREATE TABLE IF NOT EXISTS screener_runs (
     progress     INTEGER NOT NULL DEFAULT 0,
     total        INTEGER NOT NULL DEFAULT 0,
     truncated    INTEGER NOT NULL DEFAULT 0,  -- 结果被 SCREENER_RESULT_MAX 截断
+    n_results    INTEGER,                 -- 结果行数 (摘要查询用, 避免解析 results)
     results      TEXT,                    -- JSON 数组
     data_version TEXT,                    -- 因子/行情数据版本 (第二批启用)
     cache_key    TEXT,                    -- 结果去重键 (第二批启用)
@@ -369,6 +370,13 @@ def init_db(db_path=None):
         scols = {r[1] for r in conn.execute("PRAGMA table_info(screener_runs)")}
         if scols and "truncated" not in scols:
             conn.execute("ALTER TABLE screener_runs ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0")
+        # 迁移: n_results 让摘要查询不用解析 results JSON; 老行回填一次
+        if scols and "n_results" not in scols:
+            conn.execute("ALTER TABLE screener_runs ADD COLUMN n_results INTEGER")
+            conn.execute(
+                "UPDATE screener_runs SET n_results = "
+                "(length(results) - length(replace(results, '\"symbol\"', ''))) / 8 "
+                "WHERE results IS NOT NULL AND n_results IS NULL")
         # 迁移: 旧库 models 表补 hold_days; 仅在刚加列时回填 A–D 默认值, 之后不覆盖人工修改
         mcols = {r[1] for r in conn.execute("PRAGMA table_info(models)")}
         if "hold_days" not in mcols:
@@ -2814,10 +2822,21 @@ SCREENER_ACTIVE = ("queued", "running")
 _SCREENER_JSON = {"conditions", "results"}
 
 
-def _screener_run_row(row):
-    """行 → dict, 解析 JSON 字段 (脏数据退化为空, 不抛)。"""
+# 摘要查询显式列出的列: 不含 results (单条最多数千行 JSON, 轮询每次解析它是主要开销)
+_SCREENER_SUMMARY_COLS = (
+    "id, user_id, status, mode, conditions, universe, count_limit, price_mode, "
+    "progress, total, truncated, n_results, data_version, cache_key, error, "
+    "queued_at, started_at, done_at")
+
+
+def _screener_run_row(row, parse_results=True):
+    """行 → dict, 解析 JSON 字段 (脏数据退化为空, 不抛)。
+
+    parse_results=False 用于摘要 (status/队列轮询): 不带 results 列, 也不解析它。
+    """
     d = dict(row)
-    for k in _SCREENER_JSON:
+    keys = _SCREENER_JSON if parse_results else ("conditions",)
+    for k in keys:
         raw = d.get(k)
         if raw is None:
             d[k] = [] if k == "conditions" else None
@@ -2842,11 +2861,12 @@ def create_screener_run(user_id, conditions, *, mode="and", universe="stock+etf"
     try:
         cur = conn.execute(
             "INSERT INTO screener_runs(user_id, status, mode, conditions, universe, "
-            "count_limit, price_mode, progress, total, truncated, results, data_version, "
-            "cache_key, error, queued_at, started_at, done_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "count_limit, price_mode, progress, total, truncated, n_results, results, "
+            "data_version, cache_key, error, queued_at, started_at, done_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (user_id, status, mode, json.dumps(conditions or [], ensure_ascii=False),
              universe, count_limit, price_mode, progress, total, int(bool(truncated)),
+             None if results is None else len(results),
              None if results is None else json.dumps(results, ensure_ascii=False),
              data_version, cache_key, error, now,
              now if status == "running" else None,
@@ -2870,32 +2890,39 @@ def get_screener_run(run_id):
 
 
 def active_screener_run(user_id=None):
-    """最早的 queued/running 任务 (user_id 为空 = 全局队列头), 无则 None。"""
+    """最早的 queued/running 任务 (user_id 为空 = 全局队列头), 无则 None。
+
+    只取摘要列: 认领/轮询不需要结果 JSON。
+    """
     conn = get_conn()
     try:
-        sql = ("SELECT * FROM screener_runs WHERE status IN ('queued','running') ")
+        sql = (f"SELECT {_SCREENER_SUMMARY_COLS} FROM screener_runs "
+               "WHERE status IN ('queued','running') ")
         args = []
         if user_id is not None:
             sql += "AND user_id=? "
             args.append(user_id)
         sql += "ORDER BY id LIMIT 1"
         row = conn.execute(sql, args).fetchone()
-        return _screener_run_row(row) if row else None
+        return _screener_run_row(row, parse_results=False) if row else None
     finally:
         conn.close()
 
 
 def list_screener_runs(user_id, limit=3, include_active=False):
-    """该用户最近的任务 (新→旧)。默认只含已结束的 (历史), 界面上限 3 条。"""
+    """该用户最近的任务 (新→旧)。默认只含已结束的 (历史), 界面上限 3 条。
+
+    只取摘要列: 历史列表只展示条数, 详情走 get_screener_run。
+    """
     limit = _clamp_int(limit, 1, 50, 3)
     conn = get_conn()
     try:
-        sql = "SELECT * FROM screener_runs WHERE user_id=?"
+        sql = f"SELECT {_SCREENER_SUMMARY_COLS} FROM screener_runs WHERE user_id=?"
         if not include_active:
             sql += " AND status NOT IN ('queued','running')"
         sql += " ORDER BY id DESC LIMIT ?"
         rows = conn.execute(sql, (user_id, limit)).fetchall()
-        return [_screener_run_row(r) for r in rows]
+        return [_screener_run_row(r, parse_results=False) for r in rows]
     finally:
         conn.close()
 
@@ -2914,11 +2941,16 @@ def claim_screener_run(run_id):
 
 
 def update_screener_run(run_id, **fields):
-    """更新白名单字段; JSON 字段自动序列化。返回是否改到行。"""
+    """更新白名单字段; JSON 字段自动序列化。返回是否改到行。
+
+    写 results 时同步写 n_results: 摘要查询只读这个数, 不再解析 JSON。
+    """
     allowed = {"status", "progress", "total", "results", "error", "done_at",
                "started_at", "data_version", "cache_key", "mode", "conditions",
-               "universe", "count_limit", "price_mode", "truncated"}
+               "universe", "count_limit", "price_mode", "truncated", "n_results"}
     sets, args = [], []
+    if "results" in fields and "n_results" not in fields:
+        fields["n_results"] = None if fields["results"] is None else len(fields["results"])
     for k, v in fields.items():
         if k not in allowed:
             continue
@@ -3014,29 +3046,38 @@ def find_screener_run_by_cache(cache_key, exclude_id=None):
 
 
 def list_screener_queue(limit=50):
-    """管理员: 全部排队/运行中的任务 (含用户名, 按入队顺序)。"""
+    """管理员: 全部排队/运行中的任务 (含用户名, 按入队顺序)。
+
+    只取摘要列: 管理页 5 秒刷新一次, 不该每次解析全部结果 JSON。
+    """
     limit = _clamp_int(limit, 1, 500, 50)
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT r.*, u.username FROM screener_runs r JOIN users u ON u.id=r.user_id "
+            f"SELECT r.id, r.user_id, r.status, r.mode, r.conditions, r.universe, "
+            "r.count_limit, r.price_mode, r.progress, r.total, r.truncated, r.n_results, "
+            "r.data_version, r.cache_key, r.error, r.queued_at, r.started_at, r.done_at, "
+            "u.username FROM screener_runs r JOIN users u ON u.id=r.user_id "
             "WHERE r.status IN ('queued','running') ORDER BY r.id LIMIT ?",
             (limit,)).fetchall()
-        return [_screener_run_row(r) for r in rows]
+        return [_screener_run_row(r, parse_results=False) for r in rows]
     finally:
         conn.close()
 
 
 def list_recent_screener_runs(limit=20):
-    """管理员: 全部用户最近结束的任务 (新→旧)。"""
+    """管理员: 全部用户最近结束的任务 (新→旧)。只取摘要列, 命中数用 n_results。"""
     limit = _clamp_int(limit, 1, 200, 20)
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT r.*, u.username FROM screener_runs r JOIN users u ON u.id=r.user_id "
+            f"SELECT r.id, r.user_id, r.status, r.mode, r.conditions, r.universe, "
+            "r.count_limit, r.price_mode, r.progress, r.total, r.truncated, r.n_results, "
+            "r.data_version, r.cache_key, r.error, r.queued_at, r.started_at, r.done_at, "
+            "u.username FROM screener_runs r JOIN users u ON u.id=r.user_id "
             "WHERE r.status NOT IN ('queued','running') ORDER BY r.id DESC LIMIT ?",
             (limit,)).fetchall()
-        return [_screener_run_row(r) for r in rows]
+        return [_screener_run_row(r, parse_results=False) for r in rows]
     finally:
         conn.close()
 

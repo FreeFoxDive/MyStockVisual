@@ -8367,6 +8367,8 @@ document.addEventListener('DOMContentLoaded', () => {
           const n = last.n_results == null ? 0 : last.n_results;
           showToast(last.status === "stopped"
             ? `选股已取消: 保留 ${n} 只 (可到选股页看条件与结果)`
+            : last.status === "error"
+            ? `选股失败: ${last.error || "请到选股页查看"}`
             : `选股完成: 命中 ${n} 只 (可到选股页看条件与结果)`);
         }
       }

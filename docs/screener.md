@@ -17,6 +17,8 @@
   `hits:[{metric,label,ok,value,unit}]`，页面据此做「满足 N 项」筛选与 ✅/❌ 明细列；
 - `price_mode`：`close`（默认，用因子库=收盘口径）/ `live`（盘中用批量快照补当日 bar
   后重算，10 分钟共享缓存；不可用时自动回退收盘口径并记录实际 `data_version`）。
+  只重算有当日有效快照的标的，K 线一次读出；取快照期间任务进度按批次推进，
+  页面不再显示「扫描中 0/?」。
 
 条件由 `screener_metrics.METRICS` 定义（key/label/group/kind/field/unit/scale/op），
 前后端共用：`GET /api/screener/metrics` 把目录发给页面渲染，扫描时按同一份定义判定，
@@ -65,7 +67,7 @@ POST /api/screener/run ──► screener_runs(status=queued)
 ```
 
 - **有序**：FIFO，同一时刻只有一个任务在跑。取数只在**因子库构建**那一步
-  （`SCREENER_KLINE_PER_MIN`，默认 54/min），扫描本身不取数。
+  （`FACTORS_KLINE_PER_MIN`，默认 54/min），扫描本身不取数。
 - **隔离**：`/status`、`/runs/{id}`、`/stop` 全部按 `user_id` 过滤；非本人任务
   返回 403（管理员例外，`/admin.html` 的「选股队列」可代停）。
 - **可恢复**：任务与页面解耦，关页/换设备后重新登录仍能看到条件、进度与结果；
@@ -146,7 +148,8 @@ POST /api/screener/run ──► screener_runs(status=queued)
 
 - `GET /api/screener/status` **默认不下发 `results`**（首页徽章每 10~60s 轮询一次，
   带结果就是每次数 MB JSON）：只给摘要与 `n_results`/`truncated`；要详情用 `?full=1`
-  或 `GET /api/screener/runs/<id>`，页面按需取并缓存。
+  或 `GET /api/screener/runs/<id>`，页面按需取并缓存。服务端也不解析 `results`：
+  摘要查询只读 `n_results` 列（完成时写入，旧库启动时按 `"symbol"` 出现次数回填一次）。
 - `POST /api/screener/stop` 只接受正整数 `run_id`（非数字/浮点/列表一律 400），缺省取消
   自己的当前任务；取消请求与 worker「认领→写内存态」之间的窗口用 `_pending_stop` 记账，
   不会丢取消。
@@ -154,7 +157,8 @@ POST /api/screener/run ──► screener_runs(status=queued)
 ## 已知边界
 
 - 扫描依赖因子库：当日快照缺失时 `/api/screener/run` 返回 503（不会静默退回逐只拉K）；
-  交易日 18:00 自动构建，也可由管理员手动重建（`POST /api/factors/rebuild`）。
+  交易日 18:00 自动构建。管理员也可在选股页状态条点「立即构建」，或在管理页 /
+  `POST /api/factors/rebuild` 手动重建。
 - `price_mode=live` 用未复权实时价拼前复权序列，除权日会有一日偏差（18:00 重建纠正）；
   筹码列在盘中口径下沿用收盘值（重算太贵）。
 - 阶段通知只在任务确实跑 >30 秒时才发（秒级扫描没必要刷屏）；开始与完成必发。

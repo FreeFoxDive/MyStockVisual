@@ -27,11 +27,14 @@ import factors  # noqa: E402
 import screener_metrics as sm  # noqa: E402
 
 
-def _df(closes, volumes=None, freq="D", start="2026-01-01", amount=None):
+def _df(closes, volumes=None, freq="D", start="2026-01-01", amount=None, end=None):
     n = len(closes)
     closes = np.asarray(closes, dtype=float)
     volumes = np.asarray(volumes if volumes is not None else [1_000_000.0] * n, dtype=float)
-    idx = pd.date_range(start, periods=n, freq=freq)
+    if end:
+        idx = pd.date_range(end=end, periods=n, freq=freq)
+    else:
+        idx = pd.date_range(start, periods=n, freq=freq)
     return pd.DataFrame({
         "open": closes * 0.995, "high": closes * 1.01, "low": closes * 0.99,
         "close": closes, "volume": volumes,
@@ -145,6 +148,17 @@ class LimitFlagTest(unittest.TestCase):
 
     def test_st_5pct(self):
         self.assertEqual(factors._limit_flags("600001.SH", "ST某某", 5.0, 5.0), (True, False))
+        # 创业板/科创板 ST 是 20% 不是 5%
+        self.assertEqual(factors._limit_flags("300001.SZ", "ST宁德", 5.0, 10.0), (False, False))
+        self.assertEqual(factors._limit_flags("300001.SZ", "*ST宁德", 19.9, 10.0), (True, False))
+        self.assertEqual(factors._limit_flags("688001.SH", "ST金山", 19.9, 10.0), (True, False))
+
+    def test_bse_30pct(self):
+        self.assertEqual(factors._limit_flags("830001.BJ", "北交示例", 29.9, 10.0), (True, False))
+        self.assertEqual(factors._limit_flags("920001.BJ", "北交新码", 29.9, 10.0), (True, False))
+        self.assertEqual(factors._limit_flags("830001.BJ", "ST北交", 9.9, 10.0), (False, False))
+        self.assertEqual(factors._limit_flags("830001.BJ", "ST北交", 29.9, 10.0), (True, False))
+        self.assertEqual(factors._limit_flags("430001.BJ", "老三板", 10.0, 10.0), (False, False))
 
     def test_etf_and_non_numeric_skipped(self):
         self.assertEqual(factors._limit_flags("510300.SH", "沪深300ETF", 10.0, 4.0), (False, False))
@@ -384,7 +398,7 @@ class ManualBuildWindowTest(StoreTestCaseBase):
         factors.init_store()
         with mock.patch.object(factors, "before_build_at", lambda now=None: True), \
              mock.patch.object(factors, "universe", lambda: [("600000.SH", "浦发")]), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: {}), \
+             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
              mock.patch.object(factors, "external_meta",
                                lambda day, syms: ({}, {"spot": "ok:0"})), \
              mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
@@ -411,10 +425,53 @@ class LiveSnapshotTest(StoreTestCaseBase):
                 fetch.assert_not_called()
 
     def test_trading_phase_proceeds_to_fetch(self):
+        factors._live_cache.update({"day": None, "ts": 0.0, "df": None, "version": None})
         with mock.patch("market_hours.session_phase", lambda v=None: "trading"), \
              mock.patch.object(factors, "_fetch_quotes", return_value={}) as fetch:
-            self.assertEqual(factors.live_snapshot(), (None, None), "无快照数据 → 回退")
+            df, ver = factors.live_snapshot()
+        self.assertIsNone(ver, "无快照数据 → 回退")
         self.assertTrue(fetch.called, "连续竞价应当去取快照")
+
+
+class SchedulerSpawnTest(unittest.TestCase):
+    """调度线程拉起子进程而不是在 Web 进程里算 (全市场计算约 2 分钟, 会占住 GIL)。"""
+
+    def test_spawn_build_uses_subprocess(self):
+        import subprocess
+        with mock.patch("subprocess.Popen") as popen:
+            popen.return_value = mock.Mock()
+            factors._spawn_build("2026-09-18")
+        cmd = popen.call_args.args[0]
+        self.assertIn("--build", cmd)
+        self.assertIn("--day", cmd)
+        self.assertIn("2026-09-18", cmd)
+        self.assertTrue(cmd[0].endswith("python.exe") or cmd[0].endswith("python")
+                        or "python" in cmd[0])
+
+    def test_loop_does_not_respawn_while_child_runs(self):
+        child = mock.Mock()
+        child.poll.return_value = None          # 还在跑
+        spawned = []
+
+        def fake_spawn(day):
+            spawned.append(day)
+            return child
+
+        sleeps = {"n": 0}
+
+        def fake_sleep(_sec):
+            sleeps["n"] += 1
+            if sleeps["n"] >= 2:
+                raise SystemExit
+
+        with mock.patch.object(factors, "init_store", lambda: None), \
+             mock.patch.object(factors, "should_build", lambda now=None: (True, "due")), \
+             mock.patch.object(factors, "due_day", lambda now=None: "2026-09-18"), \
+             mock.patch.object(factors, "_spawn_build", fake_spawn), \
+             mock.patch("time.sleep", fake_sleep):
+            with self.assertRaises(SystemExit):
+                factors._loop()
+        self.assertEqual(spawned, ["2026-09-18"], "子进程还在跑时不能再拉起一个")
 
 
 class StatusTest(StoreTestCaseBase):
@@ -424,7 +481,12 @@ class StatusTest(StoreTestCaseBase):
         factors._ensure_build_row("2026-09-18")
         factors._update_build("2026-09-18", state="done", n_rows=1, n_symbols=2,
                               n_missing=1, percent=100)
-        st = factors.status()
+        now = datetime(2026, 9, 18, 20, 0)
+        # 时钟被拨到 18:00 之后时, 同进程里的调度线程不能跟着去拉真实行情
+        with mock.patch.object(factors, "_now_dt", lambda: now), \
+             mock.patch("market_hours.is_trading_day", lambda v=None: True), \
+             mock.patch.object(factors, "build", lambda *a, **k: {"ok": False}):
+            st = factors.status()
         self.assertEqual(st["snapshot_day"], "2026-09-18")
         self.assertEqual(len(st["last_days"]), 5)
         self.assertEqual(st["last_days"][0]["day"], "2026-09-18")
@@ -474,15 +536,18 @@ class ExternalMetaTest(unittest.TestCase):
 class BuildTest(StoreTestCaseBase):
     """build(): mock 取数与外部源, 断言 bars/快照/builds 落库与通知。"""
 
-    def _frames(self):
-        return {"600000.SH": _rising(120), "000001.SZ": _falling(120)}
+    def _frames(self, day="2026-09-18"):
+        # 最后一根必须落在构建日, 否则按停牌剔除
+        return {"600000.SH": _df([10.0 + 0.5 * i for i in range(120)], end=day),
+                "000001.SZ": _df([70.0 - 0.3 * i for i in range(120)], end=day)}
 
     def test_build_writes_snapshot_and_records(self):
         factors.init_store()
         notes = []
         with mock.patch.object(factors, "universe",
                                lambda: [("600000.SH", "浦发银行"), ("000001.SZ", "平安银行")]), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: self._frames()), \
+             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: (
+                 self._frames(), {"batches": 4, "failed_batches": 1})), \
              mock.patch.object(factors, "_fetch_shares",
                                lambda syms: {"600000.SH": (1e9, 1.2e9)}), \
              mock.patch.object(factors, "external_meta",
@@ -498,6 +563,7 @@ class BuildTest(StoreTestCaseBase):
         self.assertEqual(row["state"], "done")
         self.assertEqual(row["percent"], 100)
         self.assertIn("yjbb", row["sources"])
+        self.assertIn('"bars": "fail:1/4批"', row["sources"], "失败批次要记进 sources")
         df, day = factors.snapshot()
         self.assertEqual(day, "2026-09-18")
         self.assertEqual(set(df["symbol"]), {"600000.SH", "000001.SZ"})
@@ -548,7 +614,7 @@ class BuildTest(StoreTestCaseBase):
         """回归: attempts/状态更新抛错时 running 必须复位, 否则永久卡 running。"""
         factors.init_store()
         with mock.patch.object(factors, "universe", lambda: [("600000.SH", "浦发")]), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: {}), \
+             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
              mock.patch.object(factors, "_bump_attempts",
                                side_effect=RuntimeError("database is locked")), \
              mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
@@ -567,6 +633,207 @@ class BuildTest(StoreTestCaseBase):
         self.assertIsNone(factors.build_blocked_reason(day="2026-09-18", force=True))
         factors._update_build("2026-09-18", state="error", attempts=factors.MAX_ATTEMPTS)
         self.assertIn("已失败", factors.build_blocked_reason(day="2026-09-18") or "")
+
+    def test_bars_truncated_to_day_and_stale_dropped(self):
+        factors.init_store()
+        # 序列延伸到 09-20; 按 09-18 构建时收盘价必须是 09-18 那根, 不能是更新的
+        extended = _df(list(range(1, 41)), end="2026-09-20")
+        stale = _df([10.0 + i for i in range(40)], end="2026-09-17")
+        frames = {"600000.SH": extended, "000001.SZ": stale}
+        with mock.patch.object(factors, "universe",
+                               lambda: [("600000.SH", "浦发"), ("000001.SZ", "平安")]), \
+             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: (frames, {"batches": 1, "failed_batches": 0})), \
+             mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {})), \
+             mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
+            out = factors.build(day="2026-09-18")
+        self.assertTrue(out["ok"], out)
+        df, day = factors.snapshot()
+        self.assertEqual(day, "2026-09-18")
+        self.assertEqual(list(df["symbol"]), ["600000.SH"])
+        # end=09-20 的最后三根是 09-18/19/20, 对应 close 38/39/40
+        self.assertAlmostEqual(float(df.iloc[0]["close"]), 38.0)
+        self.assertEqual(out["n_missing"], 1)
+
+    def test_bad_day_rejected(self):
+        factors.init_store()
+        for bad in ("nope", "2026/09/18", "2026-09-19", "2099-01-04"):
+            out = factors.build(day=bad, force=True)
+            self.assertFalse(out["ok"], bad)
+            self.assertEqual(out["reason"], "bad_day", bad)
+            self.assertIsNotNone(factors.build_blocked_reason(day=bad, force=True), bad)
+
+    def test_start_notice_counts_attempts(self):
+        factors.init_store()
+        factors._ensure_build_row("2026-09-18")
+        factors._update_build("2026-09-18", state="error", attempts=1)
+        notes = []
+        with mock.patch.object(factors, "universe", lambda: []), \
+             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
+             mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {})), \
+             mock.patch.object(factors, "_notify_state",
+                               lambda kind, day, extra="": notes.append((kind, extra))):
+            out = factors.build(day="2026-09-18")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(notes[0][0], "start")
+        self.assertIn("第 2 次", notes[0][1])
+
+    def test_afternoon_force_is_rebuilt_after_build_at(self):
+        factors.init_store()
+        afternoon = datetime(2026, 9, 18, 16, 0)
+        with mock.patch.object(factors, "_now_dt", lambda: afternoon), \
+             mock.patch.object(factors, "before_build_at", lambda now=None: True), \
+             mock.patch.object(factors, "universe", lambda: []), \
+             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
+             mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {"spot": "ok:0"})), \
+             mock.patch.object(factors, "_notify_state", lambda *a, **k: None), \
+             mock.patch("market_hours.is_trading_day", lambda v=None: True):
+            out = factors.build(day="2026-09-18", force=True)
+        self.assertTrue(out["ok"], out)
+        row = factors.get_build("2026-09-18")
+        self.assertIn("_provisional", row["sources"])
+        evening = datetime(2026, 9, 18, 19, 0)
+        with mock.patch("market_hours.is_trading_day", lambda v=None: True), \
+             mock.patch.object(factors, "build_at", lambda: (18, 0)), \
+             mock.patch.object(factors, "_now_dt", lambda: evening):
+            ok, why = factors.should_build(evening)
+            blocked = factors.build_blocked_reason(day="2026-09-18")
+        self.assertTrue(ok, why)
+        self.assertEqual(why, "due")
+        self.assertIsNone(blocked, "临时快照到点后手动重建也不能报「已构建完成」")
+
+
+class AsOfAndLiveBarTest(unittest.TestCase):
+    def test_bars_as_of_requires_that_day(self):
+        df = _df([float(i) for i in range(40)], end="2026-09-17")
+        self.assertIsNone(factors._bars_as_of(df, "2026-09-18"))
+        kept = factors._bars_as_of(_df([float(i) for i in range(40)], end="2026-09-18"),
+                                   "2026-09-18")
+        self.assertEqual(str(kept.index[-1])[:10], "2026-09-18")
+
+    def test_quote_without_volume_or_stale_ts_is_not_today(self):
+        self.assertFalse(factors._quote_is_today({"volume": 0, "last_price": 10}, "2026-09-18"))
+        self.assertFalse(factors._quote_is_today({"volume": None}, "2026-09-18"))
+        # 2026-09-17 15:00 CST
+        import datetime as dt_mod
+        ts = dt_mod.datetime(2026, 9, 17, 15, 0,
+                             tzinfo=dt_mod.timezone(dt_mod.timedelta(hours=8))).timestamp()
+        self.assertFalse(factors._quote_is_today(
+            {"volume": 100, "timestamp": ts}, "2026-09-18"))
+        self.assertTrue(factors._quote_is_today({"volume": 100}, "2026-09-18"))
+
+    def test_patch_updates_amount_and_skips_zero_volume(self):
+        bars = _df([10.0] * 40, end="2026-09-17")
+        untouched = factors._patch_last_bar(
+            bars, "2026-09-18", {"volume": 0, "last_price": 11}, 11)
+        self.assertEqual(len(untouched), len(bars))
+        patched = factors._patch_last_bar(
+            bars, "2026-09-18",
+            {"volume": 123, "amount": 456, "high": 12, "low": 9, "open": 10}, 11)
+        self.assertEqual(str(patched.index[-1])[:10], "2026-09-18")
+        self.assertAlmostEqual(float(patched["close"].iloc[-1]), 11.0)
+        self.assertAlmostEqual(float(patched["amount"].iloc[-1]), 456.0)
+        self.assertAlmostEqual(float(patched["volume"].iloc[-1]), 123.0)
+        # 同日替换也要改 amount, 不能只改 close
+        same_day = _df([10.0] * 40, end="2026-09-18")
+        replaced = factors._patch_last_bar(
+            same_day, "2026-09-18",
+            {"volume": 200, "amount": 999, "high": 12, "low": 9, "open": 10}, 11)
+        self.assertEqual(len(replaced), len(same_day))
+        self.assertAlmostEqual(float(replaced["amount"].iloc[-1]), 999.0)
+        self.assertAlmostEqual(float(replaced["close"].iloc[-1]), 11.0)
+
+    def test_fetch_quotes_imports_rate(self):
+        af = mock.Mock()
+        frame = pd.DataFrame([{"symbol": "600000.SH", "last_price": 10.0, "volume": 100}])
+        af.quotes.get.return_value = frame
+        seen = []
+        with mock.patch("market.get_af", return_value=af):
+            out = factors._fetch_quotes(["600000.SH"],
+                                        progress_cb=lambda d, t: seen.append((d, t)))
+        self.assertEqual(out["600000.SH"]["last_price"], 10.0)
+        self.assertEqual(seen, [(1, 1)], "取快照期间要回报进度")
+        self.assertLessEqual(factors.live_quote_rate(), 108)
+
+    def test_live_snapshot_reads_bars_once_and_skips_stale(self):
+        """有当日快照的标的一次读出; 无快照/量为 0 的不读K、不重算。"""
+        base = pd.DataFrame([
+            {"symbol": "600000.SH", "name": "浦发", "close": 10.0, "prev_close": 9.5},
+            {"symbol": "000001.SZ", "name": "平安", "close": 12.0, "prev_close": 12.0},
+        ])
+        quotes = {"600000.SH": {"last_price": 11.0, "volume": 100, "amount": 1100,
+                                "high": 11.2, "low": 10.5, "open": 10.6},
+                  "000001.SZ": {"last_price": 12.5, "volume": 0}}
+        calls = {"load": 0, "compute": 0}
+
+        def load_many(symbols):
+            calls["load"] += 1
+            self.assertEqual(symbols, ["600000.SH"], "量为 0 的标的不该读K")
+            return {"600000.SH": _df([10.0] * 40, end="2026-09-17")}
+
+        def compute(df, symbol="", name="", float_shares=None):
+            calls["compute"] += 1
+            return {"symbol": symbol, "close": float(df["close"].iloc[-1])}
+
+        factors._live_cache.update({"day": None, "ts": 0.0, "df": None, "version": None})
+        with mock.patch.object(factors, "snapshot", lambda day=None: (base, "2026-09-18")), \
+             mock.patch.object(factors, "_now_dt",
+                               lambda: datetime(2026, 9, 18, 10, 30)), \
+             mock.patch("market_hours.session_phase", lambda now=None: "trading"), \
+             mock.patch.object(factors, "_fetch_quotes", lambda syms, progress_cb=None: quotes), \
+             mock.patch.object(factors, "load_bars_many", load_many), \
+             mock.patch.object(factors, "load_shares", lambda: {}), \
+             mock.patch.object(factors, "compute_factors", compute):
+            df, ver = factors.live_snapshot()
+        self.assertEqual(calls["load"], 1)
+        self.assertEqual(calls["compute"], 1)
+        got = df.set_index("symbol")
+        self.assertAlmostEqual(float(got.loc["600000.SH", "close"]), 11.0)
+        self.assertAlmostEqual(float(got.loc["000001.SZ", "close"]), 12.0,
+                               msg="无当日快照的标的应沿用收盘因子")
+        self.assertIn("+live@", ver)
+
+
+class YjbbPeriodTest(unittest.TestCase):
+    def test_candidates_skip_unfinished_quarter(self):
+        # 2026-02-15: 当年各季都没结束, 最新候选是上年年报而不是当年 0930
+        self.assertEqual(factors._yjbb_candidates("2026-02-15")[0], "20251231")
+        self.assertNotIn("20260930", factors._yjbb_candidates("2026-02-15"))
+        self.assertEqual(factors._yjbb_candidates("2026-09-18")[0], "20260630")
+
+    def test_thin_newer_period_falls_through(self):
+        def fake(date):
+            if date == "20251231":
+                return pd.DataFrame([{
+                    "股票代码": "600000", "净资产收益率": 1.0,
+                    "所处行业": "银行", "每股收益": 1.0, "每股净资产": 1.0,
+                }])
+            if date == "20250930":
+                rows = [{"股票代码": f"{i:06d}", "净资产收益率": 2.0,
+                         "所处行业": "银行", "每股收益": 1.0, "每股净资产": 1.0}
+                        for i in range(factors.YJBB_MIN_ROWS)]
+                return pd.DataFrame(rows)
+            raise RuntimeError(date)
+
+        with mock.patch("akshare.stock_yjbb_em", side_effect=fake):
+            out = factors._src_yjbb("2026-02-15")
+        self.assertEqual(out["_period"], "20250930")
+        self.assertGreaterEqual(len(out["rows"]), factors.YJBB_MIN_ROWS)
+
+
+class MainJsonTest(StoreTestCaseBase):
+    def test_status_and_build_both_dump_json(self):
+        factors.init_store()
+        buf = []
+        with mock.patch("sys.argv", ["factors.py", "--status"]), \
+             mock.patch("builtins.print", lambda s: buf.append(s)):
+            factors.main()
+        self.assertIn("snapshot_day", buf[-1])
+        buf.clear()
+        with mock.patch.object(factors, "build", return_value={"ok": True}), \
+             mock.patch("sys.argv", ["factors.py", "--build", "--day", "2026-09-18"]), \
+             mock.patch("builtins.print", lambda s: buf.append(s)):
+            factors.main()
+        self.assertIn('"ok": true', buf[-1])
 
 
 if __name__ == "__main__":

@@ -24,12 +24,17 @@ from pathlib import Path
 
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
 SCREENER_HTML = _VISUAL_DIR / "static" / "screener.html"
+ADMIN_HTML = _VISUAL_DIR / "static" / "admin.html"
 
 _FNS = (
     "specOf", "condLabel", "fmtTime", "statusText", "readInputs", "saveCond",
     "editCond", "cancelEdit", "delCond", "renderConds", "setLocked", "syncInputs",
     "fillComposerFrom", "loadRunConditions", "fillHistory", "renderFilterRow",
     "setHitFilter", "renderResults", "renderRun", "showRun", "applyStatus",
+)
+_FACTOR_FNS = (
+    "scheduleFactorBar", "setFactorRebuildVisible", "refreshFactorBar",
+    "rebuildFactorsNow",
 )
 
 
@@ -74,6 +79,8 @@ let runCache = {};
 let displayId = null;
 let hitFilter = null;
 let factorDay = null;
+let isAdmin = false;
+let factorBarTimer = null;
 const LIVE_QUOTE_MAX = 200;
 const els = {};
 function el(id) {
@@ -95,10 +102,23 @@ const VisualMarketClock = { MarketClock: function () {
 const VisualMarketStore = { store: { accept: () => {} }, watch: () => {} };
 const marketClock = new VisualMarketClock.MarketClock();
 const apiCalls = [];
-function api(path) { apiCalls.push(path); return Promise.resolve(globalThis.__apiResult || {}); }
+const apiPosts = [];
+function api(path, options) {
+  apiCalls.push(path);
+  apiPosts.push({ path, options: options || {} });
+  if (typeof globalThis.__apiHandler === "function") {
+    return Promise.resolve(globalThis.__apiHandler(path, options || {}));
+  }
+  return Promise.resolve(globalThis.__apiResult || {});
+}
 // 现价订阅要记下来: 结果可达数千行, 全量订阅会打出几十个 /api/quotes 批次
 const quoteSyms = [];
 liveQuotes.setSymbols = syms => { quoteSyms.push(syms); };
+const confirms = [];
+globalThis.confirm = (msg) => { confirms.push(msg); return globalThis.__confirm !== false; };
+const timers = [];
+globalThis.clearTimeout = (id) => {};
+globalThis.setTimeout = (fn, ms) => { timers.push(ms); return timers.length; };
 """
 
 
@@ -151,9 +171,18 @@ class ScreenerPageStaticTest(unittest.TestCase):
     def test_factor_status_bar(self):
         self.assertIn('/api/factors/status', self.src)
         self.assertIn('id="factor-bar"', self.src)
+        self.assertIn('id="factor-rebuild"', self.src)
         body = _extract_fn(self.src, "refreshFactorBar")
         self.assertIn("snapshot_day", body)
         self.assertIn("构建中", body)
+        self.assertIn("setFactorRebuildVisible", body)
+        show = _extract_fn(self.src, "setFactorRebuildVisible")
+        self.assertIn('"inline-block"', show,
+                      "显示时不能写空字符串, 否则回落到 CSS 的 display:none")
+        rebuild = _extract_fn(self.src, "rebuildFactorsNow")
+        self.assertIn('"/api/factors/rebuild"', rebuild)
+        self.assertIn("force: true", rebuild)
+        self.assertIn("isAdmin", rebuild)
 
     def test_no_legacy_global_job_fields(self):
         self.assertNotIn("s.running", self.src)
@@ -531,6 +560,156 @@ class ScreenerPollStatusBehaviorTest(unittest.TestCase):
                          "失败退避 1.5s→3s, 恢复后回到 1.5s")
         self.assertEqual(out["failures"], 0, "成功即复位失败计数")
         self.assertEqual(out["applied"], 1)
+
+
+class ScriptOrderTest(unittest.TestCase):
+    """market-store.js 在加载时就要求 Vue 和 Pinia 都在。缺 Vue 会抛错, 后面的 initResume 不执行。"""
+
+    def test_vue_and_demi_load_before_pinia(self):
+        src = SCREENER_HTML.read_text(encoding="utf-8")
+        vue = src.index("/vendor/vue-3.5.13.global.prod.js")
+        demi = src.index("/vendor/vue-demi-0.14.10.iife.js")
+        pinia = src.index("/vendor/pinia-2.2.6.iife.prod.js")
+        store = src.index("/js/market-store.js")
+        self.assertLess(vue, demi)
+        self.assertLess(demi, pinia)
+        self.assertLess(pinia, store)
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
+class FactorRebuildTest(unittest.TestCase):
+    """选股页因子库缺失/失败时, 管理员可点「立即构建」; 普通用户看不到按钮。"""
+
+    def _run(self, extra: str) -> dict:
+        src = SCREENER_HTML.read_text(encoding="utf-8")
+        fns = "\n".join(_extract_fn(src, name) for name in _FACTOR_FNS)
+        proc = subprocess.run(["node", "-e", _PRELUDE + fns + "\n" + extra],
+                              capture_output=True, check=True, text=True, encoding="utf-8")
+        return json.loads(proc.stdout)
+
+    def test_admin_sees_button_when_missing(self):
+        out = self._run("""
+(async () => {
+  isAdmin = true;
+  globalThis.__apiResult = { state: "idle", snapshot_day: null };
+  await refreshFactorBar();
+  const r = {
+    display: el("factor-rebuild").style.display,
+    text: el("factor-text").textContent,
+    delay: timers[timers.length - 1],
+  };
+  console.log(JSON.stringify(r));
+})();
+""")
+        self.assertEqual(out["display"], "inline-block")
+        self.assertIn("立即构建", out["text"])
+        self.assertEqual(out["delay"], 60000)
+
+    def test_user_hides_button_when_missing(self):
+        out = self._run("""
+(async () => {
+  isAdmin = false;
+  globalThis.__apiResult = { state: "idle", snapshot_day: null };
+  await refreshFactorBar();
+  console.log(JSON.stringify({
+    display: el("factor-rebuild").style.display,
+    text: el("factor-text").textContent,
+  }));
+})();
+""")
+        self.assertEqual(out["display"], "none")
+        self.assertIn("管理员", out["text"])
+
+    def test_running_hides_button_and_polls_fast(self):
+        out = self._run("""
+(async () => {
+  isAdmin = true;
+  globalThis.__apiResult = { state: "running", percent: 40, phase: "bars",
+                             snapshot_day: null };
+  await refreshFactorBar();
+  console.log(JSON.stringify({
+    display: el("factor-rebuild").style.display,
+    text: el("factor-text").textContent,
+    delay: timers[timers.length - 1],
+  }));
+})();
+""")
+        self.assertEqual(out["display"], "none")
+        self.assertIn("构建中 40%", out["text"])
+        self.assertEqual(out["delay"], 5000)
+
+    def test_rebuild_posts_force_true(self):
+        out = self._run("""
+(async () => {
+  isAdmin = true;
+  let rebuilt = false;
+  globalThis.__apiHandler = (path) => {
+    if (path === "/api/factors/rebuild") return { ok: true, started: true };
+    if (path === "/api/factors/status") {
+      return rebuilt
+        ? { state: "running", percent: 1, phase: "bars", snapshot_day: null }
+        : { state: "idle", snapshot_day: null };
+    }
+    return {};
+  };
+  await refreshFactorBar();
+  rebuilt = true;
+  await rebuildFactorsNow();
+  const post = apiPosts.find(c => c.path === "/api/factors/rebuild");
+  console.log(JSON.stringify({
+    confirmed: confirms.length === 1,
+    method: post && post.options.method,
+    body: post && post.options.body,
+    display: el("factor-rebuild").style.display,
+    text: el("factor-text").textContent,
+  }));
+})();
+""")
+        self.assertTrue(out["confirmed"])
+        self.assertEqual(out["method"], "POST")
+        self.assertEqual(json.loads(out["body"]), {"force": True})
+        self.assertEqual(out["display"], "none", "触发后进入构建中, 按钮应隐藏")
+        self.assertIn("构建中", out["text"])
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
+class AdminCondTextTest(unittest.TestCase):
+    """管理页选股队列的 condText 要和选股页 condLabel 同一套写法: OR 用「或」,
+    区间带上下限, 文本带等号, 数值带运算符。旧版只显示 value、一律用「且」。"""
+
+    @classmethod
+    def setUpClass(cls):
+        src = ADMIN_HTML.read_text(encoding="utf-8")
+        cls.script = (
+            _extract_fn(src, "condText") + "\n"
+            + "process.stdout.write(condText("
+            + "JSON.parse(process.argv[1]), process.argv[2]));"
+        )
+
+    def _run(self, conditions, mode):
+        proc = subprocess.run(
+            ["node", "-e", self.script, json.dumps(conditions, ensure_ascii=False), mode],
+            capture_output=True, check=True)
+        return proc.stdout.decode("utf-8")
+
+    def test_or_range_text_and_num(self):
+        conds = [
+            {"kind": "bool", "label": "站上 MA20", "metric": "above_ma20"},
+            {"kind": "range", "label": "换手率", "metric": "turnover",
+             "value": 1, "value2": 5},
+            {"kind": "text", "label": "所处行业", "metric": "industry", "value": "银行"},
+            {"kind": "num", "label": "RSI6", "metric": "rsi6", "op": "<=", "value": 20},
+        ]
+        self.assertEqual(
+            self._run(conds, "or"),
+            "站上 MA20 或 换手率 1~5 或 所处行业=银行 或 RSI6 ≤ 20")
+        self.assertEqual(
+            self._run(conds[:2], "and"),
+            "站上 MA20 且 换手率 1~5")
+
+    def test_empty_is_dash(self):
+        self.assertEqual(self._run([], "and"), "—")
+        self.assertEqual(self._run(None, "or"), "—")
 
 
 if __name__ == "__main__":

@@ -280,6 +280,7 @@ class TabletLayoutTest(unittest.TestCase):
         self.assertNotIn("innerHTML", fn)
         self.assertIn("`${pct}%`", fn, "扫描中显示百分比")
         self.assertIn('"排队"', fn, "排队中显示「排队」(任务化后本人任务才有徽章)")
+        self.assertIn("选股失败", fn, "失败不能提示成「选股完成: 命中 0 只」")
         self.assertIn("setNavText(btn, '选股')", fn)
         self.assertIn('classList.add("scanning")', fn, "扫描态仍要驱动 CSS 把进度露出来")
         setter = _extract_fn(self.src, "setNavText")

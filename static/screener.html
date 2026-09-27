@@ -39,11 +39,14 @@ button.primary { background: var(--btn-active); color: var(--btn-active-text); b
 .progress .fill { height: 100%; background: var(--btn-active); width: 0; transition: width 0.3s; }
 .hint { font-size: 12px; color: var(--text-secondary); }
 .hint.warn { color: var(--warn-text); }
-#factor-bar { margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+#factor-bar { margin-top: 10px; font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 #factor-bar .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--up-text); margin-right: 5px; }
 #factor-bar.bad { color: var(--down-text); }
 #factor-bar.bad .dot { background: var(--down-text); }
 #factor-bar.busy .dot { background: var(--warn-text); }
+#factor-rebuild { display: none; padding: 2px 10px; border: 1px solid var(--input-border); border-radius: 999px; background: transparent; color: var(--text); font-size: 12px; cursor: pointer; }
+#factor-rebuild:hover { background: var(--btn-hover); }
+#factor-rebuild:disabled { opacity: .5; cursor: not-allowed; }
 #run-meta { margin-top: 12px; font-size: 12px; color: var(--text-secondary); }
 #hist-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
 #hist-row select { padding: 4px 8px; border: 1px solid var(--input-border); border-radius: 4px; background: var(--input-bg); color: var(--text); font-size: 12px; max-width: 380px; }
@@ -110,7 +113,10 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
     <div id="err"></div>
     <div class="progress" id="prog-wrap" style="display:none"><div class="fill" id="prog-fill"></div></div>
     <div class="hint" id="scan-hint"></div>
-    <div id="factor-bar"><span class="dot"></span><span id="factor-text">因子库状态加载中…</span></div>
+    <div id="factor-bar">
+      <span><span class="dot"></span><span id="factor-text">因子库状态加载中…</span></span>
+      <button type="button" id="factor-rebuild" onclick="rebuildFactorsNow()">立即构建</button>
+    </div>
     <div id="hist-row" style="display:none">
       <span>历史</span>
       <select id="hist-select" onchange="showRun(this.value)"></select>
@@ -132,6 +138,8 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
 <script src="/js/api.js"></script>
 <script src="/js/live-market.js"></script>
 <script src="/js/market-clock.js"></script>
+<script src="/vendor/vue-3.5.13.global.prod.js"></script>
+<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
 <script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
 <script src="/js/market-store.js"></script>
 <script>
@@ -147,6 +155,8 @@ let runCache = {};          // 任务详情 (含 results), 按 id 缓存且不�
 let displayId = null;       // 结果区当前展示的任务 id
 let hitFilter = null;       // 命中数筛选 (null = 全部)
 let factorDay = null;       // 因子库数据版本
+let isAdmin = false;        // 因子库重建仅管理员可触发
+let factorBarTimer = null;  // 构建中 5s 刷新, 平时 60s
 // 现价订阅上限: 结果最多 SCREENER_RESULT_MAX 行, 全量订阅会让本页每 2.5s 发几十个
 // /api/quotes 批次并挤占监控/其它页面的共享额度 —— 只订阅命中最多的前 N 只。
 const LIVE_QUOTE_MAX = 200;
@@ -416,29 +426,82 @@ async function showRun(id) {
 }
 
 // ── 因子库状态 ──
+function scheduleFactorBar(delayMs) {
+  clearTimeout(factorBarTimer);
+  factorBarTimer = setTimeout(async () => {
+    await refreshFactorBar();
+  }, delayMs);
+}
+function setFactorRebuildVisible(show) {
+  const btn = document.getElementById("factor-rebuild");
+  if (!btn) return;
+  // 样式表里默认 display:none; 显示时必须写具体值, 空字符串会回落到 CSS 继续隐藏
+  btn.style.display = show ? "inline-block" : "none";
+  if (!show) btn.disabled = false;
+}
 async function refreshFactorBar() {
+  let delay = 60000;
   try {
     const s = await api("/api/factors/status");
     const bar = document.getElementById("factor-bar");
     const txt = document.getElementById("factor-text");
     bar.classList.remove("bad", "busy");
+    let needRebuild = false;
     if (s.state === "running") {
       bar.classList.add("busy");
       txt.textContent = `因子库构建中 ${s.percent || 0}%（${s.phase || "bars"}）… 完成后才能按最新数据扫描`;
+      delay = 5000;
     } else if (s.state === "error" && !s.snapshot_day) {
       bar.classList.add("bad");
-      txt.textContent = `因子库构建失败：${s.error || "未知原因"}（管理员可在管理页手动重建）`;
+      txt.textContent = isAdmin
+        ? `因子库构建失败：${s.error || "未知原因"}`
+        : `因子库构建失败：${s.error || "未知原因"}（请联系管理员重建）`;
+      needRebuild = true;
     } else if (!s.snapshot_day) {
       bar.classList.add("bad");
-      txt.textContent = "因子库尚未构建 —— 交易日 18:00 自动更新，或由管理员手动重建";
+      txt.textContent = isAdmin
+        ? "因子库尚未构建 —— 交易日 18:00 自动更新，或点右侧立即构建"
+        : "因子库尚未构建 —— 交易日 18:00 自动更新，或由管理员手动重建";
+      needRebuild = true;
     } else {
       const rows = s.snapshot_rows == null ? "" : ` · ${s.snapshot_rows} 只`;
       let extra = "";
-      if (s.state === "error") { bar.classList.add("bad"); extra = ` · 今日更新失败：${s.error || ""}`; }
+      if (s.state === "error") {
+        bar.classList.add("bad");
+        extra = ` · 今日更新失败：${s.error || ""}`;
+        needRebuild = true;
+      }
       txt.textContent = `因子库 ${s.snapshot_day}${rows}${extra}`;
       factorDay = s.snapshot_day;
     }
+    // 构建中隐藏, 避免重复触发; 缺失/失败时仅管理员可见
+    setFactorRebuildVisible(isAdmin && needRebuild && s.state !== "running");
   } catch (e) { /* 状态条失败不影响扫描 */ }
+  scheduleFactorBar(delay);
+}
+async function rebuildFactorsNow() {
+  if (!isAdmin) return;
+  if (!confirm("立即构建因子库？将重新拉取全市场日K（未到 18:00 也会强制开跑）。")) return;
+  const btn = document.getElementById("factor-rebuild");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/factors/rebuild", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    if (r && r.ok === false) {
+      const txt = document.getElementById("factor-text");
+      if (txt) txt.textContent = `未能触发构建：${r.reason || "未知原因"}`;
+      if (btn) btn.disabled = false;
+      return;
+    }
+    await refreshFactorBar();
+  } catch (e) {
+    const txt = document.getElementById("factor-text");
+    if (txt) txt.textContent = `触发失败：${e.message || e}`;
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ── 扫描 ──
@@ -561,11 +624,14 @@ VisualMarketStore.watch(() => VisualMarketStore.store.last, (change) => {
 
 document.getElementById("cond-metric").addEventListener("change", syncInputs);
 renderConds();
-setInterval(refreshFactorBar, 60000);
 
-// 页面加载: 指标目录 + 因子库状态 + 进行中的任务/最近一次结果
+// 页面加载: 身份 + 指标目录 + 因子库状态 + 进行中的任务/最近一次结果
 (async function initResume() {
   try {
+    try {
+      const me = await api("/api/auth/me");
+      isAdmin = !!me.is_admin;
+    } catch (e) { isAdmin = false; }
     await loadMetrics();
     await refreshFactorBar();
     const s = await refreshStatus();

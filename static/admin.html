@@ -289,16 +289,17 @@ function bindEnter(id, fn) {
 }
 
 // ═══════════════ 选股队列 (全用户可见性, 仅管理员) ═══════════════
-const COND_LABELS = {
-  macd_cross_up: "MACD 金叉", above_ma20: "收盘站上 MA20",
-  chip_profit_gt: "筹码获利盘", rsi6_lt: "RSI6", change_pct_gt: "5日涨幅",
-};
-
-function condText(list) {
-  return (list || []).map(c => {
-    const label = c.label || COND_LABELS[c.metric] || c.metric;
-    return c.value == null ? String(label) : `${label} ${c.value}`;
-  }).join(' 且 ') || '—';
+function condText(list, mode) {
+  const opText = { ">=": "≥", "<=": "≤", ">": ">", "<": "<", "==": "=" };
+  const parts = (list || []).map(c => {
+    const label = c.label || c.metric;
+    if (c.kind === "range") return `${label} ${c.value}~${c.value2}`;
+    if (c.kind === "text") return `${label}=${c.value}`;
+    if (c.kind === "bool" || c.value == null) return String(label);
+    const op = opText[c.op] || c.op || "";
+    return `${label} ${op} ${c.value}`.trim();
+  });
+  return parts.join(mode === "or" ? " 或 " : " 且 ") || "—";
 }
 
 function fmtTs(v) {
@@ -322,7 +323,7 @@ async function loadScreenerQueue() {
     document.getElementById('sq-tbody').innerHTML = queue.length ? queue.map(r => `
       <tr>
         <td>${escHtml(r.username)}</td>
-        <td class="reason-cell">${escHtml(condText(r.conditions))}</td>
+        <td class="reason-cell">${escHtml(condText(r.conditions, r.mode))}</td>
         <td>${runStatusText(r)}${r.status === 'queued' && r.position ? ` (前面 ${r.position} 个)` : ''}</td>
         <td>${r.total ? `${r.progress || 0}/${r.total}` : '—'}</td>
         <td>${fmtTs(r.queued_at)}</td>
@@ -335,7 +336,7 @@ async function loadScreenerQueue() {
     document.getElementById('sr-tbody').innerHTML = recent.length ? recent.map(r => `
       <tr>
         <td>${escHtml(r.username)}</td>
-        <td class="reason-cell">${escHtml(condText(r.conditions))}</td>
+        <td class="reason-cell">${escHtml(condText(r.conditions, r.mode))}</td>
         <td>${runStatusText(r)}${r.error ? `: ${escHtml(r.error)}` : ''}</td>
         <td>${r.n_results == null ? '—' : r.n_results}</td>
         <td>${fmtTs(r.done_at)}</td>

@@ -293,7 +293,18 @@ def _execute(run):
         df, data_version = factors.snapshot()
         eff_mode = price_mode
         if price_mode == "live":
-            live_df, live_ver = factors.live_snapshot()
+            # 取快照要几分钟: 先写 total, 页面不再显示「扫描中 0/?」
+            trades.update_screener_run(
+                run_id, total=len(df), progress=0,
+                data_version=data_version, price_mode="live")
+            try:
+                live_df, live_ver = factors.live_snapshot(
+                    progress_cb=lambda done, total: trades.update_screener_run(
+                        run_id, progress=done, total=total))
+            except Exception as e:
+                log.warning("盘中快照失败, 回退收盘口径 run=%s: %s",
+                            run_id, _sanitize_error(e))
+                live_df, live_ver = None, None
             if live_df is not None:
                 df, data_version = live_df, live_ver
             else:
@@ -318,7 +329,8 @@ def _execute(run):
                     run_id, status="done", results=cached["results"],
                     data_version=data_version, price_mode=eff_mode, cache_key=key,
                     truncated=int(cached.get("truncated") or 0),
-                    progress=cached.get("progress") or len(cached["results"]),
+                    progress=cached.get("progress") or cached.get("n_results")
+                    or len(cached["results"]),
                     total=cached.get("total") or total, done_at=done_at)
                 try:
                     _notify_done(dict(run), cached["results"], False, total,
@@ -407,13 +419,13 @@ def wake():
 
 # ── 路由 ──
 def _run_summary(r):
-    """任务摘要 (含结果时也带 results, 由调用方决定是否下发)。"""
+    """任务摘要 (不含 results; 命中数取 n_results 列, 轮询不再解析结果 JSON)。"""
     return {
         "id": r["id"], "status": r["status"], "mode": r["mode"],
         "conditions": r["conditions"], "progress": r["progress"], "total": r["total"],
         "queued_at": r["queued_at"], "started_at": r["started_at"], "done_at": r["done_at"],
         "stopped": r["status"] == "stopped", "error": r["error"],
-        "n_results": len(r.get("results") or []) if r.get("results") is not None else None,
+        "n_results": r.get("n_results"),
         "truncated": bool(r.get("truncated")),
         "data_version": r.get("data_version"), "price_mode": r.get("price_mode"),
     }
@@ -498,8 +510,8 @@ def screener_run():
 def screener_status():
     """本人当前任务 + 最近 3 次历史。
 
-    默认**不下发 results** (单次最多 RESULT_MAX 行, 首页徽章会 10~60s 轮询一次,
-    带结果就是每次数 MB JSON); 需要详情时用 `?full=1` 或 GET /api/screener/runs/<id>。
+    默认**不下发 results**, 也不在服务端解析它 (首页徽章 10~60s 轮询一次):
+    摘要查询只读 n_results 列。需要详情时用 `?full=1` 或 GET /api/screener/runs/<id>。
     """
     user = _require_user()
     if not user:
@@ -510,7 +522,11 @@ def screener_status():
     current_id = active["id"] if active else (recent[0]["id"] if recent else None)
     current = None
     if current_id is not None:
-        row = trades.get_screener_run(current_id)
+        # 默认用摘要 (active/recent 已含全部展示字段); 只有 ?full=1 才读结果 JSON
+        row = next((r for r in ([active] if active else []) + recent
+                    if r["id"] == current_id), None)
+        if full:
+            row = trades.get_screener_run(current_id)
         if row:
             current = _run_summary(row)
             current["conditions"] = row.get("conditions") or []

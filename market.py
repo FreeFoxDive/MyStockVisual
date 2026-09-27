@@ -1149,7 +1149,15 @@ def _fetch_af_kline(symbol, period, count, adjust="forward"):
 
     AlphaFeed 原生支持 1d/1w/1M; 股票/ETF 日K为备选源, 周/月K为主源
     (周/月K不依赖抖动的 akshare)。
+
+    日K与因子库构建共用「日K批量 60/min」额度: 构建吃掉 90% 后取不到令牌就
+    直接返回 None, 由 kline_source 走下一数据源, 而不是打出 429。
     """
+    if period == "1d":
+        import factors as _factors
+        if not _factors.daily_kline_bucket().try_acquire():
+            log.info(f"日K额度让给因子库构建, 跳过 AlphaFeed {symbol}")
+            return None
     adj = _af_adjust(adjust)
     try:
         af = get_af()

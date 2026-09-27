@@ -11,6 +11,7 @@ mock; 路由用例只落库 (worker 不在测试里启动)。
 import json
 import os
 import sys
+from datetime import datetime
 import tempfile
 import time
 import unittest
@@ -59,14 +60,34 @@ class KlineRateTest(unittest.TestCase):
     def test_default_rate_is_ninety_percent(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SCREENER_KLINE_PER_MIN", None)
+            os.environ.pop("FACTORS_KLINE_PER_MIN", None)
             self.assertEqual(factors.kline_rate(), 54)
         import af_limits
         self.assertEqual(factors.kline_rate(),
                          af_limits.bucket_rate("kline_daily_batch"))
 
     def test_env_override(self):
-        with mock.patch.dict(os.environ, {"SCREENER_KLINE_PER_MIN": "12"}):
+        with mock.patch.dict(os.environ, {"FACTORS_KLINE_PER_MIN": "12"}):
             self.assertEqual(factors.kline_rate(), 12)
+
+    def test_legacy_screener_rate_is_ignored(self):
+        """旧逐只扫描的 6/min 不能再把全市场构建拖慢。"""
+        with mock.patch.dict(os.environ, {"SCREENER_KLINE_PER_MIN": "6"}, clear=False):
+            os.environ.pop("FACTORS_KLINE_PER_MIN", None)
+            self.assertEqual(factors.kline_rate(), 54)
+
+    def test_live_quote_rate_stays_below_shared_quota(self):
+        import af_limits
+        import feed
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FACTORS_LIVE_QUOTES_PER_MIN", None)
+            rate = factors.live_quote_rate()
+        self.assertEqual(rate, 20, "默认 20/min, 不能按额度 90% 再开一桶")
+        self.assertLessEqual(rate, af_limits.bucket_rate("quotes_symbol"))
+        self.assertLessEqual(rate + feed.QUOTES_RATE_PER_MIN, af_limits.limit("quotes_symbol"))
+        self.assertEqual(feed.QUOTES_RATE_PER_MIN, 6)
+        with mock.patch.dict(os.environ, {"FACTORS_LIVE_QUOTES_PER_MIN": "9999"}):
+            self.assertEqual(factors.live_quote_rate(), af_limits.bucket_rate("quotes_symbol"))
 
     def test_existing_web_buckets_untouched(self):
         import feed
@@ -77,11 +98,51 @@ class KlineRateTest(unittest.TestCase):
         """fetch_bars 必须过令牌桶 (限速在因子库取数这一层)。"""
         import inspect
         src = inspect.getsource(factors.fetch_bars)
-        self.assertIn("kline_rate()", src)
+        self.assertIn("daily_kline_bucket()", src)
         self.assertIn("try_acquire", src)
         # 扫描侧不再自己取数/限速 (因子库模式), 防重复令牌
         from api import screener
         self.assertFalse(hasattr(screener, "_scan_bucket"))
+
+    def test_fetch_bars_retries_failed_batch(self):
+        """失败批次要重试; 重试仍失败时记入 failed_batches, 不能静默丢标的。"""
+        calls = {"n": 0}
+
+        def flaky(af, chunk, count):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("429")
+            return {chunk[0]: pd.DataFrame({"close": [1.0]})}
+
+        with mock.patch.object(factors, "_fetch_bars_chunk", flaky), \
+             mock.patch.object(factors, "FETCH_BARS_RETRY_SLEEP", 0), \
+             mock.patch("market.get_af", return_value=object()), \
+             mock.patch("market._normalize", lambda df, prefer_time=False: df):
+            out, stats = factors.fetch_bars(["600000.SH"])
+        self.assertEqual(calls["n"], 2, "失败一次后应重试")
+        self.assertIn("600000.SH", out)
+        self.assertEqual(stats["failed_batches"], 0)
+
+    def test_fetch_bars_records_exhausted_batch(self):
+        def boom(af, chunk, count):
+            raise RuntimeError("429")
+
+        with mock.patch.object(factors, "_fetch_bars_chunk", boom), \
+             mock.patch.object(factors, "FETCH_BARS_RETRY_SLEEP", 0), \
+             mock.patch("market.get_af", return_value=object()):
+            out, stats = factors.fetch_bars(["600000.SH"])
+        self.assertEqual(out, {})
+        self.assertEqual(stats["failed_batches"], 1)
+
+    def test_chart_daily_kline_yields_when_bucket_empty(self):
+        """构建占满额度时, 图表日K不再打 AlphaFeed, 交给回退源。"""
+        import market
+        bucket = mock.Mock()
+        bucket.try_acquire.return_value = False
+        with mock.patch.object(factors, "daily_kline_bucket", lambda: bucket), \
+             mock.patch("market.get_af") as get_af:
+            self.assertIsNone(market._fetch_af_kline("600000.SH", "1d", 100))
+        get_af.assert_not_called()
 
 
 class ScreenerTestBase(unittest.TestCase):
@@ -256,6 +317,24 @@ class ScreenerRunRouteTest(ScreenerTestBase):
         self.assertEqual(light["current"]["n_results"], 1)
         full = self.client.get("/api/screener/status?full=1").get_json()
         self.assertEqual(len(full["current"]["results"]), 1)
+
+    def test_status_summary_does_not_parse_results(self):
+        """轮询走摘要查询: 即使 results 是坏 JSON, 命中数仍取 n_results 列。"""
+        run_id = trades.create_screener_run(
+            self.uid["scr_bob"], CONDS_AND, status="done", data_version="2026-09-18",
+            results=[{"symbol": "600000.SH", "hit_count": 1}], total=3)
+        conn = trades.get_conn()
+        try:
+            conn.execute("UPDATE screener_runs SET results=? WHERE id=?",
+                         ("{这不是合法JSON", run_id))
+            conn.commit()
+        finally:
+            conn.close()
+        light = self.client.get("/api/screener/status").get_json()
+        self.assertEqual(light["current"]["n_results"], 1)
+        self.assertEqual(light["recent"][0]["n_results"], 1)
+        detail = self.client.get(f"/api/screener/runs/{run_id}").get_json()
+        self.assertEqual(detail["results"], [])
 
     def test_condition_cap_and_text_validation(self):
         many = [{"metric": "above_ma20"}] * (metrics.MAX_CONDITIONS + 1)
@@ -474,18 +553,29 @@ class ScreenerScanTest(ScreenerTestBase):
         self.assertLess(row["progress"], len(big))
 
     def test_live_mode_falls_back_when_unavailable(self):
-        with mock.patch.object(factors, "live_snapshot", lambda max_age_sec=None: (None, None)):
+        with mock.patch.object(factors, "live_snapshot",
+                               lambda max_age_sec=None, progress_cb=None: (None, None)):
             row, _n = self._run_scan(CONDS_AND, price_mode="live")
         self.assertEqual(row["status"], "done")
         self.assertEqual(row["data_version"], "2026-09-18", "回退收盘口径")
         self.assertEqual(row["price_mode"], "close", "回退后口径要如实记为收盘")
 
+    def test_live_mode_falls_back_when_snapshot_raises(self):
+        def boom(max_age_sec=None, progress_cb=None):
+            raise NameError("af_limits")
+        with mock.patch.object(factors, "live_snapshot", boom):
+            row, _n = self._run_scan(CONDS_AND, price_mode="live")
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["price_mode"], "close")
+
     def test_live_fallback_result_is_reused_by_next_live_run(self):
         """回归: 回退收盘的结果, 第二次 live 请求应当命中同一份缓存而不是重扫。"""
         from api import screener as scr
-        with mock.patch.object(factors, "live_snapshot", lambda max_age_sec=None: (None, None)):
+        with mock.patch.object(factors, "live_snapshot",
+                               lambda max_age_sec=None, progress_cb=None: (None, None)):
             first, _n1 = self._run_scan(CONDS_AND, price_mode="live")
-        with mock.patch.object(factors, "live_snapshot", lambda max_age_sec=None: (None, None)), \
+        with mock.patch.object(factors, "live_snapshot",
+                               lambda max_age_sec=None, progress_cb=None: (None, None)), \
              mock.patch.object(scr, "_scan") as scan:
             second, notes = self._run_scan(CONDS_AND, price_mode="live")
         scan.assert_not_called()
@@ -520,7 +610,8 @@ class ScreenerScanTest(ScreenerTestBase):
         live = SNAPSHOT.copy()
         live.loc[live["symbol"] == "300750.SZ", "above_ma20"] = True
         with mock.patch.object(factors, "live_snapshot",
-                               lambda max_age_sec=None: (live, "2026-09-18+live@99")):
+                               lambda max_age_sec=None, progress_cb=None: (
+                                   live, "2026-09-18+live@99")):
             row, _n = self._run_scan([{"metric": "above_ma20"}], price_mode="live")
         self.assertEqual(row["data_version"], "2026-09-18+live@99")
         self.assertEqual(row["price_mode"], "live")
@@ -542,7 +633,12 @@ class FactorsRouteTest(ScreenerTestBase):
         factors.init_store()
         factors._ensure_build_row("2026-09-18")
         factors._update_build("2026-09-18", state="done", n_rows=3, n_symbols=3, percent=100)
-        data = self.client.get("/api/factors/status").get_json()
+        now = datetime(2026, 9, 18, 20, 0)
+        # 时钟被拨到 18:00 之后时, create_app 拉起的调度线程不能跟着去拉真实行情
+        with mock.patch.object(factors, "_now_dt", lambda: now), \
+             mock.patch("market_hours.is_trading_day", lambda v=None: True), \
+             mock.patch.object(factors, "build", lambda *a, **k: {"ok": False}):
+            data = self.client.get("/api/factors/status").get_json()
         self.assertEqual(data["snapshot_day"], "2026-09-18")
         self.assertEqual(len(data["last_days"]), 5)
         self.assertEqual(data["last_days"][0]["state"], "done")
