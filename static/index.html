@@ -669,11 +669,12 @@ body {
      信息行留出余量, 功能组就不会被挤在换行阈值上 */
   #toolbar .oh, #toolbar #info-time { display: none; }
 }
-/* ── 平板: 与 isTabletUi() 同一口径 (触屏 或 ≤1024px) ──
-   768~1024 的平板原本掉在 900px 与 1000px 两条断点的缝里: 时钟照显示、指标栏换行、
-   搜索框跟着按钮放大。手机另有 ≤640 一条, 必须排在本块之后 (冲突的属性由它覆盖, 见那里的
-   overflow —— 手机浮层是绝对定位的, 被 overflow 裁掉就点不到了)。 */
-@media (max-width: 1024px), (pointer: coarse) {
+/* ── 平板 / ≤1536 窄桌面: 与 isTabletUi() 同一口径 (触屏 或 ≤1536px) ──
+   原 ≤1024 覆盖平板; 现扩到 1536 让 14 寸及以下笔记本也走同一套布局
+   (入口只留图标、指标栏单行滚动、搜索框收窄)。手机另有 ≤640 一条, 必须排在本块之后
+   (冲突的属性由它覆盖, 见那里的 overflow —— 手机浮层是绝对定位的, 被 overflow 裁掉就点不到了)。
+   触控加大目标仍只在下面 (pointer: coarse) 块, 鼠标窄屏不套用。 */
+@media (max-width: 1536px), (pointer: coarse) {
   /* 平板顶栏必是「信息行 + 功能组行」两行, 6px 行距 + 38px 控件让两行之间显得空 */
   #toolbar { row-gap: 2px; padding: 4px 12px; }
   /* 秒级时钟: 手机早已隐藏, 平板同样省这一截横向空间 */
@@ -691,9 +692,6 @@ body {
     padding: 4px 8px;
     font-size: 14px;
   }
-  /* 聚焦时抬回 16px: iOS Safari 只在聚焦那一刻按当时的字号决定要不要放大整个页面,
-     平时 14px 与同排文字齐平, 聚焦时不触发放大 */
-  #toolbar input[type="text"]:focus { font-size: 16px; }
   /* 信息行: 901~999 是一段没有任何规则的缝 —— 基类 flex-shrink: 0 + nowrap 既不换行也不裁自己,
      整行溢出视口被 body 裁掉 (比裁剪更难看)。补上可收缩 + min-width: 0 之后, 它同时也是
      fitInfoRow() 能量到「这一行到底能给信息行多少宽度」的前提。1000~1919 那条的 overflow: hidden
@@ -717,13 +715,14 @@ body {
   #indicator-bar .cfg-mini,
   #indicator-bar select { flex-shrink: 0; }
 }
-/* 大宽度触屏 (iPad Pro 13 横屏 1376 这类): 试试把功能组并回信息行右侧, 顶栏做成一行 ——
-   与下面 1000~1919 那条「功能组独占一行」正相反 (那条是桌面口径: 行数只由断点定, 不让行情
+/* 大宽度触屏 / ≤1536 窄桌面 (≥1025): 试试把功能组并回信息行右侧, 顶栏做成一行 ——
+   与下面 1000~1919 那条「功能组独占一行」正相反 (那条是宽桌面口径: 行数只由断点定, 不让行情
    文字宽窄把行数晃来晃去)。窄于 1025 时一行必放不下 (信息行最小宽约 430px + 功能组自然宽约
-   680px), 所以只在大宽度启用; 真放不下时 fitInfoRow() 给 #toolbar 加 .tb-2row 退回两行。
-   桌面 (>1024 且鼠标) 与 ≤1024 窄屏都不受影响: 手机/竖屏平板还得靠功能组内部换行。 */
-@media (min-width: 1025px) and (pointer: coarse) {
-  /* 11 寸横屏 (1180) 要并成一行: 信息行至少需要 ~510px, 而功能组占 720px 放不下。
+   680px), 所以只在 ≥1025 启用; 真放不下时 fitInfoRow() 给 #toolbar 加 .tb-2row 退回两行。
+   源序在本块之后、手机块之前: 1025~1536 鼠标设备靠本块覆盖桌面「独占一行」规则。
+   >1536 且鼠标不受影响; ≤1024 窄屏还得靠功能组内部换行。 */
+@media (min-width: 1025px) and (pointer: coarse), (min-width: 1025px) and (max-width: 1536px) {
+  /* 11 寸横屏 (1180) / 14 寸笔记本要并成一行: 信息行至少需要 ~510px, 而功能组占 720px 放不下。
      把「非信息」部分挤紧约 140px —— 不动任何行情字段、不动字号:
        项间距 6→4 / 图标按钮与入口按钮内边距各收 2px / 去掉竖分隔线 / 搜索框 120→100 /
        顶栏左右内边距 12→8 / 隐藏 GitHub 入口 (手机 ≤640 早就隐藏它了)。
@@ -831,10 +830,13 @@ body {
   #toolbar #info-pledge, #toolbar #info-shares, #toolbar #info-amount { display: none; }
 }
 
-/* 触控设备: 加大触控目标 (输入框的字号/高度/宽度不在这里 —— 平板要 14px/32px,
-   手机要 16px/38px, 由上面两条断点各自定; 写在这里会被它们之中靠后的那条盖掉) */
+/* 触控设备: 加大触控目标 (输入框的宽度/高度不在这里 —— 平板要 14px/32px,
+   手机要 16px/38px, 由上面两条断点各自定; 写在这里会被它们之中靠后的那条盖掉)。
+   聚焦抬回 16px 只给触屏: iOS Safari 只在聚焦那一刻按当时字号决定要不要放大页面;
+   鼠标窄屏不套用, 免得聚焦时搜索框字号跳一下。 */
 @media (pointer: coarse) {
   #toolbar button, #toolbar select { min-height: 38px; padding: 8px 14px; }
+  #toolbar input[type="text"]:focus { font-size: 16px; }
   .history-tag { padding: 6px 10px; font-size: 13px; }
   #history-tags { gap: 12px 14px; }
   .history-tag .tag-del { top: -9px; right: -9px; width: 20px; height: 20px; font-size: 13px; }
@@ -2697,11 +2699,15 @@ function infoRowBudget(innerW, pad, siblingWidths, gap) {
   return innerW - pad - others.reduce((s, w) => s + w, 0) - others.length * gap;
 }
 
-/** 大宽度触屏判定: 与样式里 `@media (min-width: 1025px) and (pointer: coarse)` 用同一条查询,
- *  JS 与样式同进同退 (同 isPhoneUi 的写法)。iPad Pro 横屏 1376 这类就靠它, 与桌面区分开。 */
+/** 大宽度触屏 / ≤1536 窄桌面判定: 与样式里
+ *  `@media (min-width: 1025px) and (pointer: coarse), (min-width: 1025px) and (max-width: 1536px)`
+ *  用同一条查询, JS 与样式同进同退 (同 isPhoneUi 的写法)。
+ *  iPad Pro 横屏 1376、14 寸笔记本 ≤1536 都靠它争取顶栏单行; >1536 且鼠标走宽桌面口径。 */
 function isWideTouchUi() {
   return !!(window.matchMedia
-    && window.matchMedia('(min-width: 1025px) and (pointer: coarse)').matches);
+    && window.matchMedia(
+      '(min-width: 1025px) and (pointer: coarse), (min-width: 1025px) and (max-width: 1536px)'
+    ).matches);
 }
 
 /** 功能组的自然宽 (可见子项宽之和 + 间距): 与当前排一行还是两行无关, 所以不必先改类再量。
@@ -2754,7 +2760,7 @@ function fitInfoRow() {
     plan = row.plan;
     twoRows = row.rows === 2;
   } else {
-    // 其余设备: 行数由断点定死 (≤1024 靠功能组内部换行, 1000~1919 功能组独占一行, ≥1920 并排),
+    // 其余设备: 行数由断点定死 (≤1024 靠功能组内部换行, ≥1537 且鼠标走桌面断点),
     // 这里只管信息行自己那一行够不够 —— 只算与它同一行的兄弟项。高矮不一的项没法比 top,
     // 用纵向重叠判定: 对齐方式/字号不同也不会误判。
     const gt = group.getBoundingClientRect();
@@ -3800,11 +3806,11 @@ const LS_CACHE_BUDGET = 2 * 1024 * 1024; // vk_/vi_ 缓存上限 2MB，保留历
 /* 保留键用字面量: 本行在 CFG_KEY 声明之前执行, 引用常量会撞 TDZ */
 const LS_KEEP_KEYS = new Set([HIST_KEY, 'visual_chart_config', 'visual_chart_config_phone', 'visual-theme', 'trades-theme']);
 
-/** 平板/触屏判定 (同时覆盖窄窗口): 触屏无可靠 hover, 且横向空间紧张 ——
- *  搜索记录条数上限、周期条只显示 3 个周期都按它分流。 */
+/** 平板/触屏/≤1536 窄桌面判定: 触屏无可靠 hover, 且横向空间紧张 ——
+ *  搜索记录条数上限、周期条只显示 3 个周期都按它分流 (与平板 CSS 块同一口径)。 */
 function isTabletUi() {
   return (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
-    || window.innerWidth <= 1024;
+    || window.innerWidth <= 1536;
 }
 
 /** 手机判定: 与 CSS 的 @media (max-width: 640px) 用同一条查询, JS 分支与样式同进同退。
@@ -4038,7 +4044,7 @@ function watchHistoryBarBreakpoint() {
   });
 }
 
-/** 记录条布局口径: 手机(≤640, 默认收起) / 平板(≤1024 或触屏, 最多 10 条) / 桌面(全量)。
+/** 记录条布局口径: 手机(≤640, 默认收起) / 平板(≤1536 或触屏, 最多 10 条) / 桌面(全量)。
  *  三态任一切换都要重渲染 —— 只比 isTabletUi 会漏掉 640 那条线 (手机横屏后记录条再也出不来)。 */
 function histLayoutMode() {
   if (isPhoneUi()) return 'phone';

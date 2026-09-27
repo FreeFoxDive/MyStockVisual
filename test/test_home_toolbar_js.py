@@ -8,7 +8,7 @@
   * 顶栏/记录栏/指标栏高度变化时图表容器尺寸跟着变, 必须触发 chart.resize
     (否则 ECharts 画布与 overlay 画线层一起和容器错位);
   * 平板周期条默认只显示 3 个周期, 翻页按真实按钮宽度而不是固定像素;
-  * 平板 (触屏 或 ≤1024px) 顶栏口径: 不显示秒级时钟、入口只留图标、指标栏固定单行横向滚动
+  * 平板 (触屏 或 ≤1536px) 顶栏口径: 不显示秒级时钟、入口只留图标、指标栏固定单行横向滚动
     (换行时栏高随周期在 1/2 行之间跳)、搜索框按 symbol.ex 收窄、下拉长名称限宽省略;
   * isTabletUi / isWeeklyPlus 的判定口径 (从 index.html 抽真源码用 node 执行)。
 
@@ -215,19 +215,23 @@ class TabletPeriodStripTest(unittest.TestCase):
 
 
 class TabletLayoutTest(unittest.TestCase):
-    """平板口径: 触屏 或 ≤1024px (与 isTabletUi() 同一条判定)。
+    """平板 / ≤1536 窄桌面口径: 触屏 或 ≤1536px (与 isTabletUi() 同一条判定)。
 
     覆盖的事故:
       * 768~1024 的平板掉在 900px 与 1000px 两条断点之间: 秒级时钟照显示、指标栏照换行、
         搜索框跟着触控按钮放大到 38px/16px (比同排按钮还显眼);
       * 指标栏换行时 pill 数量随周期变 (分时少 筹码/动力系统/通道 三个), 栏高就在
         「日K 两行 / 分时 一行」之间跳, 图表跟着上下一截 → 平板改成固定单行 + 横向滚动;
+      * 14 寸及以下笔记本 (视口 ≤1536) 原先走桌面「功能组独占一行」口径, 顶栏空间浪费;
+        现与 11 寸 pad 同布局 (只动布局, 不动 38px 触控块)。
       * 入口文案 (监控/选股/交易) 在平板/手机上仍占位 → 只留图标, 进度只能写文字层。
       * 信息行的 开/高/低 在平板被截断/被整条摘掉 → 改成「实测一行放不下才收次要读数」
         (见 test_info_row_drops_stats_only_when_it_does_not_fit 与 test_info_drop_plan)。
     """
 
-    TABLET_MQ = "@media (max-width: 1024px), (pointer: coarse)"
+    TABLET_MQ = "@media (max-width: 1536px), (pointer: coarse)"
+    WIDE_MQ = ("@media (min-width: 1025px) and (pointer: coarse), "
+               "(min-width: 1025px) and (max-width: 1536px)")
 
     @classmethod
     def setUpClass(cls):
@@ -238,9 +242,9 @@ class TabletLayoutTest(unittest.TestCase):
         """口径与 isTabletUi() 一致, 且必须排在 640 手机块之前 (手机块要能覆盖它)。"""
         js = _extract_fn(self.src, "isTabletUi")
         self.assertIn("(pointer: coarse)", js)
-        self.assertIn("innerWidth <= 1024", js)
+        self.assertIn("innerWidth <= 1536", js)
         self.assertIn("(pointer: coarse)", self.TABLET_MQ)
-        self.assertIn("(max-width: 1024px)", self.TABLET_MQ)
+        self.assertIn("(max-width: 1536px)", self.TABLET_MQ)
         self.assertLess(self.src.index(self.TABLET_MQ + " {"),
                         self.src.index("@media (max-width: 640px) {"),
                         "平板块排在手机块之后就会把手机的浮层/字号盖坏")
@@ -315,10 +319,15 @@ class TabletLayoutTest(unittest.TestCase):
         self.assertIn("width: 120px", self.tablet)
         self.assertIn("font-size: 14px", self.tablet)
         self.assertIn("min-height: 32px", self.tablet)
-        self.assertIn('#toolbar input[type="text"]:focus { font-size: 16px; }', self.tablet,
-                      "聚焦抬回 16px: iOS 只在聚焦那一刻看字号决定要不要放大页面")
-        # 触控块不得再写输入框尺寸: 它排在平板块之后, 会把 14px/32px 顶回 16px/38px
-        self.assertNotIn('input[type="text"]', _css_block(self.src, "@media (pointer: coarse)"))
+        # 聚焦抬回 16px 只给触屏 (iOS 防放大); 鼠标窄屏不套用, 免得聚焦时字号跳
+        coarse = _css_block(self.src, "@media (pointer: coarse)")
+        focus_rule = '#toolbar input[type="text"]:focus { font-size: 16px; }'
+        self.assertIn(focus_rule, coarse)
+        self.assertNotIn(':focus { font-size: 16px; }', self.tablet)
+        # 触控块不得写输入框宽度/高度: 它排在平板块之后, 会把 14px/32px 顶回 16px/38px;
+        # 只允许上面那条 :focus 字号
+        stripped = coarse.replace(focus_rule, "")
+        self.assertNotIn('input[type="text"]', stripped)
         # 120px 放不下原 placeholder → 收短
         self.assertIn('placeholder="代码/名称"', self.src)
         self.assertNotIn("输入代码或名称搜索", self.src)
@@ -371,17 +380,18 @@ class TabletLayoutTest(unittest.TestCase):
             self.assertNotIn(f"#{pid}", self.tablet, f"平板块不该再按断点收 {pid} (交给实测)")
 
     def test_wide_touch_can_merge_into_one_row(self):
-        """大宽度触屏 (iPad Pro 13 横屏 1376): 允许把功能组并回信息行做成一行。
+        """大宽度触屏 (iPad Pro 13 横屏 1376) / ≤1536 窄桌面: 允许把功能组并回信息行做成一行。
 
-        桌面 <1920 是「功能组独占一行」的既定设计 (行数只由断点定); 触屏大宽度上改成实测争取
-        单行 —— 为此可以收掉几个次要读数, 连收光都放不下才退回那条两行规则 (.tb-2row)。
+        宽桌面 (≥1537 且鼠标) 仍是「功能组独占一行」的既定设计 (行数只由断点定);
+        触屏大宽度与 ≤1536 窄桌面上改成实测争取单行 —— 为此可以收掉几个次要读数,
+        连收光都放不下才退回那条两行规则 (.tb-2row)。
         """
-        css = _css_block(self.src, "@media (min-width: 1025px) and (pointer: coarse)")
+        css = _css_block(self.src, self.WIDE_MQ)
         self.assertIn("#toolbar .toolbar-right { flex: 0 0 auto; flex-wrap: nowrap; margin-left: auto;",
                       css, "默认并排: 功能组保持自然宽, 不被压扁")
         self.assertIn("#toolbar.tb-2row .toolbar-right { flex: 1 1 100%; margin-left: 0; "
                       "justify-content: flex-end; }", css, "退回两行时与桌面 1000~1919 同口径")
-        # 11 寸 (1180) 并成一行靠这段「非信息部分」挤紧约 140px: 间距/内边距/分隔线/搜索框/顶栏内边距/GitHub
+        # 11 寸 (1180) / 14 寸并成一行靠这段「非信息部分」挤紧约 140px: 间距/内边距/分隔线/搜索框/顶栏内边距/GitHub
         for rule in ("#toolbar { padding: 4px 8px; column-gap: 4px; }",
                      "#toolbar .info-group { column-gap: 4px; }",
                      "#toolbar .icon-btn { padding: 6px 7px; }",
@@ -391,31 +401,44 @@ class TabletLayoutTest(unittest.TestCase):
                      '#toolbar input[type="text"] { width: 100px; }'):
             self.assertIn(rule, css, f"11 寸一行少了这条紧凑规则: {rule}")
         self.assertNotIn("font-size: 12px", css, "这一轮不动字号 (你选的: 只收紧间距/内边距)")
-        # GitHub 入口只在触屏大宽度块与 ≤640 手机块里隐藏, 桌面不得被波及
+        # GitHub 入口只在大宽度块与 ≤640 手机块里隐藏, 宽桌面断点不得被波及
         for band in ("@media (min-width: 1000px) and (max-width: 1919px)", "@media (min-width: 1920px)"):
             self.assertNotIn("github-link", _css_block(self.src, band), band)
         self.assertIn("#toolbar .github-link { display: none; }",
                       _css_block(self.src, "@media (max-width: 640px)"), "手机一直是隐藏的")
         # JS 与样式同一条查询 (同 isPhoneUi 的做法), 免得又出现「样式生效/判定不生效」的漂移
+        wide_q = ("(min-width: 1025px) and (pointer: coarse), "
+                  "(min-width: 1025px) and (max-width: 1536px)")
         wide = _extract_fn(self.src, "isWideTouchUi")
-        self.assertIn("(min-width: 1025px) and (pointer: coarse)", wide)
-        self.assertIn("@media (min-width: 1025px) and (pointer: coarse) {", self.src,
+        self.assertIn(wide_q, wide)
+        self.assertIn(self.WIDE_MQ + " {", self.src,
                       "样式块的查询串要与 isWideTouchUi 逐字一致")
         # 源序: 必须排在桌面 1000~1919 与平板块之后 (要靠后者覆盖它们), 在手机块之前
         self.assertLess(self.src.index("@media (min-width: 1000px) and (max-width: 1919px)"),
-                        self.src.index("@media (min-width: 1025px) and (pointer: coarse)"))
-        self.assertLess(self.src.index("@media (min-width: 1025px) and (pointer: coarse)"),
+                        self.src.index(self.WIDE_MQ))
+        self.assertLess(self.src.index(self.WIDE_MQ),
                         self.src.index("@media (max-width: 640px) {"))
         row = _extract_fn(self.src, "toolbarRowPlan")
         self.assertIn("rows: 1", row)
         self.assertIn("rows: 2", row, "单行收光也放不下要能退回两行")
         self.assertIn("|| []", row, "退回两行时字段全放回 (而不是继续收)")
         fit = _extract_fn(self.src, "fitInfoRow")
-        self.assertIn("isWideTouchUi()", fit, "只有大宽度触屏才争取单行, 桌面口径不变")
+        self.assertIn("isWideTouchUi()", fit, "只有大宽度触屏/≤1536 窄桌面才争取单行")
         self.assertIn("toolbarRowPlan(", fit)
         self.assertIn("fnNaturalWidth(", fit, "功能组的自然宽: 与当前排几行无关, 不必先改类再量")
         self.assertIn("classList.toggle('tb-2row', wideTouch && twoRows)", fit,
-                      "只在「宽触屏 + 两行」时加退回类")
+                      "只在「宽触屏/窄桌面 + 两行」时加退回类")
+
+    def test_narrow_desktop_shares_pad_layout_not_touch_sizing(self):
+        """1025~1536 鼠标设备走 pad 布局, 但 38px 触控目标仍只在 (pointer: coarse)。"""
+        self.assertIn(self.WIDE_MQ + " {", self.src)
+        self.assertIn("(max-width: 1536px)", self.WIDE_MQ)
+        coarse = _css_block(self.src, "@media (pointer: coarse)")
+        self.assertIn("min-height: 38px", coarse, "加大触控目标仍只给触屏")
+        # 宽度口径不得混进触控块 (否则鼠标窄屏也会被撑到 38px)
+        self.assertNotIn("max-width", coarse)
+        self.assertNotIn("min-width", coarse)
+        self.assertNotIn("1536", coarse)
 
     def test_search_dropdown_contained(self):
         """长名称: 名称走省略号 (代码/徽章不被裁), 浮层宽度有上限且按位置限位不出屏。"""
@@ -460,13 +483,15 @@ process.stdout.write(JSON.stringify(cases.map(c => {
 """
         out = self._run(script, [
             {"coarse": True, "w": 1366},    # 触屏平板: 即便够宽也算平板
-            {"coarse": False, "w": 1440},   # 桌面
+            {"coarse": False, "w": 1440},   # 14 寸笔记本: ≤1536 走平板布局
             {"coarse": False, "w": 800},    # 窄窗口也算平板布局
-            {"coarse": False, "w": 1024},   # 边界含在平板内
-            {"coarse": False, "w": 1025},   # 边界外是桌面
+            {"coarse": False, "w": 1536},   # 边界含在平板内
+            {"coarse": False, "w": 1537},   # 边界外是桌面
+            {"coarse": False, "w": 1920},   # 宽桌面
             {"coarse": False, "w": 1440, "noMM": True},  # 无 matchMedia 时靠宽度兜底
+            {"coarse": False, "w": 1600, "noMM": True},  # >1536 无 matchMedia → 桌面
         ])
-        self.assertEqual(out, [True, False, True, True, False, False])
+        self.assertEqual(out, [True, True, True, True, False, False, True, False])
 
     def test_is_phone_ui(self):
         """手机口径 = CSS 的 @media (max-width: 640px), JS 与样式必须同一条查询。"""
