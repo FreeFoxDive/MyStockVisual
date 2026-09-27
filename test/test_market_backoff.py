@@ -40,6 +40,11 @@ class BackoffBase(unittest.TestCase):
         self._orig = market._mr_backoff_until
         market._mr_backoff_until = 0.0
         self.addCleanup(lambda: setattr(market, "_mr_backoff_until", self._orig))
+        # 429 退避会推告警: 不打桩就真发钉钉/ntfy (单个文件单跑时这是唯一兜底)。
+        # 要验证"确实通知了"的用例在自己的 with 里再 patch 一层。
+        p = mock.patch.object(market.source_alert, "notify", return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
 
 
 class Is429Test(BackoffBase):
@@ -94,6 +99,56 @@ class ClientBackoffTest(BackoffBase):
         with self.assertRaises(_FakeMairuiHTTPError):
             c.index_list()
         self.assertEqual(market._mr_backoff_remaining(), 0.0)
+
+
+class BackoffAlertTest(BackoffBase):
+    """429 退避要推一条告警, 且**每个源每天最多一条** (source_alert 的当日闸门)。"""
+
+    def setUp(self):
+        super().setUp()
+        import source_alert
+        source_alert.reset()
+        self.sent = []
+        self._p = mock.patch.object(
+            market.source_alert, "notify",
+            side_effect=lambda src, reason, **kw: (
+                self.sent.append((src, reason, kw)), True)[1])
+        self._p.start()
+        self.addCleanup(self._p.stop)
+        self.addCleanup(source_alert.reset)
+
+    def test_sdk_429_notifies_once_with_safe_detail(self):
+        class _Client:
+            def stock_history(self, symbol, period, div):
+                raise _FakeMairuiHTTPError(429, payload={"code": 103})
+
+        c = market._MairuiClient(_Client())
+        for _ in range(3):                      # 窗口内的后续调用不会再发 HTTP
+            with self.assertRaises(Exception):
+                c.stock_history("600519.SH", "d", "n")
+        self.assertEqual(len(self.sent), 1, "同一轮限流只通报一次")
+        src, reason, kw = self.sent[0]
+        self.assertEqual(src, "mairui")
+        self.assertIn("429", reason)
+        self.assertEqual(kw.get("detail"), "stock_history() 600519.SH")
+
+    def test_direct_http_429_detail_drops_the_licence_segment(self):
+        url = "https://api.mairuiapi.com/hszbl/fsjy/600519.SH/3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+        err = urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO(b""))
+        with mock.patch.object(market.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(urllib.error.HTTPError):
+                market._mr_urlopen_json(url)
+        _src, _reason, kw = self.sent[0]
+        self.assertEqual(kw.get("detail"),
+                         "https://api.mairuiapi.com/hszbl/fsjy/600519.SH")
+        self.assertNotIn("3f2504e0", str(kw.get("detail")), "证书 key 不许进通知")
+
+    def test_window_skip_does_not_notify(self):
+        """退避窗口内的主动跳过 (未发 HTTP) 不是新事件, 不该再报一次。"""
+        market._mr_backoff_until = market.time.time() + 60
+        with self.assertRaises(market.MairuiBackoff):
+            market._mr_urlopen_json("https://api.mairuiapi.com/jj/lskx/510300/d/KEY")
+        self.assertEqual(self.sent, [])
 
 
 class DirectHttpBackoffTest(BackoffBase):

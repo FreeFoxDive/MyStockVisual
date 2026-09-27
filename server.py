@@ -76,6 +76,7 @@ def main():
 ║   📈 Visual K线图 股票可视化              ║
 ║   数据源链 (主源→回退, KLINE_SOURCE_*):   ║
 ║     分钟: {chains['minute']:<28}║
+║     分时: {chains['intraday']:<28}║
 ║     股票: {chains['stock']:<28}║
 ║     指数: {chains['index']:<28}║
 ║     基金: {chains['fund']:<28}║

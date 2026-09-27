@@ -1,6 +1,54 @@
+# Docker 构建上下文排除表 (上下文 = visual/ 目录本身)
+# 目标: COPY 层只带运行时代码与静态资源 (≈3MB); 本机专用的巨大目录一个都不许进来。
+# 匹配规则: 带 **/ 前缀的规则在任意层级生效; 不带前缀的只匹配上下文根下的那一项。
+
+# ── 宿主机虚拟环境 (最要命的一条) ──
+# visual/run.sh 会在 visual/ 内部建 venv/ (约 313MB)。镜像里的依赖由下面的
+# pip install 负责安装, 宿主机 venv 对容器毫无用处 —— 漏掉这条, 每次构建的
+# COPY 层就会多出 300MB+。
+venv/
+.venv/
+env/
+
+# ── 运行期数据 (由 docker-compose 以 bind mount 注入, 不进镜像) ──
 .cache/
 data/
-__pycache__/
-*.pyc
+out_files/
+
+# ── Python 字节码与各类工具缓存 ──
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+
+# ── 密钥与日志 (日志随运行时间增长, 绝不能进镜像) ──
 .env
+.env.*
+**/*.log
+nohup.out
+
+# ── 开发期资源: 服务端不读 ──
+# docs/ 无任何路由引用; test/fixtures 由 monitor.py 运行期自建 (mkdir parents=True)
+test/
+docs/
+.github/
+**/node_modules/
+
+# ── 版本控制与构建描述文件 (排除后改这些不再让 COPY 层失效) ──
 .git/
+.gitignore
+.gitattributes
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# ── 编辑器 / 操作系统 ──
+**/.vscode/
+**/.idea/
+**/.DS_Store
+**/Thumbs.db

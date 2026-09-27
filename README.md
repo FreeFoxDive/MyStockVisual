@@ -30,7 +30,7 @@ venv/Scripts/python.exe -u visual/server.py
 | OBV 面板 | OBV + MAOBV(30)（东财/通达信口径），零轴参考线 |
 | 成交量面板 | 可开关；叠加 VOL MA5/MA10/MA20（东财口径）；关闭时 K线自动拉高 |
 | 筹码分布 | 日/周/月 K 股票/ETF，东财原版 CYQ 算法（始终日线粒度，回看窗口 210/600/1500 根日线，前复权），右侧叠加、与主图价格轴联动；含获利比例/平均成本/90·70成本区间 |
-| 左侧信息栏 | **所有周期**显示「基本信息」：前两行是 **代码/名称**，其后为 行业/总手/成交额/换手/量比/涨停价/跌停价/3·5·10日涨幅/PE/PB/交易状态，末行 **下一开盘**（盘外给出下一次开盘/集合竞价时刻与倒计时，如 `午休 → 13:00 余 1:23:45`，跨日如 `09-18 09:15`，盘中为 `—`；值区只有 129px，所以只留「时刻 + 余 倒计时」，完整描述见悬停 title；值由本地时钟每秒就地更新，不重绘面板。**停牌时不显示这一行** —— 该票当日不参与交易，给"下一次开盘"是误导），**股票 / ETF 都显示涨跌停价**（见下方「涨跌停价口径」）；盘中每 60s 刷新，标题栏 ◀ 可收起（收起后左缘 › 展开，展开按钮按 2 倍放大点按区域）。同一框内下方接「五档」(买1-5/卖1-5) **所有周期**可用（盘中约 3s 刷新，独立滚动预算 4/5×30/min）；整框显隐由面板栏「信息」勾选框控制，「五档」勾选框单独控制框内五档子块 |
+| 左侧信息栏 | **所有周期**显示「基本信息」：前两行是 **代码/名称**，其后为 行业/总手/成交额/换手/量比/涨停价/跌停价/3·5·10日涨幅/PE/PB/交易状态，末行 **下一开盘**（盘外给出下一次开盘/集合竞价时刻与倒计时，如 `午休 → 13:00 余 1:23:45`，跨日如 `09-18 09:15`，盘中为 `—`；值区只有 129px，所以只留「时刻 + 余 倒计时」，完整描述见悬停 title；值由本地时钟每秒就地更新，不重绘面板。**停牌时不显示这一行** —— 该票当日不参与交易，给"下一次开盘"是误导），**股票 / ETF 都显示涨跌停价**（见下方「涨跌停价口径」）；盘中每 60s 刷新，标题栏 ◀ 可收起（收起后左缘 › 展开，展开按钮按 2 倍放大点按区域）。同一框内下方接「五档」(买1-5/卖1-5) **所有周期**可用（盘中约 3s 刷新，独立滚动预算 4/5×30/min；「量」按东财口径显示 —— 不足 1 万手按原数，过万 `3.1万` 一位小数，列头已写「量」故数值不带单位）；整框显隐由面板栏「信息」勾选框控制，「五档」勾选框单独控制框内五档子块 |
 | 图表截图导出 | 工具栏相机按钮导出 PNG = ECharts 画布 + 画线层 + **左侧基本信息/五档面板**。面板是 DOM 不能直接导出，导出时按 `infoPanelRows`/`depthPanelRows` 的行规格以等宽字体重绘到左侧留白区（与面板同色同序，超宽省略、超长裁剪）；侧栏收起时只导出图表。文件名 `<代码>_<周期>_<日期>_<时分秒>.png`（如 `000001.SZ_1d_2026-09-18_100503.png`，`localStampStr()` 按**本地时区**拼；时分秒不写冒号，Windows 文件名不允许 `:`；只写到日期的话同日连拍会互相覆盖） |
 | 换手/流值/份额/成交额 | 顶部信息栏：股票显示换手率与流通市值；ETF 显示份额、实时换手率（源无字段时按成交量/份额回算）；均显示当日成交额 |
 | 动力系统 | Elder Impulse System — EMA13方向 + MACD柱方向决定蜡烛颜色(红多/绿空/蓝中性)，日/周/月K |
@@ -66,7 +66,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 趋势线监控 | 选中趋势线/射线/水平线 → 画线菜单「🔔监控」→ 强制命名 + 跌破幅度%（默认 个股 2 / ETF·指数 3）→ 现价跌破线值×(1−pct%) 时盘中推送钉钉/ntfy，每条线每日一次；监控配置随画线保存（含复权口径），拖动即跟随，预警弹窗可总览；日/周/月K 支持。监控中心「去图表」跳回该监控线所在周期（`/?symbol=…&period=1w`） |
 | 条件选股 | `/screener.html`：**40+ 指标**（技术指标 / 量价 / 基本面估值 / 资金与筹码四组，见 [docs/screener.md](docs/screener.md)）任意组合。**AND / OR 两种模式**：OR 时结果带「命中 N 项」并可按满足项数筛选，每行展开逐条件 ✅/❌ 与实测值。**扫的是因子库**（交易日 18:00 全市场构建，见 [docs/factors.md](docs/factors.md)）→ 秒级、不再逐只拉K；**同日同条件不重扫**（cache_key 命中直接复用结果）。任务化 + FIFO 队列：按用户隔离，看不到也停不了别人的（管理员在 `/admin.html` 有队列视图与因子库面板）。条件框扫描中锁定、支持 ✎ 修改；历史最多 3 次（含 0 命中与「已取消（保留部分结果）」）；开始/阶段（默认 50%）/完成各推一次钉钉/ntfy + 站内告警 |
 | 因子库 | 交易日 18:00 自动构建全市场日K级因子（技术/量价/筹码本地计算 + 基本面/资金/龙虎榜/质押/ETF溢价外部快照），开始/完成/异常通知管理员，页面可见进度与**最近 5 个交易日**完成情况；失败 30 分钟退避重试最多 3 次，管理员可手动/强制重建（开不了跑会如实回报原因）。存储 `.cache/factors.db` + `snapshot_<交易日>.pkl.gz`，详见 [docs/factors.md](docs/factors.md) |
-| 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存）；麦蕊源：交易所公告（日期倒序）、主力净流入（当前股单票键值视图 + 全市场排名）、股东户数变化、十大股东、十大流通股东、解禁限售（含解禁市值/占流通股%） |
+| 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存）；麦蕊源：交易所公告（日期倒序）、主力净流入（当前股单票键值视图 + 全市场排名）、股东户数变化（上方近三年折线图，横轴刻度=每期公布的截至日期，纵轴=股东户数；下方明细表常显并列出全部记录，抽屉按图表/表格较宽者自适应）、十大股东、十大流通股东、解禁限售（含解禁市值/占流通股%） |
 
 ## 文件结构
 
@@ -147,7 +147,7 @@ visual/
 | `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 10s，调低可换实时性、代价是上游调用量）。前端据此更新末根，不再自行拼 bar |
 | `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数；附 `is_trading_day`） |
 | `GET /api/chips?symbol=600519.SH&period=1w` | 筹码分布（股票/ETF；`period` 1d/1w/1M 决定日线回看窗口 210/600/1500 根，返回直方图+汇总+`source`/`period`；指数返回 null）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
-| `GET /api/depth?symbol=600519.SH` | 五档盘口（所有周期可用；AlphaFeed 优先，空数据/限流时回退麦蕊 `stock_real_five`；独立滚动预算 24/min） |
+| `GET /api/depth?symbol=600519.SH` | 五档盘口（所有周期可用；AlphaFeed 优先，空数据/限流时回退麦蕊 `stock_real_five`；独立滚动预算 24/min）。档位价 `null` = 该档不存在：上游缺档时补 `0.0`，后端清洗成 `null`（前端画「`—`」），价与量一起置空，全 `0` 的盘口当「没拿到数据」处理。当日快照（`.cache/depth_day.json`，盘后/周末回放）**只收完整盘口**：两个集合竞价窗口（09:15–09:30 / 14:57–15:00）与盘前不留档，买1==卖1／单档的塌陷盘口不留档（被拒时打 warning + `perf` 计数），且只新不旧；盘后/周末读到**收盘前抓的**或塌陷的旧快照时花一个令牌回源换成收盘那份（实测盘后上游给的就是当天最后一份连续竞价盘口），换来的那份之后所有视图直接回放。规则详见 `docs/known-issues.md` 第 9 条 |
 | `GET /api/stock-info?symbol=600519.SH` | 侧栏基本信息（行业/总手/成交额/换手/量比/涨停跌停/N日涨幅/PE/PB/交易状态；AlphaFeed + 麦蕊 + 日K，整包 60s 缓存，港/美股降级为 None） |
 | `GET /api/cn/fund-flow?symbol=` | 个股资金流向（东财，15min 缓存） |
 | `GET /api/cn/lhb?symbol=` | 龙虎榜（近 7 日，30min 缓存） |
@@ -155,7 +155,7 @@ visual/
 | `GET /api/cn/announcements?symbol=` | 公告（巨潮/akshare，近 90 天，30min 缓存） |
 | `GET /api/cn/exchange-announcement?symbol=` | 交易所公告（麦蕊 `/hsstock/announcement`，源升序→按日期倒序展示，30min 缓存） |
 | `GET /api/cn/zljlr?symbol=` | 当前股票主力净流入（单票键值视图：主力净额/率、主力流入/流出、净额/率、量价换手、全市场排名；麦蕊 `/higg/zljlr` 全市场快照，10min 缓存） |
-| `GET /api/cn/holder-change?symbol=` | 股东户数变化趋势（麦蕊 `/hscp/gdbh`，6h 缓存） |
+| `GET /api/cn/holder-change?symbol=` | 股东户数变化趋势（麦蕊 `/hscp/gdbh`，6h 缓存；`截止日期`在出口归一成 ISO，认不出的给 `null`；按截止日期倒序，前端取近三年作图、表格列全部记录） |
 | `GET /api/cn/top-holders?symbol=` | 十大股东（最新报告期展平，麦蕊 `/hscp/sdgd`，6h 缓存） |
 | `GET /api/cn/float-holders?symbol=` | 十大流通股东（麦蕊 `/hscp/ltgd`，6h 缓存） |
 | `GET /api/cn/unlock?symbol=` | 解禁限售（麦蕊 `/hscp/jjxs`，12h 缓存；附 解禁市值(亿)、解禁均价(元)=市值÷数量、占流通股% = 解禁数量÷流通股本） |
@@ -258,19 +258,28 @@ visual/
 - 麦蕊快照回退预算 `MR_QUOTE_RATE_PER_MIN`（默认 20/min）: AF 未配置/故障时的兜底路径同样限速，桶空本轮沿用缓存；磁盘缓存清理（24h/50MB）除启动外每 6h 周期执行
 
 ### K线数据源配置
-K线按类别（分钟/股票/指数/基金）经 `kline_source.py` 注册表路由，主源失败自动回退下一源；`.env` 可自定义每类的源链（逗号分隔，依次尝试）：
+K线按类别（分时/分钟/股票/指数/基金）经 `kline_source.py` 注册表路由，主源失败自动回退下一源；`.env` 可自定义每类的源链（逗号分隔，依次尝试）：
 
 ```bash
 KLINE_SOURCE_MINUTE=alphafeed,akshare      # 默认
+KLINE_SOURCE_INTRADAY=alphafeed_intraday   # 默认 (分时图; 只回当日, 不兜 akshare)
 KLINE_SOURCE_STOCK=mairui,alphafeed,akshare # 默认
 KLINE_SOURCE_INDEX=mairui,akshare           # 默认
 KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复权)
 ```
 
+`intraday`（分时图）与 `minute`（分钟K视图）是**两类**，不能合并：分时只要当日，优先走
+AlphaFeed 日内走势接口 `/v1/klines/intraday`（限额 60/min，与「分钟K批量 30/min」是两份额度），
+权限被拒则记**当日**熔断并退回分钟K批量（`market._fetch_intraday_kline` + `visual/af_intraday.py`，
+监控补种共用同一份熔断）；而 1m/5m/15m/30m/60m 是跨天历史（1m 要 1200 根 ≈ 5 个交易日），
+仍走批量接口。实测差异与复跑命令见 [`docs/alphafeed-limits.md`](docs/alphafeed-limits.md)。
+注意 AF 的权限按**功能 × 市场**授权：本套餐 A股 两个接口都可用（日内分时 200），而港/美股日内分时与 `klines.batch` 分钟线均为 403 —— 港/美股分时在默认链下会直接报无数据（默认**不**兜 akshare：实测它分钟数据不稳、东财限流期整段失败，而且是静默换供应商；要这层兜底就显式配 `KLINE_SOURCE_INTRADAY=alphafeed_intraday,akshare`）。所以当日熔断按市场分别记（`af_intraday.available(symbol)`），自选表里的美股不会把 A股 的日内走势偏好关掉；监控补种的批量请求也**按市场分组**发（混一只没权限的会被整批拒）。另外分时是**单源链**、而源级冷却与市场无关 —— 所以"这个市场/标的我服务不了"必须抛 `kline_source.SourceSkip`（能力缺口不计源故障），否则港/美股 403 或某个没数据的代码连来 3 次就能把整源冷却 60s，全站 A股 分时一起 404（见 `market._fetch_intraday_kline` 与 `kline_source._try_source`）。
+
 | 数据源 | 分钟K | 股票/指数/基金 日周月K | 说明 |
 |---|---|---|---|
 | `mairui` | 5m/15m/30m/60m（`hszbl/fsjy`，仅未复权；1m/北交所不支持） | 股票等比前复权 `fr`；指数无复权；基金 `jj/lskx` 仅未复权 | 付费证书；分钟/基金在图表前复权链上会被跳过 |
-| `alphafeed` | ✓ 全周期前复权 | 仅股票/ETF 日K（指数未验证） | 付费证书 `AF_API_KEY` |
+| `alphafeed` | ✓ 全周期前复权（`minute` 类别） | 仅股票/ETF 日K（指数未验证） | 付费证书 `AF_API_KEY` |
+| `alphafeed_intraday` | 分时（`intraday` 类别）：日内走势接口，只回当日 | — | 分时图主源（默认链只有它）；权限不可用时当日退回 `klines.batch`，故 A股 恒有数据 |
 | `akshare` | ✓（东财源，1m 仅近 5 个交易日） | ✓ 免费前复权 `qfq` | 无需 key，作兜底；东财限流期可能持续失败 |
 
 - 改 `.env` 后重启生效；启动横幅会打印各类别实际生效的链
@@ -311,6 +320,8 @@ NTFY_PASSWORD=...
 ```
 
 未配置的通道会跳过并打错误日志，不中断监控。
+
+**数据源告警**：K 线数据源熔断（`kline_source` 连续失败达阈值 → 冷却跳过该源）与麦蕊 429 退避（`market._mr_note_429`）都会推一条通知，正文带"原因 + 冷却时长 + 最后失败的标的/周期"，例如 `数据源告警: alphafeed` → `连续失败 3 次 → 60s 内跳过该源（最后失败: 600519.SH 1m (stock)）`。**每个源每天最多一条**（当日闸门在 `visual/source_alert.py`，按源名记，跨日自动恢复；麦蕊的 429 与连续失败共用同一条配额）。关掉：`.env` 里 `SOURCE_ALERT_DISABLED=1`。走的是与「服务告警」同一条异步通道（`error_notify`：队列 + 工作线程 + 每源 5 分钟聚合窗口 + 全局 5 条/分钟预算），所以不会因告警本身拖慢取数。
 
 ### 日志
 
@@ -405,13 +416,46 @@ docker compose down
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | 端口 | `127.0.0.1:8888` | 仅本地访问 |
-| 缓存卷 | `.cache` | Docker volume 持久化 |
-| 数据卷 | `data` | 交易记录数据库 `trades.db` 持久化 |
+| 缓存卷 | `.cache` | bind mount 挂载宿主机 `visual/.cache` |
+| 数据卷 | `data` | bind mount 挂载宿主机 `visual/data`（交易记录 `trades.db`） |
 | 环境变量 | `.env` | 通过 `env_file` 注入 |
 | 管理员账号 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 无管理员则自动创建；已有则启动时同步口令 |
 | 用户 | `appuser` (非 root) | 降低容器逃逸风险 |
 
 > 注：部署主机 `visual/data`、`visual/.cache` 的属主需为 UID 1000（绝大多数 Linux 首个用户即 1000）；否则构建时用 `--build-arg UID=$(id -u)` 对齐。
+
+### 镜像体积与磁盘清理
+
+构建上下文就是 `visual/` 目录本身，`.dockerignore` 只放行运行时代码与静态资源（`venv/`、`.cache/`、`data/`、`test/`、`docs/`、`.github/`、`*.log` 均已排除）。**不要在 `visual/` 里放宿主虚拟环境**：`run.sh` 会在 `visual/` 下建 `venv/`，一旦漏排除就会被 `COPY . .` 整个打进镜像（约 305MB）。
+
+预期分层（`docker history mystockvisual-stock-visual:latest`）：
+
+| 层 | 大小 |
+|---|---|
+| `python:3.12-slim` 基础层 | ≈130MB |
+| `RUN pip install` | ≈280MB |
+| `COPY --chown . .` | ≈3MB |
+| `RUN mkdir/chown .cache data` | ≈0MB |
+| **合计** | **≈400MB** |
+
+频繁 `docker compose build` 时旧镜像会变成 `<none>:<none>` 悬空镜像，这是磁盘被吃满最常见的原因。排查与清理：
+
+```bash
+docker system df -v         # 先看谁在占: 镜像 / build cache / 容器日志
+docker image prune -f       # 清悬空镜像 (不碰在用的 :latest, 也不碰卷)
+docker builder prune -f     # 清未被引用的构建缓存 —— 日常用这个
+docker builder prune -a -f  # 磁盘告急才用: 连被镜像引用的缓存一起清, 下次构建要重装依赖
+```
+
+**不要**随手跑 `docker system prune -a --volumes`：`-a` 会删掉所有未被使用的镜像；`--volumes` 会删掉宿主机上所有**命名卷**（本 compose 用的是 bind mount，`visual/data`、`visual/.cache` 不受影响，但同机其他项目的命名卷会被一并清掉）。
+
+容器日志是另一个口子：docker 的 json-file 默认无上限，`docker-compose.yml` 里已设 10MB×3 的轮转上限。
+
+改 Dockerfile / .dockerignore 时的注意点：
+
+- **不要写 `chown -R appuser:appuser /app`。** OverlayFS 上对整棵树 chown 会触发 copy-up，等于把 `COPY` 层再复制一份（每次构建 +305MB）。正确做法是 `COPY --chown=appuser:appuser . .`，只对不在构建上下文里的 `.cache`/`data` 做非递归 `chown`。
+- Dockerfile 里有一道**构建守卫**：上下文混入 `venv/`、`.venv/`、`.cache/`、`data/` 会直接构建失败。看到那条 `ERROR: 上下文混入宿主机目录` 就是 `.dockerignore` 被改坏或 build context 指错了目录。
+- 在 `visual/` 新增本机专用的大目录（缓存、数据集、日志）时，同步加进 `.dockerignore`。
 
 ## 配色
 

@@ -364,6 +364,7 @@
 - **告警类型与节流**：
   - 每日一次：到达保本价（上穿 `breakeven_hit` / 从上方跌破或跌回 `be_broken`）、止损击穿、止盈达成、涨停封板（卖1量为 0）、推荐持仓到期上午（`hold_exit_am`）、到期下午（`hold_exit_pm`）
   - 同股同类型 30 分钟一次：加速下跌、加速上涨
+  - **每个数据源每天一次**：数据源告警（K 线源熔断 / 麦蕊 429 退避，见 `visual/source_alert.py`）。走与上面同一条钉钉+ntfy 通道，正文带"原因 + 冷却时长 + 最后失败的标的与周期"，`SOURCE_ALERT_DISABLED=1` 可关。闸门按**源名**记：同一源的两类故障共用当天那一条配额。
 - **到期平仓提醒**：授权用户的 open 持仓若关联了填了 `hold_days` 的模型，在推荐周期**最后一个交易日**的 10:00–11:30 与 14:00–15:00 各推一次钉钉（不拉行情、不要求风控价）。单笔从买入日起算第 N 个交易日（含买入日）；批次从**最晚一笔买入腿**起算。同用户同标的按 `trade_id` 分别去重。
 - **钉钉 / ntfy**：`visual/dingtalk.py` / `visual/ntfy.py` 为 `myappnotify` 薄包装；读 `DINGDING_WEB_HOOK_TOKEN` / `DINGDING_BOT_SIGN` 与 `NTFY_URL`（可加 `NTFY_TOPIC`）/ `NTFY_USER` / `NTFY_PASSWORD`。同一轮多条合并成一条 markdown 双发，按用户名分组（群消息会带账户名与代码，不含口令）。到期提醒标题为「持仓到期提醒」。未配置的通道跳过并打错误日志。
 - **运行**：`visual/server.py`（Waitress）启动时由 `app.start_background_jobs` 起 daemon 线程；新增记录不会立刻盯盘，下一轮轮询（约 20s）才会纳入。也可 `python -u visual/monitor.py` 单跑，`--replay 603698.SH:2026-08-19` 做离线校准。探测脚本 `python -u visual/probe_feed.py`。

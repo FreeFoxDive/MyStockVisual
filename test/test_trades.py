@@ -1368,11 +1368,20 @@ class TestReverseRepo(TradesTestCase):
         from datetime import timedelta
         uid = self._make_user("admin", "secret123", is_admin=True)
         today = trades._now().date()
-        # 已到期: 买入日 = 今天-3 → 到期约今天-2
+        # 已到期: 不能写死「今天-3」—— 节假日顺延会把到期日推到今天之后
+        # (2026-09-27 复现: 09-24 买 1 天期 → 原料 09-25 中秋休市 → 顺延到 09-28)。
+        # 从今天往前找第一个「到期日 ≤ 今天」的买入日。
+        entry_matured = today - timedelta(days=1)
+        while True:
+            exit_guess = trades._repo_maturity(entry_matured.isoformat(), 1)
+            if exit_guess and exit_guess <= today.isoformat():
+                break
+            entry_matured -= timedelta(days=1)
+            self.assertGreater(entry_matured.isoformat(), "2020-01-01", "找不到已到期买入日")
         matured = trades.create_trade(uid, {
             "type": "reverse_repo", "symbol": "204001.SH", "entry_price": 2.0,
             "quantity": 100000,
-            "entry_date": (today - timedelta(days=3)).isoformat(),
+            "entry_date": entry_matured.isoformat(),
         })
         self.assertLessEqual(matured["exit_date"], today.isoformat())
         # 未到期: 买入日 = 今天 → 到期至少明天

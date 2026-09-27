@@ -8,6 +8,10 @@
     python -u visual/probe_feed.py --kline-batches 5      # 5 批 (500 只) 验速率
     python -u visual/probe_feed.py --kline-batches 0      # 全市场 (≈79 批 ≈1.5min)
 
+第 8 节: 日内走势 /v1/klines/intraday 与分钟K批量的对照实测 (分时图取数取舍的依据):
+    python -u visual/probe_feed.py --only-intraday
+    python -u visual/probe_feed.py --only-intraday --intraday-symbols 600519.SH,510300.SH
+
 运行:
     python -u visual/probe_feed.py
     python -u visual/probe_feed.py --seconds 90
@@ -25,6 +29,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import af_limits  # noqa: E402
+from logger import redact_message  # noqa: E402
 
 for env_dir in (SCRIPT_DIR, SCRIPT_DIR.parent):
     env_file = env_dir / ".env"
@@ -47,6 +52,13 @@ PROBE_LIMIT_SYMBOLS = ["600519.SH", "300750.SZ", "688111.SH",
                        "513100.SH", "511990.SH"]
 # 第 5b 节港/美股探测用 (此前漏定义, 该节一直抛 NameError 静默失效)
 PROBE_HKUS_SYMBOLS = ["00700.HK", "AAPL.US"]
+# 第 8 节日内走势对照用: 股票 / 主板股 / ETF / 指数 (顺带看新接口覆盖到哪些品种)
+PROBE_INTRADAY_SYMBOLS = ["600519.SH", "000001.SZ", "510300.SH", "000001.SH"]
+
+
+def _err(e):
+    """异常 → 可打印文本 (脱敏)。probe 的输出常被贴进 issue/日志, 不留裸 key/token。"""
+    return redact_message(str(e))
 
 
 def _ok(name, ok, extra=""):
@@ -63,7 +75,7 @@ def _universe_symbols(limit=None, af=None):
             print(f"       标的池来自本地列表: {len(syms)} 只", flush=True)
             return syms[:limit] if limit else syms
     except Exception as e:
-        print(f"       本地列表不可用 ({e}), 回退 AF universe", flush=True)
+        print(f"       本地列表不可用 ({_err(e)}), 回退 AF universe", flush=True)
     if af is None:
         return []
     try:
@@ -72,7 +84,7 @@ def _universe_symbols(limit=None, af=None):
         print(f"       标的池来自 AF universe: {len(syms)} 只 (消耗 1 次池查询)", flush=True)
         return syms[:limit] if limit else syms
     except Exception as e:
-        print(f"       AF universe 失败: {e}", flush=True)
+        print(f"       AF universe 失败: {_err(e)}", flush=True)
         return []
 
 
@@ -92,7 +104,7 @@ def _kline_ceiling_check(af, symbols):
     except Exception as e:
         wait = feed_mod._retry_after_ms(e)
         extra = f" retry_after_ms={wait}" if wait is not None else ""
-        print(f"       {len(symbols)} 只/次: 被拒 [{type(e).__name__}] {str(e)[:120]}{extra} "
+        print(f"       {len(symbols)} 只/次: 被拒 [{type(e).__name__}] {_err(e)[:120]}{extra} "
               f"→ 证实单次上限 {af_limits.BATCH_SIZE} 只", flush=True)
 
 
@@ -140,7 +152,7 @@ def _kline_batch_rate_probe(af, batches=0, count=130, ratio=af_limits.RESERVE_RA
                 print(f"       [{i}] 429 限流 retry_after_ms={wait}", flush=True)
             else:
                 err += 1
-                print(f"       [{i}] 失败 {type(e).__name__}: {str(e)[:120]}", flush=True)
+                print(f"       [{i}] 失败 {type(e).__name__}: {_err(e)[:120]}", flush=True)
         lat.append(time.time() - t0)
         if i % 10 == 0 or i == len(chunks):
             elapsed = time.time() - t_start
@@ -163,6 +175,177 @@ def _kline_batch_rate_probe(af, batches=0, count=130, ratio=af_limits.RESERVE_RA
               f"(目标 {target}/min, 余量 {hard - eff:.1f}); 单批 {af_limits.BATCH_SIZE} 只可用", flush=True)
 
 
+def _df_desc(df, dt):
+    """一行描述一份 K 线 df: 根数 / 时间跨度 / 跨几个交易日 / 耗时。"""
+    if df is None or len(df) == 0:
+        return f"0 根 ({dt:.2f}s)"
+    first = str(df["trade_time"].iloc[0]) if "trade_time" in df.columns else "?"
+    last = str(df["trade_time"].iloc[-1]) if "trade_time" in df.columns else "?"
+    days = int(df["trade_date"].nunique()) if "trade_date" in df.columns else 0
+    return f"{len(df):>4} 根  {first} → {last}  ({days} 个交易日)  {dt:.2f}s"
+
+
+def _diff_overlap(idf, bdf):
+    """重叠时间戳上的逐列最大差: intraday 无 adjust 参数, 用它钉住「当日 qfq == raw」。"""
+    if idf is None or bdf is None or len(idf) == 0 or len(bdf) == 0:
+        return "无法对照 (一侧为空)"
+    merged = idf.merge(bdf, on="trade_time", suffixes=("_i", "_b"))
+    if len(merged) == 0:
+        return "无重叠时间戳 (两侧时间口径不同?)"
+    parts = [f"重叠 {len(merged)} 根"]
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        a, b = f"{col}_i", f"{col}_b"
+        if a not in merged.columns or b not in merged.columns:
+            continue
+        d = (merged[a].astype(float) - merged[b].astype(float)).abs().max()
+        parts.append(f"{col} 最大差 {'NaN' if d != d else f'{d:g}'}")
+    return "  ".join(parts)
+
+
+def _exchange_now(symbol):
+    """标的所在市场的当前墙钟 + 时区名 (美股盘中判断"末根是不是正在走"要用它)。
+
+    返回 (str 'YYYY-MM-DD HH:MM:SS', tzname) —— 拿不到时区就返回 (None, 原因)。
+    """
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from alphafeed.utils import get_instrument_region, get_region_timezone
+        tz = get_region_timezone(get_instrument_region(symbol))
+        return datetime.now(ZoneInfo(tz)).strftime("%Y-%m-%d %H:%M:%S"), tz
+    except Exception as e:
+        return None, f"未知 ({_err(e)})"
+
+
+def _hhmm(bar_time):
+    """'2026-09-18 09:31:00' → '09:31' (与 /api/intraday 下发的 bar.time 同口径)。"""
+    return str(bar_time)[-8:-3]
+
+
+def _phase_of(bar_time):
+    """分时固定 240 槽的相位: 首根 09:30 → 起相位, 09:31 → 末相位 (前端两种都支持)。"""
+    return {"09:30": "09:30 起相位 (09:30-11:29 + 13:00-14:59)",
+            "09:31": "09:31 末相位 (09:31-11:30 + 13:01-15:00)"}.get(
+                _hhmm(bar_time),
+                f"既非 09:30 也非 09:31 ({_hhmm(bar_time)}) → 前端固定窗口会自行跳过")
+
+
+def _intraday_ab_probe(af, symbols, period="1m", count=240, ratio=af_limits.RESERVE_RATIO):
+    """8. 日内走势 /v1/klines/intraday 与「分钟K批量」对照实测 (决定分时图怎么取数)。
+
+    一次把差异量清楚:
+      * 行数/时间跨度: intraday 是不是只回当日、含不含正在走的那根分钟;
+      * 首根时间戳: 09:30 还是 09:31 —— 前端分时固定 240 槽靠它定相位;
+      * 列: 有没有 amount (分时均价线要用) / trade_date;
+      * 重叠时间戳上的数值 diff: intraday 没有 adjust 参数, 当日 qfq 与 raw 是否一致;
+      * 单次耗时 (分时图 60s 轮询选哪个接口)。
+    """
+    import market_hours
+
+    i_iv = af_limits.bucket_interval("intraday_symbol", ratio)
+    b_iv = af_limits.bucket_interval("kline_minute_batch", ratio)
+    print(f"=== 8. 日内走势 /v1/klines/intraday vs 分钟K批量 "
+          f"({period} × {count} 根) ===", flush=True)
+    print(f"       限额: 日内走势 {af_limits.limit('intraday_symbol')}/min "
+          f"(×{ratio:g} → {af_limits.bucket_rate('intraday_symbol', ratio)}/min, "
+          f"间隔 {i_iv:.2f}s); 分钟K批量 {af_limits.limit('kline_minute_batch')}/min "
+          f"(×{ratio:g} → {af_limits.bucket_rate('kline_minute_batch', ratio)}/min, "
+          f"间隔 {b_iv:.2f}s)", flush=True)
+    print(f"       当日已过交易分钟 {market_hours.session_elapsed_minutes():.0f}/240 "
+          f"| 现在(北京) {market_hours.now():%Y-%m-%d %H:%M:%S}", flush=True)
+
+    verdict = []
+    i_lat, b_lat = [], []
+    for sym in symbols:
+        print(f"  ── {sym} ──", flush=True)
+        # 日内走势 (新接口): 无 adjust / 无 start_time, 只回当日
+        time.sleep(i_iv)
+        t0 = time.time()
+        try:
+            idf, i_err = af.klines.intraday(sym, period=period, count=count,
+                                            to_dataframe=True), None
+        except Exception as e:
+            idf, i_err = None, e
+        i_dt = time.time() - t0
+        i_lat.append(i_dt)
+        if i_err is not None:
+            _ok("klines.intraday", False,
+                f"[{type(i_err).__name__}] {_err(i_err)[:140]}"
+                + (f" status_code={getattr(i_err, 'status_code', None)}"
+                   f" code={getattr(i_err, 'code', None)}"
+                   if getattr(i_err, "status_code", None) else ""))
+            verdict.append(f"{sym}: intraday 不可用 ({type(i_err).__name__})")
+        else:
+            cols = list(idf.columns) if idf is not None and len(idf) else []
+            _ok("klines.intraday", idf is not None and len(idf) > 0, _df_desc(idf, i_dt))
+            print(f"       cols={cols}", flush=True)
+
+        # 分钟K批量 (原接口, 分时图现在走的就是它)
+        time.sleep(b_iv)
+        t0 = time.time()
+        try:
+            bdf, b_err = (af.klines.batch([sym], period=period, count=count,
+                                          adjust="forward", to_dataframe=True)
+                          or {}).get(sym), None
+        except Exception as e:
+            bdf, b_err = None, e
+        b_dt = time.time() - t0
+        b_lat.append(b_dt)
+        if b_err is not None:
+            _ok("klines.batch(1m, forward)", False,
+                f"[{type(b_err).__name__}] {_err(b_err)[:140]}")
+        else:
+            _ok("klines.batch(1m, forward)", bdf is not None and len(bdf) > 0, _df_desc(bdf, b_dt))
+
+        if idf is not None and len(idf) and bdf is not None and len(bdf):
+            match = _diff_overlap(idf, bdf)
+            first, last = idf["trade_time"].iloc[0], idf["trade_time"].iloc[-1]
+            same = all(f"{c} 最大差 0" in match
+                       for c in ("open", "close", "volume", "amount"))
+            print(f"       数值对照: {match}", flush=True)
+            verdict.append(
+                f"{sym}: 只回当日={int(idf['trade_date'].nunique()) == 1}, "
+                f"{_hhmm(first)}~{_hhmm(last)} (相位 {_phase_of(first)[:5]}), "
+                f"与批量 qfq {'完全一致' if same else '有差异'}"
+            )
+            print(f"       相位: 首根 {_hhmm(first)} → {_phase_of(first)}", flush=True)
+            # 末根是不是「正在走」的那一分钟: 跟快照 last_price 对一下, 并看时间戳
+            try:
+                qdf = af.quotes.get(symbols=[sym], to_dataframe=True)
+                last_px = (float(qdf["last_price"].iloc[0])
+                           if qdf is not None and len(qdf) else None)
+            except Exception as e:
+                last_px = None
+                print(f"       (快照对照跳过: {_err(e)[:80]})", flush=True)
+            bar = idf.iloc[-1]
+            gap = ("—" if last_px is None
+                   else f"{float(bar['close']) - last_px:+.4f}")
+            print(f"       末根 {_hhmm(bar['trade_time'])} close={float(bar['close']):.4f} "
+                  f"vol={bar['volume']} | 快照 last={last_px} (差 {gap})", flush=True)
+            # 盘中关键一问: 两个接口给的是不是「正在走」的那一分钟?
+            # 判据 = 末根时间戳 == 标的所在市场的当前分钟 (盘后当然相等, 只有盘中才有信息量)
+            ex_now, tz = _exchange_now(sym)
+            if ex_now:
+                same_min = _hhmm(bar["trade_time"]) == ex_now[-8:-3]
+                print(f"       标的本地时间 {ex_now} ({tz}) → "
+                      f"末根{'就是当前分钟 (盘中含未走完的那根)' if same_min else '不是当前分钟 (滞后)'}",
+                      flush=True)
+                verdict.append(f"{sym}: 盘中末根{'=当前分钟' if same_min else '滞后'}")
+        elif i_err is None:
+            verdict.append(f"{sym}: 一侧为空, 无法对照")
+
+    print("  [小结]", flush=True)
+    for v in verdict:
+        print(f"       {v}", flush=True)
+    if i_lat and b_lat:
+        i_lat.sort()
+        b_lat.sort()
+        print(f"       耗时中位数: intraday {i_lat[len(i_lat) // 2]:.2f}s "
+              f"(max {i_lat[-1]:.2f}s) vs batch {b_lat[len(b_lat) // 2]:.2f}s "
+              f"(max {b_lat[-1]:.2f}s) —— 两个接口额度独立, 取 intraday 是为了"
+              f"把「分钟K批量 30/min」让给 1m/5m/15m/30m/60m 分钟K视图", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=int, default=60, help="快照刷新探测时长")
@@ -176,6 +359,12 @@ def main():
                         help="实测额度比例 (默认 0.9 = Pro 限额的 90%%)")
     parser.add_argument("--only-kline", action="store_true",
                         help="只跑第 7 节日K批量限速实测 (跳过 1~6 节, 不占用快照采样时间)")
+    parser.add_argument("--only-intraday", action="store_true",
+                        help="只跑第 8 节日内走势 vs 分钟K批量对照实测")
+    parser.add_argument("--intraday-symbols", default=",".join(PROBE_INTRADAY_SYMBOLS),
+                        help="第 8 节对照用的标的 (逗号分隔; 默认 股票+ETF+指数)")
+    parser.add_argument("--intraday-period", default="1m",
+                        help="第 8 节对照的分钟周期 (默认 1m, 即分时图口径)")
     args = parser.parse_args()
 
     key = os.environ.get("AF_API_KEY", "")
@@ -185,6 +374,12 @@ def main():
     from alphafeed import AlphaFeed
     import feed as feed_mod
     af = AlphaFeed(api_key=key)
+
+    if args.only_intraday:
+        syms = [s.strip() for s in args.intraday_symbols.split(",") if s.strip()]
+        _intraday_ab_probe(af, syms, period=args.intraday_period)
+        print("探测结束 (仅日内走势对照)。", flush=True)
+        return
 
     if args.only_kline:
         _kline_batch_rate_probe(af, batches=max(0, args.kline_batches),
@@ -206,7 +401,7 @@ def main():
             print(f"       sample symbol={row.get('symbol')} last={row.get('last_price')} "
                   f"ts={row.get('timestamp')} prev_close={row.get('prev_close')}", flush=True)
     except Exception as e:
-        _ok("quotes.get(symbols=)", False, str(e))
+        _ok("quotes.get(symbols=)", False, _err(e))
         df = None
 
     print("=== 2. instruments.batch (limit_up) ===", flush=True)
@@ -236,7 +431,7 @@ def main():
                   f"{str(ext.get('type')):<10} {str(ext.get('limit_up')):>9} "
                   f"{str(ext.get('limit_down')):>10}", flush=True)
     except Exception as e:
-        _ok("instruments.batch", False, str(e))
+        _ok("instruments.batch", False, _err(e))
 
     print("=== 3. depth_get_batch (depth.get 模拟, 30/min) ===", flush=True)
     try:
@@ -249,7 +444,7 @@ def main():
             extra = f"ask1_vol={(d0.get('ask_volumes') or [None])[0]}"
         _ok("depth_get_batch", n > 0, f"n={n} {extra}")
     except Exception as e:
-        _ok("depth_get_batch", False, str(e))
+        _ok("depth_get_batch", False, _err(e))
 
     print("=== 3b. depth.batch 原生 (高套餐, Starter 预期 FAIL) ===", flush=True)
     try:
@@ -261,7 +456,7 @@ def main():
             extra = f"ask1_vol={(d0.get('ask_volumes') or [None])[0]}"
         _ok("depth.batch", n > 0, f"n={n} {extra}")
     except Exception as e:
-        _ok("depth.batch", False, str(e))
+        _ok("depth.batch", False, _err(e))
 
     print("=== 4. klines.intraday_batch ===", flush=True)
     try:

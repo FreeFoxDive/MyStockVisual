@@ -1,12 +1,17 @@
 """异步节流错误通知 + 日志观察者。
 
 设计要点(见 doc/VISUAL_错误处理补强计划.md):
-- notify_error / notify_exception **零阻塞**:只入队, 由守护线程消费; 队列满则丢弃计数。
+- notify_error / notify_exception / notify_alert **零阻塞**:只入队, 由守护线程消费; 队列满则丢弃计数。
 - 同 source 在窗口内聚合计数(只发一条摘要); 跨 source 有全局预算, 防通知风暴。
 - 只发**脱敏摘要**(异常类型 + 文件:行), 完整堆栈只进本地日志, 不出境。
 - install_log_handler() 监听 root logger 上带 exc_info 的 ERROR 记录, 真实出错位置取
   exc_info 最深栈帧(Flask 的 log_exception 其 record.pathname 指向 flask/app.py, 不可用)。
 - 本模块自身绝不抛异常, 也不因自身日志触发递归通知。
+
+两类入队:
+  * **异常摘要** (notify_error/notify_exception): 文案由本模块拼 (源 + 类型 + 位置)。
+  * **自定义文案** (notify_alert): 运维事件 (如数据源熔断) 的标题/正文由调用方给。
+    两者共用同一条队列、同一个工作线程、同一套按 source 去重与全局预算。
 
 环境变量:
   ERROR_NOTIFY_DISABLED=1      全部静默(测试/CI 用)
@@ -75,9 +80,42 @@ def notify_error(source, exc_type=None, location=None):
         return False
     global _dropped
     item = {
+        "kind": "error",
         "source": normalize_source(source),
         "exc_type": str(exc_type or "Error"),
         "location": str(location or "?"),
+        "ts": time.time(),
+    }
+    _start_worker()
+    try:
+        _q.put_nowait(item)
+        return True
+    except queue.Full:
+        with _lock:
+            _dropped += 1
+        return False
+
+
+def notify_alert(source, title, text):
+    """运维事件通知: 标题/正文由调用方给 (如"数据源熔断: alphafeed")。
+
+    与 notify_error 共用队列/工作线程/按 source 去重/全局预算/双通道, 区别只在文案:
+    异常摘要由本模块拼, 事件文案由调用方拼 (数据源熔断这类事件不是异常, 摘要格式说
+    不清"哪个源、为什么、冷却多久")。零阻塞, 任何情况下不抛。
+    """
+    if _disabled():
+        return False
+    global _dropped
+    try:
+        from logger import redact_message
+        text = redact_message(text)
+    except Exception:
+        pass
+    item = {
+        "kind": "alert",
+        "source": normalize_source(source),
+        "title": str(title or "服务告警"),
+        "text": str(text or ""),
         "ts": time.time(),
     }
     _start_worker()
@@ -172,7 +210,12 @@ def _process_batch(items) -> int:
             _recent[source] = [window_start, count, True]
 
         last = group[-1]
-        _send_both("服务告警", _summary_text(source, last["exc_type"], last["location"], count))
+        if last.get("kind") == "alert":
+            # 事件通知: 文案调用方给, 不做摘要聚合 (同一 source 窗口内只发第一条)
+            _send_both(last.get("title") or "服务告警", last.get("text") or "")
+        else:
+            _send_both("服务告警", _summary_text(source, last["exc_type"],
+                                                 last["location"], count))
         sent += 1
     return sent
 

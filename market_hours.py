@@ -21,6 +21,9 @@ _SESSION_MINUTES = 240
 # 开盘集合竞价: 09:15 起接受申报并给出虚拟匹配价, 09:25 撮合出开盘价, 09:30
 # 连续竞价接棒。这段已有快照意义 (要退回只认 09:25 就改这一个常量)。
 _AUCTION_START = (9, 15)
+# 收盘集合竞价: 沪深两市 14:57-15:00。这段挂在连续竞价里 (in_session 为真), 但盘口
+# 已不是「五档」—— 上游只给一个虚拟撮合价, 其余档位补 0 (见 depth_book_replayable)。
+_CLOSING_AUCTION_START = (14, 57)
 # 行情流提前建连时刻: 交易日 09:00 起允许建立 SSE, 只发保活帧不取上游数据,
 # 换取 09:15 第一帧零握手延迟。
 _STREAM_OPEN = (9, 0)
@@ -165,6 +168,38 @@ def is_auction(now: datetime | None = None) -> bool:
     return session_phase(now) == "auction"
 
 
+def in_closing_auction(now: datetime | None = None) -> bool:
+    """收盘集合竞价 (交易日 14:57-15:00, 含 15:00 整点)。
+
+    刻意不并进 session_phase(): 那会把 14:57-15:00 从 "trading" 拆出来, 牵动量比、
+    BAR_READY_PHASES、前端相位分支一大片。这里只回答"盘口是不是虚拟撮合队列"。
+    """
+    now = now or _now()
+    if not is_trading_day(now):
+        return False
+    t = _mins(now.hour, now.minute)
+    return _mins(*_CLOSING_AUCTION_START) <= t <= _mins(*_PM_END)
+
+
+def depth_book_replayable(now: datetime | None = None) -> bool:
+    """现在取到的**完整盘口**值不值得当「当天最后一份」留档 (market._depth_day_set 的门槛)。
+
+    排除两个集合竞价窗口 + 盘前: 09:15–09:30 开盘竞价与 14:57–15:00 收盘竞价给的是虚拟
+    撮合队列而不是五档 (收盘那段另由形态判据兜底); 09:00–09:15 盘前上游手里还是上一个
+    交易日的收盘盘口, 留档会被标成今天那份。其余时段都可以 —— 午休/盘后/非交易日取到的
+    正是"当天最后一份连续竞价盘口" (实测盘后上游给的 timestamp 是 15:30, 内容是完整的
+    双边五档), 盘后第一次取到就留档, 之后所有人回放都不用再花令牌。
+
+    不变量: 09:30–11:30 与 13:00–14:56 (in_session 减去收盘竞价) 为真 —— 盘中留档口径与
+    修复盘中事故时一致。588200.SH 2026-09-18 那份坏就坏在 14:59 也被算成"盘中最后一份"。
+    """
+    now = now or _now()
+    phase = session_phase(now)
+    if phase == "trading":
+        return not in_closing_auction(now)
+    return phase in ("break", "closed", "non_trading")
+
+
 def is_live(now: datetime | None = None) -> bool:
     """现在要不要拉行情 —— 快照/五档/SSE 取数/磁盘 TTL 的唯一口径。
 
@@ -244,6 +279,32 @@ def next_trading_day(day=None, inclusive: bool = False) -> datetime | None:
         return None
     i = bisect_left(days, base.isoformat())
     if i >= len(days):
+        return None
+    return datetime.strptime(days[i], "%Y-%m-%d")
+
+
+def last_trading_day(day=None) -> datetime | None:
+    """day 当天 (含) 或之前最近的交易日 (00:00 时刻); 找不到返回 None。
+
+    与 next_trading_day 对称, 同样走缓存日历二分 (长假无天数上限)。用途: 非交易日要给
+    「当天最后一份盘口」找一个归属交易日 —— 周末/假期回源取到的还是上一个交易日那份,
+    落档时得挂在那个交易日上 (market._depth_snapshot_key), 否则连 key 都拼不出来,
+    那份刷新结果既不落盘也不进内存, 每次查看都要重新回源。
+    """
+    base = _as_date(day) or _now().date()
+    try:
+        days = _xshg_sorted(base.year - 1, base.year + 1)
+    except Exception:
+        # 日历包缺失: 退化为周一~周五, 与 is_trading_day 的降级口径一致
+        for _ in range(400):
+            if _weekday_fallback(base.isoformat()):
+                return datetime(base.year, base.month, base.day)
+            base -= timedelta(days=1)
+        return None
+    i = bisect_left(days, base.isoformat())
+    if i >= len(days) or days[i] != base.isoformat():
+        i -= 1                      # 二分落到的是"之后第一个", 当天不是交易日就往回退一格
+    if i < 0:
         return None
     return datetime.strptime(days[i], "%Y-%m-%d")
 

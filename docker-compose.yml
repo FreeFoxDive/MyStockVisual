@@ -10,6 +10,13 @@ services:
       - ./.cache:/app/.cache
       - ./data:/app/data
     restart: unless-stopped
+    # 日志上限: docker 的 json-file 默认无上限, 7x24 运行会把日志堆在根分区上
+    # (与镜像无关的另一个磁盘口子); 保留 30MB 近期日志足够 docker compose logs -f 排查
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     # 仅可见性: unhealthy 不会触发重启(restart 策略只响应进程退出)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys;o=urllib.request.build_opener(urllib.request.ProxyHandler({}));sys.exit(0 if o.open('http://127.0.0.1:8888/api/health',timeout=8).status==200 else 1)"]

@@ -117,6 +117,7 @@ class SidePanelShotModelTest(unittest.TestCase):
             + _extract_fn(src, "marketCountdownSec") + "\n"
             + _extract_fn(src, "marketHintTitle") + "\n"
             + _extract_fn(src, "infoPanelRows") + "\n"
+            + _extract_fn(src, "fmtDepthVol") + "\n"
             + _extract_fn(src, "depthPanelRows") + "\n"
             + _extract_fn(src, "fitShotText") + "\n"
             + _extract_fn(src, "drawSidePanelShot") + "\n"
@@ -159,8 +160,9 @@ const INFO = { symbol: '000001.SZ', name: '平安银行', last_price: 11.5, prev
   industry: '银行', volume: 123456, amount: 1.4e8, turnover_rate: 0.51, vol_ratio: 1.2,
   limit_up: 12.32, limit_down: 10.08, chg_3d: 1.5, chg_5d: -2.25, chg_10d: 0, pe: 5.5, pb: 0.55,
   trade_status: 'trading', trade_status_text: '连续竞价' };
-const DEPTH = { ask_prices: [11.6, 11.59, 11.58, 11.57, 11.56], ask_volumes: [10, 20, 30, 40, 50],
-  bid_prices: [11.5, 11.49, 11.48, 11.47, 11.46], bid_volumes: [11, 21, 31, 41, 51] };
+// 量刻意混小值 (原样) 与大值 (过万 → x.x万), 让面板/截图两条路径都走到万位分支
+const DEPTH = { ask_prices: [11.6, 11.59, 11.58, 11.57, 11.56], ask_volumes: [10, 20, 30, 40, 30883],
+  bid_prices: [11.5, 11.49, 11.48, 11.47, 11.46], bid_volumes: [15499, 21, 31, 41, 51] };
 
 function collect(step) {
   _infoOn = step.info !== false;
@@ -236,6 +238,47 @@ process.stdout.write(JSON.stringify(collect(JSON.parse(process.argv[1]))));"""
         self.assertGreater(len(on["rules"]), len(off["rules"]), "五档多出分隔线")
         self.assertEqual(next(t for t in on["drawn"] if t["t"] == "11.6")["color"], "#14b143",
                          "卖盘用跌色")
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_depth_volume_uses_eastmoney_wan_rule(self):
+        """五档「量」: 过万 → x.x万 (一位小数), 不足 1 万按原数 —— 面板与截图必须同口径。
+
+        以前是裸 String(vol), 页面上就是 30883 / 15499 这种六位原数; 列头已经写着「量」,
+        所以数值不带单位 (东财五档同口径), 手机那栏 40px 也放得下。
+        """
+        on = self._collect({"width": 204, "height": 720, "depth": True})
+        texts = [t["t"] for t in on["drawn"]]
+        self.assertIn("3.1万", texts, "30883 手要显示成 3.1万")
+        self.assertIn("1.5万", texts, "15499 手要显示成 1.5万")
+        self.assertIn("10", texts, "不足 1 万按原数")
+        self.assertNotIn("30883", texts, "原数不该再出现")
+        # 量那一列不带单位后缀 (列头已写「量」)
+        for t in ("万手", "手"):
+            self.assertNotIn(t, texts, "五档量不带单位后缀")
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_fmt_depth_vol_boundaries(self):
+        """fmtDepthVol 的分档边界 (10000 起进万位, 亿位保持两位小数)。"""
+        script = _extract_fn(INDEX_HTML.read_text(encoding="utf-8"), "fmtDepthVol") + """
+const cases = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(cases.map(c => fmtDepthVol(c))));
+"""
+        cases = [0, 9999, 10000, 15499, 30883, 999999, 1e8, 1.234e8, None, -12000]
+        proc = subprocess.run(["node", "-e", script, json.dumps(cases)],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=30, check=False)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr or proc.stdout)
+        self.assertEqual(json.loads(proc.stdout.strip()),
+                         ["0", "9999", "1.0万", "1.5万", "3.1万", "100.0万",
+                          "1.00亿", "1.23亿", "—", "-1.2万"])
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_depth_rows_go_through_formatter(self):
+        """源码级: 行模型必须走 fmtDepthVol, 不能各处自己 String(vol) 而漂移。"""
+        src = INDEX_HTML.read_text(encoding="utf-8")
+        self.assertIn("vol: fmtDepthVol(vol)", _extract_fn(src, "depthPanelRows"))
+        self.assertIn("fmtDepthVol", src)
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_lines_do_not_overlap_and_fit(self):

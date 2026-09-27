@@ -201,5 +201,83 @@ class ErrorNotifyTest(unittest.TestCase):
         self.assertEqual(count, 1)
 
 
+class NotifyAlertTest(unittest.TestCase):
+    """notify_alert: 事件通知 (文案调用方给) 走同一条异步通道。
+
+    与 notify_error 的区别只在文案来源: 数据源熔断这类事件不是异常, 摘要格式
+    ("近5分钟 N 次: TypeError @ a.py:1") 说不清"哪个源、为什么、冷却多久"。
+    """
+
+    def setUp(self):
+        self.rec = _Recorder()
+        for p in (
+            mock.patch.object(error_notify, "_q", queue.Queue(maxsize=error_notify.QUEUE_MAX)),
+            mock.patch.object(error_notify, "_recent", {}),
+            mock.patch.object(error_notify, "_sent_times", deque()),
+            mock.patch.object(error_notify, "_dropped", 0),
+            mock.patch.object(error_notify, "_suppressed", 0),
+            mock.patch.object(error_notify, "_start_worker", lambda: None),
+            mock.patch.object(dingtalk, "send_markdown", self.rec.dingtalk),
+            mock.patch.object(ntfy, "send_markdown", self.rec.ntfy),
+            mock.patch.dict(os.environ, {"ERROR_NOTIFY_DISABLED": ""}),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_alert_uses_caller_title_and_text(self):
+        self.assertTrue(error_notify.notify_alert(
+            "source:alphafeed", "数据源告警: alphafeed", "连续失败 3 次 → 60s 内跳过该源"))
+        self.assertEqual(error_notify.drain_once(), 1)
+        self.assertEqual([c[1] for c in self.rec.calls], ["数据源告警: alphafeed"] * 2,
+                         "两个通道各一条, 标题用调用方给的 (不是固定的「服务告警」)")
+        self.assertEqual([c[2] for c in self.rec.calls],
+                         ["连续失败 3 次 → 60s 内跳过该源"] * 2)
+        self.assertNotIn("近", self.rec.calls[0][2], "事件通知不该套异常摘要格式")
+
+    def test_alert_is_zero_blocking_and_redacted(self):
+        self.rec.delay = 0.5
+        t0 = time.perf_counter()
+        error_notify.notify_alert("source:x", "t", "text")
+        self.assertLess(time.perf_counter() - t0, 0.05, "notify_alert 必须零阻塞")
+        self.rec.delay = 0.0
+        error_notify._q.get_nowait()      # 清掉上一条, 免得干扰下面的断言
+        # 麦蕊 licence 是 UUID 且就长在 URL 路径里: 这类正文必须被脱敏
+        lic = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+        error_notify.notify_alert("source:x", "t", f"url=https://api.mairuiapi.com/a/b/{lic}")
+        error_notify.drain_once()
+        self.assertNotIn(lic, self.rec.calls[-1][2], "正文必须脱敏")
+
+    def test_alert_respects_disabled_and_budget(self):
+        with mock.patch.dict(os.environ, {"ERROR_NOTIFY_DISABLED": "1"}):
+            self.assertFalse(error_notify.notify_alert("source:x", "t", "text"))
+        self.assertEqual(error_notify._q.qsize(), 0, "关掉后不入队")
+        with mock.patch.object(error_notify, "BUDGET_PER_MIN", 1):
+            error_notify.notify_alert("source:a", "t", "1")
+            error_notify.notify_alert("source:b", "t", "2")
+            self.assertEqual(error_notify.drain_once(), 1, "全局预算仍生效")
+            self.assertEqual(len(self.rec.calls), 2, "只发了一条 × 两个通道")
+
+    def test_alert_and_error_share_one_window_per_source(self):
+        """同一 source 的窗口聚合对两类通知都生效, 文案取**最新一条**的类型。
+
+        现实里不会撞: 数据源告警用的 source 带 `source:` 前缀 (见 source_alert), 与
+        异常摘要的 source 不同组。这条只钉住"万一撞上"的行为: 不会两类各发一条。
+        """
+        for first_is_alert in (True, False):
+            error_notify._recent.clear()
+            error_notify._sent_times.clear()
+            self.rec.calls.clear()
+            if first_is_alert:
+                error_notify.notify_alert("dup", "数据源告警", "事件")
+                error_notify.notify_error("dup", "RuntimeError", "a.py:1")
+                want = "服务告警"          # 最新一条是异常 → 用异常摘要文案
+            else:
+                error_notify.notify_error("dup", "RuntimeError", "a.py:1")
+                error_notify.notify_alert("dup", "数据源告警", "事件")
+                want = "数据源告警"        # 最新一条是事件 → 用事件文案
+            self.assertEqual(error_notify.drain_once(), 1, "同源窗口内只发一条")
+            self.assertEqual([c[1] for c in self.rec.calls], [want] * 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

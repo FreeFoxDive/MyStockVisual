@@ -24,6 +24,8 @@ PROJECT_DIR = SCRIPT_DIR.parent
 log = logging.getLogger("market")
 
 from logger import redact_message, sanitize_error as _sanitize_error  # noqa: E402
+import af_intraday  # noqa: E402  (日内走势接口的当日可用性, 分时/监控共用)
+import af_limits  # noqa: E402  (AlphaFeed Pro 限额单一来源, 新增取数路径按 90% 折算)
 import datetime as dt_mod
 import decimal as dec_mod
 import feed
@@ -31,6 +33,7 @@ import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_sour
 import market_hours  # noqa: E402
 import perf  # noqa: E402
 import search_index  # noqa: E402
+import source_alert  # noqa: E402  (数据源熔断/429 退避告警, 每源每天一条)
 
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
@@ -109,16 +112,42 @@ def _mr_is_429(e):
     return code == 429
 
 
-def _mr_note_429(e):
-    """记录 429 并开启进程级退避窗口。"""
+def _mr_note_429(e, detail=""):
+    """记录 429 并开启进程级退避窗口。
+
+    detail 是"这次请求打的哪只票/哪个接口", 只用于告警文案 —— 由调用方保证不含证书
+    key (SDK 路径给方法名+标的, 直连路径给去掉末段的 URL)。
+    """
     global _mr_backoff_until
     sec = max(1.0, _mr_retry_after_sec(e) or MAIRUI_BACKOFF_SEC)
     with _mr_backoff_lock:
         _mr_backoff_until = max(_mr_backoff_until, time.time() + sec)
     perf.bump("mr_429")
     payload = getattr(e, "payload", None)
-    detail = f" payload={redact_message(payload)}" if payload is not None else ""
-    log.warning(f"麦蕊触发 429 限流, 退避 {sec:.0f}s (窗口内不再请求, 走回退){detail}")
+    detail_txt = f" payload={redact_message(payload)}" if payload is not None else ""
+    log.warning(f"麦蕊触发 429 限流, 退避 {sec:.0f}s (窗口内不再请求, 走回退){detail_txt}")
+    # 退避窗口内的后续 429 会被当日闸门挡下 (每源每天最多一条); 别占着退避锁推送
+    source_alert.notify("mairui", "429 限流退避", detail=detail, cooldown_sec=sec)
+
+
+_MR_SYMBOL_RE = re.compile(r"^[0-9A-Za-z.]{2,12}$")
+
+
+def _mr_call_detail(name, args):
+    """SDK 调用的告警上下文: 方法名 + (看起来像标的的)第一个位置参数。
+
+    只认"纯代码"形态的字符串, 避免把 URL/dict/带 key 的串照抄进通知。
+    """
+    label = f"{name}()" if name else "SDK 调用"
+    if args and isinstance(args[0], str) and _MR_SYMBOL_RE.match(args[0]):
+        label += f" {args[0]}"
+    return label
+
+
+def _mr_url_detail(url):
+    """直连 URL 的告警上下文: 去掉最后一段(证书 key), 例如 .../hszbl/fsjy/600519.SH。"""
+    base = str(url).split("?", 1)[0].rstrip("/")
+    return base.rsplit("/", 1)[0] if "/" in base else base
 
 
 class _MairuiClient:
@@ -147,7 +176,7 @@ class _MairuiClient:
                 return attr(*args, **kwargs)
             except Exception as e:
                 if _mr_is_429(e):
-                    _mr_note_429(e)
+                    _mr_note_429(e, detail=_mr_call_detail(name, args))
                 raise
 
         return _guarded
@@ -164,7 +193,7 @@ def _mr_urlopen_json(url, timeout=8):
             return json.loads(resp.read().decode("utf-8", "ignore"))
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            _mr_note_429(e)
+            _mr_note_429(e, detail=_mr_url_detail(url))
         raise
 
 
@@ -662,6 +691,10 @@ _quote_budget = PacedBudget(QUOTE_RATE_PER_MIN)
 # 计数粒度 = 麦蕊 HTTP 调用次数 (指数/ETF 单只 1 次, 股票批量 20 只 1 次)。
 MR_QUOTE_RATE_PER_MIN = max(1, int(os.environ.get("MR_QUOTE_RATE_PER_MIN", "20")))
 _mr_quote_budget = PacedBudget(MR_QUOTE_RATE_PER_MIN)
+# 日内走势接口 (分时取数) 预算: 60/min 按 90% 折算 = 54/min, 与「分钟K批量 30/min」
+# 互相独立。按 af_limits 折算而不是吃满额度, 留 10% 给网页/监控链路; 桶空时本次
+# 直接走原接口 (分钟K批量), 不熔断。
+_intraday_budget = PacedBudget(af_limits.bucket_rate("intraday_symbol"))
 _quote_fetch_lock = threading.Lock()
 _quote_fetch_condition = threading.Condition()
 _quote_fetch_inflight = False
@@ -1011,15 +1044,86 @@ def _af_adjust(adj):
     return "backward" if adj == kline_source.ADJUST_HFQ else adj
 
 
-def _fetch_minute_kline(symbol, period, count, adjust="forward"):
-    """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
+def _fetch_intraday_kline(symbol, period, count, adjust="forward"):
+    """分时取数: 优先日内走势接口 (/v1/klines/intraday), 不可用则退回分钟K批量。
+
+    两个接口的差异 (2026-09-18 实测, 见 docs/alphafeed-limits.md 的日内走势实测一节;
+    复跑: probe_feed.py --only-intraday):
+      * intraday 只回当日、无 adjust 参数; 当日 qfq 与 raw 本就相同, 实测与
+        `klines.batch(period, adjust=forward)` 重叠 240 根逐列差 0 —— 所以分时图
+        口径不变, 换的是额度账本: intraday 60/min 与「分钟K批量 30/min」互相独立,
+        分时轮询不再和 1m/5m/15m/30m/60m 分钟K视图抢同一份额度。
+      * 权限被拒 (403 等) 记**该市场**当日熔断, 之后同一市场一律走原接口, 不反复重试;
+        其余异常/空数据只本次回退 —— 开盘前、偶发超时不该把一整天都降级。
+        (权限按市场分级: 实测本套餐 A股可日内走势、港/美股 403, 所以熔断按市场记,
+        免得自选表里一只美股把 A股 的这条路径一起关掉。)
+
+    **能力缺口要抛 SourceSkip, 不能返回 None**: 分时默认链只有这一个源, 返回 None 会被
+    路由记成"源故障", 连记 3 次整源冷却 60s —— 而冷却与市场无关, 于是港/美股(403 是常态)
+    或某个当日没数据的代码, 就能把 A股 的分时一起打成 404。判据: 上游**答了**(HTTP 200,
+    哪怕 0 根) 或**明确没权限**, 都算能力缺口; 只有真出错/超时才返回 None 记故障。
+    """
+    denied = not af_intraday.available(symbol)
+    # 「上游答了」的两个标记: 只有答了(而不是抛错/超时)才说明"是没这个市场/没这根数据"
+    answered = [False, False]
+    if not denied:
+        # 港/美股 K线类请求合计仍受 _hkus_kline_bucket (额度 10/min 的 4/5) 约束:
+        # "分时优先" 不是绕开它的理由。桶空则本次直接走原接口 —— 那里还会再判一次。
+        allowed = True
+        if _symbol_market(symbol) in ("hk", "us"):
+            with _hkus_lock:
+                allowed = _hkus_kline_bucket.try_acquire()
+                if not allowed:
+                    log.warning(f"港美股K线限频跳过 {symbol} {period} (日内走势)")
+        # 新增取数路径按 af_limits 折算取令牌 (90% × 60 = 54/min), 桶空则本次用原接口
+        if allowed and _intraday_budget.try_acquire():
+            try:
+                af = get_af()
+                df = af.klines.intraday(symbol, period=period, count=count,
+                                        to_dataframe=True)
+                answered[0] = True          # 上游答了 (可能是 0 根)
+            except Exception as e:
+                if af_intraday.is_permission_error(e):
+                    af_intraday.note_denied(e, symbol)
+                else:
+                    log.warning(f"AlphaFeed 日内走势失败 {symbol} {period}: "
+                                f"{redact_message(e)}")
+                df = None
+            if df is not None and len(df) > 0:
+                out = _normalize(df, prefer_time=True)
+                if out is not None:
+                    return out
+                # 开盘头几分钟只有 1~4 根: _normalize 的「>=5 根」门槛会判无数据,
+                # 而日内走势接口不带前一日尾巴, 永远凑不够。交给原接口 —— 它带回
+                # 前一日的尾部能过门槛, 路由再截当日, 于是 09:31 也能画出一根 bar。
+                log.info(f"日内走势当日仅 {len(df)} 根 (太少), 回退分钟K批量")
+            else:
+                log.info(f"日内走势无当日数据 {symbol} {period}, 回退分钟K批量")
+        else:
+            perf.bump("intraday_budget_skip")
+    out, answered[1] = _fetch_af_minute(symbol, period, count, adjust=adjust)
+    if out is not None:
+        return out
+    if denied or all(answered):
+        raise kline_source.SourceSkip(
+            f"{'本市场当日无日内走势权限' if denied else '上游答复但该标的无数据'}"
+            f" (symbol={symbol} {period})")
+    return None
+
+
+def _fetch_af_minute(symbol, period, count, adjust="forward"):
+    """分钟K批量取数, 返回 (标准 df 或 None, 上游是否答复)。
+
+    第二个返回值给分时源用来区分"能力缺口"与"上游故障": 异常/超时 → False (要记故障),
+    HTTP 200 但 0 根 → True (这个标的没数据, 不该惩罚源)。分钟K视图只要取到没取到。
+    """
     adj = _af_adjust(adjust)
     # 港/美股 K线限频 (额度 10/min 的 4/5); 桶空返回 None 走缓存/回退
     if _symbol_market(symbol) in ("hk", "us"):
         with _hkus_lock:
             if not _hkus_kline_bucket.try_acquire():
                 log.warning(f"港美股K线限频跳过 {symbol} {period}")
-                return None
+                return None, False
     try:
         af = get_af()
         dfs = af.klines.batch(
@@ -1027,11 +1131,17 @@ def _fetch_minute_kline(symbol, period, count, adjust="forward"):
         )
         df = dfs.get(symbol) if dfs else None
     except Exception as e:
-        log.warning(f"AlphaFeed 获取分钟K线失败 {symbol} {period}: {e}")
-        return None
+        log.warning(f"AlphaFeed 获取分钟K线失败 {symbol} {period}: "
+                    f"{redact_message(e)}")
+        return None, False
     if df is None or len(df) == 0:
-        return None
-    return _normalize(df, prefer_time=True)
+        return None, True
+    return _normalize(df, prefer_time=True), True
+
+
+def _fetch_minute_kline(symbol, period, count, adjust="forward"):
+    """从 AlphaFeed 拉取分钟 K 线, 返回标准化 DataFrame 或 None。"""
+    return _fetch_af_minute(symbol, period, count, adjust=adjust)[0]
 
 
 def _fetch_af_kline(symbol, period, count, adjust="forward"):
@@ -1657,8 +1767,166 @@ def _depth_trade_date():
     return now.strftime("%Y-%m-%d") if market_hours.is_trading_day(now) else None
 
 
+_DEPTH_LEVEL_KEYS = ("bid_prices", "bid_volumes", "ask_prices", "ask_volumes")
+
+
+def _depth_array(payload, key):
+    """取上游/落档给的档位数组; 非序列 (脏数据、老格式) 一律当空。
+
+    读路径上的一行脏数据 (例如手改或截断后的 `"bid_prices": 1.0`) 不能让 /api/depth 打 500:
+    它只是"这份盘口没有档位"。
+    """
+    value = payload.get(key) if isinstance(payload, dict) else None
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _copy_depth_entry(entry):
+    """存一份副本 (含四个档位列表)。TTL 缓存与 /api/depth 的响应持有的是同一个 dict,
+    就地改一下就会顺带改掉落档的那份 —— 日缓存必须跟它们解耦。"""
+    out = dict(entry)
+    for key in _DEPTH_LEVEL_KEYS:
+        if isinstance(out.get(key), list):
+            out[key] = list(out[key])
+    return out
+
+
+def _clean_depth_levels(prices, volumes):
+    """规整一档价量: 价格 <= 0 的档位视为不存在, 价与量一起置 None。
+
+    上游缺档位时不是少给几项, 而是补 0.0 —— 588200.SH 2026-09-18 14:59 (收盘集合
+    竞价) 拿到 bid_prices=[1.184, 0, 0, 0, 0] / bid_volumes=[174867, 656, 0, 0, 0]。
+    原样下发时前端 `VisualLive.price(0)` 会画出一个并不存在的 "0" 报价 (那 656 手
+    则是无主的量)。长度沿用上游给的档数, 不做补齐/截断 —— API 契约仍是"映射上游字段"。
+    """
+    if not isinstance(prices, (list, tuple)):
+        return [], []
+    out_prices, out_volumes = [], []
+    for i in range(len(prices)):
+        p = _safe_float(prices[i])
+        if p is None or p <= 0:
+            out_prices.append(None)
+            out_volumes.append(None)
+            continue
+        v = _safe_float(volumes[i]) if isinstance(volumes, (list, tuple)) and i < len(volumes) else None
+        out_prices.append(p)
+        out_volumes.append(v)
+    return out_prices, out_volumes
+
+
+def _clean_depth_payload(d):
+    """上游盘口 → 清洗后的 {bid_prices, bid_volumes, ask_prices, ask_volumes}; 全无效返回 None。
+
+    None 表示"这份盘口一档有效价都没有"(停牌/未开盘时上游给全 0 占位), 调用方要当
+    "没拿到数据"处理 —— 既不该 set 进缓存, 也不该当成"五档是空的"答给前端。
+    """
+    if not isinstance(d, dict):
+        return None
+    bids, bid_volumes = _clean_depth_levels(d.get("bid_prices"), d.get("bid_volumes"))
+    asks, ask_volumes = _clean_depth_levels(d.get("ask_prices"), d.get("ask_volumes"))
+    if not any(p is not None for p in bids + asks):
+        return None
+    return {"bid_prices": bids, "bid_volumes": bid_volumes,
+            "ask_prices": asks, "ask_volumes": ask_volumes}
+
+
+# 塌陷盘口的形态判据: 买1 == 卖1 是集合竞价虚拟撮合价的签名 (真实盘口同价挂两侧会立即
+# 撮合), 有效档位 <= 1 的快照也没有"当天最后一份"的回放价值。容差 1e-6: 上游浮点会带
+# 17.650000000000002 这种噪声, 而最小 tick 是 0.001, 不会误伤相邻档。
+_DEPTH_COLLAPSED_MAX_LEVELS = 1
+_DEPTH_PRICE_EPS = 1e-6
+
+
+def _depth_level_count(payload):
+    """有效档位总数 (价非空即有效)。"""
+    levels = _depth_array(payload, "bid_prices") + _depth_array(payload, "ask_prices")
+    return sum(1 for p in levels if p is not None)
+
+
+def _is_collapsed_depth(payload):
+    """这份盘口是不是"塌陷"的 —— 与时段无关的第二道判据 (第一道是 depth_book_replayable)。
+
+    时段判据只覆盖已知的集合竞价窗口; 这条按盘口**形态**兜底, 覆盖上游偶发的单档快照、
+    临停复牌瞬间等任何"这不是一份五档"的情形。涨停/跌停的单边空不算塌陷 (一侧 5 档、
+    另一侧全空, 有效档数正常) —— 否则封板票永远进不了当日快照。全 0 的盘口在
+    _clean_depth_payload 那层已返回 None, 到不了这里。
+    """
+    if not isinstance(payload, dict):
+        return True
+    bids = _depth_array(payload, "bid_prices")
+    asks = _depth_array(payload, "ask_prices")
+    if _depth_level_count(payload) <= _DEPTH_COLLAPSED_MAX_LEVELS:
+        return True
+    bid1 = bids[0] if bids else None
+    ask1 = asks[0] if asks else None
+    if bid1 is None or ask1 is None:
+        return False
+    return abs(float(bid1) - float(ask1)) < _DEPTH_PRICE_EPS
+
+
+# 「手里这份是不是收盘后抓的」判据: 用条目自己的 _revision (抓取时刻, time_ns()//1000 微秒)
+# 而不是上游 timestamp, 也不用"离收盘几分钟"的容差 —— 实测差距与钟点无关:
+#   10:33 那份只差 1 tick, 14:52 那份差 17 tick (41.52→41.35), 而七只票的五档**量全都变了**。
+# 差多少取决于"这之后价格动没动过", 所以唯一说得通的门槛是"当天连续竞价结束了没有"(15:00)。
+_DEPTH_CLOSE_MIN = 15 * 60
+_DEPTH_CST = dt_mod.timezone(dt_mod.timedelta(hours=8))
+
+
+def _depth_fetch_time(payload):
+    """条目的抓取时刻 (CST, naive); 认不出返回 None。"""
+    try:
+        usec = float((payload or {}).get("_revision"))
+    except (TypeError, ValueError):
+        return None
+    if usec <= 0:
+        return None
+    secs = usec / 1e6 if usec > 1e14 else usec      # 兼容按"秒"写盘的老条目
+    if not (1e9 <= secs <= 4e9):
+        return None
+    return dt_mod.datetime.fromtimestamp(secs, _DEPTH_CST)
+
+
+def _depth_snapshot_stale(payload, trade_date=None):
+    """这份快照是不是「当天收盘前抓的」 (=> 盘后读到它就该花一个令牌换一份收盘后的)。
+
+    判据 = 抓取时刻落在**它所属交易日**的 15:00 之前。**必须带上日期维度**: 周末/假期
+    15:00 之前回源换来的那份, 抓取日期晚于所属交易日 (= 上一个交易日收盘之后), 属于
+    "收盘后那份", 不能再判陈旧 —— 否则周末上午每看一次就回源一次, 永不收敛 (实测: 连看
+    3 次 = 3 次上游调用, 而设计上"每个标的每天最多回源一次")。
+
+    用我们自己记的抓取时刻 (`_revision`) 而不是上游 timestamp: 盘后上游给的是它自己的
+    刷新时刻, 那是供应商行为, 不该当协议依赖 (按上游时间戳判会在它改成给"最后一笔"的
+    时刻后变成每次视图都回源)。老条目没有可用的 `_revision` 时退回上游 timestamp。
+    """
+    if not isinstance(payload, dict):
+        return True
+    moment = _depth_fetch_time(payload)
+    if moment is None:
+        secs = _safe_epoch(payload.get("timestamp"))
+        if secs is None:
+            return True
+        moment = dt_mod.datetime.fromtimestamp(secs, _DEPTH_CST)
+    if trade_date and moment.strftime("%Y-%m-%d") > str(trade_date):
+        return False
+    return moment.hour * 60 + moment.minute < _DEPTH_CLOSE_MIN
+
+
+def _is_older_depth(value, prev):
+    """新盘口是否比已存的那份更旧 (按上游 timestamp)。只新不旧 —— 一次滞后的响应不该把
+    更好的那份顶掉; 任一时间戳认不出就不拦 (交给形态判据)。"""
+    if not isinstance(prev, dict):
+        return False
+    new_secs, old_secs = _safe_epoch(value.get("timestamp")), _safe_epoch(prev.get("timestamp"))
+    if new_secs is None or old_secs is None:
+        return False
+    return new_secs < old_secs
+
+
 def _depth_day_get(symbol):
-    """盘后/周末读最后交易日五档；进入下一交易日即失效。"""
+    """盘后/周末读最后交易日五档；进入下一交易日即失效。
+
+    读出时再过一遍清洗: 磁盘上可能留着修复前写入的补零盘口 (脏数据不该靠"等它自己
+    过期"来治), 内存缓存回写清洗后的副本, 不然每次读都要重算。
+    """
     global _depth_day_cache_date
     with _depth_day_cache_lock:
         today = _depth_trade_date()
@@ -1667,7 +1935,7 @@ def _depth_day_get(symbol):
                 _depth_day_cache.clear()
                 _depth_day_cache_date = None
                 return None
-            return _depth_day_cache.get(symbol)
+            return _clean_depth_entry(symbol, _depth_day_cache.get(symbol))
         try:
             raw = json.loads(_DEPTH_DAY_CACHE_FILE.read_text(encoding="utf-8"))
             cache_date = raw.get("trade_date")
@@ -1676,21 +1944,51 @@ def _depth_day_get(symbol):
                     return None
                 _depth_day_cache_date = cache_date
                 _depth_day_cache.update(raw["rows"])
-                return _depth_day_cache.get(symbol)
+                return _clean_depth_entry(symbol, _depth_day_cache.get(symbol))
         except Exception:
             pass
     return None
 
 
+def _clean_depth_entry(symbol, entry):
+    """当日快照出库清洗 (调用方持 _depth_day_cache_lock); 无有效档位则丢弃。"""
+    if not isinstance(entry, dict):
+        return None
+    levels = _clean_depth_payload(entry)
+    if levels is None:
+        return None
+    cleaned = {**entry, **levels}
+    _depth_day_cache[symbol] = cleaned
+    return cleaned
+
+
 def _depth_day_set(symbol, trade_date, value):
-    if not trade_date:
+    """写当日快照 (时段门槛由调用点把关)。
+
+    形态判据放在这里而不是调用点: AF / 麦蕊 / 将来新增的取数路径共用一道门, 不靠调用点
+    自觉。被拒时打一条 warning + 计数 —— 这是"上游又在某个时刻给了不是五档的东西"唯一
+    的留痕 (不接 source_alert: 集合竞价塌陷是预期内的市场状态, 每天推一条会变噪音)。
+    """
+    if not trade_date or not isinstance(value, dict):
+        return
+    if _is_collapsed_depth(value):
+        bids = value.get("bid_prices") or []
+        asks = value.get("ask_prices") or []
+        perf.bump("depth_day_reject")
+        log.warning("五档快照不入库 (盘口塌陷) %s: bid1=%s ask1=%s 有效档=%d ts=%s",
+                    symbol, bids[0] if bids else None, asks[0] if asks else None,
+                    _depth_level_count(value), value.get("timestamp"))
         return
     global _depth_day_cache_date
     with _depth_day_cache_lock:
         if _depth_day_cache_date != trade_date:
             _depth_day_cache.clear()
-        _depth_day_cache_date = trade_date
-        _depth_day_cache[symbol] = value
+            _depth_day_cache_date = trade_date
+        elif _is_older_depth(value, _depth_day_cache.get(symbol)):
+            # 只新不旧 (仅在同一天内比较: 跨日的旧条目马上会被上面清掉, 不该挡住新一天)
+            perf.bump("depth_day_stale_skip")
+            return
+        _depth_day_cache[symbol] = _copy_depth_entry(value)
         try:
             _DEPTH_DAY_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
             tmp = _DEPTH_DAY_CACHE_FILE.with_suffix(".tmp")
@@ -1698,6 +1996,8 @@ def _depth_day_set(symbol, trade_date, value):
             tmp.replace(_DEPTH_DAY_CACHE_FILE)
         except Exception as e:
             log.warning("写入当日五档缓存失败: %s", _sanitize_error(e))
+            return
+    perf.bump("depth_day_write")
 
 
 def _depth_token_bucket():
@@ -1728,11 +2028,25 @@ def _fetch_depth_locked(symbol):
     if cached is not None:
         return cached
     trade_date = _depth_trade_date()
+    day_cached = None
+    refresh = False
     # 非活跃时段 (盘前/午休/收盘) 不再请求供应商，展示当天最后一份五档;
     # 集合竞价期五档仍有意义 (虚拟撮合队列), 要走实时拉取。
     if not market_hours.is_live():
         day_cached = _depth_day_get(symbol)
-        if day_cached is not None:
+        # 手里那份可能只是"你早上看它时"的盘口 (写入是请求驱动的)。实测盘后上游给的正是
+        # 当天最后一份连续竞价盘口, 而"差多少"跟钟点无关 (14:52 那份差 17 tick、10:33 那份
+        # 只差 1 tick, 但七只票的五档量全变了) —— 所以只要手里这份是**收盘前抓的**, 就花
+        # 一个令牌换一份收盘后的: 拿到了顶掉内存与磁盘上那份 (之后不用再花令牌), 桶空/上游
+        # 拿不到就退回手里这份, 不能变空。
+        # 塌陷的旧条目 (修复前写盘的补零/单档盘口, 例如线上那条 14:59 的) 同样要换: 留着它
+        # 只是把竞价那一刻一直摆到晚上。
+        # 只在 A股 判: 港美股不适用 A股 时段口径, 且它们的盘中在本口径里本就落在非 live。
+        refresh = (day_cached is not None
+                   and _symbol_market(symbol) == "cn"
+                   and (_depth_snapshot_stale(day_cached, _depth_day_cache_date)
+                        or _is_collapsed_depth(day_cached)))
+        if day_cached is not None and not refresh:
             return day_cached
     # AlphaFeed 优先；无 AF key、AF 限流或返回空时回退麦蕊五档。
     if AF_API_KEY and _depth_token_bucket().try_acquire(1):
@@ -1742,41 +2056,40 @@ def _fetch_depth_locked(symbol):
             # 兼容旧版 SDK 可能返回 {data: {...}} 的包装格式。
             if isinstance(d, dict) and isinstance(d.get("data"), dict):
                 d = d["data"]
-            if isinstance(d, dict) and d.get("bid_prices"):
-                out = {
-                    "symbol": symbol,
-                    "timestamp": d.get("timestamp"),
-                    "bid_prices": d.get("bid_prices") or [],
-                    "bid_volumes": d.get("bid_volumes") or [],
-                    "ask_prices": d.get("ask_prices") or [],
-                    "ask_volumes": d.get("ask_volumes") or [],
-                }
+            levels = _clean_depth_payload(d)
+            if levels is not None:
+                out = {"symbol": symbol, "timestamp": d.get("timestamp"), **levels}
                 out["_revision"] = time.time_ns() // 1000
                 _depth_cache.set(symbol, out, fetched_at=fetched_at)
-                # 日缓存只收连续竞价的盘口: 收盘后回放要的是"当天盘中最后一份",
-                # 不能把 09:20 的集合竞价队列当成收盘盘口 (任何盘中拉取都会覆盖)
-                if market_hours.in_session():
-                    _depth_day_set(symbol, trade_date, out)
+                # 留档口径见 market_hours.depth_book_replayable: 盘中 + 午休/盘后/非交易日
+                # 都留 (盘后那份正是回放要的), 只有两个集合竞价窗口与盘前不留 —— 那三段给的
+                # 不是五档 (盘前那份甚至还是上一个交易日的)。
+                if market_hours.depth_book_replayable():
+                    _depth_day_set(symbol, _depth_snapshot_key(trade_date), out)
                 return out
         except Exception as e:
             log.warning(f"AlphaFeed 获取五档失败 {symbol}: {_sanitize_error(e)}")
 
     if not MAIRUI_API_KEY or not _mr_depth_bucket.try_acquire(1):
-        return None
+        return day_cached
     try:
         raw = get_mr().stock_real_five(symbol.split(".")[0])
     except Exception as e:
         log.warning(f"麦蕊获取五档失败 {symbol}: {_sanitize_error(e)}")
-        return None
+        return day_cached
     row = raw[0] if isinstance(raw, list) and raw else raw if isinstance(raw, dict) else None
     if not isinstance(row, dict):
-        return None
-    bids = [_safe_float(row.get(f"pb{i}") if row.get(f"pb{i}") is not None else row.get("pb")) for i in range(1, 6)]
-    bid_volumes = [_safe_float(row.get(f"vb{i}") if row.get(f"vb{i}") is not None else row.get("vb")) for i in range(1, 6)]
-    asks = [_safe_float(row.get(f"ps{i}") if row.get(f"ps{i}") is not None else row.get("ps")) for i in range(1, 6)]
-    ask_volumes = [_safe_float(row.get(f"vs{i}") if row.get(f"vs{i}") is not None else row.get("vs")) for i in range(1, 6)]
-    if not any(v is not None for v in bids + asks):
-        return None
+        return day_cached
+    bids, bid_volumes = _clean_depth_levels(
+        [row.get(f"pb{i}") if row.get(f"pb{i}") is not None else row.get("pb") for i in range(1, 6)],
+        [row.get(f"vb{i}") if row.get(f"vb{i}") is not None else row.get("vb") for i in range(1, 6)],
+    )
+    asks, ask_volumes = _clean_depth_levels(
+        [row.get(f"ps{i}") if row.get(f"ps{i}") is not None else row.get("ps") for i in range(1, 6)],
+        [row.get(f"vs{i}") if row.get(f"vs{i}") is not None else row.get("vs") for i in range(1, 6)],
+    )
+    if not any(p is not None for p in bids + asks):
+        return day_cached
     out = {
         "symbol": symbol,
         "timestamp": _safe_epoch(row.get("t")) or time.time(),
@@ -1787,10 +2100,25 @@ def _fetch_depth_locked(symbol):
         "_revision": time.time_ns() // 1000,
     }
     _depth_cache.set(symbol, out)
-    # 同上: 日缓存只收连续竞价盘口
-    if market_hours.in_session():
-        _depth_day_set(symbol, trade_date, out)
+    # 同上: 留档口径见 market_hours.depth_book_replayable
+    if market_hours.depth_book_replayable():
+        _depth_day_set(symbol, _depth_snapshot_key(trade_date), out)
     return out
+
+
+def _depth_snapshot_key(trade_date):
+    """当日快照落盘用的交易日 key。
+
+    当天是交易日就用当天; 非交易日用**最近一个已收盘的交易日** (周末/假期回源取到的还是
+    那一天那份) —— 不能用 `_depth_day_cache_date` 兜底: 缓存文件缺失/不可读时它是 `None`,
+    `_depth_day_set` 会直接 early-return, 那份刷新结果既不落盘也不进内存, 于是每次查看都要
+    重新回源 (实测: 全新进程 + 无缓存文件 + 周六 16:00, 连看 3 次 = 3 次上游调用)。
+    文件里那个日期只作为最后的兜底 (日历都查不到时)。
+    """
+    if trade_date:
+        return trade_date
+    day = market_hours.last_trading_day()
+    return day.strftime("%Y-%m-%d") if day else _depth_day_cache_date
 
 
 # ── 全量股票搜索缓存 (内存 + 磁盘, 24h TTL, 用到时刷新) ──

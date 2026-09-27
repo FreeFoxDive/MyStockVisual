@@ -105,6 +105,37 @@ def _none_if_nan(v):
     return None if v is None or (isinstance(v, float) and np.isnan(v)) else float(v)
 
 
+def _session_times(n, day=DAY):
+    """末相位全天 240 个槽位时刻 (09:31-11:30 + 13:01-15:00) 的前 n 个。
+
+    n=120 正好是午休半场 (09:31..11:30), n=121 多一根 13:01。
+    """
+    out = []
+    for start, end in (((9, 31), (11, 30)), ((13, 1), (15, 0))):
+        m, stop = start[0] * 60 + start[1], end[0] * 60 + end[1]
+        while m <= stop:
+            out.append(f"{day} {m // 60:02d}:{m % 60:02d}")
+            m += 1
+    return out[:n]
+
+
+def _session_df(n, day=DAY, base=34.0):
+    """某交易日"已走了 n 分钟"的分钟 df (分钟粒度、时间与真实分时口径一致)。"""
+    idx = pd.to_datetime(_session_times(n, day))
+    close = [base + i * 0.01 for i in range(n)]
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": [c + 0.05 for c in close],
+            "low": [c - 0.05 for c in close],
+            "close": close,
+            "volume": [1000.0 + i for i in range(n)],
+            "amount": [(1000.0 + i) * 100 * c for i, c in enumerate(close)],
+        },
+        index=idx,
+    )
+
+
 class FakeIntradaySource:
     """冒充 kline_source: 记录调用参数, 回一份固定分钟 df。"""
 
@@ -159,13 +190,17 @@ class IntradayRouteTest(unittest.TestCase):
         with self._mock_source():
             self.assertEqual(self.client.get("/api/intraday").status_code, 400)
 
-    def test_fetch_uses_minute_source_forward_adjusted(self):
-        """分时的数据来源口径: minute 分类 + 前复权 (与图表默认口径一致)。"""
+    def test_fetch_uses_intraday_source_forward_adjusted(self):
+        """分时的数据来源口径: intraday 分类 + 前复权 (与图表默认口径一致)。
+
+        类别必须是 "intraday" 而不是 "minute": 后者是跨天分钟K历史视图, 分时要的是
+        只回当日的日内走势源 (接口优先与当日熔断在 market._fetch_intraday_kline 里)。
+        """
         with self._mock_source():
             self.client.get(f"/api/intraday?symbol={SYM}&period=1m&count=240")
         self.assertEqual(len(self.source.calls), 1)
         call = self.source.calls[0]
-        self.assertEqual(call["category"], "minute")
+        self.assertEqual(call["category"], "intraday")
         self.assertEqual(call["adjust"], "forward")
         self.assertEqual(call["symbol"], SYM)
         self.assertEqual(call["period"], "1m")
@@ -259,6 +294,98 @@ class IntradayRouteTest(unittest.TestCase):
         self.assertEqual(len(got), len(_AVG_CLOSES), "只回当日 bar")
         for i, want in enumerate(_vwap(_AVG_CLOSES, _AVG_VOLS)):
             self.assertAlmostEqual(got[i], want, places=6, msg="前一日成交量被算进了均价")
+
+
+class IntradayPhaseContractTest(unittest.TestCase):
+    """各时段/交易日的返回契约: 盘前 & 非交易日回上一交易日, 午休只回上午。
+
+    路由本身不看时钟 —— 它只做"取回来 → 截到最后一个交易日"。所以这几条钉的是
+    "各相位下前端会收到什么", 前端据此把标题写成数据那一天 (见 test_chart_period_label_js
+    的 test_intraday_title_across_session_phases)。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        cls._db = Path(cls._tmpdir.name) / "test_intraday_phase.db"
+        cls._orig_db = trades._db_path
+        trades.init_db(cls._db)
+        trades.create_user("phase_u", "password123")
+        cls.uid = trades.list_users()[0]["id"]
+        from app import create_app
+        cls.app = create_app()
+
+    @classmethod
+    def tearDownClass(cls):
+        trades._db_path = cls._orig_db
+        cls._tmpdir.cleanup()
+
+    def setUp(self):
+        _reset_rate_limit()
+        from api import kline as kline_mod
+        self.kline_mod = kline_mod
+        self.client = self.app.test_client()
+        token, _ = trades.create_session(self.uid)
+        self.client.set_cookie("session", token)
+        _csrf(self.client)
+
+    def _get(self, df):
+        with mock.patch.object(self.kline_mod, "kline_source", FakeIntradaySource(df)):
+            return self.client.get(f"/api/intraday?symbol={SYM}&period=1m&count=240")
+
+    def test_no_bars_today_returns_previous_trading_day(self):
+        """盘前 (09:15-09:31) 与非交易日: 当日一根 bar 都没有 → 回上一交易日那批。
+
+        非交易日服务端没有"今天"这个概念可借, 盘前则是源还没出当日 bar —— 两条路都落到
+        "最后一个是上一交易日", 所以 date 必须是上一交易日, 前端标题才不会把昨天的分时
+        说成今天。
+        """
+        r = self._get(_session_df(240, day=PREV_DAY))
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["date"], PREV_DAY, "没有当日数据时必须回上一交易日的日期")
+        self.assertEqual(len(body["bars"]), 240)
+        self.assertEqual(body["bars"][0]["time"], "09:31")
+        self.assertEqual(body["bars"][-1]["time"], "15:00")
+
+    def test_lunch_break_returns_morning_only(self):
+        """午休: 只回上午 120 根 (下午那半段不许凭空补), 均价只按上午累计。"""
+        r = self._get(_session_df(120))
+        self.assertEqual(r.status_code, 200)
+        bars = r.get_json()["bars"]
+        self.assertEqual(len(bars), 120, "半场就是 120 根")
+        self.assertEqual(bars[0]["time"], "09:31")
+        self.assertEqual(bars[-1]["time"], "11:30", "上午最后一根是 11:30")
+        closes = [b["close"] for b in bars]
+        vols = [b["volume"] for b in bars]
+        for i, want in enumerate(_vwap(closes, vols)):
+            self.assertAlmostEqual(bars[i]["avg_price"], want, places=6,
+                                   msg="午休的均价必须只累计上午")
+        # 午休那半小时 (11:31-13:00) 不产生任何 bar; 下午的槽位由前端按固定窗口留空
+        self.assertFalse([b["time"] for b in bars if "11:30" < b["time"] < "13:01"],
+                         "午休区间不该有 bar")
+
+    def test_afternoon_first_bar_follows_the_lunch_gap(self):
+        """第 121 根是 13:01 (不是 11:31) —— 分时的时间轴靠这根接上下午。"""
+        r = self._get(_session_df(121))
+        bars = r.get_json()["bars"]
+        self.assertEqual(len(bars), 121)
+        self.assertEqual(bars[119]["time"], "11:30")
+        self.assertEqual(bars[120]["time"], "13:01")
+
+    def test_empty_source_returns_404(self):
+        """源完全没数据 → 404 (而不是 200 + 空 bars, 后者会让前端画出空图又不提示)。"""
+        r = self._get(pd.DataFrame())
+        self.assertEqual(r.status_code, 404)
+
+    def test_bars_never_mix_two_days(self):
+        """跨日数据一律只留最后一天: 盘前拿到的"昨日尾巴 + 今日"里, 今日一根都不许漏进昨日那批。"""
+        mixed = pd.concat([_session_df(240, day=PREV_DAY), _session_df(3)])
+        r = self._get(mixed)
+        bars = r.get_json()["bars"]
+        self.assertEqual(len(bars), 3, "只留今天这 3 根")
+        self.assertEqual([b["time"] for b in bars], ["09:31", "09:32", "09:33"])
+        self.assertEqual(r.get_json()["date"], DAY)
 
 
 if __name__ == "__main__":
