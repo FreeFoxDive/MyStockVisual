@@ -1004,10 +1004,10 @@ body {
       <button type="button" class="period-scroll" id="period-scroll-left" aria-label="向左滚动周期" title="向左滚动周期">‹</button>
       <span class="period-viewport" id="period-viewport">
       <span class="period-group">
+      <button id="btn-intraday" onclick="switchPeriod('intraday')" title="分时 (快捷键 4)">分时</button>
       <button id="btn-1d" class="active" onclick="switchPeriod('1d')" title="日K (快捷键 1)">日K</button>
       <button id="btn-1w" onclick="switchPeriod('1w')" title="周K (快捷键 2)">周K</button>
       <button id="btn-1M" onclick="switchPeriod('1M')" title="月K (快捷键 3)">月K</button>
-      <button id="btn-intraday" onclick="switchPeriod('intraday')" title="分时 (快捷键 4)">分时</button>
       <button id="btn-1m" onclick="switchPeriod('1m')" title="1分 (快捷键 5)">1分</button>
       <button id="btn-5m" onclick="switchPeriod('5m')" title="5分 (快捷键 6)">5分</button>
       <button id="btn-15m" onclick="switchPeriod('15m')" title="15分 (快捷键 7)">15分</button>
@@ -1385,7 +1385,7 @@ const MINUTE_PERIODS = ['1m', '5m', '15m', '30m', '60m'];
 const MINUTE_COUNTS = { '1m': 1200, '5m': 480, '15m': 320, '30m': 320, '60m': 1000 };
 // 日K: 3年可见 (3×252) + RSI 收敛 warmup 250
 const DAILY_COUNT = 3 * 252 + 250; // 1006
-const ALL_PERIODS = ['1d', '1w', '1M', 'intraday', ...MINUTE_PERIODS];
+const ALL_PERIODS = ['intraday', '1d', '1w', '1M', ...MINUTE_PERIODS];
 // 周期中文名: 图表左上角的周期标题与 #btn-<period> 按钮文案共用一张表
 // (周期只体现在按钮高亮上时, 截图导出/窄屏都认不出当前看的是哪个周期)。
 const PERIOD_LABELS = {
