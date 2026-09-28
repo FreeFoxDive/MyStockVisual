@@ -319,6 +319,21 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertIn("marketHintRow,", body, "行要进返回数组")
         self.assertIn("].filter(r => r)", body, "空行由既有 filter 丢掉")
 
+    def test_compact_side_keeps_key_rows(self):
+        """641~900 只收次要行: 现价/涨跌停/换手/量比/估值/状态留下, 顺序不动。"""
+        body = _extract_fn(self.src, "infoPanelRows")
+        self.assertIn("markInfoMinor", body)
+        html = _extract_fn(self.src, "stockInfoRowHtml")
+        self.assertIn("sp-minor", html)
+        self.assertIn("const INFO_KEEP_LABELS = {", body)
+        for label in ("名称", "代码", "现价", "涨停价", "跌停价", "换手", "量比", "PE", "PB", "溢价", "状态"):
+            self.assertIn("'" + label + "'", body[body.index("INFO_KEEP_LABELS"):body.index("INFO_KEEP_LABELS") + 280])
+        self.assertIn("@media (min-width: 641px) and (max-width: 900px)", self.src)
+        self.assertIn("#side-panel:not(.sp-expanded) .sp-minor { display: none; }", self.src)
+        self.assertIn('id="sp-expand"', self.src)
+        toggle = _extract_fn(self.src, "toggleSideCompact")
+        self.assertIn("saveConfig()", toggle, "展开状态按设备记住")
+
     def test_reopen_button_doubled(self):
         seg = self.src[self.src.index("#side-reopen {"):]
         css = seg[:seg.index("}")]

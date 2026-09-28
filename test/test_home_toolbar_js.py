@@ -316,6 +316,30 @@ class TabletLayoutTest(unittest.TestCase):
         phone = _css_block(self.src, "@media (max-width: 640px)")
         self.assertIn("#indicator-bar.show-extra {", phone,
                       "手机浮层那一行不能被平板块的 show-extra 换行带偏")
+        self.assertIn("position: absolute", extra, "展开后浮在图表上, 不把图表往下推")
+        self.assertIn("#ind-slot", self.tablet)
+        self.assertIn("height: 40px", self.tablet, "外层占住一行的高度")
+
+    def test_pad_surfaces_checked_extras_and_scroll_hints(self):
+        """已勾选的低频副图留在一行里; 放不下时有左右箭头, 不再只靠藏起来的滚动条。"""
+        self.assertIn("#indicator-bar .extra-ind.surface:has(input:checked)", self.tablet)
+        self.assertIn("#ind-scroll-left", self.src)
+        self.assertIn("#ind-scroll-right", self.src)
+        for anchor in ('id="chk-atr"', 'id="chk-wr"', 'id="chk-log"'):
+            tag = self.src[self.src.rindex("<label", 0, self.src.index(anchor)):self.src.index(">", self.src.index(anchor))]
+            self.assertIn("surface", tag, anchor)
+        # 缺口/信息/提示框不上浮
+        gap = self.src[self.src.rindex("<label", 0, self.src.index('id="lbl-gap"')):self.src.index(">", self.src.index('id="lbl-gap"'))]
+        self.assertNotIn("surface", gap)
+        self.assertIn('class="ind-tip"', self.src)
+        self.assertIn("#indicator-bar:not(.show-extra) .ind-tip { display: none; }", self.tablet)
+        fold = _extract_fn(self.src, "isPadFoldUi")
+        self.assertIn("isTabletUi()", fold)
+        self.assertIn("!isPhoneUi()", fold)
+        more = _extract_fn(self.src, "toggleIndMore")
+        self.assertIn("isPadFoldUi()", more, "平板展开不写入配置")
+        apply = _extract_fn(self.src, "applyConfig")
+        self.assertIn("if (!isPadFoldUi())", apply, "平板不恢复上次的展开")
 
     def test_phone_block_still_wins(self):
         """手机 (≤640) 不能被平板块带坏: 浮层照旧、不被 overflow 裁掉、字号仍 16px。"""
@@ -1102,6 +1126,46 @@ process.stdout.write(JSON.stringify(cases.map(c => infoDropPlan(c.items, c.avail
         for plan in out:
             self.assertTrue(plan is None or all(p in order for p in plan),
                             f"收起名单里出现了非统计字段: {plan}")
+
+    def test_info_drop_plan_reserves_button_width(self):
+        """「⋯ +N」的宽度要先从预算里扣掉, 否则按钮一出现这一行又会挤爆。"""
+        m = re.search(r"const INFO_DROP_ORDER = (\[[^\]]*\]);", self.src)
+        slack = re.search(r"const INFO_FIT_SLACK = ([0-9.]+);", self.src)
+        script = ("const INFO_DROP_ORDER = " + m.group(1) + ";\n"
+                  + "const INFO_FIT_SLACK = " + slack.group(1) + ";\n"
+                  + _extract_fn(self.src, "infoRowBudget") + "\n"
+                  + _extract_fn(self.src, "infoDropPlan") + "\n"
+                  + _extract_fn(self.src, "toolbarRowPlan") + """
+const cases = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(cases.map(c => ({
+  drop: infoDropPlan(c.items, c.avail, c.gap, c.reserve),
+  row: toolbarRowPlan(c.items, c.innerW, c.pad, c.gap, c.githubW, c.fnW, c.reserve),
+}))));
+""")
+        items = [{"id": i, "w": w, "on": True} for i, w in
+                 [("info-sym", 150), ("info-holding", 50), ("info-price", 48), ("info-change", 68),
+                  ("info-open", 53), ("info-high", 53), ("info-low", 53), ("info-pledge", 66),
+                  ("info-shares", 98), ("info-amount", 69), ("info-premium", 66), ("info-turnover", 80)]]
+        out = self._run(script, [
+            {"items": items, "avail": 920, "gap": 6, "reserve": 0,
+             "innerW": 1920, "pad": 24, "githubW": 32, "fnW": 680},
+            {"items": items, "avail": 920, "gap": 6, "reserve": 40,
+             "innerW": 1920, "pad": 24, "githubW": 32, "fnW": 680},
+        ])
+        self.assertEqual(out[0]["drop"], [], "不预留时 920 正好放下")
+        self.assertEqual(out[1]["drop"], ["info-pledge"], "预留 40px 后要多收质押")
+        self.assertEqual(out[0]["row"], {"rows": 1, "plan": []})
+        # 1920 的单行预算很宽, 扣 40 仍放得下; 用一条更紧的单行验证 reserve 传到 toolbarRowPlan
+        tight = self._run(script, [
+            {"items": items, "avail": 1, "gap": 6, "reserve": 0,
+             "innerW": 1376, "pad": 24, "githubW": 32, "fnW": 680},
+            {"items": items, "avail": 1, "gap": 6, "reserve": 80,
+             "innerW": 1376, "pad": 24, "githubW": 32, "fnW": 680},
+        ])
+        self.assertNotIn("info-turnover", tight[0]["row"]["plan"],
+                         "1376 不预留时换手还留得下 (与 test_toolbar_row_plan 一致)")
+        self.assertIn("info-turnover", tight[1]["row"]["plan"],
+                      "再扣按钮宽度后换手也得收")
 
     def test_dropdown_box_stays_in_viewport(self):
         """搜索下拉的限位几何 (抽真源码跑): 搜索框在工具栏行里的左缘随入口按钮数/断点变

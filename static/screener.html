@@ -38,6 +38,8 @@ button.primary { background: var(--btn-active); color: var(--btn-active-text); b
 .progress { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin: 10px 0; }
 .progress .fill { height: 100%; background: var(--btn-active); width: 0; transition: width 0.3s; }
 .hint { font-size: 12px; color: var(--text-secondary); }
+.unit-tag { font-size: 12px; color: var(--text-secondary); }
+#cond-hint { min-height: 1.2em; margin: 2px 0 4px; }
 .hint.warn { color: var(--warn-text); }
 #factor-bar { margin-top: 10px; font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 #factor-bar .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--up-text); margin-right: 5px; }
@@ -94,7 +96,8 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
         <option value="==">=</option>
       </select></span>
       <input type="number" id="cond-value" step="any" placeholder="数值">
-      <span id="range-wrap" style="display:none">~<input type="number" id="cond-value2" step="any" placeholder="上限"></span>
+      <span id="cond-unit" class="unit-tag" style="display:none"></span>
+      <span id="range-wrap" style="display:none">~<input type="number" id="cond-value2" step="any" placeholder="上限"><span id="cond-unit2" class="unit-tag"></span></span>
       <input type="text" id="cond-text" list="cond-options" placeholder="取值" style="display:none">
       <datalist id="cond-options"></datalist>
       <button id="btn-add" onclick="saveCond()">+ 添加条件</button>
@@ -108,6 +111,7 @@ td.sym a { color: var(--btn-active); text-decoration: none; }
         </select>
       </label>
     </div>
+    <div id="cond-hint" class="hint"></div>
     <div id="cond-list" style="font-size:12px;color:var(--text-secondary)">未添加条件</div>
     <div id="lock-hint" class="hint warn" style="display:none"></div>
     <div id="err"></div>
@@ -178,6 +182,33 @@ function statusText(r) {
 }
 function specOf(key) { return METRICS[key] || {}; }
 
+/** 下拉文案带单位, 无单位的指标不加括号。 */
+function metricMenuLabel(m) {
+  if (!m) return "";
+  return m.unit ? `${m.label}（${m.unit}）` : (m.label || "");
+}
+
+/** 输入区下方的填写说明: 单位怎么填 + 无单位指标的取值范围 + 后端 hint。
+ *  bool/text 没有数值, 只显示 hint。 */
+function condGuide(s) {
+  if (!s) return "";
+  const UNIT_NOTE = {
+    "万元": "单位万元，1 亿填 10000",
+    "%": "填 5 表示 5%（不是 0.05）",
+    "亿元": "单位亿元，例如 100 表示 100 亿",
+    "倍": "单位倍，例如 1.5 表示 1.5 倍",
+    "天": "单位天",
+  };
+  const kind = s.kind || (s.ops && s.ops[0] === "is" ? "bool" : "num");
+  if (kind === "bool" || kind === "text") return s.hint || "";
+  const parts = [];
+  if (s.unit && UNIT_NOTE[s.unit]) parts.push(UNIT_NOTE[s.unit]);
+  else if (s.unit) parts.push("单位" + s.unit);
+  if (!s.unit && s.domain) parts.push("取值范围 " + s.domain);
+  if (s.hint) parts.push(s.hint);
+  return parts.join(" · ");
+}
+
 /** 条件 → 可读文案, 如「RSI6 ≤ 20」「换手率 1 ~ 5」「站上 MA20」。 */
 function condLabel(c) {
   const s = specOf(c.metric);
@@ -196,7 +227,7 @@ async function loadMetrics() {
   METRICS = {};
   const sel = document.getElementById("cond-metric");
   sel.innerHTML = metricGroups.map(g => `<optgroup label="${esc(g.group)}">` +
-    g.metrics.map(m => `<option value="${esc(m.key)}">${esc(m.label)}</option>`).join("") +
+    g.metrics.map(m => `<option value="${esc(m.key)}">${esc(metricMenuLabel(m))}</option>`).join("") +
     `</optgroup>`).join("");
   metricGroups.forEach(g => g.metrics.forEach(m => { METRICS[m.key] = m; }));
   syncInputs();
@@ -213,6 +244,24 @@ function syncInputs() {
     (kind === "num" || kind === "range") ? "" : "none";
   document.getElementById("range-wrap").style.display = (kind === "range") ? "" : "none";
   document.getElementById("cond-text").style.display = (kind === "text") ? "" : "none";
+  const unit = s.unit || "";
+  const showNum = kind === "num" || kind === "range";
+  const unitEl = document.getElementById("cond-unit");
+  const unitEl2 = document.getElementById("cond-unit2");
+  if (unitEl) {
+    unitEl.textContent = unit;
+    unitEl.style.display = (showNum && unit) ? "" : "none";
+  }
+  if (unitEl2) {
+    unitEl2.textContent = unit;
+    unitEl2.style.display = (kind === "range" && unit) ? "" : "none";
+  }
+  const valueEl = document.getElementById("cond-value");
+  const value2El = document.getElementById("cond-value2");
+  if (showNum) valueEl.placeholder = unit ? `数值（${unit}）` : "数值";
+  if (kind === "range") value2El.placeholder = unit ? `上限（${unit}）` : "上限";
+  const hintEl = document.getElementById("cond-hint");
+  if (hintEl) hintEl.textContent = condGuide(s);
   if (kind === "num" && s.op) document.getElementById("cond-op").value = s.op;
   const dl = document.getElementById("cond-options");
   dl.innerHTML = (s.options || []).map(o => `<option value="${esc(o)}"></option>`).join("");

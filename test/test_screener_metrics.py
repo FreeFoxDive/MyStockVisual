@@ -41,6 +41,22 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(by_key["turnover"]["ops"], ["between"])
         self.assertEqual(by_key["above_ma20"]["ops"], ["is"])
 
+    def test_domain_is_published_but_not_in_version(self):
+        """取值范围只给页面做提示: 目录里有, 改它不改变口径指纹。"""
+        by_key = {m["key"]: m for c in sm.catalog() for m in c["metrics"]}
+        self.assertEqual(by_key["rsi6"]["domain"], "0~100")
+        self.assertEqual(by_key["wr14"]["domain"], "0~100")
+        self.assertEqual(by_key["cci14"]["domain"], "约 -300~300")
+        self.assertEqual(by_key["dmi_adx"]["domain"], "0~100")
+        self.assertEqual(by_key["kdj_j"]["domain"], "可超出 0~100")
+        self.assertEqual(by_key["above_ma20"]["domain"], "")
+        old = by_key["rsi6"]["domain"]
+        try:
+            sm.get("rsi6")["domain"] = "changed"
+            self.assertEqual(sm._registry_version(), sm.VERSION)
+        finally:
+            sm.get("rsi6")["domain"] = old
+
     def test_text_options_from_df(self):
         df = pd.DataFrame({"industry": ["银行", "白酒", "银行", "", None]})
         out = sm.text_field_options(df, ["industry", "missing"])

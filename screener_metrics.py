@@ -15,6 +15,8 @@ kind:
 
 scale: 列值的存储单位 → 展示单位的折算 (如市值列存元, 条件按亿元填 → scale=1e8)。
 判定与展示都用折算后的值, 页面看到的数字与用户填的阈值同一口径。
+
+domain: 仅展示用的取值范围 (如 RSI「0~100」), 不参与判定, 也不进口径指纹。
 """
 from __future__ import annotations
 
@@ -39,9 +41,11 @@ OPS_BY_KIND = {"num": (">=", "<=", ">", "<", "=="), "range": ("between",),
                "bool": ("is",), "text": ("==",)}
 
 
-def _m(key, label, group, kind, field, unit="", scale=1.0, op=">=", hint="", bars=0):
+def _m(key, label, group, kind, field, unit="", scale=1.0, op=">=", hint="", bars=0,
+       domain=""):
     return {"key": key, "label": label, "group": group, "kind": kind, "field": field,
-            "unit": unit, "scale": scale, "op": op, "hint": hint, "bars": bars}
+            "unit": unit, "scale": scale, "op": op, "hint": hint, "bars": bars,
+            "domain": domain}
 
 
 # ── 指标目录 (顺序即页面分组内的显示顺序) ──
@@ -64,19 +68,23 @@ METRICS = [
     _m("macd_hist_expand", "MACD 红柱放大", "技术指标", "bool", "macd_hist_expand"),
     # 技术指标 · KDJ / RSI / BOLL
     _m("kdj_golden", "KDJ 金叉", "技术指标", "bool", "kdj_golden"),
-    _m("kdj_j", "KDJ J 值", "技术指标", "num", "kdj_j", op="<=", hint="J<0 超卖"),
-    _m("kdj_k", "KDJ K 值", "技术指标", "num", "kdj_k", op="<="),
-    _m("rsi6", "RSI6", "技术指标", "num", "rsi6", op="<=", hint="<20 超卖"),
-    _m("rsi12", "RSI12", "技术指标", "num", "rsi12", op="<="),
-    _m("rsi24", "RSI24", "技术指标", "num", "rsi24", op="<="),
+    _m("kdj_j", "KDJ J 值", "技术指标", "num", "kdj_j", op="<=", hint="J<0 超卖",
+       domain="可超出 0~100"),
+    _m("kdj_k", "KDJ K 值", "技术指标", "num", "kdj_k", op="<=", domain="0~100"),
+    _m("rsi6", "RSI6", "技术指标", "num", "rsi6", op="<=", hint="<20 超卖", domain="0~100"),
+    _m("rsi12", "RSI12", "技术指标", "num", "rsi12", op="<=", domain="0~100"),
+    _m("rsi24", "RSI24", "技术指标", "num", "rsi24", op="<=", domain="0~100"),
     _m("boll_break_up", "突破 BOLL 上轨", "技术指标", "bool", "boll_break_up"),
     _m("boll_above_mid", "站上 BOLL 中轨", "技术指标", "bool", "boll_above_mid"),
     _m("boll_break_low", "跌破 BOLL 下轨", "技术指标", "bool", "boll_break_low"),
     # 技术指标 · 其他
-    _m("wr14", "WR14", "技术指标", "num", "wr14", op="<=", hint="越小越强"),
-    _m("cci14", "CCI14", "技术指标", "num", "cci14", op=">=", hint=">100 强势"),
+    _m("wr14", "WR14", "技术指标", "num", "wr14", op="<=", hint="越小越强",
+       domain="0~100"),  # 东财口径: 100*(HHV-C)/(HHV-LLV), 不是 -100~0
+    _m("cci14", "CCI14", "技术指标", "num", "cci14", op=">=", hint=">100 强势",
+       domain="约 -300~300"),
     _m("bias6", "BIAS6", "技术指标", "num", "bias6", "%", op="<=", hint="负值越大越超跌"),
-    _m("dmi_adx", "DMI ADX", "技术指标", "num", "dmi_adx", op=">=", hint="趋势强度"),
+    _m("dmi_adx", "DMI ADX", "技术指标", "num", "dmi_adx", op=">=", hint="趋势强度",
+       domain="0~100"),
     _m("atr_pct", "ATR% (波动)", "技术指标", "num", "atr_pct", "%", op="<="),
 
     # 量价
@@ -111,6 +119,10 @@ METRICS = [
     _m("industry", "所处行业", "基本面/估值", "text", "industry", hint="东财业绩报表口径"),
 
     # 资金与筹码
+    # 单位核对 (2026-09, 本地无因子快照, 按写入源):
+    # main_net_inflow ← 麦蕊 zljlr, 单位元 (api/mr_data.py), scale=1e4 后按万元填;
+    # main_net_ratio ← zljlrl 已是百分数; pledge_ratio / etf_premium / 换手 / 筹码
+    # 同样是 0~100 的百分数 (筹码在 factors.py 里 ×100), 不是 0~1 的小数。
     _m("main_net_inflow_wan", "主力净流入", "资金与筹码", "num", "main_net_inflow", "万元",
        scale=1e4, op=">="),
     _m("main_net_ratio", "主力净流入率", "资金与筹码", "num", "main_net_ratio", "%", op=">="),

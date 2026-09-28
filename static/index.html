@@ -255,6 +255,35 @@ body {
    用类而不是内联: 数据侧写 display 时赋 '' 等于撤掉内联声明, 所以这条能生效; 反过来数据到达
    也顶不掉这个类。不加 !important —— 那会盖住数据侧「没数据就不显示」的硬闸门。 */
 #toolbar .info-group > .rd-drop { display: none; }
+/* 顶栏放不下、且左侧信息栏收起时才出现: 点开看被收起的读数。默认隐藏, .on 才占宽。 */
+#info-more {
+  display: none;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#info-more.on { display: inline-flex; }
+#info-more-pop {
+  display: none;
+  position: fixed;
+  z-index: 80;
+  min-width: 148px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+  font-size: 13px;
+}
+#info-more-pop.open { display: flex; flex-direction: column; gap: 4px; }
+#info-more-pop .imp-row { display: flex; justify-content: space-between; gap: 16px; white-space: nowrap; }
 /* 宽屏顶栏布局: 行数只由断点决定, 不随行情文字宽窄跳。
    成因: 信息行 (代码/名称/成交额/换手/…实测最长约 1000px) 与功能组 (搜索+周期+入口+图标, 约 950~1200px)
    都很宽, 而成交额 万↔亿、换手出现/消失、秒级时钟变宽都会改变信息行宽度 ——
@@ -489,6 +518,8 @@ body {
 /* ── 面板栏包装层 (给手机下拉浮层用, 桌面完全透明) ──
    display:contents 让包装节点不参与布局 → 桌面 DOM 只是深了一层, 视觉与顺序逐字不变。 */
 #ind-body, #adj-slot, #adj-group { display: contents; }
+#ind-slot { display: contents; }
+.ind-scroll { display: none; }
 #btn-ind-sheet, #btn-ind-sheet-done { display: none; }
 
 /* ═══════════════ Chart ═══════════ */
@@ -604,6 +635,26 @@ body {
 #depth-dock .dp-row .dp-vol { width: 40px; }
 /* 侧栏展开时右移画线工具面板, 避免被遮挡 */
 #chart-wrap.side-on #draw-palette { left: 212px; }
+/* 641~900 (11 寸竖屏): 侧栏收窄, 次要行默认收起, 底部可展开。手机 (≤640) 不走这条。 */
+#side-panel .sp-expand {
+  display: none;
+  margin-top: 4px;
+  padding: 3px 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  width: 100%;
+}
+@media (min-width: 641px) and (max-width: 900px) {
+  #side-panel { width: 168px; }
+  #side-panel:not(.sp-expanded) .sp-minor { display: none; }
+  #side-panel .sp-expand { display: block; }
+  #chart-wrap.side-on #draw-palette { left: 176px; }
+}
 
 /* ═══════════════ Scrollbar ═══════════ */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -675,6 +726,53 @@ body {
    (冲突的属性由它覆盖, 见那里的 overflow —— 手机浮层是绝对定位的, 被 overflow 裁掉就点不到了)。
    触控加大目标仍只在下面 (pointer: coarse) 块, 鼠标窄屏不套用。 */
 @media (max-width: 1536px), (pointer: coarse) {
+  /* 指标栏外层占住「一行」的高度。展开「更多」时栏本身改为绝对定位浮在图表上,
+     不再把图表往下推。桌面 (>1536 且鼠标) 这个外层是 display:contents, 布局不变。
+     手机 (≤640) 在后面的块里把外层改回 contents。 */
+  #ind-slot {
+    display: block;
+    position: relative;
+    flex-shrink: 0;
+    height: 40px;
+    z-index: 25;
+  }
+  #ind-scroll-left { left: 2px; }
+  #ind-scroll-right { right: 2px; }
+  .ind-scroll {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 3;
+    width: 22px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  #ind-slot.ind-left #ind-scroll-left,
+  #ind-slot.ind-right #ind-scroll-right { display: inline-flex; align-items: center; justify-content: center; }
+  #ind-slot.ind-left #indicator-bar {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 18px);
+    mask-image: linear-gradient(to right, transparent, #000 18px);
+  }
+  #ind-slot.ind-right #indicator-bar {
+    -webkit-mask-image: linear-gradient(to left, transparent, #000 18px);
+    mask-image: linear-gradient(to left, transparent, #000 18px);
+  }
+  #ind-slot.ind-left.ind-right #indicator-bar {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  }
+  #ind-slot:has(#indicator-bar.show-extra) .ind-scroll { display: none; }
+  /* 已勾选的低频副图/主图开关不上收: 不点「更多」也能看见、也能关。 */
+  #indicator-bar .extra-ind.surface:has(input:checked) { display: inline-flex; }
+  /* 提示框那一段平时留在浮层里 (宽桌面没有这条, 仍常显)。 */
+  #indicator-bar:not(.show-extra) .ind-tip { display: none; }
   /* 平板顶栏必是「信息行 + 功能组行」两行, 6px 行距 + 38px 控件让两行之间显得空 */
   #toolbar { row-gap: 2px; padding: 4px 12px; }
   /* 秒级时钟: 手机早已隐藏, 平板同样省这一截横向空间 */
@@ -712,8 +810,17 @@ body {
     min-width: 0;
   }
   #indicator-bar.show-extra {
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    z-index: 30;
+    height: auto;
+    max-height: 58vh;
     flex-wrap: wrap;
     overflow-x: visible;
+    overflow-y: auto;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
   }
   #indicator-bar::-webkit-scrollbar { display: none; }
   /* nowrap 下 pill 默认会被压扁 (flex-shrink:1), 必须定住宽度才会真的横向滚动 */
@@ -755,9 +862,14 @@ body {
   /* 手机不显示 GitHub 入口 (顶栏空间留给行情与操作) */
   #toolbar .github-link { display: none; }
   /* ── 手机指标栏: 不再横向滑动, 改成「面板 ▾ + 复权」一行 + 下拉浮层 ── */
+  #ind-slot { display: contents; height: auto; }
+  #indicator-bar.sheet-open .ind-tip { display: revert; }
   #indicator-bar,
   #indicator-bar.show-extra {
-    position: relative;      /* 浮层相对它定位 */
+    position: relative;      /* 盖掉平板块给 show-extra 的 absolute: 手机浮层自己定位 */
+    max-height: none;
+    box-shadow: none;
+    background: var(--bg-panel);
     flex-wrap: nowrap;       /* 一行: 触发按钮 + 复权; 控件都在浮层里 */
     gap: 8px;
     padding: 6px 10px;
@@ -990,6 +1102,7 @@ body {
     <span class="oh" id="info-high">高 —</span>
     <span class="oh" id="info-low">低 —</span>
     <span id="info-time"></span>
+    <button type="button" id="info-more" onclick="toggleInfoMore(event)" aria-expanded="false" title="查看放不下的行情">⋯</button>
   </div>
   <div class="toolbar-right">
     <button id="monitor-entry" class="nav-btn" onclick="location.href='/monitor.html'" aria-label="监控中心" title="监控中心: 持仓风控/趋势线跌破/条件预警/告警一览"><span class="nav-ico" aria-hidden="true">🛡</span><span class="nav-txt">监控</span></button>
@@ -1026,6 +1139,7 @@ body {
     <button id="btn-theme" class="icon-btn" onclick="toggleTheme()" title="切换暗色/亮色主题"></button>
   </div>
 </div>
+<div id="info-more-pop"></div>
 
 <!-- ═══════════════ Search History Bar ═══════════ -->
 <div id="history-bar" style="display:none">
@@ -1036,6 +1150,8 @@ body {
 </div>
 
 <!-- ═══════════════ Indicator Config Bar ═══════════ -->
+<div id="ind-slot">
+<button type="button" class="ind-scroll" id="ind-scroll-left" aria-label="向左滚动指标栏" title="向左滚动指标栏">‹</button>
 <div id="indicator-bar">
   <!-- 手机: 触发下拉浮层 (桌面隐藏); 计数由 applyIndSheet() 维护 -->
   <button type="button" id="btn-ind-sheet" onclick="toggleIndSheet()" aria-expanded="false" aria-controls="ind-body" title="面板设置">面板 ▾</button>
@@ -1051,7 +1167,7 @@ body {
   <label title="MACD 平滑异同均线 (DIF/DEA + 柱状图)"><input type="checkbox" id="chk-macd" checked onchange="onConfigChange()">MACD</label>
   <label id="lbl-kdj" title="KDJ 随机指标 (超买超卖)"><input type="checkbox" id="chk-kdj" onchange="onConfigChange()">KDJ</label>
   <label id="lbl-rsi" title="RSI 相对强弱指标"><input type="checkbox" id="chk-rsi" onchange="onConfigChange()">RSI</label>
-  <label class="extra-ind" title="ATR 平均真实波幅"><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
+  <label class="extra-ind surface" title="ATR 平均真实波幅"><input type="checkbox" id="chk-atr" onchange="onConfigChange()">ATR</label>
   <label title="OBV 能量潮 (成交量累计); 数值随加载窗口变化, 比较看走势"><input type="checkbox" id="chk-obv" onchange="onConfigChange()">OBV</label>
   <label id="lbl-premium" style="display:none"><input type="checkbox" id="chk-premium" onchange="onConfigChange()">溢价</label>
   <label id="lbl-risk" style="display:none" title="持仓风控: 主图止盈/保本/止损虚线 + 名称标签 (数值看代码旁的「持仓中」徽章)"><input type="checkbox" id="chk-risk" checked onchange="onConfigChange()">风控线</label>
@@ -1069,20 +1185,22 @@ body {
   <label class="extra-ind" id="lbl-depth" title="五档盘口 (所有周期可用)"><input type="checkbox" id="chk-depth" checked onchange="onConfigChange()">五档</label>
   <button class="cfg-mini extra-ind" id="cfg-ma" onclick="openParamEditor('ma')" title="均线参数 (SMA 简单移动平均, 对标东财)">MA⚙</button>
   <label class="extra-ind" title="MACD 金叉死叉 + MA5/20 交叉标记"><input type="checkbox" id="chk-cross" checked onchange="onConfigChange()">金叉死叉</label>
-  <label class="extra-ind" title="WR 威廉指标 (超买超卖)"><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
-  <label class="extra-ind" title="CCI 顺势指标"><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
-  <label class="extra-ind" title="BIAS 乖离率 (价格偏离均线)"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
-  <label class="extra-ind" title="DMI 趋向指标 (ADX 多空趋势)"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
+  <label class="extra-ind surface" title="WR 威廉指标 (超买超卖)"><input type="checkbox" id="chk-wr" onchange="onConfigChange()">WR</label>
+  <label class="extra-ind surface" title="CCI 顺势指标"><input type="checkbox" id="chk-cci" onchange="onConfigChange()">CCI</label>
+  <label class="extra-ind surface" title="BIAS 乖离率 (价格偏离均线)"><input type="checkbox" id="chk-bias" onchange="onConfigChange()">BIAS</label>
+  <label class="extra-ind surface" title="DMI 趋向指标 (ADX 多空趋势)"><input type="checkbox" id="chk-dmi" onchange="onConfigChange()">DMI</label>
   <label class="extra-ind" title="主图标注经典 K 线形态 (锤头/吞没/十字星等)"><input type="checkbox" id="chk-patterns" checked onchange="onConfigChange()">K线形态</label>
-  <label class="extra-ind" title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
-  <button class="cfg-mini more-btn" id="btn-ind-more" onclick="toggleIndMore()" title="展开/收起更多面板设置">▾ 更多</button>
-  <span class="separator" style="height:18px;background:var(--border)"></span>
-  <span>提示框:</span>
-  <label title="在提示框中显示 RSI 数值"><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
-  <label title="在提示框中显示 KDJ 数值"><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
-  <label title="在提示框中显示 ATR 数值"><input type="checkbox" id="tip-atr" checked onchange="onConfigChange()">ATR</label>
+  <label class="extra-ind surface" title="主图价格轴对数刻度 (长周期涨幅对比更直观)"><input type="checkbox" id="chk-log" onchange="onConfigChange()">对数轴</label>
+  <button class="cfg-mini more-btn" id="btn-ind-more" onclick="toggleIndMore()" title="展开/收起更多面板设置">更多 ▾</button>
+  <span class="separator ind-tip" style="height:18px;background:var(--border)"></span>
+  <span class="ind-tip">提示框:</span>
+  <label class="ind-tip" title="在提示框中显示 RSI 数值"><input type="checkbox" id="tip-rsi" checked onchange="onConfigChange()">RSI</label>
+  <label class="ind-tip" title="在提示框中显示 KDJ 数值"><input type="checkbox" id="tip-kdj" checked onchange="onConfigChange()">KDJ</label>
+  <label class="ind-tip" title="在提示框中显示 ATR 数值"><input type="checkbox" id="tip-atr" checked onchange="onConfigChange()">ATR</label>
   <button type="button" id="btn-ind-sheet-done" onclick="closeIndSheet()">完成</button>
   </div>
+</div>
+<button type="button" class="ind-scroll" id="ind-scroll-right" aria-label="向右滚动指标栏" title="向右滚动指标栏">›</button>
 </div>
 
 <!-- ═══════════════ Chart ═══════════ -->
@@ -1093,6 +1211,7 @@ body {
     <div class="sp-sec" id="info-sec">
       <div class="sp-title"><span>基本信息</span><button class="sp-fold" id="sp-fold-info" title="收起侧栏" onclick="foldSidePanel()">◀</button></div>
       <div id="info-body"></div>
+      <button type="button" id="sp-expand" class="sp-expand" onclick="toggleSideCompact()" aria-expanded="false">展开全部 ▾</button>
       <div id="depth-sec">
         <div class="dp-row dp-head"><span class="dp-label">档位</span><span class="dp-price">价格</span><span class="dp-vol">量</span></div>
         <div id="depth-body"></div>
@@ -2628,6 +2747,7 @@ function applySidePanels() {
   showDepthSection(depthOn);
   const dp = document.getElementById('depth-dock');
   if (dp) dp.style.display = (phone && depthOn) ? 'block' : 'none';
+  scheduleFitInfoRow();   // 侧栏开着时顶栏不提示被收起的读数, 收起后才出「⋯ +N」
 }
 
 /** K线网格左边距: 侧栏展开时让出面板宽度 + Y 轴刻度标签宽度, 否则 8% */
@@ -2682,8 +2802,9 @@ const INFO_DROP_ORDER = ['info-pledge', 'info-shares', 'info-amount', 'info-prem
  *  —— 那就一个都别收 (窄屏本来就靠换行, 收了也没用), 交回 CSS 的换行/裁尾。 */
 const INFO_FIT_SLACK = 0.2;   // 宽度都是小数, 留一点余量吸收 1/64px 级的布局取整; 真实缺口 (实测 0.48px
                               // 就会让浏览器折行) 必须大于它才算放不下
-function infoDropPlan(items, avail, gap) {
-  const FITS = (list) => list.reduce((s, it) => s + it.w, 0) + gap * Math.max(0, list.length - 1) <= avail + INFO_FIT_SLACK;
+function infoDropPlan(items, avail, gap, reserve) {
+  const budget = avail - (Number(reserve) || 0);
+  const FITS = (list) => list.reduce((s, it) => s + it.w, 0) + gap * Math.max(0, list.length - 1) <= budget + INFO_FIT_SLACK;
   const shown = (items || []).filter(it => it && it.on && it.w > 0);
   if (FITS(shown)) return [];
   let rest = shown;
@@ -2730,11 +2851,12 @@ function fnNaturalWidth(el) {
 /** 顶栏排几行 + 收哪些字段 (纯函数, 便于用例):
  *  先按单行算 —— 功能组并到信息行右侧, 收尽量少的次要读数把它塞进一行;
  *  连收光都放不下 → 退回两行 (功能组独占一行, 与桌面 <1920 一致), 两行够住就把字段全放回来。 */
-function toolbarRowPlan(items, innerW, pad, gap, githubW, fnW) {
-  const one = infoDropPlan(items, infoRowBudget(innerW, pad, [githubW, fnW].filter(w => w > 0), gap), gap);
+function toolbarRowPlan(items, innerW, pad, gap, githubW, fnW, reserve) {
+  const r = Number(reserve) || 0;
+  const one = infoDropPlan(items, infoRowBudget(innerW, pad, [githubW, fnW].filter(w => w > 0), gap), gap, r);
   if (one) return { rows: 1, plan: one };
   const two = infoRowBudget(innerW, pad, githubW ? [githubW] : [], gap);
-  return { rows: 2, plan: infoDropPlan(items, two, gap) || [] };
+  return { rows: 2, plan: infoDropPlan(items, two, gap, r) || [] };
 }
 
 /** 实测顶栏信息行一行放不放得下, 放不下才逐个收起次要读数 (加 .rd-drop 类)。
@@ -2744,6 +2866,8 @@ function fitInfoRow() {
   const group = document.querySelector('#toolbar .info-group');
   const toolbar = document.getElementById('toolbar');
   if (!group || !toolbar || !group.clientWidth) return;
+  const moreBtn = document.getElementById('info-more');
+  if (moreBtn) moreBtn.classList.remove('on');   // 先藏掉, 测量才不含按钮自己的宽度
   const els = Array.from(group.children);
   els.forEach(el => el.classList.remove('rd-drop'));
   // 宽度一律用 getBoundingClientRect 的小数值: offsetWidth 会取整, 十来项累加能凭空多出 1px,
@@ -2778,11 +2902,101 @@ function fitInfoRow() {
       .map(r => r.width);
     plan = infoDropPlan(items, infoRowBudget(inner, pad, siblingW, parseFloat(tcs.columnGap) || 0), gap);
   }
+  // 放不下且侧栏收起时, 末尾要留「⋯ +N」。先按按钮宽度把预算再扣一次,
+  // 免得按钮一出现又把这一行挤爆 (侧栏开着时那些读数在侧栏里, 不提示)。
+  const more = moreBtn;
+  if (plan && plan.length && more && !sidePanelOn()) {
+    more.textContent = '⋯ +' + plan.length;
+    more.classList.add('on');
+    const reserve = more.getBoundingClientRect().width + gap;
+    more.classList.remove('on');
+    if (wideTouch) {
+      const again = toolbarRowPlan(items, inner, pad, gap, githubW,
+        fnNaturalWidth(toolbar.querySelector('.toolbar-right')), reserve);
+      plan = again.plan;
+      twoRows = again.rows === 2;
+    } else {
+      const gt2 = group.getBoundingClientRect();
+      const siblingW2 = Array.from(toolbar.children).filter(el => el !== group)
+        .map(el => el.getBoundingClientRect())
+        .filter(r => r.width > 0 && r.bottom > gt2.top + 1 && r.top < gt2.bottom - 1)
+        .map(r => r.width);
+      const again = infoDropPlan(items, infoRowBudget(inner, pad, siblingW2, parseFloat(tcs.columnGap) || 0), gap, reserve);
+      if (again) plan = again;
+    }
+    if (plan && plan.length) {
+      more.textContent = '⋯ +' + plan.length;
+      more.classList.add('on');
+    }
+  }
   toolbar.classList.toggle('tb-2row', wideTouch && twoRows);
-  if (!plan) return;
+  if (!plan) { closeInfoMore(); return; }
   plan.forEach(id => {
     const it = items.find(x => x.id === id);
     if (it) it.el.classList.add('rd-drop');
+  });
+  if (!more || !more.classList.contains('on')) closeInfoMore();
+  else if (document.getElementById('info-more-pop').classList.contains('open')) renderInfoMorePop();
+}
+
+function toggleInfoMore(ev) {
+  if (ev) ev.stopPropagation();
+  const pop = document.getElementById('info-more-pop');
+  const btn = document.getElementById('info-more');
+  if (!pop || !btn || !btn.classList.contains('on')) return;
+  const open = !pop.classList.contains('open');
+  pop.classList.toggle('open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (!open) return;
+  renderInfoMorePop();
+  const r = btn.getBoundingClientRect();
+  pop.style.top = (r.bottom + 6) + 'px';
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8));
+  pop.style.left = left + 'px';
+}
+
+function closeInfoMore() {
+  const pop = document.getElementById('info-more-pop');
+  const btn = document.getElementById('info-more');
+  if (pop) pop.classList.remove('open');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+/** 浮层内容 = 当前被收起的读数 (标签 + 数值), 行情刷新时跟着重写。 */
+function renderInfoMorePop() {
+  const pop = document.getElementById('info-more-pop');
+  const group = document.querySelector('#toolbar .info-group');
+  if (!pop || !group) return;
+  pop.textContent = '';
+  const dropped = Array.from(group.children).filter(el => el.classList.contains('rd-drop'));
+  if (!dropped.length) { closeInfoMore(); return; }
+  dropped.forEach(el => {
+    const row = document.createElement('div');
+    row.className = 'imp-row';
+    const lbl = document.createElement('span');
+    lbl.className = 'info-lbl';
+    const srcLbl = el.querySelector('.info-lbl');
+    lbl.textContent = srcLbl ? srcLbl.textContent : '';
+    const val = document.createElement('span');
+    val.className = 'info-val';
+    const srcVal = el.querySelector('.info-val');
+    val.textContent = srcVal ? srcVal.textContent : '';
+    row.appendChild(lbl);
+    row.appendChild(val);
+    pop.appendChild(row);
+  });
+}
+
+function wireInfoMore() {
+  document.addEventListener('click', (e) => {
+    const pop = document.getElementById('info-more-pop');
+    const btn = document.getElementById('info-more');
+    if (!pop || !pop.classList.contains('open')) return;
+    if (pop.contains(e.target) || (btn && btn.contains(e.target))) return;
+    closeInfoMore();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeInfoMore();
   });
 }
 
@@ -2819,6 +3033,15 @@ function panelStockCode(d) {
  */
 function infoPanelRows(d) {
   if (!d || d.error) return null;
+  // 641~900 紧凑侧栏始终显示这些行, 其余加 minor。写在函数内: 截图/面板测试会整段抽走本函数。
+  const INFO_KEEP_LABELS = {
+    '名称': 1, '代码': 1, '现价': 1, '涨停价': 1, '跌停价': 1,
+    '换手': 1, '量比': 1, 'PE': 1, 'PB': 1, '溢价': 1, '状态': 1,
+  };
+  const markInfoMinor = (r) => {
+    if (r && !INFO_KEEP_LABELS[r.label]) r.minor = true;
+    return r;
+  };
   const up = C().up, down = C().down;
   const gray = 'var(--text-secondary)';
   const pct = (v) => {
@@ -2896,7 +3119,7 @@ function infoPanelRows(d) {
     { label: '10日涨幅', text: p10.text, color: p10.color },
     { label: '状态', text: d.trade_status_text || '—', color: statusColor },
     marketHintRow,
-  ].filter(r => r);
+  ].filter(r => r).map(markInfoMinor);
 }
 
 function stockInfoRowHtml(r) {
@@ -2904,7 +3127,8 @@ function stockInfoRowHtml(r) {
   const style = r.color ? ` style="color:${r.color}"` : '';
   // title 可选 (目前只有溢价/下一开盘用它给出计算时间与时段说明); escHtml 不管引号, 这里自己补一下
   const title = r.title ? ` title="${escHtml(r.title).replace(/"/g, '&quot;')}"` : '';
-  return `<div class="sp-row"${id}${title}><span class="sp-label">${escHtml(r.label)}</span>` +
+  const minor = r.minor ? ' sp-minor' : '';
+  return `<div class="sp-row${minor}"${id}${title}><span class="sp-label">${escHtml(r.label)}</span>` +
     `<span class="sp-val"${style}>${escHtml(r.text)}</span></div>`;
 }
 
@@ -4162,10 +4386,12 @@ function buildConfig() {
     patterns: document.getElementById('chk-patterns').checked,
     risk: document.getElementById('chk-risk').checked,
     logScale: document.getElementById('chk-log').checked,
+    sideCompact: STATE._sideCompact === true,
     adjust: STATE.adjust,
     maPeriods: STATE.maPeriods,
     bollParams: STATE.bollParams,
-    indMore: STATE._indMore === true,
+    // 平板/14 寸的「更多」是当次浮层, 不写进配置 (写了会经账号同步把桌面的展开态冲掉)
+    indMore: isPadFoldUi() ? readCfg(CFG_KEY).indMore === true : STATE._indMore === true,
   };
 }
 
@@ -4266,10 +4492,19 @@ function applyConfig(cfg) {
     STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
   }
   // 旧版 periodMore 配置已废弃；周期改为固定单行滚动，不再改变工具栏高度。
+  // 平板/14 寸每次打开都收起浮层 (重要项已内联), 不恢复上次的展开。
   if (cfg.indMore === true) {
-    STATE._indMore = true;
-    document.getElementById('indicator-bar').classList.add('show-extra');
+    if (!isPadFoldUi()) {
+      STATE._indMore = true;
+      document.getElementById('indicator-bar').classList.add('show-extra');
+    }
   }
+  STATE._sideCompact = cfg.sideCompact === true;
+  const side = document.getElementById('side-panel');
+  if (side) side.classList.toggle('sp-expanded', STATE._sideCompact);
+  syncSideCompactBtn();
+  updateIndMoreCount();
+  syncIndScroll();
 }
 
 // ── 面板设置服务器同步 (跟账号; 默认开启) ──
@@ -4663,17 +4898,99 @@ function onConfigChange() {
   // 侧栏开关 (信息/五档): 重排图/面板并即时拉取
   applySidePanels();
   applyIndSheet();   // 勾选变了 → 手机触发按钮上的副图计数跟着变
+  updateIndMoreCount();
+  syncIndScroll();
   if (depthPanelVisible()) fetchDepth();
   if (sidePanelOn() && !STATE.stockInfo) fetchStockInfo();
   syncPosition(); // 持仓徽章 + 风控线开关显隐 (线条由下方 onIndicatorChange 重建)
   onIndicatorChange();
 }
 
-/** 指标栏低频项折叠切换 (信息/五档/MA/金叉死叉/WR/CCI/BIAS/DMI/对数轴) */
+/** 平板 / ≤1536 / 触屏, 且不是手机: 「更多」是浮在图表上的浮层, 不记住展开。 */
+function isPadFoldUi() {
+  return isTabletUi() && !isPhoneUi();
+}
+
+/** 浮层里已开启、收起时看不见的项 (已勾选并上浮到栏上的不算)。 */
+const IND_POP_ON = ['chk-gap', 'chk-cross', 'chk-patterns', 'chk-info', 'chk-depth',
+  'tip-rsi', 'tip-kdj', 'tip-atr'];
+function indMoreCount() {
+  return IND_POP_ON.reduce((n, id) => {
+    const el = document.getElementById(id);
+    return n + (el && el.checked ? 1 : 0);
+  }, 0);
+}
+function updateIndMoreCount() {
+  const btn = document.getElementById('btn-ind-more');
+  const bar = document.getElementById('indicator-bar');
+  if (!btn || !bar) return;
+  const n = indMoreCount();
+  const open = bar.classList.contains('show-extra');
+  const caret = open ? '▴' : '▾';
+  btn.textContent = n > 0 ? `更多 · ${n} ${caret}` : `更多 ${caret}`;
+}
+
+/** 指标栏低频项折叠切换。平板/14 寸只切当次浮层, 不写入配置。 */
 function toggleIndMore() {
   const bar = document.getElementById('indicator-bar');
   bar.classList.toggle('show-extra');
-  STATE._indMore = bar.classList.contains('show-extra');
+  if (!isPadFoldUi()) {
+    STATE._indMore = bar.classList.contains('show-extra');
+    saveConfig();
+  }
+  updateIndMoreCount();
+  syncIndScroll();
+}
+
+function closePadIndMore() {
+  const bar = document.getElementById('indicator-bar');
+  if (!bar || !bar.classList.contains('show-extra') || !isPadFoldUi()) return;
+  bar.classList.remove('show-extra');
+  updateIndMoreCount();
+  syncIndScroll();
+}
+
+/** 一行放不下时露出左右箭头和边缘渐隐; 浮层展开或非平板时收起。 */
+function syncIndScroll() {
+  const bar = document.getElementById('indicator-bar');
+  const slot = document.getElementById('ind-slot');
+  if (!bar || !slot) return;
+  if (!isPadFoldUi() || bar.classList.contains('show-extra')) {
+    slot.classList.remove('ind-left', 'ind-right');
+    return;
+  }
+  slot.classList.toggle('ind-left', bar.scrollLeft > 1);
+  slot.classList.toggle('ind-right', bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 1);
+}
+
+function initIndScroller() {
+  const bar = document.getElementById('indicator-bar');
+  const left = document.getElementById('ind-scroll-left');
+  const right = document.getElementById('ind-scroll-right');
+  if (!bar || !left || !right) return;
+  const move = dir => bar.scrollBy({ left: dir * Math.max(120, bar.clientWidth * 0.6), behavior: 'smooth' });
+  left.addEventListener('click', () => move(-1));
+  right.addEventListener('click', () => move(1));
+  bar.addEventListener('scroll', syncIndScroll, { passive: true });
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(syncIndScroll).observe(bar);
+  syncIndScroll();
+}
+
+function syncSideCompactBtn() {
+  const btn = document.getElementById('sp-expand');
+  const panel = document.getElementById('side-panel');
+  if (!btn || !panel) return;
+  const on = panel.classList.contains('sp-expanded');
+  btn.textContent = on ? '收起' : '展开全部 ▾';
+  btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+
+function toggleSideCompact() {
+  const panel = document.getElementById('side-panel');
+  if (!panel) return;
+  panel.classList.toggle('sp-expanded');
+  STATE._sideCompact = panel.classList.contains('sp-expanded');
+  syncSideCompactBtn();
   saveConfig();
 }
 
@@ -4763,12 +5080,15 @@ function closeIndSheet() {
 function wireIndSheet() {
   document.addEventListener('click', (e) => {
     const bar = document.getElementById('indicator-bar');
-    if (!bar || !bar.classList.contains('sheet-open')) return;
-    if (bar.contains(e.target)) return;
-    closeIndSheet();
+    const slot = document.getElementById('ind-slot');
+    if (bar && bar.classList.contains('sheet-open') && !bar.contains(e.target)) closeIndSheet();
+    if (bar && bar.classList.contains('show-extra') && isPadFoldUi()) {
+      const host = slot || bar;
+      if (!host.contains(e.target)) closePadIndMore();
+    }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeIndSheet();
+    if (e.key === 'Escape') { closeIndSheet(); closePadIndMore(); }
   });
   window.addEventListener('resize', () => {
     if (STATE._indSheetPhone !== isPhoneUi()) {
@@ -7983,7 +8303,9 @@ function dropdownBox(boxLeft, vw) {
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   initPeriodScroller();
+  initIndScroller();
   wireInfoRowFit();
+  wireInfoMore();
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();

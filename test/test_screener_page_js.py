@@ -27,7 +27,8 @@ SCREENER_HTML = _VISUAL_DIR / "static" / "screener.html"
 ADMIN_HTML = _VISUAL_DIR / "static" / "admin.html"
 
 _FNS = (
-    "specOf", "condLabel", "fmtTime", "statusText", "readInputs", "saveCond",
+    "specOf", "metricMenuLabel", "condGuide", "condLabel", "fmtTime", "statusText",
+    "readInputs", "saveCond",
     "editCond", "cancelEdit", "delCond", "renderConds", "setLocked", "syncInputs",
     "fillComposerFrom", "loadRunConditions", "fillHistory", "renderFilterRow",
     "setHitFilter", "renderResults", "renderRun", "showRun", "applyStatus",
@@ -59,7 +60,7 @@ const METRICS = {
   above_ma20: { key: "above_ma20", label: "站上 MA20", group: "技术指标", kind: "bool",
                 unit: "", ops: ["is"], hint: "" },
   rsi6: { key: "rsi6", label: "RSI6", group: "技术指标", kind: "num", unit: "",
-          op: "<=", ops: [">=", "<="], hint: "" },
+          op: "<=", ops: [">=", "<="], hint: "<20 超卖", domain: "0~100" },
   turnover: { key: "turnover", label: "换手率", group: "量价", kind: "range", unit: "%",
               ops: ["between"], hint: "" },
   industry: { key: "industry", label: "所处行业", group: "基本面/估值", kind: "text",
@@ -163,6 +164,9 @@ class ScreenerPageStaticTest(unittest.TestCase):
         """指标下拉必须由 /api/screener/metrics 渲染, 不能在前端硬编码。"""
         self.assertIn('/api/screener/metrics', self.src)
         self.assertIn("optgroup", self.src)
+        self.assertIn("metricMenuLabel", self.src)
+        self.assertIn('id="cond-unit"', self.src)
+        self.assertIn('id="cond-hint"', self.src)
         self.assertNotIn("METRIC_LABELS", self.src, "旧硬编码标签表应已移除")
         body = _extract_fn(self.src, "syncInputs")
         for kind in ("bool", "num", "range", "text"):
@@ -258,6 +262,39 @@ console.log(JSON.stringify(r));
         self.assertEqual(out["range"]["range"], "")
         self.assertEqual(out["text"]["text"], "")
         self.assertIn("银行", out["text"]["options"])
+
+    def test_unit_and_guide_follow_the_metric(self):
+        """选指标后: 下拉带单位, 输入框后有单位, 下方说明给出怎么填。"""
+        out = _run_page_script("""
+const r = {};
+r.menu = metricMenuLabel(METRICS.main_net_inflow_wan);
+r.plain = metricMenuLabel(METRICS.rsi6);
+const probe = key => {
+  el("cond-metric").value = key;
+  syncInputs();
+  return { unit: el("cond-unit").textContent, unitOn: el("cond-unit").style.display,
+           unit2: el("cond-unit2").style.display, ph: el("cond-value").placeholder,
+           ph2: el("cond-value2").placeholder, hint: el("cond-hint").textContent };
+};
+r.wan = probe("main_net_inflow_wan");
+r.rsi = probe("rsi6");
+r.range = probe("turnover");
+r.bool = probe("above_ma20");
+console.log(JSON.stringify(r));
+""")
+        self.assertEqual(out["menu"], "主力净流入（万元）")
+        self.assertEqual(out["plain"], "RSI6")
+        self.assertEqual(out["wan"]["unit"], "万元")
+        self.assertEqual(out["wan"]["unitOn"], "")
+        self.assertEqual(out["wan"]["ph"], "数值（万元）")
+        self.assertIn("1 亿填 10000", out["wan"]["hint"])
+        self.assertEqual(out["rsi"]["unitOn"], "none")
+        self.assertEqual(out["rsi"]["hint"], "取值范围 0~100 · <20 超卖")
+        self.assertEqual(out["range"]["unit2"], "")
+        self.assertEqual(out["range"]["ph2"], "上限（%）")
+        self.assertIn("不是 0.05", out["range"]["hint"])
+        self.assertEqual(out["bool"]["unitOn"], "none")
+        self.assertEqual(out["bool"]["hint"], "")
 
     def test_range_condition_label_and_validation(self):
         out = _run_page_script("""
