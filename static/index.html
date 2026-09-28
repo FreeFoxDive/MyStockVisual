@@ -700,14 +700,20 @@ body {
   /* 开/高/低 常显: 900 那条为宽屏防跳行把它们摘了, 平板放回来 (手机 ≤640 同样是放回的)。
      三个字段只有约 190px, 且它在收起优先级里永远不动 —— 放不下时先收统计读数 */
   #toolbar .oh { display: inline-block; }
-  /* 指标栏固定单行 + 横向滚动 (与平板周期条同一手法): 换行布局下 pill 数量随周期变 ——
+  /* 指标栏默认单行 + 横向滚动 (与平板周期条同一手法): 换行布局下 pill 数量随周期变 ——
      分时少了 筹码/动力系统/通道 三个, 栏高就在「日K 两行 / 分时 一行」之间跳, 图表跟着上下一截。
-     定成单行后高度恒定。滚动条必须藏: Windows 的 17px 横条本身就会把栏顶高。 */
+     收起时定成单行后高度恒定。滚动条必须藏: Windows 的 17px 横条本身就会把栏顶高。
+     点「更多」后必须换行: 14 寸鼠标设备滚条被藏、原生 overflow 又不认拖拽, 单行会把低频项裁出视口。 */
   #indicator-bar {
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
+    min-width: 0;
+  }
+  #indicator-bar.show-extra {
+    flex-wrap: wrap;
+    overflow-x: visible;
   }
   #indicator-bar::-webkit-scrollbar { display: none; }
   /* nowrap 下 pill 默认会被压扁 (flex-shrink:1), 必须定住宽度才会真的横向滚动 */
@@ -749,13 +755,15 @@ body {
   /* 手机不显示 GitHub 入口 (顶栏空间留给行情与操作) */
   #toolbar .github-link { display: none; }
   /* ── 手机指标栏: 不再横向滑动, 改成「面板 ▾ + 复权」一行 + 下拉浮层 ── */
-  #indicator-bar {
+  #indicator-bar,
+  #indicator-bar.show-extra {
     position: relative;      /* 浮层相对它定位 */
     flex-wrap: nowrap;       /* 一行: 触发按钮 + 复权; 控件都在浮层里 */
     gap: 8px;
     padding: 6px 10px;
     /* 必须 visible: 浮层 (#ind-body) 是它的绝对定位子节点, 被裁掉就点不到 ——
-       平板块给指标栏加了横向滚动 (触屏口径同时命中手机), 这里要盖回去 */
+       平板块给指标栏加了横向滚动 (触屏口径同时命中手机), 这里要盖回去。
+       show-extra 也要盖: 平板块「更多则换行」比本条 #indicator-bar 特异性高。 */
     overflow: visible;
   }
   #btn-ind-sheet {

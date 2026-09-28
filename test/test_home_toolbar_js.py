@@ -287,10 +287,10 @@ class TabletLayoutTest(unittest.TestCase):
         self.assertIn("querySelector('.nav-txt')", setter)
 
     def test_indicator_bar_single_row(self):
-        """指标栏固定单行 + 隐藏滚动条: 栏高恒定, 切周期不再上下跳。
+        """指标栏收起时固定单行 + 隐藏滚动条: 栏高恒定, 切周期不再上下跳。
 
         换行布局下, 分时比日K 少 筹码/动力系统/通道 三个 pill (见 applyPeriodUI),
-        1 行与 2 行之间切换会把图表高度来回改。"""
+        1 行与 2 行之间切换会把图表高度来回改。点「更多」后改换行, 见下一例。"""
         bar = self.tablet[self.tablet.index("#indicator-bar {"):]
         self.assertIn("flex-wrap: nowrap", bar)
         self.assertIn("overflow-x: auto", bar)
@@ -305,6 +305,17 @@ class TabletLayoutTest(unittest.TestCase):
         ui = _extract_fn(self.src, "applyPeriodUI")
         for lbl in ("lbl-chip", "lbl-impulse", "lbl-channel"):
             self.assertIn(lbl, ui)
+
+    def test_indicator_bar_wraps_when_more_open(self):
+        """14 寸笔记本点「更多」必须换行。单行横滑把滚动条藏掉, 鼠标拖拽也不会滚。"""
+        self.assertIn("#indicator-bar.show-extra {", self.tablet)
+        extra = self.tablet[self.tablet.index("#indicator-bar.show-extra {"):]
+        extra = extra[:extra.index("}")]
+        self.assertIn("flex-wrap: wrap", extra)
+        self.assertIn("overflow-x: visible", extra)
+        phone = _css_block(self.src, "@media (max-width: 640px)")
+        self.assertIn("#indicator-bar.show-extra {", phone,
+                      "手机浮层那一行不能被平板块的 show-extra 换行带偏")
 
     def test_phone_block_still_wins(self):
         """手机 (≤640) 不能被平板块带坏: 浮层照旧、不被 overflow 裁掉、字号仍 16px。"""
