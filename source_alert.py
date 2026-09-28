@@ -78,13 +78,15 @@ def _release(source) -> None:
             _notified.pop(key, None)
 
 
-def _text(reason, detail, cooldown_sec) -> str:
-    parts = [reason]
+def _text(source, reason, detail, cooldown_sec) -> str:
+    """正文必须自带源名。钉钉/ntfy 的 title 只出现在会话列表预览，群消息正文只有 text。"""
+    who = _gate_key(source)
+    parts = [f"数据源 {who}：{reason}"]
     if cooldown_sec:
         parts.append(f"→ {cooldown_sec:.0f}s 内跳过该源")
     line = " ".join(parts)
     if detail:
-        line += f"（最后失败: {detail}）"
+        line += f"（最后一次请求: {detail}）"
     return line + " · 同一源当日仅通知一次"
 
 
@@ -101,7 +103,7 @@ def notify(source, reason, detail="", cooldown_sec=None) -> bool:
         if not _claim(source):
             log.info("数据源 %s 今日已通知过 %s, 不再重复推送", source, reason)
             return False
-        text = _text(reason, detail, cooldown_sec)
+        text = _text(source, reason, detail, cooldown_sec)
         import error_notify
         ok = error_notify.notify_alert(f"source:{source}", f"数据源告警: {source}", text)
         if ok:

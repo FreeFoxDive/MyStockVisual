@@ -85,9 +85,11 @@ class SourceAlertGateTest(unittest.TestCase):
                             detail="600519.SH 1m (stock)", cooldown_sec=60)
         _src, title, text = self.sent[0]
         self.assertEqual(title, "数据源告警: alphafeed")
+        self.assertIn("数据源 alphafeed", text, "正文要带源名, 不能只写在标题里")
         self.assertIn("连续失败 3 次", text)
         self.assertIn("60s", text)
         self.assertIn("600519.SH 1m (stock)", text, "要能一眼看出是哪个标的/周期在坏")
+        self.assertIn("最后一次请求", text)
         self.assertIn("当日仅通知一次", text, "文案要说清后续不会再刷")
 
     def test_disabled_switch(self):

@@ -58,6 +58,10 @@ class SourceBusy(Exception):
     """本地容量不足，不计作上游故障。"""
 
 
+class SourceTimeout(Exception):
+    """单源硬超时。记为上游故障（与返回空数据区分开）。"""
+
+
 class SourceSkip(Exception):
     """本源明确不服务这个标的 (能力缺口)，不计作上游故障。
 
@@ -134,8 +138,8 @@ def _note_fail(name, token=None, detail=""):
             entered = True
     if entered:
         perf.bump(f"src_cooldown_{name}")
-        log.warning("数据源 %s 连续失败 %d 次, 冷却 %.0fs 内跳过",
-                    name, SOURCE_FAIL_THRESHOLD, SOURCE_COOLDOWN_SEC)
+        log.warning("数据源 %s 连续失败 %d 次, 冷却 %.0fs 内跳过 (%s)",
+                    name, SOURCE_FAIL_THRESHOLD, SOURCE_COOLDOWN_SEC, detail)
         # 通知放在锁外 (推送含入队 + 日志, 别占着健康锁); 失败也只记日志
         source_alert.notify(name, f"连续失败 {SOURCE_FAIL_THRESHOLD} 次",
                             detail=detail, cooldown_sec=SOURCE_COOLDOWN_SEC)
@@ -179,7 +183,7 @@ def _fetch_bounded(src, symbol, period, count, adj, name):
         perf.bump(f"src_timeout_{name}")
         log.warning("数据源 %s 获取 %s %s 超时 (>%.1fs), 判失败回退",
                     name, symbol, period, SOURCE_TIMEOUT_SEC)
-        return None
+        raise SourceTimeout(name)
     if "err" in box:
         raise box["err"]
     return box.get("df")
@@ -191,6 +195,7 @@ def _try_source(name, symbol, period, count, adj, category, idx, chain):
     token = _admit(name)
     if token is None:
         return None
+    why = "该源无返回"
     try:
         df = _fetch_bounded(src, symbol, period, count, adj, name)
     except SourceBusy:
@@ -209,13 +214,18 @@ def _try_source(name, symbol, period, count, adj, category, idx, chain):
         perf.bump(f"src_skip_{name}")
         log.info("数据源 %s 不服务 %s %s (%s), 直接下沉", name, symbol, period, e)
         return None
+    except SourceTimeout:
+        why = "超时"
+        df = None
     except Exception as e:  # 单源异常不拖垮整条链
         log.warning("数据源 %s 获取 %s %s 异常: %s", name, symbol, period, e)
+        why = f"异常 {type(e).__name__}"
         df = None
     if df is not None and category in ("minute", "intraday") and not _minute_fresh(df):
         log.warning("数据源 %s 分钟K数据过旧 (末根 %s), 视为失败",
                     name, df.index[-1])
         perf.bump(f"src_stale_{name}")
+        why = "分钟数据过旧"
         df = None
     if df is not None:
         _note_ok(name, token)
@@ -225,11 +235,14 @@ def _try_source(name, symbol, period, count, adj, category, idx, chain):
         return df
     # 该源本次未取到数据 (异常/空/过旧/超时): 计健康计数, 用于确认慢请求是否
     # 集中在个别坏源上 (回退链会把其耗时叠加到用户请求上)
-    _note_fail(name, token, detail=f"{symbol} {period} ({category})")
+    cat = {"index": "指数", "fund": "基金", "stock": "股票", "minute": "分钟",
+           "intraday": "分时", "hk": "港股", "us": "美股"}.get(category, category)
+    detail = f"{symbol} {period} {cat}，{why}"
+    _note_fail(name, token, detail=detail)
     perf.bump(f"src_fail_{name}")
     if idx < len(chain) - 1:
-        log.warning("数据源 %s 获取 %s %s 失败, 回退 %s",
-                    name, symbol, period, chain[idx + 1])
+        log.warning("数据源 %s 获取 %s %s 失败 (%s), 回退 %s",
+                    name, symbol, period, why, chain[idx + 1])
     return None
 
 # 内部口径: forward=前复权 / hfq=后复权 / none=未复权

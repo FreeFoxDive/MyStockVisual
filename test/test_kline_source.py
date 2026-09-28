@@ -505,8 +505,8 @@ class TestSourceTimeoutAndBreaker(KlineSourceTestBase):
         src, reason, kw = seen[0]
         self.assertEqual(src, "alphafeed")
         self.assertIn("连续失败", reason)
-        self.assertEqual(kw.get("detail"), "600519.SH 1d (stock)",
-                         "要带最后失败的那次请求的标的与周期")
+        self.assertEqual(kw.get("detail"), "600519.SH 1d 股票，该源无返回",
+                         "要带最后一次请求的标的、周期、类别和失败原因")
 
     def test_all_sources_in_cooldown_does_not_bypass(self):
         """全部冷却也不得无条件突破熔断。"""
