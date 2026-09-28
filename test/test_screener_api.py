@@ -664,7 +664,10 @@ class FactorsRouteTest(ScreenerTestBase):
         factors.init_store()
         factors._ensure_build_row("2026-09-18")
         factors._update_build("2026-09-18", state="done", n_rows=1)
+        # 未到 FACTORS_BUILD_AT 时手动重建先被窗口挡住, 到不了「已构建完成」。
+        # 这条回归测的是完成态拒绝, 时钟必须钉在窗口之后, 否则 18:00 前 CI 必失败。
         with mock.patch.object(factors, "due_day", lambda now=None: "2026-09-18"), \
+             mock.patch.object(factors, "before_build_at", lambda now=None: False), \
              mock.patch.object(factors, "build") as b:
             r = self._post("/api/factors/rebuild", {}, client=self.admin)
             body = r.get_json()
