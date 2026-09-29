@@ -53,6 +53,10 @@ _build_children_lock = threading.Lock()
 _live_running = False
 
 
+class BuildAlreadyRunning(RuntimeError):
+    """同一 Web 进程已有因子构建子进程。"""
+
+
 class HeavyLock:
     """跨进程互斥 (构建子进程 / 盘中快照 / 搜索索引)。Windows 上退化为空操作。"""
 
@@ -730,20 +734,24 @@ def live_quote_rate():
 # 取令牌, 图表取不到令牌时直接走回退源, 避免两边合计打出 429 后整批标的丢失。
 _daily_kline_bucket = None
 _daily_kline_bucket_rate = None
+_daily_kline_bucket_path = None
 _daily_kline_bucket_lock = threading.Lock()
 FETCH_BARS_RETRIES = 2          # 失败批次的额外重试次数
 FETCH_BARS_RETRY_SLEEP = 2.0   # 每次重试前的等待 (秒)
 
 
 def daily_kline_bucket():
-    """进程内共享的日K批量令牌桶 (速率随 kline_rate(), 改环境变量即重建)。"""
-    global _daily_kline_bucket, _daily_kline_bucket_rate
+    """Web 与构建子进程共用的日K批量令牌桶。"""
+    global _daily_kline_bucket, _daily_kline_bucket_rate, _daily_kline_bucket_path
     rate = kline_rate()
+    path = CACHE_DIR / "af_daily_budget.sqlite3"
     with _daily_kline_bucket_lock:
-        if _daily_kline_bucket is None or _daily_kline_bucket_rate != rate:
-            import feed as feed_mod
-            _daily_kline_bucket = feed_mod.TokenBucket(rate_per_min=rate)
+        if (_daily_kline_bucket is None or _daily_kline_bucket_rate != rate
+                or _daily_kline_bucket_path != path):
+            from shared_budget import SharedTokenBucket
+            _daily_kline_bucket = SharedTokenBucket(path, rate_per_min=rate)
             _daily_kline_bucket_rate = rate
+            _daily_kline_bucket_path = path
         return _daily_kline_bucket
 
 
@@ -1173,8 +1181,18 @@ def build_blocked_reason(day=None, force=False):
     day = day or due_day() or last_closed_trading_day()
     if _build_state["running"]:
         return f"已有构建在进行中（{_build_state['day'] or '日期未知'}）"
+    if build_child_running():
+        return "已有构建子进程在进行中"
     row = get_build(day)
     if row:
+        if row["state"] == "running" and row.get("started_at"):
+            try:
+                age = (datetime.fromisoformat(_iso())
+                       - datetime.fromisoformat(row["started_at"])).total_seconds()
+                if age < RETRY_MIN_SEC:
+                    return f"{day} 已有构建在进行中"
+            except ValueError:
+                pass
         if row["state"] == "done" and not force and not _provisional_needs_rebuild(row):
             return f"{day} 已构建完成（可用「强制重建」覆盖）"
         if not force and int(row["attempts"] or 0) >= MAX_ATTEMPTS:
@@ -1257,14 +1275,17 @@ def _build_inner(day):
                 feats["trade_date"] = day
                 rows.append(feats)
                 tags["factors"] += 1
-                # 提交写事务后再更新进度: _update_build 另开连接, 未提交的写锁会让它
-                # 直接撞 "database is locked" (WAL 下读写不互斥, 但写写互斥)。
+                # 大批次中先分段提交，避免长时间占用写锁。
                 if got % 25 == 0:
                     conn.commit()
                 if got % 200 == 0:
+                    # _update_build 另开连接，写进度前必须释放当前事务。
                     lo, hi = PHASE_WEIGHTS["factors"]
+                    conn.commit()
                     _update_build(day, percent=lo + int((hi - lo) * got / n_symbols),
                                   phase="factors")
+            # 即使本批缺数据或末尾标的被跳过，也要在下一次取数进度回调前释放写锁。
+            conn.commit()
             del batch
         conn.commit()
     finally:
@@ -1670,9 +1691,15 @@ def _spawn_build(day, force=False):
     kwargs = {"cwd": str(SCRIPT_DIR.parent)}
     if os.name != "nt":
         kwargs["preexec_fn"] = _demote
-    proc = subprocess.Popen(cmd, **kwargs)
-    _track_child(proc, day)
-    return proc
+    # API 两个并发请求可能都通过预检查；检查与 Popen 必须在同一把锁内。
+    with _build_children_lock:
+        alive = [(p, d) for p, d in _build_children if p.poll() is None]
+        _build_children[:] = alive
+        if alive:
+            raise BuildAlreadyRunning("已有构建子进程在进行中")
+        proc = subprocess.Popen(cmd, **kwargs)
+        _build_children.append((proc, day))
+        return proc
 
 
 def spawn_manual(day=None, force=False):

@@ -1194,7 +1194,12 @@ def _fetch_af_kline(symbol, period, count, adjust="forward"):
     """
     if period == "1d":
         import factors as _factors
-        if not _factors.daily_kline_bucket().try_acquire():
+        try:
+            permitted = _factors.daily_kline_bucket().try_acquire()
+        except Exception as e:
+            log.warning("日K共享配额不可用 %s: %s", symbol, _sanitize_error(e))
+            permitted = False
+        if not permitted:
             log.info(f"日K额度让给因子库构建, 跳过 AlphaFeed {symbol}")
             return None
     adj = _af_adjust(adjust)

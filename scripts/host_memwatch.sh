@@ -143,9 +143,9 @@ note_event() {
 
 cmd_events() {
   echo "host_memwatch: 监听 docker events (container=$CONTAINER)" >&2
+  local last_oom=0
   docker events --filter type=container --filter event=oom --filter event=die \
     --format '{{.Time}} {{.Action}} {{.Actor.Attributes.name}} {{.Actor.Attributes.exitCode}}' |
-  local last_oom=0
   while read -r ts action name exitcode; do
     [[ "$name" == "$CONTAINER" ]] || continue
     local now

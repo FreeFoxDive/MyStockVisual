@@ -178,7 +178,7 @@ visual/
 | `POST /api/admin/users/{id}/monitor` | `{enabled}` 授权持仓监控（仅管理员） |
 | `GET /api/admin/screener/runs` | 选股队列 + 最近完成（全用户，仅管理员；`limit` 默认 20） |
 | `GET /api/factors/status` | 因子库状态：当前构建（state/phase/percent/attempts/error）+ 最近 5 个交易日完成情况 + 最新快照日 |
-| `POST /api/factors/rebuild` | 手动构建因子库 `{force, day}`（仅管理员，后台线程执行，进度看 status） |
+| `POST /api/factors/rebuild` | 手动构建因子库 `{force, day}`（仅管理员，子进程执行，进度看 status） |
 | `GET /api/screener/metrics` | 指标目录（四组 + 每种类型的取值方式；文本类带可选值） |
 | `POST /api/screener/run` | 提交选股任务 `{conditions,mode,price_mode}`；同日同条件命中缓存时直接返回 `from_cache`；本人已有排队/运行中返回 409 |
 | `GET /api/screener/status` | 本人当前任务（`active`）+ 最近 3 次历史（`recent`）+ 当前展示的 `current`（默认**不含** `results`，用 `?full=1` 或 `/runs/{id}` 取详情）+ 因子库版本 |

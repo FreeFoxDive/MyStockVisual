@@ -895,6 +895,29 @@ class StreamingBuildTest(StoreTestCaseBase):
         self.assertEqual(rest[-1][1]["done"], 2)
         self.assertEqual(rest[-1][1]["batches"], 2)
 
+    def test_partial_batch_commits_before_next_progress_write(self):
+        """一批只有 1 只成功也要提交，否则下一批进度写入会被自身写锁挡住。"""
+        factors.init_store()
+        day = "2026-09-18"
+        factors._ensure_build_row(day)
+        bar = _df([10.0] * 40, end=day)
+
+        def fetch(_symbols, progress_cb=None):
+            yield {"600000.SH": bar}, {"batches": 2, "done": 1, "failed_batches": 0}
+            # 模拟 fetch_bars 拉下一批时的进度回调；立刻失败可避免 8 秒测试等待。
+            import sqlite3
+            with sqlite3.connect(str(factors.DB_PATH), timeout=0) as conn:
+                conn.execute("UPDATE builds SET percent=50 WHERE day=?", (day,))
+            yield {"000001.SZ": bar}, {"batches": 2, "done": 2, "failed_batches": 0}
+
+        with mock.patch.object(factors, "universe", lambda: [("600000.SH", "浦发"),
+                                                              ("000001.SZ", "平安")]), \
+             mock.patch.object(factors, "fetch_bars", fetch), \
+             mock.patch.object(factors, "_fetch_shares", lambda _symbols: {}), \
+             mock.patch.object(factors, "external_meta", lambda _day, _symbols: ({}, {})):
+            result = factors._build_inner(day)
+        self.assertEqual(result["n_symbols"], 2)
+
 
 class TokenWaitTest(unittest.TestCase):
     def test_sleeps_by_refill_rate_not_busy_loop(self):
@@ -930,6 +953,30 @@ class BuildChildTest(StoreTestCaseBase):
         with mock.patch.object(factors, "_spawn_build") as spawn:
             factors.spawn_manual(day="2026-09-18", force=True)
         spawn.assert_called_once_with("2026-09-18", force=True)
+
+    def test_second_spawn_is_refused_before_popen(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        with mock.patch("subprocess.Popen", return_value=proc) as popen:
+            factors._spawn_build("2026-09-18")
+            with self.assertRaises(factors.BuildAlreadyRunning):
+                factors._spawn_build("2026-09-18", force=True)
+        popen.assert_called_once()
+
+    def test_running_child_blocks_manual_rebuild_even_with_force(self):
+        factors.init_store()
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        factors._track_child(proc, "2026-09-18")
+        reason = factors.build_blocked_reason(day="2026-09-18", force=True)
+        self.assertIn("构建", reason)
+
+    def test_recent_running_build_row_blocks_after_web_restart(self):
+        factors.init_store()
+        factors._ensure_build_row("2026-09-18")
+        factors._update_build("2026-09-18", state="running", started_at=factors._iso())
+        reason = factors.build_blocked_reason(day="2026-09-18", force=True)
+        self.assertIn("构建", reason)
 
     def test_stop_children_terminates_and_marks_error(self):
         factors.init_store()

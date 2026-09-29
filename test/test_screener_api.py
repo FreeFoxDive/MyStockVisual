@@ -66,6 +66,10 @@ class KlineRateTest(unittest.TestCase):
         self.assertEqual(factors.kline_rate(),
                          af_limits.bucket_rate("kline_daily_batch"))
 
+    def test_daily_bucket_uses_shared_store(self):
+        from shared_budget import SharedTokenBucket
+        self.assertIsInstance(factors.daily_kline_bucket(), SharedTokenBucket)
+
     def test_env_override(self):
         with mock.patch.dict(os.environ, {"FACTORS_KLINE_PER_MIN": "12"}):
             self.assertEqual(factors.kline_rate(), 12)
@@ -721,6 +725,15 @@ class FactorsRouteTest(ScreenerTestBase):
              mock.patch.object(factors, "spawn_manual", side_effect=OSError("fork failed")):
             body = self._post("/api/factors/rebuild", {"force": True}, client=self.admin).get_json()
         self.assertFalse(body["started"], "拉不起子进程不能回 started:true")
+
+    def test_rebuild_race_reports_existing_child(self):
+        with mock.patch.object(factors, "build_blocked_reason", return_value=None), \
+             mock.patch.object(factors, "spawn_manual",
+                               side_effect=factors.BuildAlreadyRunning("已有构建子进程在进行中")):
+            body = self._post("/api/factors/rebuild", {"force": True},
+                              client=self.admin).get_json()
+        self.assertFalse(body["started"])
+        self.assertIn("进行中", body["reason"])
 
     def test_rebuild_reports_blocked_reason(self):
         """回归: 开不了跑时不能回 started:true (管理员会以为已触发)。"""

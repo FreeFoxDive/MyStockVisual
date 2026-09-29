@@ -61,6 +61,8 @@ def factors_rebuild():
 
     try:
         factors.spawn_manual(day=day, force=force)
+    except factors.BuildAlreadyRunning as e:
+        return _json({"ok": False, "started": False, "reason": str(e), "force": force})
     except Exception as e:
         log.warning("手动构建因子库拉起失败: %s", e)
         return _json({"ok": False, "started": False, "reason": "拉起构建失败", "force": force})
