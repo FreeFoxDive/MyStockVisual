@@ -240,6 +240,32 @@ class CnRouteTest(unittest.TestCase):
         self.assertEqual(kwargs["start_date"], "20260906")
         self.assertEqual(kwargs["end_date"], "20260913")
 
+    def test_lhb_market_fetched_once_for_many_symbols(self):
+        """全市场 7 日榜单按日期缓存: 换标的不再重下一遍。"""
+        df = pd.DataFrame({
+            "代码": ["600000", "000001"],
+            "上榜日": ["2026-09-10", "2026-09-11"],
+            "解读": ["a", "b"], "收盘价": [10.0, 11.0],
+            "涨跌幅": [1.0, 2.0], "龙虎榜净买额": [100.0, 200.0],
+        })
+        fetch = mock.Mock(return_value=df)
+        with mock.patch.object(self.cd.market_hours, "now", return_value=datetime(2026, 9, 13)), \
+             mock.patch.dict(sys.modules, {"akshare": _fake_ak(stock_lhb_detail_em=fetch)}):
+            a = self.client.get("/api/cn/lhb?symbol=600000.SH").get_json()
+            b = self.client.get("/api/cn/lhb?symbol=000001.SZ").get_json()
+            c = self.client.get("/api/cn/lhb?symbol=300750.SZ").get_json()
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(a["rows"][0]["收盘"], 10.0)
+        self.assertEqual(b["rows"][0]["收盘"], 11.0)
+        self.assertEqual(c["rows"], [])
+        self.assertIn("该股无龙虎榜", c["hint"])
+
+    def test_cache_capped(self):
+        with mock.patch.object(self.cd, "_CN_CACHE_MAX", 2):
+            for i in range(4):
+                self.cd._cached(f"k{i}", lambda i=i: {"v": i})
+        self.assertEqual(list(self.cd._cache), ["k2", "k3"])
+
     def test_lhb_empty_returns_hint(self):
         with mock.patch.dict(sys.modules, {"akshare": _fake_ak(
                 stock_lhb_detail_em=mock.Mock(return_value=pd.DataFrame()))}):
@@ -284,8 +310,9 @@ class CnRouteTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"akshare": _fake_ak(stock_lhb_detail_em=fetch)}):
             self.client.get("/api/cn/lhb?symbol=600000.SH").get_json()
             self.assertEqual(fetch.call_count, 3)
-            # 把失败时间戳拨回 FAIL_TTL 之前
-            self.cd._fail_ts["lhb:600000.SH"] = time.time() - self.cd.FAIL_TTL - 1
+            # 把失败时间戳拨回 FAIL_TTL 之前 (全市场龙虎榜按日期缓存, 不再按标的)
+            key = next(k for k in self.cd._fail_ts if k.startswith("lhb-market:"))
+            self.cd._fail_ts[key] = time.time() - self.cd.FAIL_TTL - 1
             self.client.get("/api/cn/lhb?symbol=600000.SH").get_json()
         self.assertEqual(fetch.call_count, 6, "窗口过后应重新重试")
 

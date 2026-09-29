@@ -192,5 +192,114 @@ class CleanupTmpDirsTest(unittest.TestCase):
         self.assertTrue(fresh.exists() and nonempty.exists() and nontmp.exists())
 
 
+class TTLCacheBoundTest(unittest.TestCase):
+    def test_max_entries_evicts_oldest(self):
+        cache = market.TTLCache(ttl_seconds=60, max_entries=2)
+        cache.set("a", 1)
+        cache.set("b", 2)
+        cache.set("c", 3)
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(cache.get("b"), 2)
+        self.assertEqual(cache.get("c"), 3)
+        self.assertEqual(len(cache), 2)
+
+    def test_purge_expired_removes_untouched(self):
+        cache = market.TTLCache(ttl_seconds=10, max_entries=10)
+        cache.set("old", 1, fetched_at=time.time() - 30)
+        cache.set("new", 2)
+        cache.purge_expired()
+        self.assertIsNone(cache.get("old"))
+        self.assertEqual(cache.get("new"), 2)
+
+    def test_set_purges_expired_before_counting(self):
+        cache = market.TTLCache(ttl_seconds=10, max_entries=1)
+        cache.set("old", 1, fetched_at=time.time() - 30)
+        cache.set("new", 2)
+        self.assertEqual(cache.get("new"), 2)
+        self.assertEqual(len(cache), 1)
+
+    def test_kline_caches_use_small_bound(self):
+        for cache in (market.kline_cache, market.kline_cache_minute, market.kline_cache_long):
+            self.assertLessEqual(cache._max_entries, 50, "K线响应缓存条目很大, 上限必须小")
+        self.assertEqual(market.quote_cache._max_entries, 500)
+
+
+class BoundedMemoTest(unittest.TestCase):
+    def setUp(self):
+        import threading
+        self.store = {}
+        self.lock = threading.Lock()
+
+    def test_expired_keys_dropped_on_write(self):
+        self.store["stale"] = {"ts": time.time() - 100, "data": 1, "ok": True}
+        market._memo("fresh", self.store, self.lock, 10, lambda: 2)
+        self.assertNotIn("stale", self.store)
+        self.assertEqual(self.store["fresh"]["data"], 2)
+
+    def test_store_capped_oldest_first(self):
+        with mock.patch.object(market, "_MEMO_MAX", 3):
+            for i in range(5):
+                market._memo(f"k{i}", self.store, self.lock, 3600, lambda i=i: i)
+        self.assertEqual(list(self.store), ["k2", "k3", "k4"])
+
+    def test_hit_does_not_refetch(self):
+        calls = []
+        market._memo("a", self.store, self.lock, 3600, lambda: calls.append(1) or "x")
+        self.assertEqual(market._memo("a", self.store, self.lock, 3600,
+                                      lambda: calls.append(1) or "y"), "x")
+        self.assertEqual(len(calls), 1)
+
+
+class BoundedSymbolCachesTest(unittest.TestCase):
+    def test_etf_nav_trim(self):
+        saved = dict(market._etf_nav_cache)
+        self.addCleanup(lambda: (market._etf_nav_cache.clear(), market._etf_nav_cache.update(saved)))
+        market._etf_nav_cache.clear()
+        now = time.time()
+        market._etf_nav_cache["old"] = (now - market._ETF_NAV_TTL - 1, None)
+        for i in range(5):
+            market._etf_nav_cache[f"s{i}"] = (now + i, None)
+        with mock.patch.object(market, "_ETF_NAV_MAX", 3):
+            market._etf_nav_trim_locked(now)
+        self.assertEqual(sorted(market._etf_nav_cache), ["s2", "s3", "s4"])
+
+    def test_chips_cache_trim(self):
+        import chips
+        saved = dict(chips._cache)
+        self.addCleanup(lambda: (chips._cache.clear(), chips._cache.update(saved)))
+        chips._cache.clear()
+        now = time.time()
+        chips._cache[("old", "1d")] = (now - 1000, {"x": 1})
+        for i in range(4):
+            chips._cache[(f"s{i}", "1d")] = (now + i, {"x": 1})
+        with mock.patch.object(chips, "_CACHE_MAX", 2):
+            chips._trim_locked(now)
+        self.assertEqual(sorted(chips._cache), [("s2", "1d"), ("s3", "1d")])
+
+    def test_premium_trim(self):
+        import premium
+        premium.clear()
+        self.addCleanup(premium.clear)
+        mono = time.monotonic()
+        premium._fail_at["gone"] = mono - premium.PREMIUM_FAIL_TTL - 1
+        premium._fail_kind["gone"] = "failed"
+        for i in range(4):
+            premium._cache[f"p{i}"] = (time.time() + i, {})
+        with mock.patch.object(premium, "PREMIUM_CACHE_MAX", 2), premium._lock:
+            premium._trim_locked()
+        self.assertEqual(sorted(premium._cache), ["p2", "p3"])
+        self.assertNotIn("gone", premium._fail_at)
+        self.assertNotIn("gone", premium._fail_kind)
+
+    def test_search_passes_candidate_limit(self):
+        with mock.patch.object(market.search_index, "search", return_value=[]) as search, \
+             mock.patch.object(market, "_load_stock_list", return_value=[]), \
+             mock.patch.object(market, "_load_index_cache", return_value=None), \
+             mock.patch.object(market, "_load_universe", return_value=[]):
+            market._search_stocks("中")
+        for call in search.call_args_list:
+            self.assertEqual(call.kwargs.get("limit"), market.SEARCH_CANDIDATES)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

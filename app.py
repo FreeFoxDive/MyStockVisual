@@ -349,3 +349,10 @@ def start_background_jobs():
         log.info("看门狗线程已启动")
     except Exception as e:
         log.warning(f"看门狗启动失败: {e}")
+
+    try:
+        import memguard as _mg
+        _mg.start_background()
+        log.info("内存看门狗线程已启动")
+    except Exception as e:
+        log.warning(f"内存看门狗启动失败: {e}")

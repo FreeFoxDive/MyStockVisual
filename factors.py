@@ -48,6 +48,106 @@ PHASE_WEIGHTS = {"bars": (0, 70), "factors": (70, 92), "meta": (92, 100)}
 
 log = logging.getLogger("factors")
 
+_build_children = []
+_build_children_lock = threading.Lock()
+_live_running = False
+
+
+class HeavyLock:
+    """跨进程互斥 (构建子进程 / 盘中快照 / 搜索索引)。Windows 上退化为空操作。"""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def acquire(self, blocking=True):
+        if os.name == "nt":
+            return True
+        import fcntl
+        path = CACHE_DIR / "heavy.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+", encoding="utf-8")
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(fh.fileno(), flags)
+        except BlockingIOError:
+            fh.close()
+            return False
+        self._local.fh = fh
+        return True
+
+    def release(self):
+        if os.name == "nt":
+            return
+        fh = getattr(self._local, "fh", None)
+        if fh is None:
+            return
+        import fcntl
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+            self._local.fh = None
+
+
+heavy_lock = HeavyLock()
+
+
+def _track_child(proc, day):
+    with _build_children_lock:
+        alive = [(p, d) for p, d in _build_children if p.poll() is None]
+        alive.append((proc, day))
+        _build_children[:] = alive
+
+
+def stop_build_children():
+    """内存紧急时只停构建子进程, Web 进程继续服务。返回终止个数。
+
+    SIGTERM 下子进程来不及走 build() 的 finally, 构建记录会停在 running;
+    这里替它落成 error, 页面不会一直显示「构建中」, 调度按失败退避重试。
+    """
+    with _build_children_lock:
+        procs = [(p, d) for p, d in _build_children if p.poll() is None]
+    stopped = 0
+    for proc, day in procs:
+        try:
+            proc.terminate()
+            stopped += 1
+        except Exception:
+            continue
+        try:
+            _update_build(day, state="error", phase=None,
+                          error="内存紧急, 构建子进程已终止", done_at=_iso())
+        except Exception as e:
+            log.warning("标记构建终止失败 %s: %s", day, e)
+    return stopped
+
+
+def build_child_running():
+    with _build_children_lock:
+        return any(p.poll() is None for p, _d in _build_children)
+
+
+def live_running():
+    return _live_running
+
+
+def _under_pressure():
+    try:
+        import memguard
+        return memguard.under_pressure()
+    except Exception:
+        return False
+
+
+def _log_rss(label):
+    try:
+        import memguard
+        memguard.log_rss(log, label)
+    except Exception:
+        pass
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars (
     symbol     TEXT PRIMARY KEY,
@@ -653,25 +753,32 @@ def _fetch_bars_chunk(af, chunk, count):
                            adjust="forward", to_dataframe=True)
 
 
-def fetch_bars(symbols, count=BARS_COUNT, progress_cb=None):
-    """批量拉日K (前复权) → ({symbol: df}, 统计)。
+def _acquire_token(bucket):
+    """按令牌补充速率睡眠, 避免 50ms 忙等占 CPU。"""
+    while not bucket.try_acquire():
+        rate = getattr(bucket, "rate", None)
+        wait = 1.0 / rate if isinstance(rate, (int, float)) and rate > 0 else 1.0
+        time.sleep(min(wait, 5.0))
 
+
+def fetch_bars(symbols, count=BARS_COUNT, progress_cb=None):
+    """批量拉日K (前复权), 按批 yield ``(batch, stats)``。
+
+    调用方处理完一批就丢掉 DataFrame, 不要把约 8000 只同时留在内存里。
+    stats 含 batches / done / failed_batches, 随每一批更新。
     令牌桶按 kline_rate() 限速, 与图表共用 (见 daily_kline_bucket)。
-    失败批次退避重试 FETCH_BARS_RETRIES 次; 仍失败的批次数记在 stats["failed_batches"],
-    由构建写进 sources, 页面能看到丢了多少, 而不是静默缺失。
+    失败批次退避重试 FETCH_BARS_RETRIES 次; 仍失败的批次数记在 failed_batches。
     progress_cb(done_batches, total_batches) 用于落库进度。
     """
     import market
     af = market.get_af()
     bucket = daily_kline_bucket()
     chunks = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
-    out = {}
     failed = 0
     for i, chunk in enumerate(chunks, 1):
         dfs = None
         for attempt in range(FETCH_BARS_RETRIES + 1):
-            while not bucket.try_acquire():
-                time.sleep(0.05)
+            _acquire_token(bucket)
             try:
                 dfs = _fetch_bars_chunk(af, chunk, count)
                 break
@@ -681,14 +788,16 @@ def fetch_bars(symbols, count=BARS_COUNT, progress_cb=None):
                 dfs = None
                 if attempt < FETCH_BARS_RETRIES:
                     time.sleep(FETCH_BARS_RETRY_SLEEP)
-        if dfs is None:
+        batch_failed = dfs is None
+        if batch_failed:
             failed += 1
+        batch = {}
         for sym in chunk:
             df = (dfs or {}).get(sym)
             if df is None or len(df) == 0:
                 continue
             try:
-                out[sym] = market._normalize(df, prefer_time=False)
+                batch[sym] = market._normalize(df, prefer_time=False)
             except Exception:
                 continue
         if progress_cb:
@@ -696,7 +805,7 @@ def fetch_bars(symbols, count=BARS_COUNT, progress_cb=None):
                 progress_cb(i, len(chunks))
             except Exception:
                 pass
-    return out, {"batches": len(chunks), "failed_batches": failed}
+        yield batch, {"batches": len(chunks), "done": i, "failed_batches": failed}
 
 
 def _fetch_shares(symbols):
@@ -989,6 +1098,7 @@ def build(day=None, force=False, notify=True):
         _build_state.update({"running": True, "day": day})
 
     attempts = 0
+    held = False
     try:
         with _build_lock:
             attempts = _bump_attempts(day)
@@ -996,7 +1106,13 @@ def build(day=None, force=False, notify=True):
                           started_at=_iso(), done_at=None)
         if notify:
             _notify_state("start", day, f"全市场日K + 因子计算 (第 {attempts} 次尝试)")
-        result = _build_inner(day)
+        held = heavy_lock.acquire(blocking=True)
+        try:
+            result = _build_inner(day)
+        finally:
+            if held:
+                heavy_lock.release()
+                held = False
         sources = dict(result["sources"] or {})
         if _should_mark_provisional(day):
             sources["_provisional"] = True
@@ -1078,6 +1194,7 @@ def _bars_as_of(df, day):
 
 def _build_inner(day):
     t0 = time.time()
+    _log_rss("因子构建开始")
     uni = universe()
     symbols = [s for s, _n in uni]
     names = dict(uni)
@@ -1088,10 +1205,7 @@ def _build_inner(day):
         pct = lo + int((hi - lo) * done / max(1, total))
         _update_build(day, percent=pct, phase="bars")
 
-    frames, bar_stats = fetch_bars(symbols, progress_cb=on_bars)
-    missing = len(symbols) - len(frames)
-
-    # 股本: 7 天刷新一次 (股本变动少)
+    # 股本先于拉K: 流式处理时不能等全部 DataFrame 到齐再去要股本
     shares = load_shares()
     age = shares_age_days()
     if not shares or age is None or age > 7:
@@ -1103,51 +1217,59 @@ def _build_inner(day):
         except Exception as e:
             log.warning("股本刷新失败: %s", e)
 
-    # 写 bars + 计算因子
+    # 按批写 bars + 计算因子, 一批算完就丢掉 DataFrame
     tags = {"bars": 0, "factors": 0, "meta": 0}
     rows = []
+    missing = 0
+    got = 0
+    bar_stats = {"batches": 0, "failed_batches": 0}
+    n_symbols = max(1, len(symbols))
     conn = _conn()
     try:
-        for i, (sym, df) in enumerate(frames.items(), 1):
-            view = _bars_as_of(df, day)
-            try:
-                # bars 表存最新拉取的序列 (盘中补 bar 要用); 因子按 day 截断后的 view 算
-                save_bars(conn, sym, names.get(sym), df)
-            except Exception as e:
-                log.warning("写K线失败 %s: %s", sym, e)
-                continue
-            tags["bars"] += 1
-            if view is None:
-                missing += 1          # 停牌或该日没有 bar, 不把上一交易日的因子标成当天
-                continue
-            fs = (shares.get(sym) or (None, None))[0]
-            feats = compute_factors(view, sym, names.get(sym), float_shares=fs)
-            if not feats:
-                missing += 1
-                continue
-            if fs:
+        for batch, bar_stats in fetch_bars(symbols, progress_cb=on_bars):
+            for sym, df in batch.items():
+                got += 1
+                view = _bars_as_of(df, day)
                 try:
-                    from indicators import volume_shares_mult
-                    mult = volume_shares_mult(view["close"], view["volume"],
-                                              view["amount"] if "amount" in view.columns else None,
-                                              tail=10)
-                    feats.update(compute_chip_factors(view, fs, mult))
+                    # bars 表存最新拉取的序列 (盘中补 bar 要用); 因子按 day 截断后的 view 算
+                    save_bars(conn, sym, names.get(sym), df)
                 except Exception as e:
-                    log.warning("筹码因子失败 %s: %s", sym, e)
-            feats["trade_date"] = day
-            rows.append(feats)
-            tags["factors"] += 1
-            # 提交写事务后再更新进度: _update_build 另开连接, 未提交的写锁会让它
-            # 直接撞 "database is locked" (WAL 下读写不互斥, 但写写互斥)。
-            if i % 25 == 0 or i == len(frames):
-                conn.commit()
-            if i % 200 == 0 or i == len(frames):
-                lo, hi = PHASE_WEIGHTS["factors"]
-                _update_build(day, percent=lo + int((hi - lo) * i / max(1, len(frames))),
-                              phase="factors")
+                    log.warning("写K线失败 %s: %s", sym, e)
+                    continue
+                tags["bars"] += 1
+                if view is None:
+                    missing += 1          # 停牌或该日没有 bar, 不把上一交易日的因子标成当天
+                    continue
+                fs = (shares.get(sym) or (None, None))[0]
+                feats = compute_factors(view, sym, names.get(sym), float_shares=fs)
+                if not feats:
+                    missing += 1
+                    continue
+                if fs:
+                    try:
+                        from indicators import volume_shares_mult
+                        mult = volume_shares_mult(view["close"], view["volume"],
+                                                  view["amount"] if "amount" in view.columns else None,
+                                                  tail=10)
+                        feats.update(compute_chip_factors(view, fs, mult))
+                    except Exception as e:
+                        log.warning("筹码因子失败 %s: %s", sym, e)
+                feats["trade_date"] = day
+                rows.append(feats)
+                tags["factors"] += 1
+                # 提交写事务后再更新进度: _update_build 另开连接, 未提交的写锁会让它
+                # 直接撞 "database is locked" (WAL 下读写不互斥, 但写写互斥)。
+                if got % 25 == 0:
+                    conn.commit()
+                if got % 200 == 0:
+                    lo, hi = PHASE_WEIGHTS["factors"]
+                    _update_build(day, percent=lo + int((hi - lo) * got / n_symbols),
+                                  phase="factors")
+            del batch
         conn.commit()
     finally:
         conn.close()
+    missing += len(symbols) - got
 
     # 外部快照 (基本面/资金/筹码) — 失败只记 sources
     _update_build(day, phase="meta", percent=PHASE_WEIGHTS["meta"][0])
@@ -1175,6 +1297,7 @@ def _build_inner(day):
     df = pd.DataFrame(rows)
     _write_snapshot(day, df)
     _update_build(day, percent=100, phase="meta", n_rows=len(df), sources=_json_sources(sources))
+    _log_rss("因子构建结束")
     return {"n_symbols": len(symbols), "n_rows": len(df), "n_missing": missing,
             "sources": sources, "elapsed": time.time() - t0}
 
@@ -1253,7 +1376,6 @@ def live_snapshot(max_age_sec=None, progress_cb=None):
     **时段桶** (``<交易日>+live@HHMM``), 让下游的结果去重能按桶刷新而不是整天冻结。
     口径提示: 用未复权实时价拼前复权序列, 除权日会有一日偏差 (18:00 重建纠正)。
     """
-    import market
     import market_hours
     ttl = max_age_sec or float(os.environ.get("FACTORS_LIVE_TTL_SEC", "600"))
     now = _now_dt()
@@ -1267,7 +1389,50 @@ def live_snapshot(max_age_sec=None, progress_cb=None):
                 and time.time() - _live_cache["ts"] < ttl):
             return _live_cache["df"], _live_cache["version"]
 
+    if _under_pressure():
+        log.info("盘中因子表跳过: 内存压力, 回退收盘口径")
+        return None, None
+    if not heavy_lock.acquire(blocking=False):
+        log.info("盘中因子表跳过: 重任务占用中, 回退收盘口径")
+        return None, None
+    global _live_running
+    _live_running = True
+    try:
+        return _live_snapshot_compute(base, day, ttl, now, progress_cb)
+    finally:
+        _live_running = False
+        heavy_lock.release()
+
+
+def _live_apply(rec, usable, bars_by_sym, shares, today, day):
+    sym = rec.get("symbol")
+    q = usable.get(sym)
+    if q is None:
+        return rec
+    last = _f(q.get("last_price"))
+    bars = bars_by_sym.get(sym)
+    if bars is None or len(bars) == 0:
+        rec = dict(rec)
+        rec["close"] = last
+        prev = _f(rec.get("prev_close"))
+        if prev:
+            rec["change_pct"] = (last / prev - 1) * 100
+        return rec
+    patched = _patch_last_bar(bars, today, q, last)
+    fs = (shares.get(sym) or (None, None))[0]
+    feats = compute_factors(patched, sym, rec.get("name"), float_shares=fs)
+    if feats:
+        for k in ("chip_profit", "chip_concentration", "chip_avg_cost", "above_chip_cost"):
+            if rec.get(k) is not None:
+                feats[k] = rec.get(k)      # 筹码不重算 (成本高), 沿用收盘口径
+        feats["trade_date"] = day
+        return feats
+    return rec
+
+
+def _live_snapshot_compute(base, day, ttl, now, progress_cb):
     today = now.date().isoformat()
+    _log_rss("盘中因子开始")
     quotes = _fetch_quotes(list(base["symbol"]), progress_cb=progress_cb)
     if not quotes:
         return None, None
@@ -1277,36 +1442,29 @@ def live_snapshot(max_age_sec=None, progress_cb=None):
         if _f(q.get("last_price")) is not None and _quote_is_today(q, today):
             usable[sym] = q
     shares = load_shares()          # 一次性读, 别在逐只循环里查库
-    bars_by_sym = load_bars_many(list(usable)) if usable else {}
     rows = []
     t0 = time.time()
-    for rec in base.to_dict("records"):
-        sym = rec.get("symbol")
-        q = usable.get(sym)
-        if q is None:
-            rows.append(rec)
-            continue
-        last = _f(q.get("last_price"))
-        bars = bars_by_sym.get(sym)
-        if bars is None or len(bars) == 0:
-            rec = dict(rec)
-            rec["close"] = last
-            prev = _f(rec.get("prev_close"))
-            if prev:
-                rec["change_pct"] = (last / prev - 1) * 100
-            rows.append(rec)
-            continue
-        patched = _patch_last_bar(bars, today, q, last)
-        fs = (shares.get(sym) or (None, None))[0]
-        feats = compute_factors(patched, sym, rec.get("name"), float_shares=fs)
-        if feats:
-            for k in ("chip_profit", "chip_concentration", "chip_avg_cost", "above_chip_cost"):
-                if rec.get(k) is not None:
-                    feats[k] = rec.get(k)      # 筹码不重算 (成本高), 沿用收盘口径
-            feats["trade_date"] = day
-            rows.append(feats)
-        else:
-            rows.append(rec)
+    cols = list(base.columns)
+    chunk = []
+    chunk_syms = []
+    chunk_cap = max(1, int(os.environ.get("FACTORS_LIVE_CHUNK", "300")))
+
+    def _flush():
+        bars_by_sym = load_bars_many(chunk_syms) if chunk_syms else {}
+        for rec in chunk:
+            rows.append(_live_apply(rec, usable, bars_by_sym, shares, today, day))
+        chunk.clear()
+        chunk_syms.clear()
+
+    for values in base.itertuples(index=False, name=None):
+        rec = dict(zip(cols, values))
+        chunk.append(rec)
+        if rec.get("symbol") in usable:
+            chunk_syms.append(rec["symbol"])
+        if len(chunk_syms) >= chunk_cap or len(chunk) >= chunk_cap:
+            _flush()
+    if chunk:
+        _flush()
     df = pd.DataFrame(rows)
     # 版本带时段桶: 结果去重 (screener cache_key) 会随桶滚动, 不会整天复用同一份盘中结果
     bucket = int(time.time() // max(60.0, ttl))
@@ -1314,6 +1472,7 @@ def live_snapshot(max_age_sec=None, progress_cb=None):
     with _live_lock:
         _live_cache.update({"day": day, "ts": time.time(), "df": df, "version": version})
     log.info("盘中因子表已刷新: %d 只, %.1fs, 版本 %s", len(df), time.time() - t0, version)
+    _log_rss("盘中因子结束")
     return df, version
 
 
@@ -1379,8 +1538,7 @@ def _fetch_quotes(symbols, progress_cb=None):
     out = {}
     chunks = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
     for i, chunk in enumerate(chunks, 1):
-        while not bucket.try_acquire():
-            time.sleep(0.05)
+        _acquire_token(bucket)
         try:
             df = af.quotes.get(symbols=list(chunk), to_dataframe=True)
         except Exception as e:
@@ -1489,17 +1647,38 @@ def should_build(now=None):
     return True, "due"
 
 
-def _spawn_build(day):
+def _spawn_build(day, force=False):
     """在子进程里跑构建, 返回 Popen。
 
     全市场因子 + 筹码计算实测约 2 分钟纯 CPU, 放在 Web 进程里会占住 GIL,
     图表/推送/监控在这段时间全部变慢。数据库与快照照旧落盘, 状态接口不变。
+    Linux 上 nice +10, 把 CPU 让给 Web 进程和其他服务。
     """
     import subprocess
     import sys
     cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--build", "--day", day]
+    if force:
+        cmd.append("--force")
     log.info("因子库构建子进程: %s", " ".join(cmd))
-    return subprocess.Popen(cmd, cwd=str(SCRIPT_DIR.parent))
+
+    def _demote():
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+
+    kwargs = {"cwd": str(SCRIPT_DIR.parent)}
+    if os.name != "nt":
+        kwargs["preexec_fn"] = _demote
+    proc = subprocess.Popen(cmd, **kwargs)
+    _track_child(proc, day)
+    return proc
+
+
+def spawn_manual(day=None, force=False):
+    """手动重建: 与定时任务一样走子进程, 不在 Web 进程里算。"""
+    day = day or due_day() or last_closed_trading_day()
+    return _spawn_build(day, force=force)
 
 
 def _loop():
@@ -1517,8 +1696,11 @@ def _loop():
                 ok, why = should_build(now)
                 if ok:
                     day = due_day(now)    # 到点后即今天 (未到点 should_build 已拦下)
-                    log.info("因子库开始构建 (%s, day=%s)", why, day)
-                    child = _spawn_build(day)
+                    if _under_pressure():
+                        log.warning("因子库跳过本轮: 内存压力")
+                    else:
+                        log.info("因子库开始构建 (%s, day=%s)", why, day)
+                        child = _spawn_build(day)
         except Exception as e:
             log.warning("因子库调度异常: %s", e)
         time.sleep(SCHED_INTERVAL_SEC)

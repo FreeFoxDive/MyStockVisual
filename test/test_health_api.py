@@ -68,6 +68,9 @@ class HealthApiTest(unittest.TestCase):
         self.assertIn("monitor", body["checks"])
         self.assertIn("watchdog", body["checks"])
         self.assertIn("db", body["checks"])
+        self.assertIn("memory", body["checks"])
+        for key in ("rss_kb", "hwm_kb", "usage_bytes", "limit_bytes", "pct", "oom_kill", "pressure"):
+            self.assertIn(key, body["checks"]["memory"])
         self.assertTrue(body["checks"]["db"]["ok"])
 
     def test_non_loopback_minimal_payload(self):

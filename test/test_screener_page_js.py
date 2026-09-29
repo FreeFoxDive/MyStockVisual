@@ -475,7 +475,8 @@ console.log(JSON.stringify(r));
   console.log(JSON.stringify(r));
 })();
 """)
-        self.assertIn("/api/screener/runs/5", out["paths"])
+        detail = [p for p in out["paths"] if str(p).startswith("/api/screener/runs/5")]
+        self.assertEqual(detail, ["/api/screener/runs/5?limit=3000"], "详情只取一次, 不分页循环")
         self.assertIn("600519.SH", out["rows"])
         self.assertEqual(out["histVal"], "5")
 

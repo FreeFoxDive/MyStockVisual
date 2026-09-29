@@ -239,7 +239,7 @@ class TestWindowByPeriod(unittest.TestCase):
     def test_known_periods(self):
         self.assertEqual(chips.window_for_period("1d"), 210)
         self.assertEqual(chips.window_for_period("1w"), 600)
-        self.assertEqual(chips.window_for_period("1M"), 1500)
+        self.assertEqual(chips.window_for_period("1M"), 600)
 
     def test_unknown_period_falls_back_to_daily(self):
         for p in ("5m", "intraday", "", None):

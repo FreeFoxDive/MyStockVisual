@@ -466,7 +466,8 @@ async function showRun(id) {
   let full = runCache[displayId];
   if (!full) {
     try {
-      full = await api("/api/screener/runs/" + displayId);
+      // 服务端每次都整份解析结果 JSON, 分页循环会把同一份解析十几遍; 页面要全量筛选, 一次取完
+      full = await api("/api/screener/runs/" + displayId + "?limit=3000");
       runCache[displayId] = full;
     } catch (e) { showErr(e.message || String(e)); return; }
   }

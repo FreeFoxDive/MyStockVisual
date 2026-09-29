@@ -626,12 +626,27 @@ _disk_cache = DiskCache()
 class TTLCache:
     """简单的 TTL 内存缓存 (基于 OrderedDict 的 LRU 淘汰)"""
 
-    def __init__(self, ttl_seconds=60):
+    def __init__(self, ttl_seconds=60, max_entries=500):
         from collections import OrderedDict
         self._cache = OrderedDict()
         self._ttl = ttl_seconds
-        self._max_entries = 500
+        self._max_entries = max(1, int(max_entries))
         self._lock = threading.Lock()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._cache)
+
+    def _purge_expired_locked(self, now):
+        stale = [k for k, entry in self._cache.items() if now - entry["time"] >= self._ttl]
+        for k in stale:
+            del self._cache[k]
+
+    def purge_expired(self, now=None):
+        """删掉已过期、但还没被 get 碰到的条目。"""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._purge_expired_locked(now)
 
     def get(self, key):
         with self._lock:
@@ -648,17 +663,18 @@ class TTLCache:
     def set(self, key, data, fetched_at=None):
         at = time.time() if fetched_at is None else fetched_at
         with self._lock:
+            self._purge_expired_locked(at)
             # 如果已存在, 更新并移到末尾
             if key in self._cache:
                 self._cache[key] = {"data": data, "time": at}
                 self._cache.move_to_end(key)
                 return
             # 超过上限: 淘汰最旧的 (OrderedDict popitem(last=False))
-            if len(self._cache) >= self._max_entries:
+            while len(self._cache) >= self._max_entries:
                 try:
                     self._cache.popitem(last=False)
                 except KeyError:
-                    pass
+                    break
             self._cache[key] = {"data": data, "time": at}
 
     def clear(self):
@@ -678,10 +694,12 @@ MINUTE_COUNTS = {"1m": 1200, "5m": 480, "15m": 320, "30m": 320, "60m": 1000}
 KLINE_DISK_TTL_SEC = float(os.environ.get("KLINE_DISK_TTL_SEC", "300"))
 KLINE_DISK_TTL_OFF_SEC = float(os.environ.get("KLINE_DISK_TTL_OFF_SEC", "1800"))
 
-# 缓存: 日K 120s, 分钟K 60s, 周/月K 300s, 快照 1.25s, 上限 500 条目
-kline_cache = TTLCache(ttl_seconds=120)
-kline_cache_minute = TTLCache(ttl_seconds=60)
-kline_cache_long = TTLCache(ttl_seconds=300)
+# 缓存: 日K 120s, 分钟K 60s, 周/月K 300s。条目是完整 API 响应 (约千根 bar),
+# 上限必须小 —— 500 条在 1GB 机器上就能到几百 MB。快照缓存条目很小, 仍用 500。
+_KLINE_MEM_MAX = max(1, int(os.environ.get("KLINE_MEM_CACHE_MAX", "30")))
+kline_cache = TTLCache(ttl_seconds=120, max_entries=_KLINE_MEM_MAX)
+kline_cache_minute = TTLCache(ttl_seconds=60, max_entries=_KLINE_MEM_MAX)
+kline_cache_long = TTLCache(ttl_seconds=300, max_entries=_KLINE_MEM_MAX)
 # Shared across page connections; 60/min package, reserve 1/5 for other work.
 from live_budget import PacedBudget
 QUOTE_RATE_PER_MIN = 48
@@ -843,6 +861,11 @@ def _refresh_pledge_async():
     def _worker():
         global _refreshing_pledge, _pledge_cache, _pledge_ts, _pledge_date
         try:
+            import memguard
+            memguard.log_rss(log, "质押刷新开始")
+        except Exception:
+            pass
+        try:
             date_str, pledge = _fetch_pledge()
             if not pledge:
                 log.warning("质押数据刷新失败: 未获取到数据, 保留旧缓存")
@@ -857,6 +880,11 @@ def _refresh_pledge_async():
                 _pledge_ts = time.time()
                 _pledge_date = date_str
             log.info(f"质押数据刷新完成: {date_str} 共 {len(pledge)} 条")
+            try:
+                import memguard
+                memguard.log_rss(log, "质押刷新结束")
+            except Exception:
+                pass
         except Exception as e:
             log.warning(f"质押数据刷新失败: {e}, 保留旧缓存")
         finally:
@@ -949,9 +977,19 @@ def _is_etf(symbol):
 # ETF 历史净值: akshare 调用原本无缓存无超时, 是 ETF 溢价慢的主因。净值日频
 # 变化, 长 TTL 内存缓存即可; 失败不写缓存 (由 premium 的负缓存兜底)。
 _ETF_NAV_TTL = float(os.environ.get("ETF_NAV_TTL", "21600"))
+_ETF_NAV_MAX = max(1, int(os.environ.get("ETF_NAV_CACHE_MAX", "50")))
 _etf_nav_cache = {}   # symbol -> (ts, df)
 _etf_nav_lock = threading.Lock()
 _etf_nav_inflight = {}  # symbol -> Event; 由调用线程持有，不另建无界工作线程
+
+
+def _etf_nav_trim_locked(now):
+    stale = [k for k, ent in _etf_nav_cache.items() if now - ent[0] >= _ETF_NAV_TTL]
+    for k in stale:
+        _etf_nav_cache.pop(k, None)
+    while len(_etf_nav_cache) > _ETF_NAV_MAX:
+        oldest = min(_etf_nav_cache, key=lambda k: _etf_nav_cache[k][0])
+        _etf_nav_cache.pop(oldest, None)
 
 
 def _fetch_etf_nav(symbol):
@@ -977,6 +1015,7 @@ def _fetch_etf_nav(symbol):
         if df is not None and len(df) > 0:
             with _etf_nav_lock:
                 _etf_nav_cache[symbol] = (time.time(), df)
+                _etf_nav_trim_locked(time.time())
         return df
     finally:
         with _etf_nav_lock:
@@ -2309,24 +2348,46 @@ def _load_universe(attr):
 
 
 SEARCH_MAX_RESULTS = 50           # 下拉返回上限 (前端一屏约 18 条, 可滚动)
+SEARCH_CANDIDATES = 500           # FTS 候选上限: 短词否则会把几千行拉进 Python 打分
 SEARCH_INDEX_FILE = SCRIPT_DIR / ".cache" / "search_catalog.sqlite3"
 
 
 def _build_search_index():
     """Build and atomically publish the local FTS5 catalogue from cached lists."""
-    stocks = _load_stock_list()
-    _load_index_cache()
-    rows = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
-             "type": "etf" if _is_etf(s["symbol"]) else "stock"} for s in stocks]
-    rows.extend({"symbol": sym, "name": name, "code": sym.split(".")[0], "type": "index"}
-                for sym, name in _index_names.items())
-    rows.extend(_load_universe("hk"))
-    rows.extend(_load_universe("us"))
-    if not rows:
-        return 0
-    count = search_index.build_index(rows, SEARCH_INDEX_FILE)
-    log.info("已发布本地搜索索引: %s 条", count)
-    return count
+    try:
+        import factors
+        if not factors.heavy_lock.acquire(blocking=False):
+            log.info("搜索索引跳过: 重任务占用中")
+            return 0
+    except Exception:
+        factors = None
+    try:
+        try:
+            import memguard
+            memguard.log_rss(log, "搜索索引开始")
+        except Exception:
+            pass
+        stocks = _load_stock_list()
+        _load_index_cache()
+        rows = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
+                 "type": "etf" if _is_etf(s["symbol"]) else "stock"} for s in stocks]
+        rows.extend({"symbol": sym, "name": name, "code": sym.split(".")[0], "type": "index"}
+                    for sym, name in _index_names.items())
+        rows.extend(_load_universe("hk"))
+        rows.extend(_load_universe("us"))
+        if not rows:
+            return 0
+        count = search_index.build_index(rows, SEARCH_INDEX_FILE)
+        log.info("已发布本地搜索索引: %s 条", count)
+        try:
+            import memguard
+            memguard.log_rss(log, "搜索索引结束")
+        except Exception:
+            pass
+        return count
+    finally:
+        if factors is not None:
+            factors.heavy_lock.release()
 
 
 def _search_catalog_status():
@@ -2430,11 +2491,11 @@ def _search_stocks(query):
     排序为 股票(含港/美) > ETF > 指数, 组内按匹配分, 同分 A股 > 港 > 美。
     """
     keys = _search_query_keys(query)
-    indexed = search_index.search(SEARCH_INDEX_FILE, query)
+    indexed = search_index.search(SEARCH_INDEX_FILE, query, limit=SEARCH_CANDIDATES)
     # 前缀式输入 (sz000070) 借归一键再查一次: FTS 把 '.' 当普通字符拆开分词,
     # 只有按完整 symbol 的精确/前缀查询才稳。
     if not indexed and keys[0] != str(query or "").strip().lower():
-        indexed = search_index.search(SEARCH_INDEX_FILE, keys[0])
+        indexed = search_index.search(SEARCH_INDEX_FILE, keys[0], limit=SEARCH_CANDIDATES)
     stocks = indexed if indexed else _load_stock_list()
     universe = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
                  "type": s.get("type") if indexed and s.get("type") else
@@ -2822,8 +2883,15 @@ def _mr_rows(rows):
     return None
 
 
+_MEMO_MAX = max(1, int(os.environ.get("MR_MEMO_MAX", "2000")))
+
+
 def _memo(key, store, lock, ttl, fetcher):
-    """进程内 TTL 记忆 (成功 ttl / 失败 _MR_FAIL_TTL); 抛异常 → None。"""
+    """进程内 TTL 记忆 (成功 ttl / 失败 _MR_FAIL_TTL); 抛异常 → None。
+
+    写入时清掉过期项, 并按插入顺序把 store 压到 _MEMO_MAX。
+    过期项以前只在被 get 到时才删, 没人再访问的 key 会一直占着。
+    """
     now = time.time()
     with lock:
         ent = store.get(key)
@@ -2836,7 +2904,16 @@ def _memo(key, store, lock, ttl, fetcher):
         log.warning(f"麦蕊数据获取失败 {key}: {_sanitize_error(e)}")
         data, ok = None, False
     with lock:
+        expired = [
+            k for k, e in store.items()
+            if now - e.get("ts", 0) >= (ttl if e.get("ok") else _MR_FAIL_TTL)
+        ]
+        for k in expired:
+            store.pop(k, None)
+        store.pop(key, None)
         store[key] = {"ts": now, "data": data, "ok": ok}
+        while len(store) > _MEMO_MAX:
+            store.pop(next(iter(store)))
     return data
 
 
@@ -3039,6 +3116,8 @@ def _live_info_for_quote(symbol, quote):
 
 _stock_info_cache: dict = {}
 _stock_info_lock = threading.Lock()
+# 侧栏补全共用一个小池, 不要每个请求再 new 一个 4 线程的 Executor。
+_stock_info_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="stock-info")
 
 
 def fetch_stock_info(symbol, force=False, include_enrichment=True):
@@ -3072,15 +3151,15 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
             code = symbol.split(".")[0]
             # 四项来自互不依赖的上游。并发取数可将首包后的等待从四段
             # 累加缩短为最慢的一段，且不会影响已先返回的行情核心包。
-            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="stock-info") as pool:
-                meta_task = pool.submit(_fetch_instrument_meta, symbol)
-                roe_task = pool.submit(_mr_roe_map) if plain else None
-                industry_task = pool.submit(_mr_industry, code) if plain else None
-                instrument_task = pool.submit(_mr_instrument, symbol) if plain else None
-                meta = meta_task.result()
-                roe = roe_task.result().get(code) if roe_task else None
-                ind = industry_task.result() if industry_task else None
-                inst = instrument_task.result() if instrument_task else None
+            pool = _stock_info_pool
+            meta_task = pool.submit(_fetch_instrument_meta, symbol)
+            roe_task = pool.submit(_mr_roe_map) if plain else None
+            industry_task = pool.submit(_mr_industry, code) if plain else None
+            instrument_task = pool.submit(_mr_instrument, symbol) if plain else None
+            meta = meta_task.result()
+            roe = roe_task.result().get(code) if roe_task else None
+            ind = industry_task.result() if industry_task else None
+            inst = instrument_task.result() if instrument_task else None
 
             # 涨跌停价优先取 AlphaFeed 标的元数据: 股票与 ETF 均有值, 且已按板块
             # 区分 10% / 20% 限制 (ETF 最小变动价位 0.001, 显示为 3 位小数)。

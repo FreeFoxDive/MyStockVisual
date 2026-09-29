@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -87,7 +88,8 @@ def main():
 
     try:
         from waitress import serve
-        serve(app, host=args.host, port=args.port, threads=8)
+        threads = max(2, int(os.environ.get("WAITRESS_THREADS", "8")))
+        serve(app, host=args.host, port=args.port, threads=threads)
     except KeyboardInterrupt:
         log.info("服务器已停止")
 

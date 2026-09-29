@@ -155,6 +155,13 @@ def clear_buffers():
     _buffers.clear()
 
 
+def prune_buffers(keep):
+    """丢掉已不在持仓/预警集合里的序列, 否则换过的标的会一直留在进程里。"""
+    keep = set(keep or ())
+    for sym in [s for s in _buffers if s not in keep]:
+        _buffers.pop(sym, None)
+
+
 def _price_at(samples, target_ts):
     """不晚于 target_ts 的最近一根; 没有则 None。"""
     hit = None
@@ -746,6 +753,24 @@ LINE_MONITOR_PCT_MIN, LINE_MONITOR_PCT_MAX = 0.1, 20.0
 
 _line_mon_cache = {}          # (user_id, symbol, period) -> (updated_at, [monitor])
 _line_mon_lock = threading.Lock()
+_line_mon_snap = {"ts": 0.0, "rows": None, "gen": 0}
+_LINE_MON_TTL = 60.0
+
+
+def invalidate_line_monitors(user_id=None, symbol=None, period=None):
+    """画线增删改后立刻失效, 不必等 60s。
+
+    给了 (user_id, symbol, period) 时连同该组的解析缓存一起丢: updated_at 只精确到秒,
+    同一秒内连存两次时按 updated_at 判新旧会命中旧解析结果。
+    """
+    with _line_mon_lock:
+        _line_mon_snap["ts"] = 0.0
+        _line_mon_snap["rows"] = None
+        _line_mon_snap["gen"] = _line_mon_snap.get("gen", 0) + 1
+        if user_id is not None:
+            _line_mon_cache.pop((user_id, symbol, period), None)
+        else:
+            _line_mon_cache.clear()
 
 
 def _clean_monitored_drawing(d):
@@ -780,7 +805,12 @@ def _clean_monitored_drawing(d):
 
 
 def _load_line_monitors():
-    """全部启用中的趋势线监控, 按 (user, symbol, period, updated_at) 缓存解析结果。"""
+    """全部启用中的趋势线监控。解析结果缓存 60s, 画线写入时主动失效。"""
+    now = time.time()
+    with _line_mon_lock:
+        if _line_mon_snap["rows"] is not None and now - _line_mon_snap["ts"] < _LINE_MON_TTL:
+            return list(_line_mon_snap["rows"])
+        gen = _line_mon_snap.get("gen", 0)
     out = []
     for row in trades.list_chart_drawing_rows():
         if row["period"] not in LINE_MONITOR_PERIODS:
@@ -805,6 +835,11 @@ def _load_line_monitors():
         with _line_mon_lock:
             _line_mon_cache[key] = (row["updated_at"], mons)
         out.extend(mons)
+    with _line_mon_lock:
+        # 计算期间被 invalidate 过就不要把旧结果存回去
+        if _line_mon_snap.get("gen", 0) == gen:
+            _line_mon_snap["ts"] = time.time()
+            _line_mon_snap["rows"] = out
     return out
 
 
@@ -876,8 +911,30 @@ def evaluate_trendline_break(points, line_type, pct, dates, price):
     return None
 
 
+_BAR_DATES_TTL = 30 * 60
+# 末根还不是今天 (开盘前/集合竞价) 时只缓存 60s: 当日 bar 一出现就要进序列,
+# 否则开盘后最长 30 分钟里趋势线外推会错位一根。
+_BAR_DATES_TTL_PENDING = 60
+_BAR_DATES_MAX = 200
+_bar_dates_cache = {}
+
+
 def _load_bar_dates(symbol, period, adjust="forward"):
-    """取该 (symbol, period, adjust) 的 bar 日期列表 (与图表同口径/同根数, 磁盘缓存兜底)。"""
+    """取该 (symbol, period, adjust) 的 bar 日期列表 (与图表同口径/同根数, 磁盘缓存兜底)。
+
+    趋势线只比日期, 一个交易日内基本不变, 所以按交易日缓存 30 分钟,
+    避免每轮轮询都把 1006 根 K 线读一遍。
+    """
+    import market_hours
+    day = market_hours.now().date().isoformat()
+    key = (symbol, period, adjust or "forward", day)
+    now = time.time()
+    ent = _bar_dates_cache.get(key)
+    if ent:
+        dates = ent[1][0]
+        ttl = _BAR_DATES_TTL if dates and dates[-1] == day else _BAR_DATES_TTL_PENDING
+        if now - ent[0] < ttl:
+            return ent[1]
     try:
         import market
         count = 1006 if period == "1d" else 200  # 与 /api/kline 默认根数一致
@@ -888,7 +945,12 @@ def _load_bar_dates(symbol, period, adjust="forward"):
     if df is None or len(df) < 2:
         return None
     dates = [str(d)[:10] for d in df.index]
-    return dates, len(dates)
+    result = dates, len(dates)
+    _bar_dates_cache.pop(key, None)
+    _bar_dates_cache[key] = (now, result)
+    while len(_bar_dates_cache) > _BAR_DATES_MAX:
+        _bar_dates_cache.pop(next(iter(_bar_dates_cache)))
+    return result
 
 
 def _evaluate_trendline_monitors(monitors, quotes, now_dt, persist=True, notify=True):
@@ -952,6 +1014,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
         [p["symbol"] for p in positions] + sorted(alert_symbols | line_symbols)))
     _set_status(n_symbols=len(symbols), last_poll=now_dt.isoformat(timespec="seconds"),
                 last_poll_ts=time.time())
+    prune_buffers(symbols)
     if not symbols:
         return []
 

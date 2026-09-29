@@ -32,6 +32,7 @@ PREMIUM_FAIL_TTL = 300.0
 PREMIUM_REFRESH_SEC = max(1.0, float(os.environ.get("PREMIUM_REFRESH_SEC", "60")))
 PREMIUM_TIMEOUT_SEC = max(1.0, float(os.environ.get("PREMIUM_TIMEOUT_SEC", "30")))
 PREMIUM_MAX_INFLIGHT = max(1, int(os.environ.get("PREMIUM_MAX_INFLIGHT", "4")))
+PREMIUM_CACHE_MAX = max(1, int(os.environ.get("PREMIUM_CACHE_MAX", "100")))
 
 _lock = threading.Lock()
 _cache: dict = {}        # key -> (ts, payload)
@@ -42,6 +43,19 @@ _fail_kind: dict = {}
 
 def _key(symbol, period, count):
     return f"{symbol}:{period}:{count}"
+
+
+def _trim_locked():
+    """过期负缓存删掉; 成功结果按时间压到 PREMIUM_CACHE_MAX。调用方须持有 _lock。"""
+    mono = time.monotonic()
+    for k in [k for k, t in _fail_at.items() if mono - t >= PREMIUM_FAIL_TTL]:
+        _fail_at.pop(k, None)
+        _fail_kind.pop(k, None)
+    while len(_cache) > PREMIUM_CACHE_MAX:
+        oldest = min(_cache, key=lambda k: _cache[k][0])
+        _cache.pop(oldest, None)
+        _fail_at.pop(oldest, None)
+        _fail_kind.pop(oldest, None)
 
 
 def _ttl():
@@ -123,6 +137,7 @@ def _schedule(key, symbol, period, count, df):
             return
         if len(_inflight) >= PREMIUM_MAX_INFLIGHT:
             return
+        _trim_locked()
         started = time.monotonic()
         generated_date = market_hours.now().date().isoformat()
         generated_phase = market_hours.session_phase()
@@ -145,6 +160,7 @@ def _schedule(key, symbol, period, count, df):
                                           "generated_phase": generated_phase})
                     _fail_at.pop(key, None)
                     _fail_kind.pop(key, None)
+                    _trim_locked()
         except Exception as e:
             log.warning(f"溢价计算失败 {symbol} {period}: {market._sanitize_error(e)}")
             with _lock:

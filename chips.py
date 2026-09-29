@@ -45,10 +45,12 @@ FACTOR = 150          # 东财价格分桶数
 PRICE_DP = 3          # 价格字段输出小数位; 前端最多显示 3 位并去掉尾随 0
 WINDOW = 210          # 日K滚动窗口 (根, 东财口径)
 # 各周期回看窗口 (日线根数): 覆盖该周期默认可视区间 (前端 visibleBars=80)。
-# 1w: 80周≈400交易日 → 600 (1.5× 余量); 1M: 80月≈1600交易日 → 1500 (封顶)。
-WINDOW_BY_PERIOD = {"1d": 210, "1w": 600, "1M": 1500}
+# 1w: 80周≈400交易日 → 600 (1.5× 余量); 1M 同样封顶 600。
+# 1500 根 × 150 桶是纯 Python 双重循环, 在 1GB 机器上打开月K 就会打满一个核。
+WINDOW_BY_PERIOD = {"1d": 210, "1w": 600, "1M": 600}
 CACHE_TTL = 60.0      # 盘中成功结果缓存 (秒); 当前成交量变化需较快反映到筹码
 CACHE_TTL_FAIL = 30.0 # 失败缓存 (秒, 尽快重试)
+_CACHE_MAX = max(1, int(os.environ.get("CHIPS_CACHE_MAX", "200")))
 FETCH_RETRIES = 3     # 每个 URL 尝试次数
 FETCH_TIMEOUT = 5.0   # 单次请求超时 (秒)
 FETCH_DEADLINE = 15.0 # 整个取数流程总超时 (秒), 避免 /api/chips 长时间挂起
@@ -365,6 +367,24 @@ def _load_bars(symbol, count=WINDOW):
     return fetch_af_chip_bars(symbol, count), "af"     # 默认 AF 近似
 
 
+def clear_cache():
+    with _lock:
+        _cache.clear()
+
+
+def _trim_locked(now):
+    stale = []
+    for key, ent in _cache.items():
+        ttl = CACHE_TTL if ent[1] else CACHE_TTL_FAIL
+        if now - ent[0] >= ttl:
+            stale.append(key)
+    for key in stale:
+        _cache.pop(key, None)
+    while len(_cache) > _CACHE_MAX:
+        oldest = min(_cache, key=lambda k: _cache[k][0])
+        _cache.pop(oldest, None)
+
+
 def get_chips(symbol, period="1d"):
     """取筹码分布 (内存 TTL 缓存); 失败/无数据返回 None。
 
@@ -390,4 +410,5 @@ def get_chips(symbol, period="1d"):
         result["period"] = period
     with _lock:
         _cache[key] = (time.time(), result)
+        _trim_locked(time.time())
     return result

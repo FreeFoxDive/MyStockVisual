@@ -42,6 +42,21 @@ def _df(closes, volumes=None, freq="D", start="2026-01-01", amount=None, end=Non
     }, index=idx)
 
 
+def _gen_bars(frames, batches=None, failed=0, size=None):
+    """fetch_bars 的替身: 与真实实现一样按批 yield (batch, stats)。
+
+    size=None 时整份一批; 给 size 则每 size 只一批, 用来验证流式构建。
+    """
+    def fake(symbols, **kw):
+        items = list(frames.items())
+        step = size or max(1, len(items))
+        chunks = [dict(items[i:i + step]) for i in range(0, len(items), step)] or [{}]
+        total = batches if batches is not None else len(chunks)
+        for i, chunk in enumerate(chunks, 1):
+            yield chunk, {"batches": total, "done": i, "failed_batches": failed}
+    return fake
+
+
 def _rising(n=120, step=0.5, start=10.0):
     return _df([start + step * i for i in range(n)])
 
@@ -398,7 +413,7 @@ class ManualBuildWindowTest(StoreTestCaseBase):
         factors.init_store()
         with mock.patch.object(factors, "before_build_at", lambda now=None: True), \
              mock.patch.object(factors, "universe", lambda: [("600000.SH", "浦发")]), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
+             mock.patch.object(factors, "fetch_bars", _gen_bars({})), \
              mock.patch.object(factors, "external_meta",
                                lambda day, syms: ({}, {"spot": "ok:0"})), \
              mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
@@ -546,8 +561,8 @@ class BuildTest(StoreTestCaseBase):
         notes = []
         with mock.patch.object(factors, "universe",
                                lambda: [("600000.SH", "浦发银行"), ("000001.SZ", "平安银行")]), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: (
-                 self._frames(), {"batches": 4, "failed_batches": 1})), \
+             mock.patch.object(factors, "fetch_bars",
+                               _gen_bars(self._frames(), batches=4, failed=1)), \
              mock.patch.object(factors, "_fetch_shares",
                                lambda syms: {"600000.SH": (1e9, 1.2e9)}), \
              mock.patch.object(factors, "external_meta",
@@ -614,7 +629,7 @@ class BuildTest(StoreTestCaseBase):
         """回归: attempts/状态更新抛错时 running 必须复位, 否则永久卡 running。"""
         factors.init_store()
         with mock.patch.object(factors, "universe", lambda: [("600000.SH", "浦发")]), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
+             mock.patch.object(factors, "fetch_bars", _gen_bars({})), \
              mock.patch.object(factors, "_bump_attempts",
                                side_effect=RuntimeError("database is locked")), \
              mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
@@ -642,7 +657,7 @@ class BuildTest(StoreTestCaseBase):
         frames = {"600000.SH": extended, "000001.SZ": stale}
         with mock.patch.object(factors, "universe",
                                lambda: [("600000.SH", "浦发"), ("000001.SZ", "平安")]), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: (frames, {"batches": 1, "failed_batches": 0})), \
+             mock.patch.object(factors, "fetch_bars", _gen_bars(frames, batches=1)), \
              mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {})), \
              mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
             out = factors.build(day="2026-09-18")
@@ -668,7 +683,7 @@ class BuildTest(StoreTestCaseBase):
         factors._update_build("2026-09-18", state="error", attempts=1)
         notes = []
         with mock.patch.object(factors, "universe", lambda: []), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
+             mock.patch.object(factors, "fetch_bars", _gen_bars({})), \
              mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {})), \
              mock.patch.object(factors, "_notify_state",
                                lambda kind, day, extra="": notes.append((kind, extra))):
@@ -683,7 +698,7 @@ class BuildTest(StoreTestCaseBase):
         with mock.patch.object(factors, "_now_dt", lambda: afternoon), \
              mock.patch.object(factors, "before_build_at", lambda now=None: True), \
              mock.patch.object(factors, "universe", lambda: []), \
-             mock.patch.object(factors, "fetch_bars", lambda syms, **kw: ({}, {"batches": 0, "failed_batches": 0})), \
+             mock.patch.object(factors, "fetch_bars", _gen_bars({})), \
              mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {"spot": "ok:0"})), \
              mock.patch.object(factors, "_notify_state", lambda *a, **k: None), \
              mock.patch("market_hours.is_trading_day", lambda v=None: True):
@@ -818,6 +833,223 @@ class YjbbPeriodTest(unittest.TestCase):
             out = factors._src_yjbb("2026-02-15")
         self.assertEqual(out["_period"], "20250930")
         self.assertGreaterEqual(len(out["rows"]), factors.YJBB_MIN_ROWS)
+
+
+class StreamingBuildTest(StoreTestCaseBase):
+    """流式构建: 按批处理与整份一批的结果必须一致, 缺失口径不变。"""
+
+    UNI = [("600000.SH", "浦发"), ("000001.SZ", "平安"), ("600519.SH", "茅台"),
+           ("000002.SZ", "万科")]
+
+    def _frames(self, day="2026-09-18"):
+        return {
+            "600000.SH": _df([10.0 + 0.5 * i for i in range(120)], end=day),
+            "000001.SZ": _df([70.0 - 0.3 * i for i in range(120)], end=day),
+            "600519.SH": _df([100.0 + i for i in range(120)], end="2026-09-17"),  # 停牌
+            # 000002.SZ 整批没拉到
+        }
+
+    def _build(self, size):
+        factors.init_store()
+        with mock.patch.object(factors, "universe", lambda: list(self.UNI)), \
+             mock.patch.object(factors, "fetch_bars", _gen_bars(self._frames(), size=size)), \
+             mock.patch.object(factors, "_fetch_shares", lambda syms: {}), \
+             mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {})), \
+             mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
+            out = factors.build(day="2026-09-18", force=True)
+        df, _day = factors.snapshot()
+        return out, df.sort_values("symbol").reset_index(drop=True)
+
+    def test_batched_equals_single_batch(self):
+        out_one, df_one = self._build(size=None)
+        self._restore()
+        self.setUp()
+        out_many, df_many = self._build(size=1)
+        self.assertTrue(out_one["ok"] and out_many["ok"])
+        pd.testing.assert_frame_equal(df_one, df_many)
+        self.assertEqual(out_one["n_missing"], out_many["n_missing"])
+
+    def test_missing_counts_unfetched_and_suspended(self):
+        out, df = self._build(size=1)
+        self.assertEqual(sorted(df["symbol"]), ["000001.SZ", "600000.SH"])
+        self.assertEqual(out["n_missing"], 2, "停牌 1 只 + 没拉到 1 只")
+        self.assertEqual(len(factors.load_bars("600519.SH")), 120, "停牌标的的 K 线照样落库")
+
+    def test_real_fetch_bars_yields_per_chunk(self):
+        seen = []
+
+        def chunk(af, syms, count):
+            seen.append(list(syms))
+            return {s: _df([10.0] * 40) for s in syms}
+
+        with mock.patch.object(factors, "BATCH_SIZE", 2), \
+             mock.patch.object(factors, "_fetch_bars_chunk", chunk), \
+             mock.patch("market.get_af", return_value=object()), \
+             mock.patch("market._normalize", lambda df, prefer_time=False: df):
+            gen = factors.fetch_bars(["A", "B", "C"])
+            first, stats = next(gen)
+            self.assertEqual(sorted(first), ["A", "B"])
+            self.assertEqual(len(seen), 1, "第二批要等调用方消费完第一批才拉")
+            rest = list(gen)
+        self.assertEqual(sorted(rest[0][0]), ["C"])
+        self.assertEqual(rest[-1][1]["done"], 2)
+        self.assertEqual(rest[-1][1]["batches"], 2)
+
+
+class TokenWaitTest(unittest.TestCase):
+    def test_sleeps_by_refill_rate_not_busy_loop(self):
+        bucket = mock.Mock(rate=0.5)
+        bucket.try_acquire.side_effect = [False, False, True]
+        with mock.patch.object(factors.time, "sleep") as sleep:
+            factors._acquire_token(bucket)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [2.0, 2.0])
+
+    def test_non_numeric_rate_falls_back(self):
+        bucket = mock.Mock()
+        bucket.try_acquire.side_effect = [False, True]
+        with mock.patch.object(factors.time, "sleep") as sleep:
+            factors._acquire_token(bucket)
+        sleep.assert_called_once_with(1.0)
+
+
+class BuildChildTest(StoreTestCaseBase):
+    def setUp(self):
+        super().setUp()
+        factors._build_children.clear()
+        self.addCleanup(factors._build_children.clear)
+
+    def test_spawn_passes_force_and_tracks_child(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        with mock.patch("subprocess.Popen", return_value=proc) as popen:
+            factors._spawn_build("2026-09-18", force=True)
+        self.assertIn("--force", popen.call_args.args[0])
+        self.assertTrue(factors.build_child_running())
+
+    def test_spawn_manual_uses_subprocess(self):
+        with mock.patch.object(factors, "_spawn_build") as spawn:
+            factors.spawn_manual(day="2026-09-18", force=True)
+        spawn.assert_called_once_with("2026-09-18", force=True)
+
+    def test_stop_children_terminates_and_marks_error(self):
+        factors.init_store()
+        factors._ensure_build_row("2026-09-18")
+        factors._update_build("2026-09-18", state="running")
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        factors._track_child(proc, "2026-09-18")
+        self.assertEqual(factors.stop_build_children(), 1)
+        proc.terminate.assert_called_once()
+        row = factors.get_build("2026-09-18")
+        self.assertEqual(row["state"], "error", "被终止的构建不能一直显示 running")
+        self.assertIn("内存", row["error"])
+
+    def test_finished_child_not_terminated(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        factors._track_child(proc, "2026-09-18")
+        self.assertEqual(factors.stop_build_children(), 0)
+        proc.terminate.assert_not_called()
+
+    def test_scheduler_skips_spawn_under_pressure(self):
+        sleeps = {"n": 0}
+
+        def fake_sleep(_sec):
+            sleeps["n"] += 1
+            if sleeps["n"] >= 1:
+                raise SystemExit
+
+        with mock.patch.object(factors, "init_store", lambda: None), \
+             mock.patch.object(factors, "should_build", lambda now=None: (True, "due")), \
+             mock.patch.object(factors, "due_day", lambda now=None: "2026-09-18"), \
+             mock.patch.object(factors, "_under_pressure", lambda: True), \
+             mock.patch.object(factors, "_spawn_build") as spawn, \
+             mock.patch("time.sleep", fake_sleep):
+            with self.assertRaises(SystemExit):
+                factors._loop()
+        spawn.assert_not_called()
+
+
+@unittest.skipIf(sys.platform == "win32", "flock 仅 POSIX")
+class HeavyLockTest(StoreTestCaseBase):
+    def test_second_holder_is_refused_until_release(self):
+        import threading
+        self.assertTrue(factors.heavy_lock.acquire(blocking=False))
+        got = []
+        t = threading.Thread(target=lambda: got.append(factors.heavy_lock.acquire(blocking=False)))
+        t.start()
+        t.join()
+        self.assertEqual(got, [False], "另一持有者必须拿不到")
+        factors.heavy_lock.release()
+        self.assertTrue(factors.heavy_lock.acquire(blocking=False))
+        factors.heavy_lock.release()
+
+
+class LiveSnapshotGuardTest(unittest.TestCase):
+    BASE = pd.DataFrame([
+        {"symbol": "600000.SH", "name": "浦发", "close": 10.0, "prev_close": 9.5},
+        {"symbol": "000001.SZ", "name": "平安", "close": 12.0, "prev_close": 12.0},
+        {"symbol": "600519.SH", "name": "茅台", "close": 100.0, "prev_close": 99.0},
+    ])
+    QUOTES = {s: {"last_price": p, "volume": 100, "amount": 100 * p,
+                  "high": p, "low": p, "open": p}
+              for s, p in (("600000.SH", 11.0), ("000001.SZ", 12.5), ("600519.SH", 101.0))}
+
+    def setUp(self):
+        factors._live_cache.update({"day": None, "ts": 0.0, "df": None, "version": None})
+
+    def _run(self, chunk, loads, **extra):
+        def load_many(symbols):
+            loads.append(list(symbols))
+            return {s: _df([10.0] * 40, end="2026-09-17") for s in symbols}
+
+        def compute(df, symbol="", name="", float_shares=None):
+            return {"symbol": symbol, "close": float(df["close"].iloc[-1])}
+
+        patches = [
+            mock.patch.object(factors, "snapshot", lambda day=None: (self.BASE, "2026-09-18")),
+            mock.patch.object(factors, "_now_dt", lambda: datetime(2026, 9, 18, 10, 30)),
+            mock.patch("market_hours.session_phase", lambda now=None: "trading"),
+            mock.patch.object(factors, "_fetch_quotes", lambda syms, progress_cb=None: self.QUOTES),
+            mock.patch.object(factors, "load_bars_many", load_many),
+            mock.patch.object(factors, "load_shares", lambda: {}),
+            mock.patch.object(factors, "compute_factors", compute),
+            mock.patch.dict("os.environ", {"FACTORS_LIVE_CHUNK": str(chunk)}),
+        ]
+        for key, value in extra.items():
+            patches.append(mock.patch.object(factors, key, value))
+        for p in patches:
+            p.start()
+        try:
+            return factors.live_snapshot()
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def test_chunked_equals_single_read(self):
+        one, many = [], []
+        df_one, _ = self._run(1000, one)
+        factors._live_cache.update({"day": None, "ts": 0.0, "df": None, "version": None})
+        df_many, _ = self._run(1, many)
+        self.assertEqual(len(one), 1)
+        self.assertEqual(len(many), 3, "分块后每块单独读 K 线")
+        pd.testing.assert_frame_equal(df_one.reset_index(drop=True), df_many.reset_index(drop=True))
+
+    def test_skips_when_heavy_lock_busy(self):
+        loads = []
+        busy = mock.Mock()
+        busy.acquire.return_value = False
+        df, ver = self._run(300, loads, heavy_lock=busy)
+        self.assertEqual((df, ver), (None, None))
+        self.assertEqual(loads, [])
+        busy.release.assert_not_called()
+
+    def test_skips_under_memory_pressure(self):
+        loads = []
+        df, ver = self._run(300, loads, _under_pressure=lambda: True)
+        self.assertEqual((df, ver), (None, None))
+        self.assertEqual(loads, [])
+        self.assertFalse(factors.live_running())
 
 
 class MainJsonTest(StoreTestCaseBase):

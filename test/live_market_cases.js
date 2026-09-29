@@ -93,6 +93,15 @@ const finish = async (r, data) => {
   const pendingCount = requests.length;
   now += 3000; resources.tick();
   assert.equal(requests.length, pendingCount, 'all recovered resources stop polling');
+  // 指标帧 30s 一推: 两帧之间 (20s) 不能判 bars 陈旧去轮询 /api/kline/tail
+  const tailPolls = () => requests.filter(r => String(r.url).includes('/api/kline/tail')).length;
+  const tailBefore = tailPolls();
+  now += 20000;
+  resourceStream.emit({ A: q(14, 141) });
+  resourceStream.emit({ A: { symbol: 'A', _revision: 141, bid_prices: [14], ask_prices: [15] } }, 'depth');
+  resources.tick();
+  assert.equal(resources.healthy('bars', 'A'), true, 'bars 通道在 30s 推送间隔内仍算健康');
+  assert.equal(tailPolls(), tailBefore, 'SSE 活着时两帧之间不轮询 tail');
   context.document.hidden = true; resources.visibility();
   resourceStream.emit({ A: q(99, 999) });
   assert.equal(resources.get('A').last_price, 14, 'hidden page callbacks are invalidated');

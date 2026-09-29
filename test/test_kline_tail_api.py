@@ -142,6 +142,24 @@ class KlineTailRouteTest(unittest.TestCase):
             self.client.get(f"/api/kline/tail?symbol={SYM}&n=1")
         self.assertEqual(len(calls), 1, "TTL 内重复请求应命中短缓存, 只取数一次")
 
+    def test_different_n_shares_one_compute(self):
+        df = _kline_df()
+        calls = []
+
+        def _counting(*a, **kw):
+            calls.append(1)
+            return (df, "双环传动", "alphafeed")
+
+        with mock.patch.object(self.kline_mod, "fetch_kline_ex", side_effect=_counting), \
+                mock.patch.object(self.kline_mod, "fetch_quote", return_value=None), \
+                mock.patch.object(self.kline_mod, "_fetch_instrument_meta", return_value=None):
+            a = self.client.get(f"/api/kline/tail?symbol={SYM}&n=1").get_json()
+            b = self.client.get(f"/api/kline/tail?symbol={SYM}&n=2").get_json()
+        self.assertEqual(len(calls), 1, "不同 n 应共用一次计算")
+        self.assertEqual(len(a["bars"]), 1)
+        self.assertEqual(len(b["bars"]), 2)
+        self.assertEqual(a["bars"][-1], b["bars"][-1])
+
     def test_404_when_no_data(self):
         with mock.patch.object(self.kline_mod, "fetch_kline_ex", return_value=(None, None, None)):
             r = self.client.get(f"/api/kline/tail?symbol={SYM}")

@@ -104,8 +104,10 @@ def health():
     ok = bool(db_ok and mon.get("running") and not _monitor_stalled(mon, now))
     payload = {"ok": ok, "time": str(now)}
     if _is_loopback_request():
+        import memguard
         import watchdog
         wd = watchdog.get_state()
+        mem = memguard.sample()
         payload["checks"] = {
             "monitor": mon,
             "watchdog": {
@@ -114,6 +116,15 @@ def health():
                 "running": watchdog.is_running(),
             },
             "db": {"ok": db_ok},
+            "memory": {
+                "rss_kb": mem.get("rss_kb"),
+                "hwm_kb": mem.get("hwm_kb"),
+                "usage_bytes": mem.get("usage_bytes"),
+                "limit_bytes": mem.get("limit_bytes"),
+                "pct": mem.get("pct"),
+                "oom_kill": mem.get("oom_kill"),
+                "pressure": memguard.under_pressure(),
+            },
         }
     return _json(payload, 200 if ok else 503)
 

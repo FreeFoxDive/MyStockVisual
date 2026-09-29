@@ -41,7 +41,7 @@ DAILY_COUNT = 3 * 252 + 250  # 1006
 # 图表当日 bar 的快照新鲜度: 默认复用 quote_cache (TTL 1.25s), 不再每次强制一次
 # 实时行情往返 —— 实测该往返在 0~700ms 抖动, 是磁盘 TTL 抬高后热路径上仅剩的
 # 耗时来源。当日 bar 仍**完全由后端快照产出** (契约不变: 前端不派生 OHLCV),
-# 只是允许最多旧 1.25s; 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (10s,
+# 只是允许最多旧 1.25s; 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (25-30s,
 # 仍走强制新鲜快照) 持续纠正末根 bar。
 # 成交校验 (market.get_daily_bar) 不经过这里, 始终强制新鲜快照。
 # KLINE_TODAY_BAR_FRESH=1 → 恢复"每次强制拉新快照"的旧行为 (更实时, 但慢)。
@@ -49,9 +49,13 @@ TODAY_BAR_QUOTE_FRESH = os.environ.get("KLINE_TODAY_BAR_FRESH", "").strip().lowe
     "1", "true", "yes", "on",
 )
 
-# 末根增量接口的短 TTL: 把多客户端/10s 轮询合并成受控的上游调用量
-KLINE_TAIL_TTL = max(5.0, float(os.environ.get("KLINE_TAIL_TTL", "10")))
-_tail_cache = TTLCache(KLINE_TAIL_TTL)
+# 末根增量接口的短 TTL: 多客户端共用一次全量指标计算。
+# 默认 25s (原 10s 每个图表连接都把 1000 根重算一遍, 盘中会把核打满)。
+# 必须短于 SSE 的 INDICATOR_SSE_INTERVAL (30s): 否则 SSE 每帧可能拿到同一份缓存,
+# revision 不变, 前端 live-market 的 bars 健康时间戳就刷不上。
+KLINE_TAIL_TTL = max(5.0, float(os.environ.get("KLINE_TAIL_TTL", "25")))
+_tail_cache = TTLCache(KLINE_TAIL_TTL, max_entries=30)
+_TAIL_CACHE_BARS = 10
 
 
 def _attach_quote(resp, symbol):
@@ -344,10 +348,15 @@ def kline_tail():
 
 
 def build_kline_tail(symbol, period, count, adjust, n=2):
-    cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}:{n}"
+    # n 不进 key: 缓存末 _TAIL_CACHE_BARS 根, 不同 n / 多客户端共用一次计算。
+    cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
     cached = _tail_cache.get(cache_key)
     if cached is not None:
-        return cached
+        bars = list(cached["bars"][-n:])
+        resp = dict(cached)
+        resp["bars"] = bars
+        resp["count"] = len(bars)
+        return resp
 
     revision = time.time_ns() // 1000
     try:
@@ -363,9 +372,9 @@ def build_kline_tail(symbol, period, count, adjust, n=2):
         log.warning("指标计算失败(tail) %s %s: %s", symbol, period, _sanitize_error(e))
         raise RuntimeError("指标计算失败") from e
 
-    bars = serialize_bars(df.tail(n), period)
+    bars = serialize_bars(df.tail(_TAIL_CACHE_BARS), period)
     now = market_hours.now()
-    resp = {
+    stored = {
         "symbol": symbol,
         "_revision": revision,
         "name": name or symbol,
@@ -379,7 +388,11 @@ def build_kline_tail(symbol, period, count, adjust, n=2):
             "adjust": adjust,
         },
     }
-    _tail_cache.set(cache_key, resp)
+    _tail_cache.set(cache_key, stored)
+    out_bars = list(bars[-n:])
+    resp = dict(stored)
+    resp["bars"] = out_bars
+    resp["count"] = len(out_bars)
     return resp
 
 
@@ -414,7 +427,7 @@ def kline_deferred():
 def chips():
     """筹码分布 (股票/ETF); 指数或无数据返回 chips=null。
 
-    period 1d/1w/1M 只决定日线回看窗口 (210/600/1500 根), 算法与粒度不变。
+    period 1d/1w/1M 只决定日线回看窗口 (210/600/600 根), 算法与粒度不变。
     指数无份额与换手率, 筹码无意义, 故仍拦截。
     """
     symbol_raw = request.args.get("symbol")

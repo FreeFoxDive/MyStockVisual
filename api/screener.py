@@ -238,7 +238,10 @@ def _result_row(rec, conditions, hits):
 
 
 def _scan(df, conditions, mode, total, run_id):
-    """全市场逐行判定 → (结果列表, 已处理行数, 是否被取消, 是否被上限截断)。"""
+    """全市场逐行判定 → (结果列表, 已处理行数, 是否被取消, 是否被上限截断)。
+
+    用 itertuples 逐行转 dict, 避免 to_dict("records") 把整张因子表再复制一份。
+    """
     milestones = _notify_pcts()
     hit_milestones = set()
     started = time.time()
@@ -246,7 +249,12 @@ def _scan(df, conditions, mode, total, run_id):
     done = 0
     truncated = False
     n_rows = len(df)
-    for rec in df.to_dict("records"):
+    cols = list(df.columns)
+    for values in df.itertuples(index=False, name=None):
+        # itertuples 给的是 numpy 标量 (np.int64 / np.bool_), 结果要 json.dumps 落库,
+        # 转回 Python 原生类型 (to_dict("records") 原本会自动做这一步)
+        rec = {c: (v.item() if hasattr(v, "item") and type(v).__module__ == "numpy" else v)
+               for c, v in zip(cols, values)}
         done += 1
         if done % 200 == 0 or done == n_rows:
             if _stopped(run_id):
@@ -465,6 +473,12 @@ def screener_run():
     mode = (body.get("mode") or "and").lower()
     if mode not in MODES:
         return _error("扫描模式无效")
+    try:
+        import memguard
+        if memguard.under_pressure():
+            return _error("服务器内存压力，请稍后再试", 503)
+    except Exception:
+        pass
     price_mode = (body.get("price_mode") or "close").lower()
     if price_mode not in PRICE_MODES:
         return _error("价格口径无效")
@@ -550,7 +564,19 @@ def screener_run_detail(run_id):
     if row["user_id"] != user["id"] and not user.get("is_admin"):
         return _error("无权限", 403)
     payload = _run_summary(row)
-    payload["results"] = row.get("results") or []
+    results = row.get("results") or []
+    try:
+        offset = max(0, int(request.args.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(request.args.get("limit") or 200)
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(1, min(limit, 3000))
+    payload["results"] = results[offset:offset + limit]
+    payload["offset"] = offset
+    payload["limit"] = limit
     payload["conditions"] = row.get("conditions") or []
     payload["username"] = row.get("username")
     return _json(payload)

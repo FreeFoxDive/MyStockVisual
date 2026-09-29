@@ -99,7 +99,7 @@ class KlineRateTest(unittest.TestCase):
         import inspect
         src = inspect.getsource(factors.fetch_bars)
         self.assertIn("daily_kline_bucket()", src)
-        self.assertIn("try_acquire", src)
+        self.assertIn("_acquire_token", src)
         # 扫描侧不再自己取数/限速 (因子库模式), 防重复令牌
         from api import screener
         self.assertFalse(hasattr(screener, "_scan_bucket"))
@@ -118,7 +118,11 @@ class KlineRateTest(unittest.TestCase):
              mock.patch.object(factors, "FETCH_BARS_RETRY_SLEEP", 0), \
              mock.patch("market.get_af", return_value=object()), \
              mock.patch("market._normalize", lambda df, prefer_time=False: df):
-            out, stats = factors.fetch_bars(["600000.SH"])
+            batches = list(factors.fetch_bars(["600000.SH"]))
+        out = {}
+        stats = {"failed_batches": None}
+        for batch, stats in batches:
+            out.update(batch)
         self.assertEqual(calls["n"], 2, "失败一次后应重试")
         self.assertIn("600000.SH", out)
         self.assertEqual(stats["failed_batches"], 0)
@@ -130,7 +134,11 @@ class KlineRateTest(unittest.TestCase):
         with mock.patch.object(factors, "_fetch_bars_chunk", boom), \
              mock.patch.object(factors, "FETCH_BARS_RETRY_SLEEP", 0), \
              mock.patch("market.get_af", return_value=object()):
-            out, stats = factors.fetch_bars(["600000.SH"])
+            batches = list(factors.fetch_bars(["600000.SH"]))
+        out = {}
+        stats = {"failed_batches": None}
+        for batch, stats in batches:
+            out.update(batch)
         self.assertEqual(out, {})
         self.assertEqual(stats["failed_batches"], 1)
 
@@ -448,6 +456,30 @@ class ScreenerRunRouteTest(ScreenerTestBase):
         self.assertEqual(self.admin.get(f"/api/screener/runs/{run_id}").status_code, 200)
         self.assertEqual(self.client.get("/api/screener/runs/999999").status_code, 404)
 
+    def test_detail_pagination(self):
+        rows = [{"symbol": f"60{i:04d}.SH", "hit_count": 1} for i in range(250)]
+        run_id = trades.create_screener_run(
+            self.uid["scr_bob"], CONDS_AND, status="done", results=rows)
+        default = self.client.get(f"/api/screener/runs/{run_id}").get_json()
+        self.assertEqual(len(default["results"]), 200, "默认一页 200 条")
+        page = self.client.get(f"/api/screener/runs/{run_id}?offset=200&limit=100").get_json()
+        self.assertEqual([r["symbol"] for r in page["results"]],
+                         [r["symbol"] for r in rows[200:]])
+        self.assertEqual((page["offset"], page["limit"]), (200, 100))
+        full = self.client.get(f"/api/screener/runs/{run_id}?limit=3000").get_json()
+        self.assertEqual(len(full["results"]), 250)
+        bad = self.client.get(f"/api/screener/runs/{run_id}?offset=x&limit=-5").get_json()
+        self.assertEqual((bad["offset"], bad["limit"]), (0, 1), "非法参数钳到合法范围")
+        huge = self.client.get(f"/api/screener/runs/{run_id}?limit=999999").get_json()
+        self.assertEqual(huge["limit"], 3000)
+
+    def test_submit_refused_under_memory_pressure(self):
+        import memguard
+        with mock.patch.object(memguard, "under_pressure", return_value=True):
+            r = self._post("/api/screener/run", {"conditions": CONDS_AND})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("内存", r.get_json()["error"])
+
     def test_admin_queue_view(self):
         trades.create_screener_run(self.uid["scr_bob"], CONDS_AND, mode="or")
         trades.create_screener_run(self.uid["scr_carol"], CONDS_AND, status="done",
@@ -500,6 +532,22 @@ class ScreenerScanTest(ScreenerTestBase):
         self.assertIn("选股开始", titles)
         self.assertIn("选股完成: 命中 1 只", titles[-1])
         self.assertIn("2026-09-18", notes[0][1])
+
+    def test_scan_results_are_json_native_with_numpy_columns(self):
+        """itertuples 逐行: 整数/布尔列是 numpy 标量, 结果必须能 json.dumps 落库。"""
+        import json
+        import numpy as np
+        from api import screener as scr
+        df = SNAPSHOT.copy()
+        df["close"] = df["close"].round().astype(np.int64)
+        conds, _ = scr.metrics.clean(CONDS_AND)
+        run_id = trades.create_screener_run(self.uid["scr_bob"], conds)
+        scr._run_ctx[run_id] = trades.get_screener_run(run_id)
+        results, done, stopped, truncated = scr._scan(df, conds, "and", len(df), run_id)
+        self.assertEqual(done, len(df))
+        self.assertTrue(results)
+        self.assertIsInstance(results[0]["close"], int)
+        json.dumps(results)
 
     def test_or_scan_counts_hits(self):
         row, notes = self._run_scan(CONDS_AND, mode="or")
@@ -647,17 +695,32 @@ class FactorsRouteTest(ScreenerTestBase):
     def test_rebuild_admin_only_and_runs_in_background(self):
         self.assertEqual(self._post("/api/factors/rebuild").status_code, 403)
         started = {}
-        with mock.patch.object(factors, "build",
-                               side_effect=lambda day=None, force=False: started.update(
-                                   {"day": day, "force": force})):
+
+        def fake_spawn(day=None, force=False):
+            started.update({"day": day, "force": force})
+            return mock.Mock()
+
+        with mock.patch.object(factors, "spawn_manual", side_effect=fake_spawn):
             r = self._post("/api/factors/rebuild", {"force": True}, client=self.admin)
-            self.assertEqual(r.status_code, 200)
-            self.assertTrue(r.get_json()["started"])
-            for _ in range(50):        # 等后台线程真的调一次 build
-                if started:
-                    break
-                time.sleep(0.02)
-        self.assertTrue(started.get("force"), "force 应透传给 build")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["started"])
+        self.assertTrue(started.get("force"), "force 应透传给子进程")
+
+    def test_rebuild_refused_under_memory_pressure(self):
+        import memguard
+        with mock.patch.object(factors, "build_blocked_reason", return_value=None), \
+             mock.patch.object(memguard, "under_pressure", return_value=True), \
+             mock.patch.object(factors, "spawn_manual") as spawn:
+            body = self._post("/api/factors/rebuild", {"force": True}, client=self.admin).get_json()
+        self.assertFalse(body["started"])
+        self.assertIn("内存", body["reason"])
+        spawn.assert_not_called()
+
+    def test_rebuild_spawn_failure_reported(self):
+        with mock.patch.object(factors, "build_blocked_reason", return_value=None), \
+             mock.patch.object(factors, "spawn_manual", side_effect=OSError("fork failed")):
+            body = self._post("/api/factors/rebuild", {"force": True}, client=self.admin).get_json()
+        self.assertFalse(body["started"], "拉不起子进程不能回 started:true")
 
     def test_rebuild_reports_blocked_reason(self):
         """回归: 开不了跑时不能回 started:true (管理员会以为已触发)。"""

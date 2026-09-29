@@ -425,6 +425,19 @@ class TestPriceBuffer(unittest.TestCase):
         self.assertFalse(monitor.append_sample("x", 100, 0, 1))
         self.assertFalse(monitor.append_sample("x", None, 10.0, 1))
 
+    def test_prune_drops_symbols_no_longer_monitored(self):
+        monitor.append_sample("keep", 100, 10.0, 1)
+        monitor.append_sample("gone", 100, 10.0, 1)
+        monitor.prune_buffers(["keep"])
+        self.assertEqual(len(monitor.get_buffer("keep")), 1)
+        self.assertEqual(monitor.get_buffer("gone"), [])
+        self.assertNotIn("gone", monitor._buffers, "已平仓标的的 key 不能留在进程里")
+
+    def test_prune_empty_clears_all(self):
+        monitor.append_sample("a", 100, 10.0, 1)
+        monitor.prune_buffers([])
+        self.assertEqual(monitor._buffers, {})
+
 
 class _FakeUrlResp:
     def __init__(self, payload, status=200):

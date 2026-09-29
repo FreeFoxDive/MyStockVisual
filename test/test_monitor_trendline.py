@@ -136,6 +136,7 @@ class LineMonitorEvalTest(unittest.TestCase):
 
     def setUp(self):
         self.mon._line_mon_cache.clear()
+        self.mon._bar_dates_cache.clear()
         conn = trades.get_conn()
         try:
             conn.execute("DELETE FROM chart_drawings")
@@ -143,6 +144,75 @@ class LineMonitorEvalTest(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
+        # 直接 SQL 删表不经过 trades 的失效钩子, 60s 快照要手动清
+        self.mon.invalidate_line_monitors()
+
+    def test_line_monitors_cached_for_60s(self):
+        self._save([_drawing("d1")])
+        self.assertEqual(len(self.mon._load_line_monitors()), 1)
+        with mock.patch.object(trades, "list_chart_drawing_rows",
+                               side_effect=AssertionError("60s 内不应重读全表")):
+            self.assertEqual(len(self.mon._load_line_monitors()), 1)
+        snap_ts = self.mon._line_mon_snap["ts"]
+        with mock.patch.object(self.mon.time, "time", return_value=snap_ts + 61), \
+             mock.patch.object(trades, "list_chart_drawing_rows", return_value=[]) as rows:
+            self.assertEqual(self.mon._load_line_monitors(), [])
+        rows.assert_called_once()
+
+    def test_save_and_delete_invalidate_snapshot(self):
+        self._save([_drawing("d1")])
+        self.assertEqual(len(self.mon._load_line_monitors()), 1)
+        self._save([_drawing("d1"), _drawing("d2")])
+        self.assertEqual(len(self.mon._load_line_monitors()), 2, "保存画线后立刻生效")
+        trades.delete_chart_drawings(self.uid, self.SYM, "1d")
+        self.assertEqual(self.mon._load_line_monitors(), [], "删除画线后立刻生效")
+
+    def test_invalidate_during_load_not_overwritten(self):
+        self._save([_drawing("d1")])
+        real = trades.list_chart_drawing_rows
+
+        def rows_then_invalidate():
+            out = real()
+            self.mon.invalidate_line_monitors()
+            return out
+
+        with mock.patch.object(trades, "list_chart_drawing_rows", side_effect=rows_then_invalidate):
+            self.mon._load_line_monitors()
+        self.assertIsNone(self.mon._line_mon_snap["rows"], "读的过程中被失效, 不能把旧结果存回去")
+
+    def test_bar_dates_cached_when_today_bar_present(self):
+        import market
+        import market_hours
+        today = market_hours.now().date().isoformat()
+        fake = _FakeDF(["2026-09-01", today])
+        with mock.patch.object(market, "fetch_kline", return_value=(fake, "x")) as fk:
+            self.mon._load_bar_dates("000001.SZ", "1d")
+            self.mon._load_bar_dates("000001.SZ", "1d")
+        self.assertEqual(fk.call_count, 1, "当日 bar 已在序列里, 30 分钟内不重读")
+
+    def test_bar_dates_pending_today_bar_uses_short_ttl(self):
+        import market
+        fake = _FakeDF(["2026-09-01", "2026-09-02"])      # 末根不是今天 (开盘前)
+        t0 = 1_000_000.0
+        with mock.patch.object(market, "fetch_kline", return_value=(fake, "x")) as fk, \
+             mock.patch.object(self.mon.time, "time", return_value=t0):
+            self.mon._load_bar_dates("000001.SZ", "1d")
+            self.mon._load_bar_dates("000001.SZ", "1d")
+        self.assertEqual(fk.call_count, 1)
+        with mock.patch.object(market, "fetch_kline", return_value=(fake, "x")) as fk, \
+             mock.patch.object(self.mon.time, "time",
+                               return_value=t0 + self.mon._BAR_DATES_TTL_PENDING + 1):
+            self.mon._load_bar_dates("000001.SZ", "1d")
+        self.assertEqual(fk.call_count, 1, "末根不是今天时 60s 后就要重读, 等当日 bar 进来")
+
+    def test_bar_dates_cache_bounded(self):
+        import market
+        fake = _FakeDF(["2026-09-01", "2026-09-02"])
+        with mock.patch.object(market, "fetch_kline", return_value=(fake, "x")), \
+             mock.patch.object(self.mon, "_BAR_DATES_MAX", 3):
+            for i in range(5):
+                self.mon._load_bar_dates(f"00000{i}.SZ", "1d")
+        self.assertEqual(len(self.mon._bar_dates_cache), 3)
 
     def _save(self, drawings, symbol=None, period="1d"):
         trades.save_chart_drawings(self.uid, symbol or self.SYM, period, drawings)

@@ -3131,7 +3131,17 @@ def save_chart_drawings(user_id, symbol, period, drawings):
         conn.commit()
     finally:
         conn.close()
+    _drop_line_monitor_cache(user_id, symbol, period)
     return len(drawings)
+
+
+def _drop_line_monitor_cache(user_id, symbol, period):
+    """画线变了就让监控线程的 60s 快照失效。monitor 反向 import trades, 这里惰性引。"""
+    try:
+        import monitor
+        monitor.invalidate_line_monitors(user_id, symbol, period)
+    except Exception:
+        pass
 
 
 def delete_chart_drawings(user_id, symbol, period):
@@ -3143,9 +3153,12 @@ def delete_chart_drawings(user_id, symbol, period):
             (user_id, symbol, period),
         )
         conn.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
     finally:
         conn.close()
+    if deleted:
+        _drop_line_monitor_cache(user_id, symbol, period)
+    return deleted
 
 
 # ── 趋势线监控 (配置存 chart_drawings JSON 的 monitor 字段, 这里只管状态) ──
@@ -3265,6 +3278,7 @@ def set_trendline_monitor_enabled(user_id, drawing_id, enabled):
                  updated_at, user_id, row["symbol"], row["period"]),
             )
             conn.commit()
+            _drop_line_monitor_cache(user_id, row["symbol"], row["period"])
             return True, row["symbol"], row["period"]
         return False, None, None
     finally:

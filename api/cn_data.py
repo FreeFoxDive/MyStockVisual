@@ -7,6 +7,7 @@ akshare/东财连接抖动常见 (RemoteDisconnected), 统一 _retry 重试 + �
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 
@@ -22,6 +23,7 @@ log = logging.getLogger("api")
 
 CACHE_TTL = 900  # 15 分钟
 FAIL_TTL = 300   # 失败负缓存: 上游挂掉时窗口内不再重试 (3 次重试阻塞 ~2.4s/请求)
+_CN_CACHE_MAX = max(1, int(os.environ.get("CN_CACHE_MAX", "200")))
 _cache = {}
 _fail_ts = {}    # key -> 最近一次失败时刻 (负缓存)
 _cache_lock = threading.Lock()
@@ -55,8 +57,11 @@ def _cached(key, fetcher, ttl=CACHE_TTL):
     try:
         data = _retry(fetcher)
         with _cache_lock:
+            _cache.pop(key, None)
             _cache[key] = (time.time(), data)
             _fail_ts.pop(key, None)
+            while len(_cache) > _CN_CACHE_MAX:
+                _cache.pop(next(iter(_cache)))
         return data
     except Exception as e:
         log.warning(f"cn 数据拉取失败 {key}: {redact_message(str(e))}")
@@ -222,24 +227,31 @@ def cn_lhb():
         return _error("缺少 symbol")
     code = symbol.split(".")[0]
 
-    def fetch():
+    def fetch_market():
         import akshare as ak
         import datetime as dt
         end = market_hours.now().strftime("%Y%m%d")
         start = (market_hours.now() - dt.timedelta(days=7)).strftime("%Y%m%d")
         df = ak.stock_lhb_detail_em(start_date=start, end_date=end)
         if df is None or len(df) == 0:
-            return {"rows": [], "hint": "近 7 日无龙虎榜数据"}
-        code_col = next((c for c in df.columns if "代码" in str(c)), None)
-        if code_col:
-            mask = df[code_col].astype(str).str.zfill(6) == code
-            df = df[mask]
-        return {"rows": _rows_pick(df, [
-            ("上榜日", "上榜日"), ("解读", "解读"), ("收盘价", "收盘"),
-            ("涨跌幅", "涨跌幅"), ("龙虎榜净买额", "净买额(万)"),
-        ], limit=15, date_key="上榜日"), "hint": "" if len(df) else "近 7 日该股无龙虎榜记录"}
+            return {"_empty": True, "rows": [], "hint": "近 7 日无龙虎榜数据"}
+        return df
 
-    return _json(_cached(f"lhb:{symbol}", fetch, ttl=1800))
+    end = market_hours.now().strftime("%Y%m%d")
+    cached = _cached(f"lhb-market:{end}", fetch_market, ttl=1800)
+    if isinstance(cached, dict):
+        if cached.get("error"):
+            return _json(cached)
+        return _json({"rows": cached.get("rows") or [], "hint": cached.get("hint") or ""})
+    df = cached
+    code_col = next((c for c in df.columns if "代码" in str(c)), None)
+    if code_col:
+        mask = df[code_col].astype(str).str.zfill(6) == code
+        df = df.loc[mask]
+    return _json({"rows": _rows_pick(df, [
+        ("上榜日", "上榜日"), ("解读", "解读"), ("收盘价", "收盘"),
+        ("涨跌幅", "涨跌幅"), ("龙虎榜净买额", "净买额(万)"),
+    ], limit=15, date_key="上榜日"), "hint": "" if len(df) else "近 7 日该股无龙虎榜记录"})
 
 
 @api_bp.route("/api/cn/dividends", methods=["GET"])

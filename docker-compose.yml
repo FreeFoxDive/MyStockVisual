@@ -10,6 +10,17 @@ services:
       - ./.cache:/app/.cache
       - ./data:/app/data
     restart: unless-stopped
+    # 1GB 宿主上 visual 之外常态已占 ~470MB。上限让 OOM 发生在 cgroup 内,
+    # 只杀本容器, 不再触发宿主 global OOM (SSH/journald 失联那条链)。
+    mem_limit: 400m
+    memswap_limit: 512m
+    mem_reservation: 256m
+    cpus: "0.8"
+    pids_limit: 200
+    oom_score_adj: 500
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      WAITRESS_THREADS: "6"
     # 日志上限: docker 的 json-file 默认无上限, 7x24 运行会把日志堆在根分区上
     # (与镜像无关的另一个磁盘口子); 保留 30MB 近期日志足够 docker compose logs -f 排查
     logging:

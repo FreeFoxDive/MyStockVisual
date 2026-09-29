@@ -29,7 +29,7 @@ venv/Scripts/python.exe -u visual/server.py
 | 可选指标面板 | MACD、KDJ、RSI、ATR、OBV，网页 checkbox 开关 |
 | OBV 面板 | OBV + MAOBV(30)（东财/通达信口径），零轴参考线 |
 | 成交量面板 | 可开关；叠加 VOL MA5/MA10/MA20（东财口径）；关闭时 K线自动拉高 |
-| 筹码分布 | 日/周/月 K 股票/ETF，东财原版 CYQ 算法（始终日线粒度，回看窗口 210/600/1500 根日线，前复权），右侧叠加、与主图价格轴联动；含获利比例/平均成本/90·70成本区间 |
+| 筹码分布 | 日/周/月 K 股票/ETF，东财原版 CYQ 算法（始终日线粒度，回看窗口 210/600/600 根日线，前复权），右侧叠加、与主图价格轴联动；含获利比例/平均成本/90·70成本区间 |
 | 左侧信息栏 | **所有周期**显示「基本信息」：前两行是 **代码/名称**，其后为 行业/总手/成交额/换手/量比/涨停价/跌停价/3·5·10日涨幅/PE/PB/交易状态，末行 **下一开盘**（盘外给出下一次开盘/集合竞价时刻与倒计时，如 `午休 → 13:00 余 1:23:45`，跨日如 `09-18 09:15`，盘中为 `—`；值区只有 129px，所以只留「时刻 + 余 倒计时」，完整描述见悬停 title；值由本地时钟每秒就地更新，不重绘面板。**停牌时不显示这一行** —— 该票当日不参与交易，给"下一次开盘"是误导），**股票 / ETF 都显示涨跌停价**（见下方「涨跌停价口径」）；盘中每 60s 刷新，标题栏 ◀ 可收起（收起后左缘 › 展开，展开按钮按 2 倍放大点按区域）。同一框内下方接「五档」(买1-5/卖1-5) **所有周期**可用（盘中约 3s 刷新，独立滚动预算 4/5×30/min；「量」按东财口径显示 —— 不足 1 万手按原数，过万 `3.1万` 一位小数，列头已写「量」故数值不带单位）；整框显隐由面板栏「信息」勾选框控制，「五档」勾选框单独控制框内五档子块 |
 | 图表截图导出 | 工具栏相机按钮导出 PNG = ECharts 画布 + 画线层 + **左侧基本信息/五档面板**。面板是 DOM 不能直接导出，导出时按 `infoPanelRows`/`depthPanelRows` 的行规格以等宽字体重绘到左侧留白区（与面板同色同序，超宽省略、超长裁剪）；侧栏收起时只导出图表。文件名 `<代码>_<周期>_<日期>_<时分秒>.png`（如 `000001.SZ_1d_2026-09-18_100503.png`，`localStampStr()` 按**本地时区**拼；时分秒不写冒号，Windows 文件名不允许 `:`；只写到日期的话同日连拍会互相覆盖） |
 | 换手/流值/份额/成交额 | 顶部信息栏：股票显示换手率与流通市值；ETF 显示份额、实时换手率（源无字段时按成交量/份额回算）；均显示当日成交额 |
@@ -144,9 +144,9 @@ visual/
 |------|------|
 | `GET /` | 提供 index.html |
 | `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（含 OBV/MAOBV/量均线）+ 流通股本元数据（日K默认 1006≈3年可见+RSI250 warmup） |
-| `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 10s，调低可换实时性、代价是上游调用量）。前端据此更新末根，不再自行拼 bar |
+| `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 25s，须短于 SSE 指标推送间隔 `INDICATOR_SSE_INTERVAL`（默认 30s）；缓存末 10 根，不同 `n` 与多个连接共用一次全量指标计算；调低可换实时性、代价是上游调用量和 CPU）。前端据此更新末根，不再自行拼 bar |
 | `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数；附 `is_trading_day`） |
-| `GET /api/chips?symbol=600519.SH&period=1w` | 筹码分布（股票/ETF；`period` 1d/1w/1M 决定日线回看窗口 210/600/1500 根，返回直方图+汇总+`source`/`period`；指数返回 null）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
+| `GET /api/chips?symbol=600519.SH&period=1w` | 筹码分布（股票/ETF；`period` 1d/1w/1M 决定日线回看窗口 210/600/600 根，返回直方图+汇总+`source`/`period`；指数返回 null）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
 | `GET /api/depth?symbol=600519.SH` | 五档盘口（所有周期可用；AlphaFeed 优先，空数据/限流时回退麦蕊 `stock_real_five`；独立滚动预算 24/min）。档位价 `null` = 该档不存在：上游缺档时补 `0.0`，后端清洗成 `null`（前端画「`—`」），价与量一起置空，全 `0` 的盘口当「没拿到数据」处理。当日快照（`.cache/depth_day.json`，盘后/周末回放）**只收完整盘口**：两个集合竞价窗口（09:15–09:30 / 14:57–15:00）与盘前不留档，买1==卖1／单档的塌陷盘口不留档（被拒时打 warning + `perf` 计数），且只新不旧；盘后/周末读到**收盘前抓的**或塌陷的旧快照时花一个令牌回源换成收盘那份（实测盘后上游给的就是当天最后一份连续竞价盘口），换来的那份之后所有视图直接回放。规则详见 `docs/known-issues.md` 第 9 条 |
 | `GET /api/stock-info?symbol=600519.SH` | 侧栏基本信息（行业/总手/成交额/换手/量比/涨停跌停/N日涨幅/PE/PB/交易状态；AlphaFeed + 麦蕊 + 日K，整包 60s 缓存，港/美股降级为 None） |
 | `GET /api/cn/fund-flow?symbol=` | 个股资金流向（东财，15min 缓存） |
@@ -225,7 +225,7 @@ visual/
   - `auto`：先东财，失败再 AlphaFeed。
 - 前复权价与图表价格轴对齐；支持股票/ETF（日/周/月 K），指数返回 `chips=null`（无份额与换手率，筹码对其无意义）；盘中成功缓存 60s（失败 30s）
 - ETF 的换手率分母用 AlphaFeed 的**份额**（`float_shares`）回算，与东财 `f61` 口径实测一致；份额随申赎变动，历史值为近似。源未返回换手率（全 0）时视为无数据（`_has_turnover` 守卫），`auto` 模式回退 AF
-- **算法粒度始终为日线**（分辨率最高）；周/月 K 只是把回看窗口加长（`WINDOW_BY_PERIOD`：1d/1w/1M = 210/600/1500 根日线），不换成周/月 bar 重算（周期 bar 会把区间成交摊在一根 H-L 上，反而失真）。因此同一只股在周/月 K 看到的筹码数值与日 K 不同属正常，摘要标题会标注「周窗口/月窗口」
+- **算法粒度始终为日线**（分辨率最高）；周/月 K 只是把回看窗口加长（`WINDOW_BY_PERIOD`：1d/1w/1M = 210/600/600 根日线，月线与周线同样封顶 600，避免 1500 根的纯 Python 双重循环打满 CPU），不换成周/月 bar 重算（周期 bar 会把区间成交摊在一根 H-L 上，反而失真）。因此同一只股在周/月 K 看到的筹码数值与日 K 不同属正常，摘要标题会标注「周窗口/月窗口」
 - 前端 `chips.js` 右侧叠加横向直方图（基线在 K 线右缘、向右延伸），按末收价分获利(红)/套牢(绿)，随 dataZoom 与主图价格轴联动；摘要位于筹码条下方右侧窄带，`source=af` 时标注「近似」
 - 摘要为**两列**（标签左对齐、数值右对齐成列；`summaryRows` 结构化返回，`paintLabels` 支持 `align`），**字号自适应 13→10px**（基准 13px，仅窄窗/矮带逐级减小以免超宽或超出画布），价格最多 3 位小数并去掉尾随 0（`4.690→4.69`、`3.4000→3.4`）；获利/均本/中位价数值分别用红/黄/紫与对应线同色。筹码带占右侧 17%（`rightPct`，overlay 83%~97%），给两列文本留出宽度（实测 1200px 图宽用 13px，1050px 降到 11px，均不溢出）
 - 价格字段由服务端按 `PRICE_DP=3` 输出（`min/max/avgCost/medianCost/pct90/pct70/桶价`）：低位 ETF（0.5 元级）的第 3 位小数有意义（如 `0.332`、`0.301~0.358`）；曾统一取整到 2 位，导致前端的 3 位小数格式实际显示不出来
@@ -420,6 +420,9 @@ docker compose down
 | 数据卷 | `data` | bind mount 挂载宿主机 `visual/data`（交易记录 `trades.db`） |
 | 环境变量 | `.env` | 通过 `env_file` 注入 |
 | 管理员账号 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 无管理员则自动创建；已有则启动时同步口令 |
+| 内存 | 400m（swap 合计 512m） | `mem_limit` / `memswap_limit`；cgroup 内 OOM 只杀本容器 |
+| CPU | 0.8 核 | 避免持续满核触发 VPS 的 CPU 限频 |
+| OOM 优先级 | `oom_score_adj=500` | 宿主仍发生 global OOM 时优先杀 visual，而不是 sshd |
 | 用户 | `appuser` (非 root) | 降低容器逃逸风险 |
 
 > 注：部署主机 `visual/data`、`visual/.cache` 的属主需为 UID 1000（绝大多数 Linux 首个用户即 1000）；否则构建时用 `--build-arg UID=$(id -u)` 对齐。
@@ -450,6 +453,20 @@ docker builder prune -a -f  # 磁盘告急才用: 连被镜像引用的缓存一
 **不要**随手跑 `docker system prune -a --volumes`：`-a` 会删掉所有未被使用的镜像；`--volumes` 会删掉宿主机上所有**命名卷**（本 compose 用的是 bind mount，`visual/data`、`visual/.cache` 不受影响，但同机其他项目的命名卷会被一并清掉）。
 
 容器日志是另一个口子：docker 的 json-file 默认无上限，`docker-compose.yml` 里已设 10MB×3 的轮转上限。
+
+### 内存告警
+
+进程内 `memguard`（随服务启动）读 cgroup 用量：约 75% 走钉钉/ntfy 预警，约 90% 再发紧急通知并清缓存、把空闲内存还给系统、停掉因子构建子进程。容器被杀掉之后这条链路发不出消息，宿主机上再跑一层：
+
+```bash
+# 每分钟看 MemAvailable / swap（cron）
+* * * * * /path/to/visual/scripts/host_memwatch.sh check
+
+# 常驻监听 docker OOM 与 10 分钟内重启超过 3 次
+/path/to/visual/scripts/host_memwatch.sh events
+```
+
+凭据用 `visual/.env` 里已有的 `NTFY_URL` / `NTFY_TOPIC` / `NTFY_USER` / `NTFY_PASSWORD`。阈值可用 `HOST_MEM_AVAILABLE_MB`（默认 120）和 `HOST_SWAP_USED_PCT`（默认 60）覆盖。
 
 改 Dockerfile / .dockerignore 时的注意点：
 
