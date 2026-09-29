@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,7 +26,13 @@ _VISUAL_DIR = Path(__file__).resolve().parents[1]
 if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
+import security  # noqa: E402
 import trades  # noqa: E402
+
+
+def _reset_rate_limit():
+    security._rate_limit_tokens = float(security.RATE_LIMIT_PER_MIN)
+    security._rate_limit_last_refill = time.time()
 
 
 def _today(offset=0):
@@ -269,6 +276,10 @@ class SignalIgnoreApiTest(unittest.TestCase):
     def tearDownClass(cls):
         trades._db_path = cls._orig_db
         cls._tmpdir.cleanup()
+
+    def setUp(self):
+        # 全量套件里其它 API 测试会吃掉全局令牌桶; 不重置时第二笔 GET 会 429 而非 401。
+        _reset_rate_limit()
 
     def _headers(self):
         self.client.get("/login.html")
