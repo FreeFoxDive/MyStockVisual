@@ -27,7 +27,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -1049,10 +1049,25 @@ def _notify_state(kind, day, extra=""):
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _canonical_day(day):
+    """把显式日期收成 YYYY-MM-DD; 非法返回 None。
+
+    经正则 + date.fromisoformat 再拼回规范串, 不沿用原始请求文本, 避免不可信
+    内容进入 subprocess argv (CodeQL py/command-line-injection)。
+    """
+    m = _DAY_RE.fullmatch(str(day or "").strip())
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(0)).isoformat()
+    except ValueError:
+        return None
+
+
 def _check_day(day):
     """显式日期: YYYY-MM-DD, 且是不晚于最近已收盘交易日的交易日。非法返回原因。"""
-    text = str(day or "")
-    if not _DAY_RE.match(text):
+    text = _canonical_day(day)
+    if not text:
         return "日期格式应为 YYYY-MM-DD"
     import market_hours
     if not market_hours.is_trading_day(text):
@@ -1089,6 +1104,7 @@ def build(day=None, force=False, notify=True):
         err = _check_day(day)
         if err:
             return {"ok": False, "reason": "bad_day", "day": str(day), "message": err}
+        day = _canonical_day(day)
     if not force and day is None and before_build_at():
         return {"ok": False, "reason": "before_build_at", "day": None,
                 "message": "因子库只在 %02d:%02d 后构建" % build_at()}
@@ -1176,6 +1192,7 @@ def build_blocked_reason(day=None, force=False):
         err = _check_day(day)
         if err:
             return err
+        day = _canonical_day(day)
     if not force and day is None and before_build_at():
         return "因子库只在 %02d:%02d 后构建（可用「强制重建」立即执行）" % build_at()
     day = day or due_day() or last_closed_trading_day()
@@ -1677,6 +1694,13 @@ def _spawn_build(day, force=False):
     """
     import subprocess
     import sys
+    # day 可能来自 /api/factors/rebuild 的 JSON; 只把正则收成的规范串放进 argv。
+    day = _canonical_day(day)
+    if not day:
+        raise ValueError("日期格式应为 YYYY-MM-DD")
+    err = _check_day(day)
+    if err:
+        raise ValueError(err)
     cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--build", "--day", day]
     if force:
         cmd.append("--force")

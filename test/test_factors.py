@@ -949,6 +949,13 @@ class BuildChildTest(StoreTestCaseBase):
         self.assertIn("--force", popen.call_args.args[0])
         self.assertTrue(factors.build_child_running())
 
+    def test_spawn_rejects_non_canonical_day_before_popen(self):
+        with mock.patch("subprocess.Popen") as popen:
+            for bad in ("2026-09-18; rm -rf /", "2026/09/18", "nope", ""):
+                with self.assertRaises(ValueError):
+                    factors._spawn_build(bad, force=True)
+        popen.assert_not_called()
+
     def test_spawn_manual_uses_subprocess(self):
         with mock.patch.object(factors, "_spawn_build") as spawn:
             factors.spawn_manual(day="2026-09-18", force=True)
