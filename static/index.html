@@ -3559,11 +3559,19 @@ function reconcileLiveBars(data) {
 
 /** 用同日快照刷新后端已经产出的当日 bar 的 OHLCV。
  *  不新增 bar、不改指标: 有没有当日 bar 仍由后端决定, 指标由 tail 帧纠正。
- *  日期取快照时间戳的北京时间; 没有时间戳时只用服务端交易日 + server_time, 不用浏览器本地日期。 */
+ *  后复权价格与原始快照口径不同, 不走这条快路径。日期取快照时间戳的北京时间;
+ *  没有时间戳时只用服务端交易日 + server_time, 不用浏览器本地日期。 */
 function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
   if (!q || symbol !== STATE.symbol || STATE.period !== '1d') return false;
   const kd = STATE.klineData;
-  if (!kd || kd.symbol !== symbol || !Array.isArray(kd.klines) || !kd.klines.length) return false;
+  if (!kd || kd.symbol !== symbol || (kd.period && kd.period !== STATE.period)
+      || !Array.isArray(kd.klines) || !kd.klines.length) return false;
+  const meta = kd.meta || {};
+  if ((meta.adjust || STATE.adjust) === 'hfq') return false;
+  const trading = typeof q.is_trading_day === 'boolean' ? q.is_trading_day
+    : (kd.quote && typeof kd.quote.is_trading_day === 'boolean' ? kd.quote.is_trading_day
+      : meta.is_trading_day);
+  if (trading === false) return false;
   const vol = Number(q.volume);
   if (!(vol > 0)) return false;
   let day = '';
@@ -3574,11 +3582,11 @@ function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
     const p = (n) => String(n).padStart(2, '0');
     day = d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
   } else {
-    const meta = kd.meta || {};
-    const trading = q.is_trading_day || (kd.quote && kd.quote.is_trading_day) || meta.is_trading_day;
     if (trading && meta.server_time) day = String(meta.server_time).slice(0, 10);
   }
   if (!day) return false;
+  const serverDay = meta.server_time ? String(meta.server_time).slice(0, 10) : '';
+  if (serverDay && serverDay !== day) return false;
   const last = kd.klines[kd.klines.length - 1];
   if (String(last.date).slice(0, 10) !== day) return false;
   const fields = {
@@ -3586,8 +3594,10 @@ function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
   };
   let changed = false;
   for (const k of Object.keys(fields)) {
-    const v = Number(fields[k]);
-    if (!Number.isFinite(v)) continue;
+    const raw = fields[k];
+    if (raw == null || raw === '') continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || (k === 'amount' ? v < 0 : v <= 0)) continue;
     if (Number(last[k]) === v) continue;
     last[k] = k === 'volume' ? Math.round(v) : v;
     changed = true;

@@ -181,6 +181,56 @@ class DailyTailJsTest(unittest.TestCase):
         self.assertEqual(last["macd_dif"], 0.2)
         self.assertEqual(out["last"]["date"], "2026-09-30")
 
+    def test_quote_null_fields_do_not_zero_valid_bar(self):
+        # Number(null) == 0: 快照缺字段时必须保留后端已有的有效 OHLC/amount。
+        state = {
+            "symbol": "S", "period": "1d", "adjust": "forward",
+            "klineData": {
+                "symbol": "S", "period": "1d",
+                "meta": {"adjust": "forward", "server_time": "2026-09-30 10:00:00"},
+                "klines": [{"date": "2026-09-30", "open": 10, "high": 12, "low": 9,
+                            "close": 10.5, "volume": 1000, "amount": 10000}],
+            },
+        }
+        quote = {"timestamp": 1790733600, "is_trading_day": True,
+                 "open": None, "high": None, "low": None, "last_price": 11,
+                 "volume": 1100, "amount": None}
+        out = self._run_patch(state, quote)
+        self.assertTrue(out["changed"])
+        self.assertEqual(out["last"]["open"], 10)
+        self.assertEqual(out["last"]["high"], 12)
+        self.assertEqual(out["last"]["low"], 9)
+        self.assertEqual(out["last"]["amount"], 10000)
+        self.assertEqual(out["last"]["close"], 11)
+        self.assertEqual(out["last"]["volume"], 1100)
+
+    def test_quote_does_not_patch_holiday_or_hfq_bar(self):
+        state = {
+            "symbol": "S", "period": "1d", "adjust": "hfq",
+            "klineData": {
+                "symbol": "S", "period": "1d",
+                "meta": {"adjust": "hfq", "is_trading_day": False,
+                         "server_time": "2026-10-01 00:01:00"},
+                "klines": [{"date": "2026-09-30", "open": 100, "high": 120, "low": 90,
+                            "close": 110, "volume": 1000, "amount": 10000}],
+            },
+        }
+        quote = {"timestamp": 1790733600, "is_trading_day": False,
+                 "open": 10, "high": 15, "low": 8, "last_price": 11,
+                 "volume": 1100, "amount": 12000}
+        out = self._run_patch(state, quote)
+        self.assertFalse(out["changed"], "假日旧快照不得覆盖历史 bar")
+        self.assertEqual(out["last"]["close"], 110)
+
+        state["klineData"]["meta"] = {
+            "adjust": "hfq", "is_trading_day": True,
+            "server_time": "2026-09-30 10:00:00",
+        }
+        quote["is_trading_day"] = True
+        out = self._run_patch(state, quote)
+        self.assertFalse(out["changed"], "原始快照不得覆盖后复权 bar")
+        self.assertEqual(out["last"]["close"], 110)
+
     def test_quote_does_not_create_or_touch_other_bars(self):
         import calendar
         from datetime import datetime, timezone
