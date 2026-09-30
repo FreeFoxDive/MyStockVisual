@@ -90,14 +90,16 @@ _URL_QUERY_RE = re.compile(
 
 # 麦蕊等: path 末段疑似 licence (长 hex/alnum)。仅覆盖少量已知路径。
 _PATH_TAIL_RE = re.compile(
-    r"(https?://[^\s\"']*?/(?:lskx|hsrl|licenceinfo)[^\s\"']*?/)([A-Za-z0-9_-]{16,})(/?|\?|$)"
+    r"(https?://[^\s\"'/?#]+(?:/[^\s\"'/?#]+)*/(?:lskx|hsrl|licenceinfo)(?:/[^\s\"'/?#]+)*/)"
+    r"([A-Za-z0-9_-]{16,})"
+    r"(/?|\?|$)"
 )
 
 # 麦蕊 licence 是 UUID, 且出现在几乎所有接口路径末段 (/hsindex/list、/himk/roe、
 # /hsstock/history/{code}/{period}/{div}、/hsstock/instrument/{code}.{mkt} 等),
 # 上面的 _PATH_TAIL_RE 覆盖不到。这里统一按 URL 路径中的 UUID 段脱敏。
 _UUID_PATH_RE = re.compile(
-    r"(https?://[^\s\"'<>]*?/)"
+    r"(https?://[^\s\"'<>/?#]+(?:/[^\s\"'<>/?#]+)*/)"
     r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"
     r"([/\s\"'<>?)]|$)"
 )
