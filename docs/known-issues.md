@@ -100,10 +100,15 @@
 
 **契约**：
 
-- 当日 bar 的 OHLCV **与全部指标**只由后端产出；前端不再派生 K 线数据、不再本地
-  重算指标（`static/js/indicators.js` 已删除）。
-- 前端通过 `GET /api/kline/tail?symbol=&period=1d&count=<与图表同>&n=2` 取权威末
-  N 根（与 `/api/kline` 同一 `fetch_kline_ex` + `compute_all_indicators` 口径），
+- **有没有当日 bar、以及全部指标**只由后端产出。前端不新增 bar、不本地重算指标
+  （`static/js/indicators.js` 已删除）。
+- 前端可以用同日快照刷新**后端已经产出的那根** bar 的 OHLCV
+  （`patchTodayBarOhlcv`）：末根日期必须等于快照时间戳的北京时间（无时间戳时
+  用服务端 `is_trading_day` + `meta.server_time`，不用浏览器本地日期），且
+  `volume>0`。只写 open/high/low/close/volume/amount，指标字段不动。非交易日
+  末根不是“今天”，这条路径是 no-op，不会再凭空多一根。
+- 指标与权威 OHLCV 仍由 `GET /api/kline/tail?symbol=&period=1d&count=<与图表同>&n=2`
+  纠正（与 `/api/kline` 同一 `fetch_kline_ex` + `compute_all_indicators` 口径），
   按 `date` 合并/追加（`applyServerBars`）；非交易日/盘前后端本就不含“今日”bar，
   合并即 no-op。
 - `count` 必须与图表一致，否则 OBV 等全序列指标会漂移。

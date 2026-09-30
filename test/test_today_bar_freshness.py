@@ -155,6 +155,32 @@ class TestFreshnessPolicy(_Harness):
         calls = [c for c in fq.call_args_list if "fresh" in c.kwargs]
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0].kwargs["fresh"], "默认必须 fresh=True")
+        self.assertGreater(calls[0].kwargs.get("wait_for_lock", 0), 0,
+                           "图表路径要等在飞快照, 不能非阻塞直接放弃")
+
+    def test_chart_bar_waits_out_a_held_quote_lock(self):
+        """锁被占且缓存是冷的时, 等到锁释放后再取快照, 首包仍能拼出当日 bar。"""
+        market_mod.quote_cache.clear()
+        market_mod._quote_fetch_lock.acquire()
+        released = threading.Event()
+
+        def release_lock():
+            time.sleep(0.05)
+            market_mod._quote_fetch_lock.release()
+            released.set()
+
+        worker = threading.Thread(target=release_lock)
+        worker.start()
+        try:
+            bar = market_mod._daily_bar_from_quote(SYM, TODAY, fresh=False)
+        finally:
+            worker.join(timeout=3)
+            if not released.is_set() and market_mod._quote_fetch_lock.locked():
+                market_mod._quote_fetch_lock.release()
+        self.assertTrue(released.is_set())
+        self.assertIsNotNone(bar)
+        self.assertEqual(bar["date"], TODAY.isoformat())
+        self.assertEqual(bar["high"], 12.0)
 
     def test_trade_validation_still_forces_fresh(self):
         """成交校验必须忽略缓存: 当日 bar 不准则买入价会被误拒 (known-issues #1)。"""

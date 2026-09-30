@@ -93,7 +93,7 @@ const finish = async (r, data) => {
   const pendingCount = requests.length;
   now += 3000; resources.tick();
   assert.equal(requests.length, pendingCount, 'all recovered resources stop polling');
-  // 指标帧 30s 一推: 两帧之间 (20s) 不能判 bars 陈旧去轮询 /api/kline/tail
+  // 指标帧 15s 一推, 健康窗口 45s: 两帧之间 (20s) 不能判 bars 陈旧去轮询 /api/kline/tail
   const tailPolls = () => requests.filter(r => String(r.url).includes('/api/kline/tail')).length;
   const tailBefore = tailPolls();
   now += 20000;

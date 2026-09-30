@@ -105,7 +105,7 @@ class KlineRetryJsTest(unittest.TestCase):
             "const STATE = {_fetchTs: 1, _klineRecoverFails: 0};\n"
             + "const loadCalls = [];\n"
             + self.src[self.src.index("let _klineRecoverAt"): self.src.index("const liveQuotes")] + "\n"
-            + "function loadCurrent() { loadCalls.push(1); }\n"
+            + "function fetchData() { loadCalls.push(1); }\n"
             + "scheduleKlineRecovery();\n"
             + "scheduleKlineRecovery();\n"  # 冷却期内: 不应再次触发
             + "const afterCooldown = loadCalls.length;\n"
@@ -117,6 +117,35 @@ class KlineRetryJsTest(unittest.TestCase):
         out = json.loads(run_node(js))
         self.assertEqual(out["afterCooldown"], 1, "15s 冷却内只补拉一次")
         self.assertEqual(out["finalCalls"], 1, "连续失败 5 次后熔断, 不再自动补拉")
+        self.assertNotIn("loadCurrent()", self.src[self.src.index("function scheduleKlineRecovery"):
+                                                    self.src.index("function klineTailNeedsRecovery")],
+                         "补拉只走 fetchData, 不再重置侧栏")
+
+    def _run_needs_recovery(self, state, data):
+        js = (
+            "const STATE = " + json.dumps(state) + ";\n"
+            + self._extract("klineTailNeedsRecovery") + "\n"
+            + "const data = JSON.parse(process.argv[1]);\n"
+            + "process.stdout.write(JSON.stringify(klineTailNeedsRecovery('S', data)));"
+        )
+        return json.loads(run_node(js, json.dumps(data)))
+
+    def test_tail_while_loading_is_not_a_failure(self):
+        data = {"period": "1d", "meta": {"adjust": "forward"}, "bars": [{"date": "2026-09-30"}]}
+        loading = {"symbol": "S", "period": "1d", "adjust": "forward",
+                   "_foregroundLoading": True, "_klineRecoverFails": 1, "klineData": None}
+        self.assertFalse(self._run_needs_recovery(loading, data), "前台请求在途不补拉")
+        fresh = {"symbol": "S", "period": "1d", "adjust": "forward",
+                 "_foregroundLoading": False, "_klineRecoverFails": 0, "klineData": None}
+        self.assertFalse(self._run_needs_recovery(fresh, data), "没有失败记录不补拉")
+
+    def test_tail_recovers_only_after_real_failure(self):
+        data = {"period": "1d", "meta": {"adjust": "forward"}, "bars": [{"date": "2026-09-30"}]}
+        failed = {"symbol": "S", "period": "1d", "adjust": "forward",
+                  "_foregroundLoading": False, "_klineRecoverFails": 1, "klineData": None}
+        self.assertTrue(self._run_needs_recovery(failed, data))
+        matched = dict(failed, klineData={"symbol": "S", "period": "1d"})
+        self.assertFalse(self._run_needs_recovery(matched, data), "整图已对上当前标的就走合并")
 
 
 if __name__ == "__main__":

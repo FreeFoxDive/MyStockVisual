@@ -3437,16 +3437,26 @@ function syncAdjustMeta(data) {
   }
 }
 
-// 初始 /api/kline 失败后的自动恢复: tail 轮询仍在成功时借道补拉整图,
-// 让图表自愈而不必手动刷新。15s 冷却 (tail 每 10s 一帧), 连续失败 5 次后
-// 停止自动重试 (对已退市/无数据标的不再空转), 交还手动刷新/重试按钮。
+// 初始 /api/kline 失败后的自动恢复: tail 仍在成功、且没有前台请求在途时,
+// 只补拉 K 线 (不重置侧栏/五档/基本信息)。15s 冷却, 连续失败 5 次后停止,
+// 交还手动刷新。tail 先于整图到达不算失败。
 let _klineRecoverAt = 0;
 function scheduleKlineRecovery() {
   const now = Date.now();
   if (now < _klineRecoverAt || (STATE._klineRecoverFails || 0) >= 5) return;
   _klineRecoverAt = now + 15000;
   console.warn('K线初始加载失败, tail 正常, 自动补拉整图');
-  loadCurrent();
+  fetchData();
+}
+
+/** tail 有数据但整图还没对上当前标的: 只有「上次整图确实失败」且「没有前台请求在途」才补拉。 */
+function klineTailNeedsRecovery(symbol, data) {
+  if (!data || symbol !== STATE.symbol || data.period !== STATE.period
+      || !data.meta || data.meta.adjust !== STATE.adjust) return false;
+  const kd = STATE.klineData;
+  if (kd && kd.symbol === symbol && kd.period === data.period) return false;
+  if (STATE._foregroundLoading || !(STATE._klineRecoverFails > 0)) return false;
+  return Array.isArray(data.bars) && data.bars.length > 0;
 }
 
 const liveQuotes = new VisualLive.LiveMarket({
@@ -3467,9 +3477,10 @@ const liveQuotes = new VisualLive.LiveMarket({
     marketStore.accept('quote', symbol, q);
   },
   onBars: (symbol, data) => {
-    if (symbol !== STATE.symbol || data.period !== STATE.period || data.meta.adjust !== STATE.adjust) return;
+    if (!data || symbol !== STATE.symbol || data.period !== STATE.period
+        || !data.meta || data.meta.adjust !== STATE.adjust) return;
     if (!STATE.klineData || STATE.klineData.symbol !== symbol || STATE.klineData.period !== data.period) {
-      if (Array.isArray(data.bars) && data.bars.length) scheduleKlineRecovery();
+      if (klineTailNeedsRecovery(symbol, data)) scheduleKlineRecovery();
       return;
     }
     if (applyServerBars(data.bars)) {
@@ -3491,6 +3502,7 @@ VisualMarketStore.watch(() => marketStore.last, (change) => {
     if (STATE.klineData && STATE.klineData.symbol === symbol) STATE.klineData.quote = q;
     updateLiveStockInfo(q, symbol);
     updateLivePriceLine(q, symbol);
+    patchTodayBarOhlcv(q, symbol);
   } else if (change.kind === 'depth') {
     STATE.depth = change.value;
     renderDepth(change.value);
@@ -3527,12 +3539,61 @@ function applyQuoteData(q) {
 }
 function reconcileLiveBars(data) {
   ensureQuoteStream();
+  // accept 会因 revision 更旧丢掉已到的 tail。整图若缺更新日期的 bar, 仍用那份 tail 补上。
+  const prev = liveQuotes.get(data.symbol, 'bars');
   if (data._revision && data.klines) liveQuotes.accept('bars', data.symbol, {
     symbol: data.symbol, period: data.period, meta: data.meta,
     _revision: data._revision, bars: data.klines.slice(-2),
   });
   const latest = liveQuotes.get(data.symbol, 'bars');
-  if (latest && latest.period === STATE.period && latest.meta.adjust === STATE.adjust) applyServerBars(latest.bars);
+  const sameView = (frame) => frame && frame.period === STATE.period
+    && frame.meta && frame.meta.adjust === STATE.adjust;
+  if (sameView(latest)) applyServerBars(latest.bars);
+  if (!prev || prev === latest || !sameView(prev)) return;
+  const klines = STATE.klineData && STATE.klineData.klines;
+  if (!klines || !klines.length) return;
+  const lastDate = String(klines[klines.length - 1].date).slice(0, 10);
+  const newer = (prev.bars || []).filter((b) => b && b.date && String(b.date).slice(0, 10) > lastDate);
+  if (newer.length) applyServerBars(newer);
+}
+
+/** 用同日快照刷新后端已经产出的当日 bar 的 OHLCV。
+ *  不新增 bar、不改指标: 有没有当日 bar 仍由后端决定, 指标由 tail 帧纠正。
+ *  日期取快照时间戳的北京时间; 没有时间戳时只用服务端交易日 + server_time, 不用浏览器本地日期。 */
+function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
+  if (!q || symbol !== STATE.symbol || STATE.period !== '1d') return false;
+  const kd = STATE.klineData;
+  if (!kd || kd.symbol !== symbol || !Array.isArray(kd.klines) || !kd.klines.length) return false;
+  const vol = Number(q.volume);
+  if (!(vol > 0)) return false;
+  let day = '';
+  const ts = Number(q.timestamp);
+  if (Number.isFinite(ts) && ts > 0) {
+    const ms = ts > 1e12 ? ts : ts * 1000;
+    const d = new Date(ms + 8 * 3600 * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    day = d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+  } else {
+    const meta = kd.meta || {};
+    const trading = q.is_trading_day || (kd.quote && kd.quote.is_trading_day) || meta.is_trading_day;
+    if (trading && meta.server_time) day = String(meta.server_time).slice(0, 10);
+  }
+  if (!day) return false;
+  const last = kd.klines[kd.klines.length - 1];
+  if (String(last.date).slice(0, 10) !== day) return false;
+  const fields = {
+    open: q.open, high: q.high, low: q.low, close: q.last_price, volume: vol, amount: q.amount,
+  };
+  let changed = false;
+  for (const k of Object.keys(fields)) {
+    const v = Number(fields[k]);
+    if (!Number.isFinite(v)) continue;
+    if (Number(last[k]) === v) continue;
+    last[k] = k === 'volume' ? Math.round(v) : v;
+    changed = true;
+  }
+  if (changed) requestBarPatchDraw();
+  return changed;
 }
 function updateLiveStockInfo(q, symbol = STATE.symbol) {
   if (!q || symbol !== STATE.symbol) return;

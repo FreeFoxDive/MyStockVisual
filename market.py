@@ -2753,12 +2753,20 @@ def _maybe_append_today_bar(symbol, df, timing=None, fresh=True):
     return _apply_quote_bar_to_df(df, quote_bar)
 
 
+# 图表拼当日 bar 时, 快照锁被 SSE/tail 占着就等这么久再读缓存。
+_CHART_QUOTE_WAIT_SEC = 1.5
+
+
 def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=False):
     """历史日K尚无当天 bar 时, 用实时快照拼一根 (仅今天 + 交易日 + 成交量>0)。
 
     fresh=False 复用 quote_cache (TTL 1.25s), 不再每次强制走网络: 图表路径用,
     因为实测该强制往返在 0~700ms 抖动, 是热路径上仅剩的耗时来源。当日 bar 仍
     完全由后端快照产出, 只是允许最多旧 1.25s。
+
+    图表路径拿锁最多等 _CHART_QUOTE_WAIT_SEC: 首屏 kline/tail/SSE 会同时抢
+    同一把非阻塞锁, 抢不到且缓存是冷的就会缺当日 bar。等到在飞请求把快照写入
+    缓存后再读, 不必为此再打一次上游。
 
     成交校验等对「当天终值」敏感的调用方 (market.get_daily_bar) 必须保持
     fresh=True —— 当日 bar 不准曾导致买入价被误拒 (见 docs/known-issues.md #1)。
@@ -2776,7 +2784,9 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
     # 观测: 该往返的耗时即 quote_ms, 是 /api/kline 关键路径上的网络成本
     with perf.Span(timing, "quote_ms"):
         q = (fetch_trade_quote(symbol) if for_trade
-             else fetch_quotes([symbol], fresh=fresh).get(normalize_symbol(symbol)))
+             else fetch_quotes(
+                 [symbol], fresh=fresh, wait_for_lock=_CHART_QUOTE_WAIT_SEC,
+             ).get(normalize_symbol(symbol)))
     if not q:
         return None
     # 快照自带交易所时间戳时校验日期: 挡住盘前/停牌等陈旧快照被当今日

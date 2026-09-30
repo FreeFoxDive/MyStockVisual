@@ -41,7 +41,7 @@ DAILY_COUNT = 3 * 252 + 250  # 1006
 # 图表当日 bar 的快照新鲜度: 默认复用 quote_cache (TTL 1.25s), 不再每次强制一次
 # 实时行情往返 —— 实测该往返在 0~700ms 抖动, 是磁盘 TTL 抬高后热路径上仅剩的
 # 耗时来源。当日 bar 仍**完全由后端快照产出** (契约不变: 前端不派生 OHLCV),
-# 只是允许最多旧 1.25s; 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (25-30s,
+# 只是允许最多旧 1.25s; 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (10-15s,
 # 仍走强制新鲜快照) 持续纠正末根 bar。
 # 成交校验 (market.get_daily_bar) 不经过这里, 始终强制新鲜快照。
 # KLINE_TODAY_BAR_FRESH=1 → 恢复"每次强制拉新快照"的旧行为 (更实时, 但慢)。
@@ -50,10 +50,10 @@ TODAY_BAR_QUOTE_FRESH = os.environ.get("KLINE_TODAY_BAR_FRESH", "").strip().lowe
 )
 
 # 末根增量接口的短 TTL: 多客户端共用一次全量指标计算。
-# 默认 25s (原 10s 每个图表连接都把 1000 根重算一遍, 盘中会把核打满)。
-# 必须短于 SSE 的 INDICATOR_SSE_INTERVAL (30s): 否则 SSE 每帧可能拿到同一份缓存,
-# revision 不变, 前端 live-market 的 bars 健康时间戳就刷不上。
-KLINE_TAIL_TTL = max(5.0, float(os.environ.get("KLINE_TAIL_TTL", "25")))
+# 默认 10s。必须短于 SSE 的 INDICATOR_SSE_INTERVAL (15s): 否则 SSE 每帧可能拿到
+# 同一份缓存, revision 不变, 前端 live-market 的 bars 健康时间戳就刷不上。
+# 单次约 30ms (1006 根, 磁盘命中); 15s 推送对几个页面是 1GB 机器上约 2% 单核。
+KLINE_TAIL_TTL = max(5.0, float(os.environ.get("KLINE_TAIL_TTL", "10")))
 _tail_cache = TTLCache(KLINE_TAIL_TTL, max_entries=30)
 _TAIL_CACHE_BARS = 10
 

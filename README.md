@@ -144,7 +144,7 @@ visual/
 |------|------|
 | `GET /` | 提供 index.html |
 | `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（含 OBV/MAOBV/量均线）+ 流通股本元数据（日K默认 1006≈3年可见+RSI250 warmup） |
-| `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 25s，须短于 SSE 指标推送间隔 `INDICATOR_SSE_INTERVAL`（默认 30s）；缓存末 10 根，不同 `n` 与多个连接共用一次全量指标计算；调低可换实时性、代价是上游调用量和 CPU）。前端据此更新末根，不再自行拼 bar |
+| `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 10s，须短于 SSE 指标推送间隔 `INDICATOR_SSE_INTERVAL`（默认 15s）；缓存末 10 根，不同 `n` 与多个连接共用一次全量指标计算）。前端用它纠正末根与指标；同日快照只刷新后端已经产出的那根 bar 的 OHLCV，不新增 bar |
 | `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数；附 `is_trading_day`） |
 | `GET /api/chips?symbol=600519.SH&period=1w` | 筹码分布（股票/ETF；`period` 1d/1w/1M 决定日线回看窗口 210/600/600 根，返回直方图+汇总+`source`/`period`；指数返回 null）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
 | `GET /api/depth?symbol=600519.SH` | 五档盘口（所有周期可用；AlphaFeed 优先，空数据/限流时回退麦蕊 `stock_real_five`；独立滚动预算 24/min）。档位价 `null` = 该档不存在：上游缺档时补 `0.0`，后端清洗成 `null`（前端画「`—`」），价与量一起置空，全 `0` 的盘口当「没拿到数据」处理。当日快照（`.cache/depth_day.json`，盘后/周末回放）**只收完整盘口**：两个集合竞价窗口（09:15–09:30 / 14:57–15:00）与盘前不留档，买1==卖1／单档的塌陷盘口不留档（被拒时打 warning + `perf` 计数），且只新不旧；盘后/周末读到**收盘前抓的**或塌陷的旧快照时花一个令牌回源换成收盘那份（实测盘后上游给的就是当天最后一份连续竞价盘口），换来的那份之后所有视图直接回放。规则详见 `docs/known-issues.md` 第 9 条 |
