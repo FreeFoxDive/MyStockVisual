@@ -109,6 +109,123 @@ class _Harness(unittest.TestCase):
         return market_mod.fetch_kline_ex(SYM, "1d", 1006, **kw)
 
 
+class TestAdjustmentIsolation(_Harness):
+    def test_hfq_never_appends_raw_quote(self):
+        df, _, _ = self._chart(adjust="hfq")
+        self.assertIsNone(_today_row(df))
+        self.assertEqual(self.af_calls, [])
+
+    def test_hfq_preserves_source_today_bar_on_cold_and_disk_hit(self):
+        source = _df_ending_yesterday(close=100.0)
+        source.loc[pd.Timestamp(TODAY)] = [110, 120, 105, 115, 5000, 1e7]
+        with mock.patch.object(market_mod.kline_source, "fetch_kline_df",
+                               return_value=(source, "test")), \
+             mock.patch.object(market_mod._disk_cache, "set") as write:
+            cold, _, _ = self._chart(adjust="hfq")
+        self.assertEqual(_today_row(cold)["close"], 115)
+        payload = write.call_args.args[3]
+        self.assertTrue(write.call_args.kwargs["chain_tag"].endswith("-hfq2"))
+        with mock.patch.object(market_mod._disk_cache, "get", return_value=payload) as read, \
+             mock.patch("market_hours.is_live", return_value=True):
+            warm, _, _ = self._chart(adjust="hfq")
+        self.assertEqual(_today_row(warm)["close"], 115)
+        self.assertLessEqual(read.call_args.args[3], 60)
+        self.assertEqual(self.af_calls, [])
+
+    def test_unadjusted_still_uses_current_quote(self):
+        df, _, _ = self._chart(adjust="none")
+        self.assertEqual(_today_row(df)["close"], 11.5)
+        self.assertEqual(len(self.af_calls), 1)
+
+    def _hfq_payload(self, close):
+        source = _df_ending_yesterday(close=100.0)
+        source.loc[pd.Timestamp(TODAY)] = [110, 120, 105, close, 5000, 1e7]
+        with mock.patch.object(market_mod.kline_source, "fetch_kline_df",
+                               return_value=(source, "test")), \
+             mock.patch.object(market_mod._disk_cache, "set") as write:
+            self._chart(adjust="hfq")
+        return write.call_args.args[3]
+
+    def _read_hfq_cache(self, payload, written, after, phase, fresh):
+        seen = {}
+
+        def _get(*args, **kwargs):
+            ttl = args[3]
+            seen["ttl"] = ttl
+            age = (_epoch(after) - _epoch(written))
+            return None if age > ttl else payload
+
+        with mock.patch.object(market_mod._disk_cache, "mtime",
+                               return_value=_epoch(written)), \
+             mock.patch.object(market_mod._disk_cache, "get", side_effect=_get), \
+             mock.patch.object(market_mod.kline_source, "fetch_kline_df",
+                               return_value=(fresh, "test")) as fetch, \
+             mock.patch("market_hours.now", return_value=after), \
+             mock.patch("market_hours.is_live", return_value=False), \
+             mock.patch("market_hours.session_phase", side_effect=phase):
+            df, _, _ = self._chart(adjust="hfq")
+        return df, seen["ttl"], fetch.call_count
+
+    def test_hfq_intraday_cache_not_reused_after_close(self):
+        """14:59 写下的后复权 bar 在 15:30 不能再当成收盘价。"""
+        payload = self._hfq_payload(100.0)
+        written = datetime(2026, 9, 15, 14, 59, 50)
+        after = datetime(2026, 9, 15, 15, 30)
+        fresh = _df_ending_yesterday(close=100.0)
+        fresh.loc[pd.Timestamp(TODAY)] = [110, 120, 105, 130, 5000, 1e7]
+
+        def phase(value=None):
+            moment = value or after
+            return "trading" if moment < datetime(2026, 9, 15, 15, 1) else "closed"
+
+        df, ttl, fetches = self._read_hfq_cache(payload, written, after, phase, fresh)
+        self.assertLessEqual(ttl, 60)
+        self.assertEqual(fetches, 1)
+        self.assertEqual(_today_row(df)["close"], 130)
+
+    def test_hfq_cache_written_after_close_keeps_long_ttl(self):
+        """收盘后写下的完整 bar 仍走休市长 TTL，避免整晚每分钟重取。"""
+        payload = self._hfq_payload(115.0)
+        written = datetime(2026, 9, 15, 15, 10)
+        after = datetime(2026, 9, 15, 15, 20)
+
+        def phase(value=None):
+            moment = value or after
+            return "closed" if moment >= datetime(2026, 9, 15, 15, 1) else "trading"
+
+        df, ttl, fetches = self._read_hfq_cache(
+            payload, written, after, phase, _df_ending_yesterday(close=100.0))
+        self.assertEqual(ttl, market_mod.KLINE_DISK_TTL_OFF_SEC)
+        self.assertGreater(ttl, 60)
+        self.assertEqual(fetches, 0)
+        self.assertEqual(_today_row(df)["close"], 115)
+
+    def test_hfq_morning_cache_not_reused_through_lunch(self):
+        """午休不是收盘：11:29 的后复权 bar 到 12:20 必须重取。"""
+        payload = self._hfq_payload(100.0)
+        written = datetime(2026, 9, 15, 11, 29)
+        after = datetime(2026, 9, 15, 12, 20)
+        fresh = _df_ending_yesterday(close=100.0)
+        fresh.loc[pd.Timestamp(TODAY)] = [110, 120, 105, 130, 5000, 1e7]
+
+        def phase(value=None):
+            moment = value or after
+            if moment < datetime(2026, 9, 15, 11, 30):
+                return "trading"
+            if moment < datetime(2026, 9, 15, 13, 0):
+                return "break"
+            return "trading"
+
+        df, ttl, fetches = self._read_hfq_cache(payload, written, after, phase, fresh)
+        self.assertLessEqual(ttl, 60)
+        self.assertEqual(fetches, 1)
+        self.assertEqual(_today_row(df)["close"], 130)
+
+
+def _epoch(moment):
+    return moment.replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+
+
 class TestFreshnessPolicy(_Harness):
     def test_policy_defaults_to_reuse(self):
         if os.environ.get("KLINE_TODAY_BAR_FRESH"):

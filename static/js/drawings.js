@@ -487,12 +487,13 @@
   }
 
   /** 命中测试: 返回 null 或 {part:'h0'|'h1'|...|'body', dist} */
-  function hitTest(d, P, ctx, px, py) {
+  function hitTest(d, P, ctx, px, py, radius) {
+    var hitPx = radius == null ? HIT_PX : radius;
     var handles = handlesOf(d, P, ctx);
     var bestH = null;
     for (var i = 0; i < handles.length; i++) {
       var dist = Math.hypot(px - handles[i].x, py - handles[i].y);
-      if (dist <= HIT_PX && (bestH === null || dist < bestH.dist)) {
+      if (dist <= hitPx && (bestH === null || dist < bestH.dist)) {
         bestH = { part: 'h' + i, dist: dist };
       }
     }
@@ -533,7 +534,7 @@
       }
       case 'fib':
         for (var j = 0; j < g.levels.length; j++) {
-          if (px >= g.xStart && px <= g.xEnd && Math.abs(py - g.levels[j].y) <= HIT_PX) bd = 0;
+          if (px >= g.xStart && px <= g.xEnd && Math.abs(py - g.levels[j].y) <= hitPx) bd = 0;
         }
         break;
       case 'regression':
@@ -552,7 +553,7 @@
         }
         break;
     }
-    if (bd !== null && bd <= HIT_PX) return { part: 'body', dist: bd };
+    if (bd !== null && bd <= hitPx) return { part: 'body', dist: bd };
     return null;
   }
 

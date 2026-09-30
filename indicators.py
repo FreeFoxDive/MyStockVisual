@@ -11,6 +11,7 @@ and _safe_list are local (convenience aggregator + JSON-safe serialization).
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 from stock_indicators_cn import (
     ema, sma, kdj, rsi, force_index,
     atr, macd, get_macd_params,
@@ -40,8 +41,21 @@ def cci(high, low, close, n=14):
     h, l, c = pd.Series(high), pd.Series(low), pd.Series(close)
     tp = (h + l + c) / 3
     ma_tp = tp.rolling(n, min_periods=n).mean()
-    md = (tp - ma_tp).abs().rolling(n, min_periods=n).mean()
-    return pd.Series(np.where(md > 0, (tp - ma_tp) / (0.015 * md), np.nan), index=c.index)
+    # 每个窗口内的所有 TP 都减去「该窗口同一个均值」。对 TP-MA(TP) 再 rolling
+    # 会混用 n 个不同的均值，并把首个有效值错误地延后到第 2n-1 根。
+    # 向量化：全市场因子构建不能对每个窗口调用一次 Python。
+    # 窗口内的 NaN 会传出去，只让受影响的窗口失效。
+    v = tp.to_numpy(dtype=float)
+    md = np.full(len(v), np.nan)
+    n = int(n)
+    if n > 0 and len(v) >= n:
+        w = sliding_window_view(v, n)
+        md[n - 1:] = np.abs(w - w.mean(axis=1, keepdims=True)).mean(axis=1)
+    diff = v - ma_tp.to_numpy(dtype=float)
+    out = np.full(len(v), np.nan)
+    ok = md > 0
+    out[ok] = diff[ok] / (0.015 * md[ok])
+    return pd.Series(out, index=c.index)
 
 
 def bias(close, periods=(6, 12, 24)):

@@ -1024,6 +1024,12 @@ body {
 #draw-menu .dm-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 #draw-menu .dm-dot.active { border-color: var(--text); }
 #draw-menu button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 8px; font-size: 12px; }
+@media (any-pointer: coarse) {
+  #draw-palette { max-height: calc(100% - 16px); overflow-y: auto; touch-action: pan-y; }
+  #draw-palette .dp-btn { width: 44px; height: 44px; flex-shrink: 0; }
+  #draw-menu button { min-width: 44px; min-height: 44px; }
+  #draw-menu .dm-dot { width: 32px; height: 32px; }
+}
 #draw-text-input {
   position: absolute; z-index: 31; display: none;
 }
@@ -1321,6 +1327,7 @@ body {
 <script src="/js/gaps.js"></script>
 <script src="/js/chips.js"></script>
 <script src="/js/drawings.js"></script>
+<script src="/js/draw-input.js"></script>
 <script src="/js/patterns.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════════════
@@ -5424,6 +5431,7 @@ function initChart() {
         }
       }
     }
+    if (STATE.draw && STATE.draw.enabled) return;
     try { STATE.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); } catch (e) { /* ignore */ }
   });
   // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样); 画线层同步重投影
@@ -5994,7 +6002,7 @@ function updateChart(reTheme) {
   const dzLocked = drawPanLocked();   // 画图时/选中画线时禁用拖拽平移(滚轮缩放保留), 规则见 drawPanLocked
   const dataZoom = [
     { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100, moveOnMouseMove: !dzLocked },
-    { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16,
+    { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16, show: !dzLocked,
       borderColor: C().gridLine, backgroundColor: 'transparent',
       fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().axisText },
       textStyle: { color: C().axisText, fontSize: 10 } }
@@ -7540,6 +7548,7 @@ function _renderDrawingsNow() {
   if (STATE.draw.draft) paintDraft(c2, P, dctx);
   else paintHoverGhost(c2, P, dctx, tags);
   paintTagLayer(c2, tags, P);
+  if (STATE.draw._touchPreview) paintTouchGuide(c2, P, dctx);
   positionDrawMenu();
   positionSuggestBox();   // 建议浮框同样跟着状态走: 采纳/撤销后一帧内自愈收起
   return true;
@@ -7548,6 +7557,25 @@ function _renderDrawingsNow() {
 // ── 指针交互 ──
 function initDrawEvents() {
   const zr = STATE.chart.getZr();
+  if (window.PointerEvent && window.DrawInput) {
+    STATE.draw._input = window.DrawInput.bind(STATE.chart.getDom(), {
+      enabled: () => STATE.draw.enabled && drawSupported(),
+      key: () => [STATE.symbol, STATE.period, STATE.adjust, STATE.draw.tool].join(':'),
+      creating: () => STATE.draw.tool !== 'select',
+      owns: drawOwnsPointer,
+      down: onDrawMouseDown,
+      move: onDrawMouseMove,
+      up: (e, deferred) => {
+        onDrawMouseUp();
+        STATE.draw._touchPreview = null;
+        // 只在「刚画完」后切到选择工具。选择工具里的普通点击也会走到这里，
+        // 再调 setDrawTool 会重入 cancel。
+        if (deferred && e.event.pointerType === 'touch' && !STATE.draw.draft && STATE.draw.selectedId) setDrawTool('select');
+        redrawDrawings();
+      },
+      cancel: cancelDrawGesture,
+    });
+  }
   zr.on('mousedown', onDrawMouseDown);
   zr.on('mousemove', onDrawMouseMove);
   zr.on('mouseup', onDrawMouseUp);
@@ -7559,12 +7587,61 @@ function initDrawEvents() {
   });
 }
 
+function drawHitRadius(e) {
+  const type = e.event && e.event.pointerType;
+  return type === 'touch' ? 24 : type === 'pen' ? 12 : Drawings.HIT_PX;
+}
+
+function drawOwnsPointer(e) {
+  const info = drawPointer(e);
+  // 主图以外（成交量、副图、坐标轴）交给图表，平板才能捏合缩放和平移。
+  if (!info) return false;
+  if (drawPanLocked()) return true;
+  if (!STATE.draw.visible) return false;
+  return STATE.draw.drawings.some(d =>
+    Drawings.hitTest(d, info.P, info.ctx, info.px, info.py, drawHitRadius(e)));
+}
+
+function cancelDrawGesture() {
+  const dr = STATE.draw;
+  if (dr.drag) {
+    const d = dr.drawings.find(x => x.id === dr.drag.id);
+    if (d) d.points = dr.drag.before;
+  }
+  dr.drag = null;
+  dr._touchPreview = null;
+  dr._hover = null;
+  dr._pointer = null;
+  redrawDrawings();
+}
+
+// Finger covers the point: show its snapped date/price above it while positioning.
+function paintTouchGuide(c2, P, ctx) {
+  const pt = STATE.draw._touchPreview;
+  if (!pt || !STATE.draw.enabled) return;
+  const x = P.x(pt.idx), y = P.y(pt.price);
+  const idx = Math.round(pt.idx);
+  const date = ctx.dateMap.dates[idx] || ('未来 +' + Math.max(0, idx - ctx.n + 1));
+  const label = date + '  ' + Number(pt.price).toFixed(3);
+  c2.save();
+  c2.strokeStyle = C().text; c2.lineWidth = 1;
+  c2.beginPath(); c2.arc(x, y, 12, 0, Math.PI * 2); c2.stroke();
+  c2.font = '12px monospace';
+  const w = c2.measureText(label).width + 16;
+  const left = Math.max(0, Math.min(P.W - w, x - w / 2));
+  const top = y - 66 >= P.grid.top ? y - 66 : y + 36;
+  c2.fillStyle = C().bg; c2.fillRect(left, top, w, 26);
+  c2.strokeRect(left, top, w, 26);
+  c2.fillStyle = C().text; c2.fillText(label, left + 8, top + 17);
+  c2.restore();
+}
+
 function drawPointer(e) {
   const ctx = drawCtx();
   if (!ctx) return null;
   const px = e.offsetX, py = e.offsetY;
   const gr = (STATE._gridRects && STATE._gridRects[0]) || null;
-  if (!gr || py < gr.top - 4 || py > gr.bottom + 4) return null;
+  if (!gr || px < gr.left || px > gr.right || py < gr.top - 4 || py > gr.bottom + 4) return null;
   const P = drawMapper();
   if (!P) return null;
   return { px, py, P, ctx, idxF: P.idxAt(px), price: P.priceAt(py) };
@@ -7581,28 +7658,38 @@ function snappedPoint(ptInfo) {
 function onDrawMouseDown(e) {
   if (!STATE.draw.enabled || !drawSupported()) return;
   if (e.event && (e.event.button === 2)) return; // 右键: cancelDraft 在 contextmenu 处理
-  if (e.event && e.event.button !== 0) return;
+  if (e.event && e.event.button != null && e.event.button !== 0) return;
   const info = drawPointer(e);
   if (!info) return;
   const dr = STATE.draw;
   // 拖拽选中画线的手柄
-  if (dr.tool === 'select' && dr.selectedId) {
+  if (dr.visible && dr.tool === 'select' && dr.selectedId) {
     const d = dr.drawings.find(x => x.id === dr.selectedId);
     if (d) {
-      const hit = Drawings.hitTest(d, info.P, info.ctx, info.px, info.py);
+      const hit = Drawings.hitTest(d, info.P, info.ctx, info.px, info.py, drawHitRadius(e));
       if (hit && hit.part.startsWith('h')) {
         const ptIdx = parseInt(hit.part.slice(1), 10);
         dr.drag = { id: d.id, ptIdx, before: JSON.parse(JSON.stringify(d.points)) };
+        if (e.event && e.event.pointerType === 'touch') {
+          const h = Drawings.handlesOf(d, info.P, info.ctx)[ptIdx];
+          dr.drag.offset = {x: h.x - info.px, y: h.y - info.py};
+        }
         // 平移已在「选中画线」时就锁住了 (selectDrawing → applyDrawPanLock), 这里不必再关一次
         return;
       }
     }
   }
   if (dr.tool === 'select') {
+    if (!dr.visible) return;
     // 命中任一画线 → 选中
     for (let i = dr.drawings.length - 1; i >= 0; i--) {
-      const hit = Drawings.hitTest(dr.drawings[i], info.P, info.ctx, info.px, info.py);
-      if (hit) { selectDrawing(dr.drawings[i].id); return; }
+      const hit = Drawings.hitTest(dr.drawings[i], info.P, info.ctx, info.px, info.py, drawHitRadius(e));
+      if (hit) {
+        selectDrawing(dr.drawings[i].id);
+        // Touching an endpoint can select and drag it in the same gesture.
+        if (hit.part.startsWith('h')) onDrawMouseDown(e);
+        return;
+      }
     }
     selectDrawing(null);
     return;
@@ -7651,6 +7738,7 @@ function onDrawMouseMove(e) {
   if (!STATE.draw.enabled) return;
   const info = drawPointer(e);
   if (!info) {
+    STATE.draw._touchPreview = null;
     // 指针移出主图: 收掉悬停预览, 免得虚线冻在边缘。
     // _pointer 故意保留 —— 它是草稿端点预览的坐标, 既有的"冻结在最后位置"行为不动。
     if (STATE.draw._hover) {
@@ -7659,16 +7747,25 @@ function onDrawMouseMove(e) {
     }
     return;
   }
-  STATE.draw._pointer = { idx: info.idxF, price: info.price };
+  const offset = STATE.draw.drag && STATE.draw.drag.offset;
+  if (offset) {
+    info.idxF = info.P.idxAt(info.px + offset.x);
+    info.price = info.P.priceAt(info.py + offset.y);
+  }
+  const snapped = snappedPoint(info);
+  STATE.draw._pointer = snapped;
+  if (e.event && e.event.pointerType === 'touch') {
+    STATE.draw._touchPreview = snapped;
+    redrawDrawings();
+  }
   // 悬停预览与落子同用磁吸口径 (paintHoverGhost 只读 _hover)
-  STATE.draw._hover = snappedPoint(info);
+  STATE.draw._hover = snapped;
   const dr = STATE.draw;
   if (dr.drag) {
     const d = dr.drawings.find(x => x.id === dr.drag.id);
     if (d) {
-      const pt = snappedPoint(info);
-      d.points[dr.drag.ptIdx] = Drawings.pointFromIdx(pt.idx, pt.price, info.ctx.dateMap, info.ctx.n);
-      d.points[dr.drag.ptIdx].p = pt.price;
+      d.points[dr.drag.ptIdx] = Drawings.pointFromIdx(snapped.idx, snapped.price, info.ctx.dateMap, info.ctx.n);
+      d.points[dr.drag.ptIdx].p = snapped.price;
       redrawDrawings();
     }
     return;
@@ -7686,7 +7783,7 @@ function onDrawMouseUp() {
   const dr = STATE.draw;
   if (!dr.drag) return;
   const d = dr.drawings.find(x => x.id === dr.drag.id);
-  if (d) {
+  if (d && JSON.stringify(d.points) !== JSON.stringify(dr.drag.before)) {
     dr.undo.push({ op: 'move', id: d.id, before: dr.drag.before, after: JSON.parse(JSON.stringify(d.points)) });
     if (dr.undo.length > 50) dr.undo.shift();
     runSuggest(d);
@@ -7729,6 +7826,7 @@ function finishPolyDraft() {
 }
 
 function cancelDraft() {
+  if (STATE.draw._input) STATE.draw._input.cancel();
   STATE.draw.draft = null;
   redrawDrawings();
 }
@@ -7756,7 +7854,10 @@ function drawPanLocked() {
 /** 运行时切换拖拽平移开关 (选区/工具/模式变化时调用; 重绘时由 option 里的 dzLocked 带上同一规则) */
 function applyDrawPanLock() {
   if (!STATE.chart) return;
-  try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: !drawPanLocked() }] }); } catch (e) { /* ignore */ }
+  const locked = drawPanLocked();
+  const dom = STATE.chart.getDom && STATE.chart.getDom();
+  if (dom) dom.style.touchAction = STATE.draw.enabled ? 'none' : '';
+  try { STATE.chart.setOption({ dataZoom: [{ moveOnMouseMove: !locked }, { show: !locked }] }); } catch (e) { /* ignore */ }
 }
 
 function selectDrawing(id) {
@@ -7821,6 +7922,7 @@ function drawUndo() {
 // ── 工具面板 ──
 function toggleDrawMode() {
   const dr = STATE.draw;
+  if (dr._input) dr._input.cancel();
   if (!dr.enabled) {
     if (STATE.period === 'intraday') { showToast('分时视图暂不支持画线, 请切换到 K 线周期', { type: 'warn' }); return; }
     if (!drawSupported()) { showToast('图表尚未就绪', { type: 'warn' }); return; }
@@ -7881,6 +7983,7 @@ function buildPalette() {
 }
 
 function setDrawTool(tool) {
+  if (STATE.draw._input) STATE.draw._input.cancel();
   STATE.draw.tool = tool;
   STATE.draw.draft = null;
   STATE.draw._hover = null;   // 换工具即失效, 免得上一工具的跟手虚线残留
@@ -8280,6 +8383,11 @@ function openTextInput(info, pt) {
 }
 
 function onDrawEscape() {
+  if (STATE.draw.drag) {
+    cancelDrawGesture();
+    if (STATE.draw._input) STATE.draw._input.cancel();
+    return true;
+  }
   if (STATE.draw._priceEdit) { closePriceInput(true); return true; }
   if (document.getElementById('draw-monitor-input').style.display === 'block') { hideMonitorInput(); return true; }
   const dr = STATE.draw;
@@ -8291,6 +8399,7 @@ function onDrawEscape() {
 
 // ── 服务器同步 ──
 async function loadDrawings() {
+  if (STATE.draw._input) STATE.draw._input.cancel();
   const key = STATE.symbol + ':' + STATE.period;
   if (STATE.draw._loadedKey === key) { redrawDrawings(); return; }
   if (STATE.period === 'intraday') return;

@@ -531,6 +531,14 @@ class DiskCache:
             raise ValueError("invalid cache key")
         return Path(fp)
 
+    def mtime(self, symbol, period, count, adjust="forward", chain_tag=""):
+        """缓存文件的写入时间 (epoch 秒); 没有文件时返回 None。"""
+        fp = self._key(symbol, period, count, adjust, chain_tag)
+        try:
+            return fp.stat().st_mtime
+        except OSError:
+            return None
+
     def get(self, symbol, period, count, ttl_seconds, adjust="forward", chain_tag=""):
         fp = self._key(symbol, period, count, adjust, chain_tag)
         if not fp.exists():
@@ -1309,6 +1317,32 @@ def fetch_kline(symbol, period, count, adjust="forward"):
     return df, name
 
 
+# 后复权日K的末根来自同源 bar。这些时段写下的当日 bar 还不是收盘价。
+_HFQ_PARTIAL_PHASES = ("auction", "trading", "break")
+
+
+def _hfq_daily_ttl(symbol, count, adj, chain_tag, now, live):
+    """后复权日K磁盘 TTL。
+
+    盘中直接按 60 秒。休市后再看写入时刻：交易日里、收盘前写下的缓存
+    （含午休）仍可能是未完成的当日 bar，不能改用 1800 秒，否则 14:59 的
+    价格会在收盘后被当成收盘价保留最多 30 分钟。收盘后写下的完整 bar 才用长 TTL。
+    """
+    short = min(KLINE_DISK_TTL_SEC, 60)
+    if live:
+        return short
+    mtime = _disk_cache.mtime(symbol, "1d", count, adjust=adj, chain_tag=chain_tag)
+    if mtime is None:
+        return KLINE_DISK_TTL_OFF_SEC
+    written = dt_mod.datetime.fromtimestamp(
+        mtime, tz=dt_mod.timezone(dt_mod.timedelta(hours=8))).replace(tzinfo=None)
+    if (written.date() == now.date()
+            and market_hours.is_trading_day(written)
+            and market_hours.session_phase(written) in _HFQ_PARTIAL_PHASES):
+        return short
+    return KLINE_DISK_TTL_OFF_SEC
+
+
 def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
                    quote_fresh=True):
     """fetch_kline 完整版, 额外返回实际服务的数据源名 (观测/透传 meta 用)。
@@ -1321,6 +1355,10 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
     adj = kline_source.normalize_adjust(adjust)
     category = _kline_category(symbol, period)
     ct = kline_source.chain_tag(category)  # 缓存按数据源链隔离, 改链即失效
+    # 未复权快照不能拼入后复权序列；旧版本写过混合价格的缓存也不能继续读。
+    quote_patch = period == "1d" and adj != kline_source.ADJUST_HFQ
+    if adj == kline_source.ADJUST_HFQ:
+        ct += "-hfq2"
     # 检查磁盘缓存 (周月K 600s; 分钟 活跃时段 60s/其余 300s; 日K 见 KLINE_DISK_TTL_*)
     now = market_hours.now()
     live = market_hours.is_live(now)
@@ -1328,7 +1366,10 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
         # 分钟 bar 不拼快照, TTL 必须短, 否则图表会滞后于实时行情
         ttl = 60 if live else 300
     elif period == "1d":
-        ttl = KLINE_DISK_TTL_SEC if live else KLINE_DISK_TTL_OFF_SEC
+        if quote_patch:
+            ttl = KLINE_DISK_TTL_SEC if live else KLINE_DISK_TTL_OFF_SEC
+        else:
+            ttl = _hfq_daily_ttl(symbol, count, adj, ct, now, live)
     else:
         ttl = 600
     cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj, chain_tag=ct)
@@ -1343,10 +1384,11 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
             if df is None:
                 cached = None
             else:
-                df = _strip_today_bar_df(df)
-                with perf.Span(timing, "append_bar_ms"):
-                    df = _maybe_append_today_bar(symbol, df, timing=timing,
-                                                 fresh=quote_fresh)
+                if quote_patch:
+                    df = _strip_today_bar_df(df)
+                    with perf.Span(timing, "append_bar_ms"):
+                        df = _maybe_append_today_bar(symbol, df, timing=timing,
+                                                     fresh=quote_fresh)
                 return df, cached.get("name", symbol), cached.get("source")
         else:
             # 分钟线优先 trade_time: JSON 常同时带 trade_date(日) 与 trade_time,
@@ -1373,13 +1415,13 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
     if df is None:
         return None, None, None
 
-    if period == "1d":
+    if quote_patch:
         with perf.Span(timing, "append_bar_ms"):
             df = _maybe_append_today_bar(symbol, df, timing=timing,
                                          fresh=quote_fresh)
 
     # 存入磁盘缓存 (日K 当日 bar 不写入，默认 dirty)
-    cache_df = _strip_today_bar_df(df) if period == "1d" else df
+    cache_df = _strip_today_bar_df(df) if quote_patch else df
     if cache_df is not None and len(cache_df) > 0:
         out = cache_df.reset_index()
         if period in MINUTE_PERIODS:

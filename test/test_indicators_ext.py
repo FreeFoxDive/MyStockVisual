@@ -80,10 +80,27 @@ class CciTest(unittest.TestCase):
         df = _ohlcv(30)
         out = cci(df["high"], df["low"], df["close"], 14)
         tp = (df["high"] + df["low"] + df["close"]) / 3
-        ma = tp.rolling(14, min_periods=14).mean()
-        md = (tp - ma).abs().rolling(14, min_periods=14).mean()
-        exp = (tp - ma) / (0.015 * md)
-        self.assertAlmostEqual(out.iloc[-1], exp.iloc[-1], places=6)
+        # 独立逐窗口参考；不能复制被测实现的两次 rolling，否则错公式也会通过。
+        self.assertTrue(out.iloc[:13].isna().all())
+        for end in range(13, len(tp)):
+            window = tp.iloc[end - 13:end + 1].tolist()
+            mean = sum(window) / 14
+            md = sum(abs(v - mean) for v in window) / 14
+            exp = (window[-1] - mean) / (0.015 * md)
+            self.assertAlmostEqual(out.iloc[end], exp, places=6)
+
+    def test_first_full_window_has_known_value(self):
+        # 1..14: mean=7.5, mean deviation=3.5 -> CCI=123.8095238。
+        values = pd.Series(range(1, 15), dtype=float)
+        self.assertAlmostEqual(cci(values, values, values, 14).iloc[-1],
+                               123.80952380952381, places=8)
+
+    def test_missing_bar_invalidates_only_its_window(self):
+        values = pd.Series(range(1, 33), dtype=float)
+        values.iloc[14] = np.nan
+        out = cci(values, values, values, 14)
+        self.assertTrue(out.iloc[14:28].isna().all())
+        self.assertTrue(np.isfinite(out.iloc[28]))
 
 
 class BiasTest(unittest.TestCase):

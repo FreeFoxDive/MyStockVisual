@@ -74,6 +74,7 @@ STATE.chart = {
   setOption(o) {
     const dz = o && o.dataZoom && o.dataZoom[0];
     if (dz && Object.prototype.hasOwnProperty.call(dz, 'moveOnMouseMove')) STATE.chart.__writes.push(dz.moveOnMouseMove);
+    if (o.dataZoom && o.dataZoom[1]) this.sliderShown = o.dataZoom[1].show;
   },
   dispatchAction() {},
 };
@@ -85,6 +86,7 @@ const snap = () => ({
   enabled: STATE.draw.enabled,
   tool: STATE.draw.tool,
   selected: STATE.draw.selectedId,
+  sliderShown: STATE.chart.sliderShown,
 });
 const actions = {
   add: (id) => { STATE.draw.drawings.push(hline(id)); },
@@ -120,6 +122,7 @@ class PanLockBehaviorTest(unittest.TestCase):
     def _expect(self, step, locked, msg):
         self.assertEqual(step["locked"], locked, f"{msg}: drawPanLocked 判定")
         self.assertEqual(step["lastWrite"], not locked, f"{msg}: 下发的 moveOnMouseMove (锁住时须为 false)")
+        self.assertEqual(step["sliderShown"], not locked, f"{msg}: 滑块也必须退出画线手势的命中范围")
 
     def test_select_tool_without_selection_allows_pan(self):
         out = self._run([["enable", True], ["tool", "select"]])
@@ -173,7 +176,8 @@ class PanLockStaticTest(unittest.TestCase):
         self.assertEqual(self.src.count("moveOnMouseMove"), 2,
                          "多出来的写入点会与选中态打架 (重绘时把锁覆盖回去就是这个原因)")
         self.assertIn("function drawPanLocked() {", self.src)
-        self.assertIn("moveOnMouseMove: !drawPanLocked()", self.src)
+        self.assertIn("const locked = drawPanLocked();", self.src)
+        self.assertIn("moveOnMouseMove: !locked", self.src)
         # option 构建侧必须调同一个判定, 且真的用上它 —— 只算不用 (写成 moveOnMouseMove: true)
         # 的话次数与两个 assertIn 都照样成立, 但重绘会把锁覆盖回去, guard 必须钉死这一行
         self.assertIn("const dzLocked = drawPanLocked();", self.src)
@@ -191,6 +195,11 @@ class PanLockStaticTest(unittest.TestCase):
         self.assertIn("applyDrawPanLock();", _extract_fn(self.src, "onDrawMouseUp"))
         toggle = _extract_fn(self.src, "toggleDrawMode")
         self.assertEqual(toggle.count("applyDrawPanLock();"), 2, "进入与退出都要按当前状态定")
+
+    def test_pointer_outside_main_grid_is_not_owned(self):
+        """主图以外的触摸必须先于平移锁判断，否则平板在画线时无法缩放。"""
+        body = _extract_fn(self.src, "drawOwnsPointer")
+        self.assertLess(body.index("if (!info) return false;"), body.index("drawPanLocked()"))
 
     def test_handle_drag_does_not_touch_the_switch(self):
         """手柄拖拽必然发生在已选中时 (已被锁), mousedown 里不该再碰 dataZoom。

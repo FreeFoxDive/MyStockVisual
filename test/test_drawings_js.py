@@ -178,9 +178,15 @@ class TestDrawingsGeom(unittest.TestCase):
             mid: D.hitTest(d, P, ctx, 80, 190),
             handle1: D.hitTest(d, P, ctx, 100, 180),
             far: D.hitTest(d, P, ctx, 400, 190),
+            mouseNear: D.hitTest(d, P, ctx, 118, 180),
+            touchNear: D.hitTest(d, P, ctx, 118, 180, 24),
+            touchFar: D.hitTest(d, P, ctx, 126, 180, 24),
           }};
         }})()""")
         self.assertEqual(hit["mid"]["part"], "body")
+        self.assertIsNone(hit["mouseNear"])
+        self.assertEqual(hit["touchNear"]["part"], "h1")
+        self.assertIsNone(hit["touchFar"])
         self.assertEqual(hit["handle1"]["part"], "h1")
         self.assertIsNone(hit["far"])
 

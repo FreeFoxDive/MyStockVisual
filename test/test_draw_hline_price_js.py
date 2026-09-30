@@ -161,7 +161,8 @@ class HlineWiringStaticTest(unittest.TestCase):
     def test_hover_point_uses_magnet_snapping(self):
         """预览坐标与落子同源: 都取 snappedPoint 的结果, 所见即所得。"""
         move = _extract_fn(self.src, "onDrawMouseMove")
-        self.assertRegex(move, r"_hover = snappedPoint\(info\)")
+        self.assertEqual(move.count("snappedPoint(info)"), 1, "一次移动只磁吸一次")
+        self.assertIn("STATE.draw._hover = snapped", move)
         down = _extract_fn(self.src, "onDrawMouseDown")
         self.assertRegex(down, r"const pt = snappedPoint\(info\)")
         self.assertIn("ghostToolActive()", move, "移出主图/无悬停点时要收掉预览")
@@ -170,7 +171,7 @@ class HlineWiringStaticTest(unittest.TestCase):
     def test_leaving_grid_keeps_draft_pointer(self):
         """移出主图只收悬停预览: _pointer 是草稿端点预览的坐标, 别的工具靠它冻结在最后位置。"""
         move = _extract_fn(self.src, "onDrawMouseMove")
-        branch = move[move.index("if (!info) {"):move.index("STATE.draw._pointer = {")]
+        branch = move[move.index("if (!info) {"):move.index("STATE.draw._pointer = snapped")]
         self.assertIn("_hover = null", branch)
         self.assertNotIn("_pointer = null", branch, "别改其他工具草稿预览的既有行为")
         gout = self.src[self.src.index("on('globalout'"):][:600]
