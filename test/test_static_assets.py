@@ -104,6 +104,25 @@ class StaticAssetsTest(unittest.TestCase):
             self.assertIn(f'src="{VENDOR_URL}"', text, page)
             self.assertNotIn("cdn.jsdelivr.net", text, page)
 
+    def test_index_paints_theme_before_blocking_vendors(self):
+        """首页白屏回归: theme.css 与 body 必须先于同步 vendor, 否则首帧被 ECharts/Vue 堵住。"""
+        text = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        theme = text.index('href="/css/theme.css"')
+        body = text.index("<body>")
+        vendor = text.index("/vendor/")
+        self.assertLess(theme, vendor)
+        self.assertLess(body, vendor)
+
+        vue = text.index("/vendor/vue-3.5.13.global.prod.js")
+        demi = text.index("/vendor/vue-demi-0.14.10.iife.js")
+        pinia = text.index("/vendor/pinia-2.2.6.iife.prod.js")
+        store = text.index("/js/market-store.js")
+        boot = text.index("<script>", store)
+        self.assertLess(vue, demi)
+        self.assertLess(demi, pinia)
+        self.assertLess(pinia, store)
+        self.assertLess(store, boot)
+
     def test_csp_has_no_third_party_origin(self):
         r = self._get("/login.html")
         csp = r.headers["Content-Security-Policy"]

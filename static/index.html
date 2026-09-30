@@ -4,10 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>📈 股票K线图 — Visual</title>
-<script src="/vendor/echarts-5.5.0.min.js"></script>
-<script src="/vendor/vue-3.5.13.global.prod.js"></script>
-<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
-<script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
 <link rel="stylesheet" href="/css/theme.css">
 <script src="/js/theme.js"></script>
 <script>
@@ -20,14 +16,6 @@
   document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
 })();
 </script>
-<script src="/js/api.js"></script>
-<script src="/js/live-market.js"></script>
-<script src="/js/market-clock.js"></script>
-<script src="/js/market-store.js"></script>
-<script src="/js/gaps.js"></script>
-<script src="/js/chips.js"></script>
-<script src="/js/drawings.js"></script>
-<script src="/js/patterns.js"></script>
 <style>
 /* ═══════════════ 页面专属 (主题变量见 theme.css) ═══════════════ */
 body {
@@ -1322,6 +1310,18 @@ body {
 <!-- Toast 通知 (非阻塞) -->
 <div id="toast-box"></div>
 
+<script src="/vendor/echarts-5.5.0.min.js"></script>
+<script src="/vendor/vue-3.5.13.global.prod.js"></script>
+<script src="/vendor/vue-demi-0.14.10.iife.js"></script>
+<script src="/vendor/pinia-2.2.6.iife.prod.js"></script>
+<script src="/js/api.js"></script>
+<script src="/js/live-market.js"></script>
+<script src="/js/market-clock.js"></script>
+<script src="/js/market-store.js"></script>
+<script src="/js/gaps.js"></script>
+<script src="/js/chips.js"></script>
+<script src="/js/drawings.js"></script>
+<script src="/js/patterns.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════════════
 // 未登录访问 /api/* 返回 401 → 跳登录页 (带 next 回跳)
