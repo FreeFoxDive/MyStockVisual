@@ -27,6 +27,7 @@ import os
 import threading
 
 import market_hours
+from logger import redact_message
 
 log = logging.getLogger("source_alert")
 
@@ -86,7 +87,8 @@ def _text(source, reason, detail, cooldown_sec) -> str:
         parts.append(f"→ {cooldown_sec:.0f}s 内跳过该源")
     line = " ".join(parts)
     if detail:
-        line += f"（最后一次请求: {detail}）"
+        # 通知正文可能带 URL/响应片段; 密钥脱敏后再发出去。日志侧只记源和原因。
+        line += f"（最后一次请求: {redact_message(detail)}）"
     return line + " · 同一源当日仅通知一次"
 
 
@@ -107,7 +109,8 @@ def notify(source, reason, detail="", cooldown_sec=None) -> bool:
         import error_notify
         ok = error_notify.notify_alert(f"source:{source}", f"数据源告警: {source}", text)
         if ok:
-            log.info("已推送数据源告警: %s %s", source, text)
+            # 不记 text/detail: 麦蕊 URL 末段是证书 key, 整段正文仍被 CodeQL 视为敏感。
+            log.info("已推送数据源告警: %s %s", source, reason)
         else:
             _release(source)
         return bool(ok)

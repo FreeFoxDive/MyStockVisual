@@ -61,8 +61,10 @@ def factors_rebuild():
 
     try:
         factors.spawn_manual(day=day, force=force)
-    except factors.BuildAlreadyRunning as e:
-        return _json({"ok": False, "started": False, "reason": str(e), "force": force})
+    except factors.BuildAlreadyRunning:
+        # 固定文案, 不回传 str(e) (CodeQL py/stack-trace-exposure, 经 api.common._json)。
+        return _json({"ok": False, "started": False,
+                      "reason": "已有构建子进程在进行中", "force": force})
     except Exception as e:
         log.warning("手动构建因子库拉起失败: %s", e)
         return _json({"ok": False, "started": False, "reason": "拉起构建失败", "force": force})
