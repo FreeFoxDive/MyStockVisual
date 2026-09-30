@@ -44,6 +44,8 @@ def _extract_fn(src: str, name: str) -> str:
 
 _EXTRACT = [
     "getSelected", "hideMonitorInput", "hideSuggestBox", "hideDrawMenu",
+    "clampDrawChrome", "drawChromeHits", "placeDrawChrome", "drawChromeBounds",
+    "_chromePts", "drawAvoidRect",
     "positionDrawMenu", "positionSuggestBox", "showDrawMenu", "selectDrawing",
     "runSuggest", "deleteSelectedDrawing", "drawUndo", "onPaletteAction",
     "adoptSuggest", "loadDrawings",

@@ -1026,9 +1026,22 @@ body {
 #draw-menu button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 8px; font-size: 12px; }
 @media (any-pointer: coarse) {
   #draw-palette { max-height: calc(100% - 16px); overflow-y: auto; touch-action: pan-y; }
+  /* 左侧工具条保持 44px: 它是常驻列, 不横铺在线条上 */
   #draw-palette .dp-btn { width: 44px; height: 44px; flex-shrink: 0; }
-  #draw-menu button { min-width: 44px; min-height: 44px; }
-  #draw-menu .dm-dot { width: 32px; height: 32px; }
+  /* 设置条随视口缩放。2.2vw 在约 1180px (11 寸横屏) 被下限夹到 28px,
+     约 2000px 起顶到 44px, 4K 触屏仍是原来的尺寸。 */
+  #draw-menu { gap: clamp(3px, 0.5vw, 6px); padding: clamp(4px, 0.45vw, 6px) clamp(4px, 0.6vw, 8px); }
+  #draw-menu button:not(.dm-dot) {
+    min-width: clamp(28px, 2.2vw, 44px);
+    min-height: clamp(28px, 2.2vw, 44px);
+    font-size: clamp(11px, 1.1vw, 13px);
+    padding: 2px clamp(4px, 0.6vw, 8px);
+  }
+  /* 色点不要吃到按钮的 min-width, 否则 11 寸上也会被撑成和按钮一样大 */
+  #draw-menu .dm-dot {
+    width: clamp(18px, 1.6vw, 32px); height: clamp(18px, 1.6vw, 32px);
+    min-width: 0; min-height: 0;
+  }
 }
 #draw-text-input {
   position: absolute; z-index: 31; display: none;
@@ -1041,33 +1054,35 @@ body {
   position: absolute; z-index: 32; display: none;
   background: var(--bg-panel, rgba(128,128,128,.12));
   border: 1px solid #e6a23c; border-radius: 6px;
-  padding: 8px 10px; width: 250px; font-size: 12px;
+  padding: clamp(6px, 0.6vw, 8px) clamp(8px, 0.8vw, 10px);
+  width: clamp(160px, 16vw, 250px); font-size: clamp(11px, 0.95vw, 12px);
   box-shadow: 0 2px 8px rgba(0,0,0,.18);
 }
 #draw-monitor-input input {
-  font-size: 12px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 3px;
+  font-size: clamp(11px, 0.95vw, 12px); padding: 2px 5px; border: 1px solid var(--border); border-radius: 3px;
   background: var(--bg-card); color: var(--text);
 }
-#draw-monitor-input button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 10px; font-size: 12px; }
+#draw-monitor-input button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px clamp(6px, 0.8vw, 10px); font-size: clamp(11px, 0.95vw, 12px); }
 #draw-price-input {
-  position: absolute; z-index: 33; display: none; flex-direction: column; gap: 4px;
+  position: absolute; z-index: 33; display: none; flex-direction: column; gap: clamp(3px, 0.4vw, 4px);
   background: var(--bg-panel, rgba(128,128,128,.12));
   border: 1px solid #e6a23c; border-radius: 6px;
-  padding: 8px 10px; width: 150px; font-size: 12px;
+  padding: clamp(6px, 0.6vw, 8px) clamp(8px, 0.8vw, 10px);
+  width: clamp(108px, 10vw, 150px); font-size: clamp(11px, 0.95vw, 12px);
   box-shadow: 0 2px 8px rgba(0,0,0,.18);
 }
 #draw-price-input input {
-  font-size: 13px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px;
+  font-size: clamp(12px, 1.05vw, 13px); padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px;
   background: var(--bg-card); color: var(--text); width: 100%; box-sizing: border-box;
 }
-#draw-price-input button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px 10px; font-size: 12px; }
+#draw-price-input button { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 4px; padding: 2px clamp(6px, 0.8vw, 10px); font-size: clamp(11px, 0.95vw, 12px); }
 #draw-suggest {
-  position: absolute; z-index: 31; display: none; align-items: center; gap: 6px;
+  position: absolute; z-index: 31; display: none; align-items: center; gap: clamp(4px, 0.6vw, 6px);
   background: var(--bg-panel); border: 1px dashed #e6a23c; border-radius: 6px;
-  padding: 4px 8px; font-size: 12px; color: var(--text);
+  padding: clamp(3px, 0.4vw, 4px) clamp(6px, 0.7vw, 8px); font-size: clamp(11px, 0.95vw, 12px); color: var(--text);
   box-shadow: 0 2px 8px rgba(0,0,0,.18);
 }
-#draw-suggest button { cursor: pointer; border: none; border-radius: 4px; padding: 2px 8px; font-size: 12px; }
+#draw-suggest button { cursor: pointer; border: none; border-radius: 4px; padding: 2px clamp(6px, 0.7vw, 8px); font-size: clamp(11px, 0.95vw, 12px); }
 #draw-suggest .ds-ok { background: #e6a23c; color: #fff; }
 #draw-suggest .ds-no { background: transparent; color: var(--text-secondary); }
 </style>
@@ -7551,6 +7566,7 @@ function _renderDrawingsNow() {
   if (STATE.draw._touchPreview) paintTouchGuide(c2, P, dctx);
   positionDrawMenu();
   positionSuggestBox();   // 建议浮框同样跟着状态走: 采纳/撤销后一帧内自愈收起
+  if (typeof positionPriceInput === 'function') positionPriceInput();   // 改价时线在动, 数值框跟着让开
   return true;
 }
 
@@ -8098,6 +8114,146 @@ function showDrawMenu() {
   positionDrawMenu();
 }
 
+/** 把 {left,top} 夹进可用区。浮层比可用区更大时贴住左/上沿, 不再钻进障碍下面。 */
+function clampDrawChrome(pos, size, bounds) {
+  const maxL = Math.max(bounds.left, bounds.right - size.w);
+  const maxT = Math.max(bounds.top, bounds.bottom - size.h);
+  return {
+    left: Math.max(bounds.left, Math.min(pos.left, maxL)),
+    top: Math.max(bounds.top, Math.min(pos.top, maxT)),
+  };
+}
+
+function drawChromeHits(pos, size, avoid) {
+  if (!avoid || !(size.w > 0) || !(size.h > 0)) return false;
+  return pos.left < avoid.x + avoid.w && pos.left + size.w > avoid.x
+    && pos.top < avoid.y + avoid.h && pos.top + size.h > avoid.y;
+}
+
+/**
+ * 把浮层放到避开矩形外侧, 并夹进可用区。
+ * menu: {w, h}; avoid: {x, y, w, h}; bounds: {left, top, right, bottom}
+ * 上下哪边空得多放哪边; 上下都放不下才改到左右。夹紧后仍压住线条时挑重叠最小的。
+ */
+function placeDrawChrome(menu, avoid, bounds) {
+  const w = menu.w, h = menu.h;
+  const ax = avoid.x, ay = avoid.y;
+  const aw = Math.max(0, avoid.w), ah = Math.max(0, avoid.h);
+  if (!(w > 0) || !(h > 0)) return { left: bounds.left, top: bounds.top };
+  const spaceAbove = ay - bounds.top;
+  const spaceBelow = bounds.bottom - (ay + ah);
+  const spaceLeft = ax - bounds.left;
+  const spaceRight = bounds.right - (ax + aw);
+  const cx = ax + aw / 2, cy = ay + ah / 2;
+  function slot(side) {
+    if (side === 'above') return { left: cx - w / 2, top: ay - h };
+    if (side === 'below') return { left: cx - w / 2, top: ay + ah };
+    if (side === 'right') return { left: ax + aw, top: cy - h / 2 };
+    return { left: ax - w, top: cy - h / 2 };
+  }
+  function fits(p) {
+    const wide = w >= bounds.right - bounds.left - 0.01;
+    const tall = h >= bounds.bottom - bounds.top - 0.01;
+    const leftOk = wide ? p.left <= bounds.left + 0.01 : p.left + w <= bounds.right + 0.01;
+    const topOk = tall ? p.top <= bounds.top + 0.01 : p.top + h <= bounds.bottom + 0.01;
+    return p.left >= bounds.left - 0.01 && p.top >= bounds.top - 0.01 && leftOk && topOk
+      && !drawChromeHits(p, { w, h }, { x: ax, y: ay, w: aw, h: ah });
+  }
+  const vertical = spaceBelow >= spaceAbove ? ['below', 'above'] : ['above', 'below'];
+  const horizontal = spaceRight >= spaceLeft ? ['right', 'left'] : ['left', 'right'];
+  const order = vertical.concat(horizontal);
+  for (let i = 0; i < order.length; i++) {
+    const p = clampDrawChrome(slot(order[i]), { w, h }, bounds);
+    if (fits(p)) return p;
+  }
+  let best = null;
+  for (let i = 0; i < order.length; i++) {
+    const p = clampDrawChrome(slot(order[i]), { w, h }, bounds);
+    const ow = Math.min(p.left + w, ax + aw) - Math.max(p.left, ax);
+    const oh = Math.min(p.top + h, ay + ah) - Math.max(p.top, ay);
+    const area = (ow > 0 && oh > 0) ? ow * oh : 0;
+    if (!best || area < best.area) best = { p, area };
+  }
+  return best.p;
+}
+
+/** 图表内可放浮层的区域: 让开左侧工具条和展开的侧栏。 */
+function drawChromeBounds(wrap) {
+  const pad = 4;
+  let left = pad;
+  const top = pad;
+  const right = Math.max(pad + 1, wrap.clientWidth - pad);
+  const bottom = Math.max(pad + 1, wrap.clientHeight - pad);
+  ['draw-palette', 'side-panel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el || !(el.offsetWidth > 0) || typeof el.getBoundingClientRect !== 'function') return;
+    const r = el.getBoundingClientRect();
+    const wr = wrap.getBoundingClientRect();
+    const edge = r.right - wr.left;
+    if (edge > left && (r.left - wr.left) < wrap.clientWidth * 0.5) left = edge + pad;
+  });
+  if (left >= right) left = pad;
+  return { left, top, right, bottom };
+}
+
+function _chromePts(pts, x, y) {
+  if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
+}
+
+/** 选中画线在像素上占的矩形 (已向外扩 DRAW_CHROME_GAP)。水平/垂直线拉成整段网格带。 */
+function drawAvoidRect(d, P, ctx) {
+  if (!d || !P || !P.grid) return null;
+  const gap = 10;  // 线条与浮层之间的空隙; 矩形已含这段, 浮层贴外沿即可
+  let g = null;
+  if (Drawings && Drawings.geom) {
+    try { g = Drawings.geom(d, P, ctx); } catch (err) { g = null; }
+  }
+  if (d.type === 'hline' && g && Number.isFinite(g.y)) {
+    return { x: P.grid.left, y: g.y - gap, w: Math.max(1, P.grid.right - P.grid.left), h: gap * 2 };
+  }
+  if (d.type === 'vline' && g && Number.isFinite(g.x)) {
+    return { x: g.x - gap, y: P.grid.top, w: gap * 2, h: Math.max(1, P.grid.bottom - P.grid.top) };
+  }
+  const pts = [];
+  const hs = (Drawings && Drawings.handlesOf) ? (Drawings.handlesOf(d, P, ctx) || []) : [];
+  hs.forEach(h => _chromePts(pts, h.x, h.y));
+  if (g) {
+    if (g.kind === 'seg') {
+      _chromePts(pts, g.x1, g.y1); _chromePts(pts, g.x2, g.y2);
+      if (d.extendRight && d.type === 'trend' && g.raw1 && g.raw2 && g.raw2.x !== g.raw1.x) {
+        const t = (P.grid.right - g.raw1.x) / (g.raw2.x - g.raw1.x);
+        if (t > 1) _chromePts(pts, P.grid.right, g.raw1.y + (g.raw2.y - g.raw1.y) * t);
+      }
+    } else if (g.kind === 'fib') {
+      _chromePts(pts, g.xStart, g.raw1 && g.raw1.y);
+      _chromePts(pts, g.xEnd, g.raw2 && g.raw2.y);
+      (g.levels || []).forEach(lv => {
+        _chromePts(pts, g.xStart, lv.y); _chromePts(pts, g.xEnd, lv.y);
+      });
+    } else if (g.kind === 'regression') {
+      [g.mid1, g.mid2, g.up1, g.up2, g.lo1, g.lo2].forEach(p => { if (p) _chromePts(pts, p.x, p.y); });
+    } else if (g.kind === 'rect') {
+      _chromePts(pts, g.x, g.y); _chromePts(pts, g.x + g.w, g.y + g.h);
+    } else if (g.kind === 'position') {
+      _chromePts(pts, g.x1, g.entryY); _chromePts(pts, g.x2, g.targetY); _chromePts(pts, g.x2, g.stopY);
+    } else if (g.kind === 'channel' && g.a && g.b) {
+      _chromePts(pts, g.a.x, g.a.y); _chromePts(pts, g.b.x, g.b.y);
+      _chromePts(pts, g.a.x + g.dx, g.a.y + g.dy); _chromePts(pts, g.b.x + g.dx, g.b.y + g.dy);
+    } else if (g.kind === 'poly') {
+      (g.pts || []).forEach(p => _chromePts(pts, p.x, p.y));
+    } else if (g.kind === 'text') {
+      _chromePts(pts, g.x, g.y);
+    }
+  }
+  if (!pts.length) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  pts.forEach(p => {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  });
+  return { x: minX - gap, y: minY - gap, w: (maxX - minX) + gap * 2, h: (maxY - minY) + gap * 2 };
+}
+
 function positionDrawMenu() {
   const d = getSelected();
   const menu = document.getElementById('draw-menu');
@@ -8109,11 +8265,13 @@ function positionDrawMenu() {
   if (!ctx) return;
   const P = drawMapper();
   if (!P) return;
-  const hs = Drawings.handlesOf(d, P, ctx);
-  if (!hs.length) return;
+  const avoid = drawAvoidRect(d, P, ctx);
+  if (!avoid) return;
   const wrap = document.getElementById('chart-wrap');
-  menu.style.left = Math.max(4, Math.min(hs[0].x, wrap.clientWidth - menu.offsetWidth - 4)) + 'px';
-  menu.style.top = Math.max(4, hs[0].y + 14) + 'px';
+  const pos = placeDrawChrome(
+    { w: menu.offsetWidth, h: menu.offsetHeight }, avoid, drawChromeBounds(wrap));
+  menu.style.left = pos.left + 'px';
+  menu.style.top = pos.top + 'px';
 }
 
 function hideDrawMenu() {
@@ -8139,9 +8297,17 @@ function openMonitorInput(d) {
   const pctF = document.getElementById('dmi-pct');
   const stopBtn = document.getElementById('dmi-stop');
   box.style.display = 'block';
+  const bounds = drawChromeBounds(wrap);
+  const size = { w: box.offsetWidth, h: box.offsetHeight };
   const mr = menu.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
-  box.style.left = Math.max(4, Math.min(mr.left - wr.left, wrap.clientWidth - box.offsetWidth - 4)) + 'px';
-  box.style.top = Math.min(mr.bottom - wr.top + 6, wrap.clientHeight - box.offsetHeight - 4) + 'px';
+  // 优先挨着设置条; 那一格压住线条时改到避开矩形外侧
+  let pos = clampDrawChrome({ left: mr.left - wr.left, top: mr.bottom - wr.top + 6 }, size, bounds);
+  const ctx = drawCtx();
+  const P = drawMapper();
+  const avoid = (ctx && P) ? drawAvoidRect(d, P, ctx) : null;
+  if (drawChromeHits(pos, size, avoid)) pos = placeDrawChrome(size, avoid, bounds);
+  box.style.left = pos.left + 'px';
+  box.style.top = pos.top + 'px';
   nameF.value = d.name || '';
   pctF.value = (d.monitor && d.monitor.pct) || defaultMonitorPct();
   const adjEl = document.getElementById('dmi-adjust');
@@ -8183,11 +8349,21 @@ function positionSuggestBox() {
   if (!ctx) return;
   const P = drawMapper();
   if (!P) return;
-  const x = P.x(sug.points[0].i), y = P.y(sug.points[0].p);
   const wrap = document.getElementById('chart-wrap');
   box.style.display = 'flex';
-  box.style.left = Math.max(4, Math.min(x + 12, wrap.clientWidth - box.offsetWidth - 4)) + 'px';
-  box.style.top = Math.max(4, y - 30) + 'px';
+  const gap = 10;
+  const pts = (sug.points || []).map(pt => ({ x: P.x(pt.i), y: P.y(pt.p) }))
+    .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (!pts.length) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  pts.forEach(p => {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  });
+  const avoid = { x: minX - gap, y: minY - gap, w: (maxX - minX) + gap * 2, h: (maxY - minY) + gap * 2 };
+  const pos = placeDrawChrome({ w: box.offsetWidth, h: box.offsetHeight }, avoid, drawChromeBounds(wrap));
+  box.style.left = pos.left + 'px';
+  box.style.top = pos.top + 'px';
 }
 
 function hideSuggestBox() {
@@ -8227,7 +8403,29 @@ function updatePriceHint(price) {
   el.style.color = pct >= 0 ? C().up : C().down;
 }
 
-/** 打开数值编辑: d 必须是水平线; anchor 为落点像素 (不给则挂线的左缘价签下方)。
+/** 数值框跟着水平线让开。投影还没就绪时退回落点旁, 避免框停在 (0,0)。 */
+function positionPriceInput(anchor) {
+  const box = document.getElementById('draw-price-input');
+  if (!box || box.style.display !== 'flex') return;
+  const wrap = document.getElementById('chart-wrap');
+  if (!wrap) return;
+  const size = { w: box.offsetWidth, h: box.offsetHeight };
+  const bounds = drawChromeBounds(wrap);
+  const d = priceEditDrawing();
+  const ctx = drawCtx();
+  const P = drawMapper();
+  const avoid = (d && ctx && P) ? drawAvoidRect(d, P, ctx) : null;
+  let pos = null;
+  if (avoid) pos = placeDrawChrome(size, avoid, bounds);
+  else if (anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y)) {
+    pos = clampDrawChrome({ left: anchor.x + 8, top: anchor.y + 16 }, size, bounds);
+  }
+  if (!pos) return;
+  box.style.left = pos.left + 'px';
+  box.style.top = pos.top + 'px';
+}
+
+/** 打开数值编辑: d 必须是水平线; anchor 为落点像素 (投影未就绪时的退路)。
  *  线在点击时已经画出, 这里只是给它一个精确取值的入口 —— 不输入直接 Enter/点别处即接受落点价。 */
 function openPriceInput(d, anchor) {
   const dr = STATE.draw;
@@ -8240,7 +8438,6 @@ function openPriceInput(d, anchor) {
   dr._priceEdit = { id: d.id, before: JSON.parse(JSON.stringify(d.points)) };
   const box = document.getElementById('draw-price-input');
   const field = document.getElementById('dpi-value');
-  const wrap = document.getElementById('chart-wrap');
   const price = d.points[0].p;
   field.value = fmtPrice3(price);
   // ↑↓ 微调步长按价位量级取, 与展示精度对齐 (低价股/指数都好用);
@@ -8248,11 +8445,7 @@ function openPriceInput(d, anchor) {
   field.dataset.step = price < 1 ? '0.001' : (price < 100 ? '0.01' : '1');
   updatePriceHint(price);
   box.style.display = 'flex';
-  const P = drawMapper();
-  const px = anchor ? anchor.x : (P ? P.grid.left + 4 : 4);
-  const py = anchor ? anchor.y : (P ? P.y(price) : 4);
-  box.style.left = Math.max(4, Math.min(px + 8, wrap.clientWidth - box.offsetWidth - 4)) + 'px';
-  box.style.top = Math.max(4, Math.min(py + 16, wrap.clientHeight - box.offsetHeight - 4)) + 'px';
+  positionPriceInput(anchor);
   // mousedown 处理器内同步 focus 会被浏览器默认行为覆盖, 延迟到下一拍 (同 openTextInput)
   setTimeout(() => { field.focus(); field.select(); }, 0);
   redrawDrawings();

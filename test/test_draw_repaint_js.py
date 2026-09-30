@@ -78,6 +78,7 @@ function paintDraft() {}
 function paintHoverGhost() {}
 function positionDrawMenu() {}
 function positionSuggestBox() {}
+function positionPriceInput() {}
 function paintTagLayer() {}
 function paintDrawing(c2, d) { log.painted.push(d.id); }
 STATE.chart = {
