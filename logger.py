@@ -89,8 +89,10 @@ _URL_QUERY_RE = re.compile(
 )
 
 # 麦蕊等: path 末段疑似 licence (长 hex/alnum)。仅覆盖少量已知路径。
+# 关键字紧跟主机名 ( /jj/lskx、/hsrl、/licenceinfo )。关键字前后都放
+# (?:/段)* 时, /hsrl 可同时落入前置通配与关键字, 在无 licence 的长串上多项式回溯。
 _PATH_TAIL_RE = re.compile(
-    r"(https?://[^\s\"'/?#]+(?:/[^\s\"'/?#]+)*/(?:lskx|hsrl|licenceinfo)(?:/[^\s\"'/?#]+)*/)"
+    r"(https?://[^\s\"'/?#]+/(?:(?:jj/)?lskx|hsrl|licenceinfo)(?:/[^\s\"'/?#]+)*/)"
     r"([A-Za-z0-9_-]{16,})"
     r"(/?|\?|$)"
 )

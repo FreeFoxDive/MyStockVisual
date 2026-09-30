@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -55,10 +56,25 @@ class TestRedactMessage(unittest.TestCase):
 
     def test_mairui_path_licence(self):
         lic = "ABCDEF0123456789abcdef01"
-        url = f"https://api.mairuiapi.com/jj/lskx/510300/d/{lic}"
-        out = redact_message(f"麦蕊失败 {url}")
-        self.assertNotIn(lic, out)
-        self.assertIn("ABCD***", out)
+        for url in (
+            f"https://api.mairuiapi.com/jj/lskx/510300/d/{lic}",
+            f"https://api.mairuiapi.com/hsrl/ssjy/all/{lic}",
+            f"https://mairui.club/licenceinfo/{lic}",
+        ):
+            out = redact_message(f"麦蕊失败 {url}")
+            self.assertNotIn(lic, out, url)
+            self.assertIn("ABCD***", out)
+
+    def test_path_tail_redos_counterexample_is_fast(self):
+        """CodeQL 反例: http://!/lskx 后接大量 /hsrl, 且末尾没有 licence。"""
+        samples = (
+            "http://!/lskx" + "/hsrl" * 5000 + "!",
+            "http://!/lskx/" + "!/hsrl/" * 5000,
+        )
+        for s in samples:
+            t0 = time.perf_counter()
+            redact_message(s)
+            self.assertLess(time.perf_counter() - t0, 0.1, s[:40])
 
     def test_mairui_uuid_licence_any_endpoint(self):
         """licence 是 UUID, 出现在 hsindex/himk/hsstock 等路径末段, 也必须脱敏。"""
