@@ -528,6 +528,55 @@ class TestSourceTimeoutAndBreaker(KlineSourceTestBase):
         af.assert_not_called()
 
 
+class TestSingleFlight(KlineSourceTestBase):
+    """同参数并发取数合并为一次上游请求。
+
+    回归点: 首屏 kline / tail / 延迟加载同时要同一份 K 线, 各自去抢会占满
+    SOURCE_MAX_INFLIGHT; 单源链上被挤掉的那个直接 SourceBusy → 404 (线上月K 404 的根因)。
+    """
+
+    def test_concurrent_same_key_fetches_upstream_once(self):
+        import threading
+
+        calls = []
+
+        def _slow(*_a, **_k):
+            calls.append(1)
+            time.sleep(0.2)
+            return _norm_df()
+
+        results = {}
+
+        def _run(i):
+            results[i] = kline_source.fetch_kline_df("stock", "600519.SH", "1M", 300)
+
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed"), \
+             mock.patch.object(kline_source, "SOURCE_MAX_INFLIGHT", 1), \
+             mock.patch.object(market, "_fetch_af_kline", side_effect=_slow):
+            threads = [threading.Thread(target=_run, args=(i,)) for i in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(5)
+        self.assertEqual(len(calls), 1, "同参数并发请求只该打一次上游")
+        self.assertEqual(len(results), 3)
+        dfs = [df for df, _src in results.values()]
+        for df, src in results.values():
+            self.assertEqual(src, "alphafeed")
+            self.assertIsNotNone(df, "被合并的请求不该 404")
+            self.assertEqual(len(df), 30)
+        self.assertEqual(len({id(df) for df in dfs}), 3,
+                         "跟随者要拿副本: 调用方会原地改 df (拼当日 bar / 算指标)")
+        self.assertEqual(kline_source._flights, {}, "取数结束后不该残留在途记录")
+
+    def test_different_keys_are_not_coalesced(self):
+        with _no_kline_env(KLINE_SOURCE_STOCK="alphafeed"), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=_norm_df()) as af:
+            kline_source.fetch_kline_df("stock", "600519.SH", "1M", 300)
+            kline_source.fetch_kline_df("stock", "600519.SH", "1M", 12)
+        self.assertEqual(af.call_count, 2, "count 不同是不同的数据, 不能合并")
+
+
 class TestMinuteStalenessGuard(KlineSourceTestBase):
     def test_stale_minute_data_rejected(self):
         stale_end = (market.market_hours.now() - pd.Timedelta(days=40)).strftime("%Y-%m-%d %H:%M")

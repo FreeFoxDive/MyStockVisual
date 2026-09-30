@@ -4583,8 +4583,16 @@ async function fetchIntraday(opts) {
   const _cacheKey = `vi_${symbol}_1m`;
 
   // ── 浏览器缓存 ──
+  // 从别的周期切回分时 (retainChart): 内存里已有同一只的分时就先画出来再后台刷新,
+  // 否则旧 K 线图要停在屏幕上等完一整次上游请求。定时刷新时图上已经是分时, 不重画。
   let cacheHit = false;
-  if (!STATE.intradayData) {
+  const mem = STATE.intradayData;
+  if (opts && opts.retainChart && mem && mem.symbol === symbol
+      && Array.isArray(mem.bars) && mem.bars.length) {
+    renderIntraday(mem);
+    fetchDepth();
+    cacheHit = true;
+  } else if (!mem) {
     try {
       const raw = localStorage.getItem(_cacheKey);
       if (raw) {
@@ -4601,23 +4609,32 @@ async function fetchIntraday(opts) {
 
   const loading = !cacheHit && !STATE.intradayData && !(opts && opts.retainChart);
   if (loading && STATE.chart) STATE.chart.showLoading({ text: '加载中...', maskColor: 'rgba(0,0,0,0.15)' });
-  try {
-    const [idResp, qResp] = await Promise.all([
-      fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`),
-      // /api/quotes keeps an unavailable snapshot as an empty 200 response;
-      // a transient upstream miss must not produce a noisy 404 in the console.
-      fetch(`/api/quotes?symbols=${encodeURIComponent(symbol)}`),
-      // 分时图也画持仓风控线/显示「持仓中」徽章, 交易记录要跟 K 线一样随后台请求走
-      loadTrades(symbol),
-    ]);
-    const id = await idResp.json();
+  const still = () => STATE._intraFetchTs === fetchTs && STATE.period === 'intraday' && STATE.symbol === symbol;
+  // 报价和交易记录不挡第一帧。分时图也画持仓风控线/显示「持仓中」徽章, 交易记录到达后
+  // 风控价变了才补画一次。
+  const riskBefore = JSON.stringify(STATE.risk);
+  loadTrades(symbol).then(() => {
+    if (still() && STATE.intradayData && JSON.stringify(STATE.risk) !== riskBefore) {
+      renderIntraday(STATE.intradayData);
+    }
+  });
+  // /api/quotes keeps an unavailable snapshot as an empty 200 response;
+  // a transient upstream miss must not produce a noisy 404 in the console.
+  fetch(`/api/quotes?symbols=${encodeURIComponent(symbol)}`).then(async (qResp) => {
     const quoteBody = await qResp.json();
-    const quote = quoteBody && quoteBody[symbol] || liveQuotes.get(symbol) || null;
+    const quote = quoteBody && quoteBody[symbol] || null;
+    if (!still() || !quote) return;
+    applyQuoteData(quote);
+    const d = STATE.intradayData;
+    if (d && d.symbol === symbol && quote.prev_close != null) d.prev_close = quote.prev_close;
+  }).catch(() => {});
+  try {
+    const idResp = await fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`);
+    const id = await idResp.json();
     if (STATE._intraFetchTs !== fetchTs) return;
     if (!id.bars || id.bars.length === 0) { if (loading) showToast('暂无分时数据'); return; }
-    id.prev_close = (liveQuotes.get(symbol) || quote || {}).prev_close;
+    id.prev_close = (liveQuotes.get(symbol) || {}).prev_close;
     STATE.intradayData = id;
-    if (quote) applyQuoteData(quote);
     renderIntraday(STATE.intradayData);
     fetchDepth();  // 五档初始拉取
     // 保存到 localStorage

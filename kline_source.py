@@ -52,6 +52,8 @@ SOURCE_MAX_TOTAL = max(1, int(os.environ.get("KLINE_SOURCE_MAX_TOTAL", "6")))
 _health_lock = threading.Lock()
 _health = {}   # name -> {"fails": 连续失败数, "until": 冷却截止 ts}
 _active = {}   # 实际存活的工作数; join 超时不能释放配额
+_flight_lock = threading.Lock()
+_flights = {}  # (category, symbol, period, count, adj) -> 进行中的取数; 见 fetch_kline_df
 
 
 class SourceBusy(Exception):
@@ -565,8 +567,39 @@ def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD):
 
     单源失败 (异常/空数据/分钟数据过旧) 记 warning 后继续下一源; 全部失败
     返回 (None, None), 对外表现与旧版单源一致 (调用方返回 404)。
+
+    同参数并发请求合并为一次上游取数 (single-flight): 首屏 kline / tail / 延迟
+    加载会同时要同一份 K 线, 各自去抢会占满 SOURCE_MAX_INFLIGHT, 挤掉的那个
+    在单源链上直接判 SourceBusy → 404。跟随者拿 df 副本, 调用方可以随意改。
     """
     adj = normalize_adjust(adjust)
+    key = (category, symbol, period, count, adj)
+    with _flight_lock:
+        flight = _flights.get(key)
+        owner = flight is None
+        if owner:
+            flight = _flights[key] = {"event": threading.Event(), "result": (None, None)}
+    if not owner:
+        perf.bump("kline_coalesced")
+        # 首发者每个源都有 SOURCE_TIMEOUT_SEC 硬超时, 整条链跑完不会超过这个上限
+        if not flight["event"].wait(SOURCE_TIMEOUT_SEC * max(1, len(_chain(category)))):
+            perf.bump("kline_coalesced_timeout")
+            log.warning("等待同参数取数超时 %s %s, 放弃", symbol, period)
+            return None, None
+        df, name = flight["result"]
+        return (df.copy() if df is not None else None), name
+    try:
+        df, name = _fetch_chain(category, symbol, period, count, adj)
+        # 调用方拿到 df 就可能原地改, 跟随者读的是交出前的快照
+        flight["result"] = ((df.copy() if df is not None else None), name)
+        return df, name
+    finally:
+        with _flight_lock:
+            _flights.pop(key, None)
+        flight["event"].set()
+
+
+def _fetch_chain(category, symbol, period, count, adj):
     chain = _chain(category)
     for i, name in enumerate(chain):
         src = SOURCES[name]
