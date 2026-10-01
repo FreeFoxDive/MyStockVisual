@@ -1813,7 +1813,7 @@ def fetch_quote(symbol):
     return fetch_quotes([symbol]).get(normalize_symbol(symbol))
 
 
-def _normalize(df, prefer_time=False):
+def _normalize(df, prefer_time=False, *, preserve_ohlc=False):
     """标准化 K 线 DataFrame: 设置日期索引，确保 OHLCV 列存在"""
     if df is None or len(df) < 5:
         return None
@@ -1835,7 +1835,8 @@ def _normalize(df, prefer_time=False):
         if c not in df.columns:
             df[c] = 0.0
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["close"])
+    if not preserve_ohlc:
+        df = df.dropna(subset=["close"])
     return df if len(df) >= 5 else None
 
 

@@ -300,10 +300,11 @@ def _execute(run):
     try:
         df, data_version = factors.snapshot()
         eff_mode = price_mode
+        live_available = False
         if price_mode == "live":
             # 取快照要几分钟: 先写 total, 页面不再显示「扫描中 0/?」
             trades.update_screener_run(
-                run_id, total=len(df), progress=0,
+                run_id, total=len(df) if df is not None else 0, progress=0,
                 data_version=data_version, price_mode="live")
             try:
                 live_df, live_ver = factors.live_snapshot(
@@ -315,10 +316,13 @@ def _execute(run):
                 live_df, live_ver = None, None
             if live_df is not None:
                 df, data_version = live_df, live_ver
+                live_available = live_ver is not None
             else:
                 log.info("盘中快照不可用, 回退收盘口径 run=%s", run_id)
                 eff_mode = "close"
-        if df is None or len(df) == 0:
+        # A versioned live table may be empty after OHLC admission rejects all
+        # symbols. It is a completed scan with zero results, not a missing store.
+        if df is None or (len(df) == 0 and not live_available):
             raise RuntimeError("因子库尚未构建 (交易日 18:00 自动更新)")
 
         cap = _max_symbols()

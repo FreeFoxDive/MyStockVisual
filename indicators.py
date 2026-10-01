@@ -109,21 +109,15 @@ def compute_impulse(close, macd_params=None):
         macd_params = {"fast": 12, "slow": 26, "signal": 9}
     e13 = ema(close, 13)
     dif, dea, hist = macd(close, macd_params["fast"], macd_params["slow"], macd_params["signal"])
-    impulse = pd.Series(0, index=close.index, dtype=int)
-    for i in range(1, len(close)):
-        e13_i = e13.iloc[i]
-        e13_prev = e13.iloc[i - 1]
-        hist_i = hist.iloc[i]
-        hist_prev = hist.iloc[i - 1]
-        if pd.isna(e13_i) or pd.isna(e13_prev) or pd.isna(hist_i) or pd.isna(hist_prev):
-            continue
-        ema_up = e13_i > e13_prev
-        hist_up = hist_i > hist_prev
-        if ema_up and hist_up:
-            impulse.iloc[i] = 1
-        elif not ema_up and not hist_up:
-            impulse.iloc[i] = -1
-    return impulse
+    return _impulse_from_indicators(e13, hist)
+
+
+def _impulse_from_indicators(e13, hist):
+    ema_diff, hist_diff = e13.diff(), hist.diff()
+    rising = (ema_diff > 0) & (hist_diff > 0)
+    falling = (ema_diff < 0) & (hist_diff < 0)
+    return pd.Series(np.select([rising, falling], [1, -1], default=0),
+                     index=e13.index, dtype=int)
 
 
 # 一手 = 多少股/张: 股票·基金·指数·港美股 100 (手), 可转债 10 (1手=10张), 已是股则 1。
@@ -204,9 +198,10 @@ def intraday_avg_price(close, volume, amount):
 
 
 def compute_all_indicators(df, period="1d",
-                           with_rsi=True, with_kdj=True, with_atr_val=True):
+                           with_rsi=True, with_kdj=True, with_atr_val=True, *, serialize=True):
     """Compute all indicators on OHLCV DataFrame
-    Returns: (enhanced_df, indicators_dict)
+    Returns: (enhanced_df, indicators_dict). With serialize=False the dict is
+    empty; the enhanced DataFrame is identical, without full-history JSON lists.
     """
     o, h, l, c, v = df["open"], df["high"], df["low"], df["close"], df["volume"]
 
@@ -250,9 +245,11 @@ def compute_all_indicators(df, period="1d",
             "obv": _safe_list(obv_series),
             "maobv": _safe_list(maobv),
         },
-    }
+    } if serialize else {}
 
     # RSI
+    # Chart RSI6/12/24 and KDJ9/ATR14 are local display choices, independent
+    # of strategy defaults in config.py. MACD remains period-aware via mp.
     if with_rsi:
         rsi6 = rsi(c, 6)
         rsi12 = rsi(c, 12)
@@ -260,6 +257,7 @@ def compute_all_indicators(df, period="1d",
         result_df["rsi6"] = rsi6
         result_df["rsi12"] = rsi12
         result_df["rsi24"] = rsi24
+    if with_rsi and serialize:
         indicators["rsi"] = {
             "params": {"periods": [6, 12, 24]},
             "rsi6": _safe_list(rsi6),
@@ -273,6 +271,7 @@ def compute_all_indicators(df, period="1d",
         result_df["kdj_k"] = k
         result_df["kdj_d"] = d
         result_df["kdj_j"] = j
+    if with_kdj and serialize:
         indicators["kdj"] = {
             "params": {"period": 9},
             "k": _safe_list(k),
@@ -284,63 +283,70 @@ def compute_all_indicators(df, period="1d",
     if with_atr_val:
         a = atr(h, l, c, 14)
         result_df["atr14"] = a
+    if with_atr_val and serialize:
         indicators["atr"] = {
             "params": {"period": 14},
             "values": _safe_list(a),
         }
 
     # Elder Impulse System: 1=bullish(红), -1=bearish(绿), 0=neutral(蓝)
-    impulse = compute_impulse(c, mp)
+    impulse = _impulse_from_indicators(e13, hist)
     result_df["impulse"] = impulse
-    indicators["impulse"] = {
-        "params": {"ema_period": 13},
-        "values": _safe_list(impulse),
-    }
+    if serialize:
+        indicators["impulse"] = {
+            "params": {"ema_period": 13},
+            "values": _safe_list(impulse),
+        }
 
     # BOLL(N=20, K=2) 主图叠加
     boll_mid, boll_up, boll_low = boll(c, 20, 2)
     result_df["boll_mid"] = boll_mid
     result_df["boll_up"] = boll_up
     result_df["boll_low"] = boll_low
-    indicators["boll"] = {
-        "params": {"n": 20, "k": 2},
-        "mid": _safe_list(boll_mid),
-        "up": _safe_list(boll_up),
-        "low": _safe_list(boll_low),
-    }
+    if serialize:
+        indicators["boll"] = {
+            "params": {"n": 20, "k": 2},
+            "mid": _safe_list(boll_mid),
+            "up": _safe_list(boll_up),
+            "low": _safe_list(boll_low),
+        }
 
     # WR(14) 面板
     wr14 = wr(h, l, c, 14)
     result_df["wr14"] = wr14
-    indicators["wr"] = {"params": {"period": 14}, "values": _safe_list(wr14)}
+    if serialize:
+        indicators["wr"] = {"params": {"period": 14}, "values": _safe_list(wr14)}
 
     # CCI(14) 面板
     cci14 = cci(h, l, c, 14)
     result_df["cci14"] = cci14
-    indicators["cci"] = {"params": {"period": 14}, "values": _safe_list(cci14)}
+    if serialize:
+        indicators["cci"] = {"params": {"period": 14}, "values": _safe_list(cci14)}
 
     # BIAS(6/12/24) 面板
     bias_map = bias(c, (6, 12, 24))
     for name, series in bias_map.items():
         result_df[name] = series
-    indicators["bias"] = {
-        "params": {"periods": [6, 12, 24]},
-        "bias6": _safe_list(bias_map["bias6"]),
-        "bias12": _safe_list(bias_map["bias12"]),
-        "bias24": _safe_list(bias_map["bias24"]),
-    }
+    if serialize:
+        indicators["bias"] = {
+            "params": {"periods": [6, 12, 24]},
+            "bias6": _safe_list(bias_map["bias6"]),
+            "bias12": _safe_list(bias_map["bias12"]),
+            "bias24": _safe_list(bias_map["bias24"]),
+        }
 
     # DMI(14,6) 面板: +DI / -DI / ADX
     pdi, mdi, adx = dmi(h, l, c, 14, 6)
     result_df["dmi_pdi"] = pdi
     result_df["dmi_mdi"] = mdi
     result_df["dmi_adx"] = adx
-    indicators["dmi"] = {
-        "params": {"period": 14, "ma": 6},
-        "pdi": _safe_list(pdi),
-        "mdi": _safe_list(mdi),
-        "adx": _safe_list(adx),
-    }
+    if serialize:
+        indicators["dmi"] = {
+            "params": {"period": 14, "ma": 6},
+            "pdi": _safe_list(pdi),
+            "mdi": _safe_list(mdi),
+            "adx": _safe_list(adx),
+        }
 
     return result_df, indicators
 

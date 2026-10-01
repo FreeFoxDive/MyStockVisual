@@ -241,6 +241,24 @@ class StoreTestCase(StoreTestCaseBase):
         self.assertEqual([g[0] for g in got], ["600000.SH"])
         self.assertEqual(got[0][1], "浦发银行")
 
+    def test_cached_bad_ohlc_is_preserved_and_rejected_on_read(self):
+        factors.init_store()
+        bad = _rising(60)
+        bad.loc[bad.index[10], "high"] = np.inf
+        bad.loc[bad.index[11], "close"] = np.nan
+        conn = factors._conn()
+        try:
+            factors.save_bars(conn, "600000.SH", "浦发银行", bad)
+            conn.commit()
+        finally:
+            conn.close()
+        restored = factors.load_bars("600000.SH")
+        self.assertTrue(np.isinf(restored["high"].iloc[10]))
+        self.assertTrue(pd.isna(restored["close"].iloc[11]))
+        with self.assertLogs(factors.log, level="WARNING"):
+            self.assertIsNone(factors.compute_factors(restored, "600000.SH"))
+        self.assertEqual(restored.attrs["ohlc_invalid"]["rows"], 2)
+
     def test_shares_round_trip_and_age(self):
         factors.init_store()
         self.assertEqual(factors.load_shares(), {})
@@ -808,6 +826,62 @@ class AsOfAndLiveBarTest(unittest.TestCase):
         self.assertIn("+live@", ver)
 
 
+class OHLCFactorAdmissionTest(unittest.TestCase):
+    def test_mixed_integer_and_float_prices_compute_factors_normally(self):
+        good = _rising()
+        good["open"], good["close"] = 10, 10
+        good["high"], good["low"] = 10.1, 9.9
+        result = factors.compute_factors(good, "600000.SH", "浦发")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["close"], 10.)
+
+    def test_compute_marks_and_skips_bad_historical_bar(self):
+        for field, value in (("high", np.nan), ("close", np.nan), ("high", 1.)):
+            df = _rising()
+            df.iloc[10, df.columns.get_loc(field)] = value
+            with self.assertLogs(factors.log, level="WARNING") as output:
+                self.assertIsNone(factors.compute_factors(df, "600000.SH", "浦发"))
+            self.assertIn("OHLC_INVALID 600000.SH", output.output[0])
+            self.assertEqual(df.attrs["ohlc_invalid"]["first"], str(df.index[10]))
+
+    def test_chart_normalizer_keeps_legacy_behavior_while_factor_path_preserves_evidence(self):
+        import market
+        df = _rising()
+        df.iloc[10, df.columns.get_loc("close")] = np.nan
+        self.assertEqual(len(market._normalize(df.copy())), len(df) - 1)
+        kept = market._normalize(df.copy(), preserve_ohlc=True)
+        self.assertEqual(len(kept), len(df))
+        self.assertIsNone(factors.compute_factors(kept, "600000.SH"))
+
+    def test_live_bad_quote_or_history_cannot_reuse_stale_factors(self):
+        rec = {"symbol": "600000.SH", "name": "浦发", "close": 10., "prev_close": 10.}
+        good = {"last_price": 10., "open": 10., "high": 10.1, "low": 9.9, "volume": 100.}
+        bars = _df([10.] * 40, end="2026-09-17")
+        bad_quote = dict(good, high=9.8)
+        self.assertIsNone(factors._live_apply(rec, {"600000.SH": bad_quote},
+                                            {"600000.SH": bars}, {}, "2026-09-18", "2026-09-17"))
+        bars.iloc[5, bars.columns.get_loc("high")] = np.nan
+        self.assertIsNone(factors._live_apply(rec, {"600000.SH": good},
+                                            {"600000.SH": bars}, {}, "2026-09-18", "2026-09-17"))
+
+    def test_all_live_symbols_rejected_returns_empty_table_not_close_fallback(self):
+        base = pd.DataFrame([{"symbol": "600000.SH", "name": "浦发", "close": 10., "prev_close": 10.}])
+        for fields in ({"high": 9.}, {"last_price": np.nan}, {"last_price": np.inf},
+                       {"last_price": None}):
+            quote = {"last_price": 10., "open": 10., "high": 10.1, "low": 9.9, "volume": 100.}
+            quote.update(fields)
+            with mock.patch.object(factors, "_fetch_quotes", return_value={"600000.SH": quote}), \
+                 mock.patch.object(factors, "load_shares", return_value={}), \
+                 mock.patch.object(factors, "load_bars_many", return_value={}), \
+                 self.assertLogs(factors.log, level="WARNING") as output:
+                table, version = factors._live_snapshot_compute(base, "2026-09-17", 600,
+                                                                datetime(2026, 9, 18, 10, 30), None)
+            self.assertTrue(table.empty)
+            self.assertEqual(list(table.columns), list(base.columns))
+            self.assertIn("+live@", version)
+            self.assertIn("OHLC_INVALID 600000.SH", output.output[0])
+
+
 class YjbbPeriodTest(unittest.TestCase):
     def test_candidates_skip_unfinished_quarter(self):
         # 2026-02-15: 当年各季都没结束, 最新候选是上年年报而不是当年 0930
@@ -885,7 +959,7 @@ class StreamingBuildTest(StoreTestCaseBase):
         with mock.patch.object(factors, "BATCH_SIZE", 2), \
              mock.patch.object(factors, "_fetch_bars_chunk", chunk), \
              mock.patch("market.get_af", return_value=object()), \
-             mock.patch("market._normalize", lambda df, prefer_time=False: df):
+             mock.patch("market._normalize", lambda df, prefer_time=False, **kwargs: df):
             gen = factors.fetch_bars(["A", "B", "C"])
             first, stats = next(gen)
             self.assertEqual(sorted(first), ["A", "B"])

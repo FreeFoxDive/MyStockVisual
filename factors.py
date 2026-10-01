@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from stock_indicators_cn.validation import admit_ohlc
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CACHE_DIR = SCRIPT_DIR / ".cache"
@@ -298,7 +299,12 @@ def save_bars(conn, symbol, name, df):
     for col in _NUM_COLS:
         series = df[col] if col in df.columns else pd.Series(
             np.zeros(len(df)), index=df.index)
-        blobs.append(np.nan_to_num(series.to_numpy(dtype=float)).astype(np.float64).tobytes())
+        values = series.to_numpy(dtype=float, na_value=np.nan)
+        # Preserve bad prices so live admission cannot mistake Inf's finite
+        # nan_to_num replacement for a valid historical high/low.
+        if col not in ("open", "high", "low", "close"):
+            values = np.nan_to_num(values)
+        blobs.append(values.astype(np.float64).tobytes())
     conn.execute(
         "INSERT INTO bars(symbol,name,n,first_date,last_date,dates,open,high,low,close,"
         "volume,amount,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
@@ -528,9 +534,11 @@ def compute_factors(df, symbol="", name="", float_shares=None):
     """
     if df is None or len(df) < MIN_BARS:
         return None
+    if not admit_ohlc(df, symbol=symbol, context="Visual 因子", report=log.warning):
+        return None
     from indicators import compute_all_indicators, sma, volume_shares_mult
 
-    out, _ind = compute_all_indicators(df, "1d")
+    out, _ind = compute_all_indicators(df, "1d", serialize=False)
     c = out["close"]
     close = _f(c.iloc[-1])
     prev_close = _f(c.iloc[-2])
@@ -805,7 +813,7 @@ def fetch_bars(symbols, count=BARS_COUNT, progress_cb=None):
             if df is None or len(df) == 0:
                 continue
             try:
-                batch[sym] = market._normalize(df, prefer_time=False)
+                batch[sym] = market._normalize(df, prefer_time=False, preserve_ohlc=True)
             except Exception:
                 continue
         if progress_cb:
@@ -1448,6 +1456,11 @@ def _live_apply(rec, usable, bars_by_sym, shares, today, day):
     if q is None:
         return rec
     last = _f(q.get("last_price"))
+    # Validate raw snapshot fields before _patch_last_bar's display fallbacks.
+    quote_bar = pd.DataFrame([{f: q.get(f) for f in ("open", "high", "low")}
+                              | {"close": last}], index=[today])
+    if not admit_ohlc(quote_bar, symbol=sym, context="Visual 盘中快照", report=log.warning):
+        return None
     bars = bars_by_sym.get(sym)
     if bars is None or len(bars) == 0:
         rec = dict(rec)
@@ -1457,6 +1470,8 @@ def _live_apply(rec, usable, bars_by_sym, shares, today, day):
             rec["change_pct"] = (last / prev - 1) * 100
         return rec
     patched = _patch_last_bar(bars, today, q, last)
+    if not admit_ohlc(patched, symbol=sym, context="Visual 盘中历史", report=log.warning):
+        return None
     fs = (shares.get(sym) or (None, None))[0]
     feats = compute_factors(patched, sym, rec.get("name"), float_shares=fs)
     if feats:
@@ -1465,7 +1480,8 @@ def _live_apply(rec, usable, bars_by_sym, shares, today, day):
                 feats[k] = rec.get(k)      # 筹码不重算 (成本高), 沿用收盘口径
         feats["trade_date"] = day
         return feats
-    return rec
+    # A failed quality check cannot fall back to yesterday's selectable factors.
+    return None if patched.attrs.get("ohlc_invalid") else rec
 
 
 def _live_snapshot_compute(base, day, ttl, now, progress_cb):
@@ -1474,10 +1490,11 @@ def _live_snapshot_compute(base, day, ttl, now, progress_cb):
     quotes = _fetch_quotes(list(base["symbol"]), progress_cb=progress_cb)
     if not quotes:
         return None, None
-    # 先筛出有当日有效快照的标的, 只为它们读K/重算 (其余直接沿用收盘因子)
+    # 当日有成交的快照交给 _live_apply 校验 OHLC; 非法 last_price 也必须
+    # 被标记并跳过, 不能在此过滤后沿用旧因子。非当日/无成交仍沿用收盘口径。
     usable = {}
     for sym, q in quotes.items():
-        if _f(q.get("last_price")) is not None and _quote_is_today(q, today):
+        if _quote_is_today(q, today):
             usable[sym] = q
     shares = load_shares()          # 一次性读, 别在逐只循环里查库
     rows = []
@@ -1490,7 +1507,9 @@ def _live_snapshot_compute(base, day, ttl, now, progress_cb):
     def _flush():
         bars_by_sym = load_bars_many(chunk_syms) if chunk_syms else {}
         for rec in chunk:
-            rows.append(_live_apply(rec, usable, bars_by_sym, shares, today, day))
+            result = _live_apply(rec, usable, bars_by_sym, shares, today, day)
+            if result is not None:
+                rows.append(result)
         chunk.clear()
         chunk_syms.clear()
 
@@ -1503,7 +1522,7 @@ def _live_snapshot_compute(base, day, ttl, now, progress_cb):
             _flush()
     if chunk:
         _flush()
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows) if rows else base.iloc[:0].copy()
     # 版本带时段桶: 结果去重 (screener cache_key) 会随桶滚动, 不会整天复用同一份盘中结果
     bucket = int(time.time() // max(60.0, ttl))
     version = f"{day}+live@{bucket}"

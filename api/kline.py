@@ -367,7 +367,7 @@ def build_kline_tail(symbol, period, count, adjust, n=2):
     if df is None:
         raise LookupError(f"无法获取 {symbol} 的K线数据")
     try:
-        df, _ind = compute_all_indicators(df, period)
+        df, _ind = compute_all_indicators(df, period, serialize=False)
     except Exception as e:
         log.warning("指标计算失败(tail) %s %s: %s", symbol, period, _sanitize_error(e))
         raise RuntimeError("指标计算失败") from e

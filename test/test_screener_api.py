@@ -121,7 +121,7 @@ class KlineRateTest(unittest.TestCase):
         with mock.patch.object(factors, "_fetch_bars_chunk", flaky), \
              mock.patch.object(factors, "FETCH_BARS_RETRY_SLEEP", 0), \
              mock.patch("market.get_af", return_value=object()), \
-             mock.patch("market._normalize", lambda df, prefer_time=False: df):
+             mock.patch("market._normalize", lambda df, prefer_time=False, **kwargs: df):
             batches = list(factors.fetch_bars(["600000.SH"]))
         out = {}
         stats = {"failed_batches": None}
@@ -668,6 +668,32 @@ class ScreenerScanTest(ScreenerTestBase):
         self.assertEqual(row["data_version"], "2026-09-18+live@99")
         self.assertEqual(row["price_mode"], "live")
         self.assertEqual(len(row["results"]), 3)
+
+    def test_versioned_empty_live_table_completes_and_can_be_reused(self):
+        from api import screener as scr
+        empty = SNAPSHOT.iloc[:0].copy()
+        version = "2026-09-18+live@empty"
+        with mock.patch.object(factors, "live_snapshot", return_value=(empty, version)):
+            first, _notes = self._run_scan(CONDS_AND, price_mode="live")
+        self.assertEqual(first["status"], "done")
+        self.assertEqual(first["results"], [])
+        self.assertEqual(first["total"], 0)
+        self.assertEqual(first["progress"], 0)
+        self.assertEqual(first["price_mode"], "live")
+        self.assertEqual(first["data_version"], version)
+        with mock.patch.object(factors, "live_snapshot", return_value=(empty, version)), \
+             mock.patch.object(scr, "_scan") as scan:
+            second, _notes = self._run_scan(CONDS_AND, price_mode="live")
+        scan.assert_not_called()
+        self.assertEqual(second["status"], "done")
+        self.assertEqual(second["results"], [])
+        self.assertEqual(second["total"], 0)
+
+    def test_empty_live_table_without_version_still_marks_error(self):
+        with mock.patch.object(factors, "live_snapshot", return_value=(SNAPSHOT.iloc[:0].copy(), None)):
+            row, _notes = self._run_scan(CONDS_AND, price_mode="live")
+        self.assertEqual(row["status"], "error")
+        self.assertIn("因子库", row["error"])
 
     def test_max_symbols_cap(self):
         with mock.patch.dict(os.environ, {"SCREENER_MAX_SYMBOLS": "1"}):

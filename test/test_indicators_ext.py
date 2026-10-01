@@ -9,6 +9,7 @@
 
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,8 @@ if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
 from indicators import (  # noqa: E402
-    boll, wr, cci, bias, dmi, compute_all_indicators,
+    boll, wr, cci, bias, dmi, compute_all_indicators, compute_impulse,
+    _impulse_from_indicators, ema, macd,
     volume_shares_mult, intraday_avg_price,
 )
 
@@ -171,6 +173,46 @@ class ComputeAllContractTest(unittest.TestCase):
         pdi, mdi, adx = dmi(h, l, c, 14, 6)
         self.assertAlmostEqual(self.ind["dmi"]["pdi"][-1], float(pdi.iloc[-1]), places=6)
         self.assertAlmostEqual(self.ind["dmi"]["adx"][-1], float(adx.iloc[-1]), places=6)
+
+    def test_no_serialization_preserves_dataframe_and_optional_columns(self):
+        for optional in (True, False):
+            flags = dict(with_rsi=optional, with_kdj=optional, with_atr_val=optional)
+            expected, _ = compute_all_indicators(self.df, **flags)
+            with patch("indicators._safe_list", side_effect=AssertionError("unused serialization")):
+                actual, serialized = compute_all_indicators(self.df, serialize=False, **flags)
+            pd.testing.assert_frame_equal(actual, expected)
+            self.assertEqual(serialized, {})
+
+    def test_aggregator_reuses_ema_and_macd(self):
+        with patch("indicators.ema", wraps=ema) as ema_call, patch("indicators.macd", wraps=macd) as macd_call:
+            result, _ = compute_all_indicators(self.df)
+        self.assertEqual(ema_call.call_count, 1)
+        self.assertEqual(macd_call.call_count, 1)
+        pd.testing.assert_series_equal(result.impulse, compute_impulse(self.df.close), check_names=False)
+
+
+class ImpulseRegressionTest(unittest.TestCase):
+    def test_flat_is_neutral_including_non_integer_prices(self):
+        for price in (10.0, 19.99):
+            close = pd.Series(np.full(250, price), index=pd.bdate_range("2026-01-01", periods=250))
+            self.assertTrue((compute_impulse(close) == 0).all())
+        self.assertEqual(len(compute_impulse(pd.Series([], dtype=float))), 0)
+
+    def test_equality_and_missing_components_are_neutral(self):
+        e13 = pd.Series([1., 2., 2., 1., 0., np.nan, 2., 3.])
+        hist = pd.Series([0., 1., 0., 0., -1., 0., 1., 2.])
+        self.assertEqual(_impulse_from_indicators(e13, hist).tolist(), [0, 1, 0, 0, -1, 0, 0, 1])
+
+    def test_strict_scalar_reference_with_price_gaps(self):
+        rng = np.random.default_rng(20261001)
+        close = pd.Series(20 + rng.normal(0, .2, 100).cumsum())
+        close.iloc[[0, 15, 16, 87, 99]] = np.nan
+        e13, hist = ema(close, 13), macd(close)[2]
+        expected = [0]
+        for i in range(1, len(close)):
+            de, dh = e13.iloc[i] - e13.iloc[i - 1], hist.iloc[i] - hist.iloc[i - 1]
+            expected.append(1 if de > 0 and dh > 0 else -1 if de < 0 and dh < 0 else 0)
+        self.assertEqual(compute_impulse(close).tolist(), expected)
 
 
 class VolumeSharesMultTest(unittest.TestCase):
