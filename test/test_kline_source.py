@@ -70,7 +70,9 @@ def _cn_daily_df(n=25):
 
 
 def _cn_minute_df(n=10):
-    idx = pd.date_range("2026-09-04 09:35", periods=n, freq="5min")
+    # 模拟可用的分钟数据, 避免固定日期超过新鲜度阈值后使路由测试失败。
+    end = market.market_hours.now() - pd.Timedelta(minutes=15)
+    idx = pd.date_range(end=end, periods=n, freq="5min")
     return pd.DataFrame({
         "时间": idx.strftime("%Y-%m-%d %H:%M:%S"),
         "开盘": 10.0, "收盘": 10.1, "最高": 10.2, "最低": 9.9,
