@@ -1549,7 +1549,7 @@ def _fetch_instrument_meta(symbol):
     return meta
 
 
-def _fetch_af_quotes(symbols):
+def _fetch_af_quotes(symbols, budget_deadline=None):
     """批量拉 AlphaFeed 快照；失败或缺 OHLCV 的 symbol 不出现在返回中。"""
     global _quote_cursor
     if not AF_API_KEY:
@@ -1564,7 +1564,12 @@ def _fetch_af_quotes(symbols):
         out = _QuoteResult()
         batches = list(_chunks(symbols, QUOTES_BATCH))
         for bi, batch in enumerate(batches):
-            if not _quote_budget.try_acquire():
+            acquired = (_quote_budget.try_acquire() if budget_deadline is None
+                        else _quote_budget.acquire(
+                            timeout=max(0.0, budget_deadline - time.monotonic())))
+            if not acquired:
+                if budget_deadline is not None:
+                    log.warning("成交快照额度等待超时 symbols=%s", ",".join(batch))
                 # 只 defer 尚未请求的批次; 此前批次 AF 已请求但未返回的标的
                 # (典型: 指数) 不算 deferred, 让本轮麦蕊回退正常接管
                 out.deferred.update(
@@ -1617,15 +1622,19 @@ def publish_quote_snapshot(symbol, quote):
     quote_snapshot_cache.set(sym, std)
 
 
-def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0):
+def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0, for_trade=False):
     """批量获取实时快照。
 
     ``wait_for_lock`` 仅供成交校验等强一致性调用使用：常规 UI 轮询继续
     非阻塞地复用缓存；但提交交易时，不能因另一条快照请求恰好在飞行中而
     把当天交易日误判为「无日 K」。
+
+    ``for_trade`` 只刷新提交交易的标的，并在同一等待期限内等原快照桶放行。
+    页面轮询仍非阻塞，限额不变。
     """
     global _quote_cursor
     symbols = list(dict.fromkeys(normalize_symbol(s) for s in symbols if s))
+    budget_deadline = time.monotonic() + max(float(wait_for_lock), 0.0)
     # 非活跃时段 (盘前/午休/盘后) 读长 TTL 最后快照, 避免撞上预算/抓取锁时返回 {}
     # (页面跳转忽快忽慢)。集合竞价必须走实时路径 —— 否则 12h 快照会命中并短路
     # 掉上游抓取, 页面看到的是昨收而不是竞价撮合价。
@@ -1636,22 +1645,32 @@ def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0):
     else:
         acquired = _quote_fetch_lock.acquire(blocking=False)
     if not acquired:
+        if for_trade:
+            log.warning("成交快照抓取锁等待超时 symbols=%s", ",".join(symbols))
         return {s: q for s in symbols
                 if (q := _quote_cache_lookup(s, off_session)) is not None}
     combined = []
     try:
-        with _quote_interest_lock:
-            watched = {s for group in _quote_interests.values() for s in group}
-        # One symbol query can serve every connected page (never a universes query).
-        combined = sorted(watched.union(symbols))
-        if combined:
-            offset = _quote_cursor % len(combined)
-            combined = combined[offset:] + combined[:offset]
+        if for_trade:
+            # 成交校验只占一个批次，不被多页面轮转挤到后续批次。
+            combined = symbols
+        else:
+            with _quote_interest_lock:
+                watched = {s for group in _quote_interests.values() for s in group}
+            # One symbol query can serve every connected page (never a universes query).
+            combined = sorted(watched.union(symbols))
+            if combined:
+                offset = _quote_cursor % len(combined)
+                combined = combined[offset:] + combined[:offset]
         with _quote_fetch_condition:
             global _quote_fetch_inflight, _quote_fetch_symbols
             _quote_fetch_inflight = True
             _quote_fetch_symbols = set(combined)
-        result = _fetch_quotes_locked(combined, fresh=fresh)
+        if for_trade:
+            result = _fetch_quotes_locked(
+                combined, fresh=fresh, budget_deadline=budget_deadline)
+        else:
+            result = _fetch_quotes_locked(combined, fresh=fresh)
         return {s: result[s] for s in symbols if s in result}
     finally:
         with _quote_fetch_condition:
@@ -1680,10 +1699,12 @@ def fetch_trade_quote(symbol, timeout=5.0):
                 return quote
 
     remaining = max(0.0, deadline - time.monotonic())
-    return fetch_quotes([symbol], fresh=True, wait_for_lock=remaining).get(symbol)
+    return fetch_quotes(
+        [symbol], fresh=True, wait_for_lock=remaining, for_trade=True,
+    ).get(symbol)
 
 
-def _fetch_quotes_locked(symbols, fresh=False):
+def _fetch_quotes_locked(symbols, fresh=False, budget_deadline=None):
     """批量获取实时快照：AlphaFeed quotes.get 优先，未命中按类型回退麦蕊。
 
     麦蕊回退：指数 index_real_time、ETF fund_real_time、股票 ssjy_more 批量。
@@ -1732,7 +1753,8 @@ def _fetch_quotes_locked(symbols, fresh=False):
         with _hkus_lock:
             if not _hkus_quote_bucket.try_acquire():
                 af_set = []
-    af_result = _fetch_af_quotes(af_set)
+    af_result = (_fetch_af_quotes(af_set) if budget_deadline is None
+                 else _fetch_af_quotes(af_set, budget_deadline=budget_deadline))
     for s, q in af_result.items():
         if s in to_fetch:
             _emit_af(s, q)
@@ -2816,14 +2838,20 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
     """
     from datetime import date as _date
 
+    def unavailable(reason):
+        if for_trade:
+            log.warning("成交当日快照不可用 symbol=%s date=%s reason=%s",
+                        symbol, target.isoformat(), reason)
+        return None
+
     today = market_hours.now().date()
     if target != today:
         return None
     if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
-        return None
+        return unavailable("非交易日")
     if market_hours.session_phase() not in market_hours.BAR_READY_PHASES:
         # 盘前/集合竞价不拼当日 bar (快照为上一交易日残留)
-        return None
+        return unavailable("当日bar未成型")
     # 观测: 该往返的耗时即 quote_ms, 是 /api/kline 关键路径上的网络成本
     with perf.Span(timing, "quote_ms"):
         q = (fetch_trade_quote(symbol) if for_trade
@@ -2831,7 +2859,7 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
                  [symbol], fresh=fresh, wait_for_lock=_CHART_QUOTE_WAIT_SEC,
              ).get(normalize_symbol(symbol)))
     if not q:
-        return None
+        return unavailable("未取到快照")
     # 快照自带交易所时间戳时校验日期: 挡住盘前/停牌等陈旧快照被当今日
     ts = q.get("timestamp")
     if ts is not None:
@@ -2842,18 +2870,18 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
         except (TypeError, ValueError, OSError, OverflowError):
             ts_date = None
         if ts_date is not None and ts_date != today:
-            return None
+            return unavailable(f"快照日期为{ts_date.isoformat()}")
     high = _safe_float(q.get("high"))
     low = _safe_float(q.get("low"))
     if high is None or low is None:
-        return None
+        return unavailable("快照缺少有效最高/最低价")
     vol = q.get("volume")
     try:
         volume = int(vol) if vol is not None else 0
     except (TypeError, ValueError):
         volume = 0
     if volume <= 0:
-        return None
+        return unavailable("快照成交量为0或无效")
     close = _safe_float(q.get("last_price"))
     if close is None:
         close = _safe_float(q.get("open"))

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -32,6 +33,8 @@ if SCRIPT_DIR not in sys.path:
 
 import api.kline as kline_api
 import market as market_mod
+
+_REAL_FETCH_AF_QUOTES = market_mod._fetch_af_quotes
 
 SYM = "600000.SH"
 NOW = datetime(2026, 9, 15, 10, 30)
@@ -83,7 +86,7 @@ class _Harness(unittest.TestCase):
         self.af_calls = []
         self._quote_for = lambda s: _af_quote()
 
-        def _fake_af(symbols):
+        def _fake_af(symbols, **kwargs):
             symbols = list(symbols)
             if symbols:
                 self.af_calls.append(symbols)
@@ -362,6 +365,98 @@ class TestFreshnessPolicy(_Harness):
                 market_mod._quote_fetch_condition.notify_all()
         self.assertEqual(quote["high"], 12.0)
         fallback.assert_not_called()
+
+    def test_trade_quote_waits_for_budget_and_only_fetches_trade_symbol(self):
+        """588200 平仓撞上轮询节流: 等原桶放行, 不让其它页面标的挤掉它。"""
+        import trades
+        from live_budget import PacedBudget
+
+        sym = "588200.SH"
+        fixed = datetime(2026, 10, 8, 10, 30)
+        clock = [100.0]
+        budget = PacedBudget(market_mod.QUOTE_RATE_PER_MIN)
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        db_path = os.path.join(tmp.name, "trades.db")
+        old_db = trades._db_path
+        self.addCleanup(setattr, trades, "_db_path", old_db)
+        trades.init_db(db_path)
+        uid = trades.create_user("etf_regression", "secret123")
+        history = pd.DataFrame([{
+            "open": 1.1, "high": 1.2, "low": 1.0, "close": 1.1, "volume": 1000,
+        }], index=pd.to_datetime(["2026-09-30"]))
+        af = mock.Mock()
+        af.quotes.get.return_value = pd.DataFrame([{
+            "symbol": sym, "open": 1.081, "high": 1.082, "low": 1.036,
+            "last_price": 1.038, "volume": 14495354,
+            "timestamp": _epoch(fixed), "ext": {"name": "科创芯片ETF嘉实"},
+        }])
+        # 调用真实 _fetch_af_quotes, 覆盖令牌不足而非只 mock fetch_quotes。
+        with mock.patch("market_hours.now", return_value=fixed), \
+             mock.patch("market.time.monotonic", side_effect=lambda: clock[0]), \
+             mock.patch("live_budget.time.sleep", side_effect=lambda sec: clock.__setitem__(0, clock[0] + sec)), \
+             mock.patch.object(market_mod, "_quote_budget", budget), \
+             mock.patch.object(market_mod, "_quote_interests", {"page": tuple(f"{i:06d}.SH" for i in range(200))}), \
+             mock.patch.object(market_mod, "_quote_cursor", 0), \
+             mock.patch.object(market_mod, "AF_API_KEY", "test"), \
+             mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod, "_fetch_af_quotes", wraps=_REAL_FETCH_AF_QUOTES), \
+             mock.patch.object(market_mod, "fetch_kline", return_value=(history, "ETF")), \
+             mock.patch.object(trades, "_now", return_value=fixed):
+            opened = trades.create_trade(uid, {
+                "symbol": sym, "name": "科创芯片ETF嘉实", "entry_date": "2026-09-30",
+                "entry_price": 1.1, "quantity": 100, "entry_reason": "突破买入",
+            })
+            self.assertTrue(budget.try_acquire())  # 页面刚用掉本时隙
+            closed = trades.update_trade(uid, opened["id"], {
+                "status": "closed", "exit_date": "2026-10-08",
+                "exit_price": 1.038, "exit_reason": "止盈(达到目标价)",
+            })
+
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["exit_date"], "2026-10-08")
+        self.assertEqual(closed["exit_price"], 1.038)
+        self.assertEqual(clock[0], 100.0 + budget.interval)
+        self.assertEqual(list(budget.starts), [100.0, 100.0 + budget.interval])
+        af.quotes.get.assert_called_once_with(symbols=[sym], to_dataframe=True)
+
+    def test_trade_quote_budget_timeout_does_not_call_upstream(self):
+        from live_budget import PacedBudget
+
+        clock = [100.0]
+        budget = PacedBudget(market_mod.QUOTE_RATE_PER_MIN)
+        af = mock.Mock()
+        market_mod.quote_snapshot_cache.clear()
+        with mock.patch("market.time.monotonic", side_effect=lambda: clock[0]), \
+             mock.patch("live_budget.time.sleep", side_effect=lambda sec: clock.__setitem__(0, clock[0] + sec)), \
+             mock.patch.object(market_mod, "_quote_budget", budget), \
+             mock.patch.object(market_mod, "_quote_interests", {}), \
+             mock.patch.object(market_mod, "AF_API_KEY", "test"), \
+             mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod, "_fetch_af_quotes", wraps=_REAL_FETCH_AF_QUOTES), \
+             self.assertLogs("market", level="WARNING") as logs:
+            self.assertTrue(budget.try_acquire())
+            quote = market_mod.fetch_trade_quote(SYM, timeout=0.5)
+        self.assertIsNone(quote)
+        self.assertEqual(clock[0], 100.5)
+        af.quotes.get.assert_not_called()
+        self.assertEqual(list(budget.starts), [100.0])
+        self.assertIn("成交快照额度等待超时", logs.output[0])
+
+    def test_trade_snapshot_rejection_logs_specific_reason(self):
+        cases = (
+            (None, "未取到快照"),
+            (_af_quote(ts=STAMP - 86400), "快照日期为2026-09-14"),
+            (_af_quote(low=None), "快照缺少有效最高/最低价"),
+            (_af_quote(volume=0), "快照成交量为0或无效"),
+        )
+        for quote, reason in cases:
+            with self.subTest(reason=reason), \
+                 mock.patch.object(market_mod, "fetch_trade_quote", return_value=quote), \
+                 self.assertLogs("market", level="WARNING") as logs:
+                bar = market_mod._daily_bar_from_quote(SYM, TODAY, for_trade=True)
+            self.assertIsNone(bar)
+            self.assertIn(f"symbol={SYM} date={TODAY.isoformat()} reason={reason}", logs.output[0])
 
     def test_endpoint_forwards_policy_constant(self):
         """/api/kline 必须按 TODAY_BAR_QUOTE_FRESH 透传 (开关才算真正接线)。"""

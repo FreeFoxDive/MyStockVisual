@@ -1462,7 +1462,7 @@ def _validate_price_on_bar(symbol, date_str, price, side_label, leg_prefix=""):
 
     pfx = leg_prefix or ""
     if bar is None:
-        return f"{pfx}{date_str} 无日K数据（非交易日或未上市）"
+        return f"{pfx}{date_str} 无日K数据（行情暂不可用、非交易日或未上市，请稍后重试）"
     vol = bar.get("volume") or 0
     if vol <= 0:
         return f"{pfx}{date_str} 成交量为0，疑似停牌，不能录入"

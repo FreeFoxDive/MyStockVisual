@@ -1698,6 +1698,14 @@ class TestMarketBarValidation(TradesTestCase):
                 trades.create_trade(uid, self._open(entry_date="2026-08-01"))
             self.assertIn("无日K数据", str(cm.exception))
 
+    def test_missing_bar_mentions_temporary_market_data_failure(self):
+        with mock.patch("market.get_daily_bar", return_value=None):
+            error = trades._validate_price_on_bar(
+                "588200.SH", "2026-10-08", 1.038, "卖出", "第2笔 ")
+        self.assertTrue(error.startswith("第2笔 2026-10-08 无日K数据"))
+        self.assertIn("行情暂不可用", error)
+        self.assertIn("稍后重试", error)
+
     def test_ok_within_range(self):
         uid = self._make_user()
         self._bar_patch.stop()

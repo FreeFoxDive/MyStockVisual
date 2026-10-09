@@ -134,6 +134,32 @@ class TradesApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.get_json()["error"], "记录不存在")
 
+    def test_missing_bar_validation_is_logged_before_update(self):
+        created = self._create(symbol="588200.SH", name="科创芯片ETF嘉实")
+        self.assertEqual(created.status_code, 201, created.data)
+        tid = created.get_json()["trade"]["id"]
+        error = "2026-10-08 无日K数据（行情暂不可用、非交易日或未上市，请稍后重试）"
+        with mock.patch("trades.validate_trade", return_value=error), \
+             mock.patch("trades.update_trade") as update, \
+             self.assertLogs("api", level="WARNING") as logs:
+            response = self.client.put(
+                f"/api/trades/{tid}", data=json.dumps({"status": "closed"}),
+                content_type="application/json", headers=self._csrf(self.client),
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], error)
+        update.assert_not_called()
+        self.assertIn(f"更新交易校验拒绝 id={tid} symbol=588200.SH", logs.output[0])
+        self.assertIn("2026-10-08 无日K数据", logs.output[0])
+
+    def test_create_validation_is_logged_without_notes(self):
+        with self.assertLogs("api", level="WARNING") as logs:
+            response = self._create(entry_price=0, entry_note="private-note")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("创建交易校验拒绝 symbol=600000.SH", logs.output[0])
+        self.assertIn("买入价必须大于 0", logs.output[0])
+        self.assertNotIn("private-note", logs.output[0])
+
 
 if __name__ == "__main__":
     unittest.main()

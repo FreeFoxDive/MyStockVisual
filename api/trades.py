@@ -68,6 +68,8 @@ def trades_create():
     # create_trade 仍会自行校验, 这里的 except 只兜底非校验类异常。
     err = trades.validate_trade(body)
     if err:
+        log.warning("创建交易校验拒绝 symbol=%s: %s",
+                    _sanitize_error(body.get("symbol", "")), _sanitize_error(err))
         return _error(err, 400)
     try:
         trade = trades.create_trade(user["id"], body)
@@ -90,6 +92,9 @@ def trades_update(tid):
         return _error("记录不存在", 404)
     err = trades.validate_trade(body, existing)
     if err:
+        log.warning("更新交易校验拒绝 id=%s symbol=%s: %s",
+                    tid, _sanitize_error(body.get("symbol", existing["symbol"])),
+                    _sanitize_error(err))
         return _error(err, 400)
     try:
         trade = trades.update_trade(user["id"], tid, body)
