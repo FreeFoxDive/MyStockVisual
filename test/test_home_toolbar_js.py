@@ -10,7 +10,7 @@
   * 平板周期条默认只显示 3 个周期, 翻页按真实按钮宽度而不是固定像素;
   * 平板 (触屏 或 ≤1536px) 顶栏口径: 不显示秒级时钟、入口只留图标、指标栏固定单行横向滚动
     (换行时栏高随周期在 1/2 行之间跳)、搜索框按 symbol.ex 收窄、下拉长名称限宽省略;
-  * isTabletUi / isWeeklyPlus 的判定口径 (从 index.html 抽真源码用 node 执行)。
+  * isTabletUi 的判定口径、RSI/KDJ 各周期可选 (从 index.html 抽真源码用 node 执行)。
 
 运行:
     venv/Scripts/python.exe -u visual/test/test_home_toolbar_js.py
@@ -1220,26 +1220,50 @@ process.stdout.write(JSON.stringify(cases.map(c => {
         self.assertEqual(out[:3], [None, None, None], "没显示/没宽度时回落")
         self.assertEqual(out[3], "122px", "可见时返回面板宽 + 4px")
 
-    def test_is_weekly_plus(self):
-        """周K及以上折 KDJ, 日K及以下折 RSI —— 口径不能与 isElderPeriod 混。"""
-        script = ("const ALL_PERIODS = [];\n"
-                  + _extract_fn(self.src, "isWeeklyPlus") + """
-const ps = JSON.parse(process.argv[1]);
-process.stdout.write(JSON.stringify(ps.map(p => isWeeklyPlus(p))));
-""")
-        out = self._run(script, ["1d", "1w", "1M", "intraday", "1m", "5m", "15m", "30m", "60m"])
-        self.assertEqual(out, [False, True, True, False, False, False, False, False, False])
-
-    def test_folding_direction_in_period_ui(self):
-        body = _extract_fn(self.src, "applyPeriodUI")
-        self.assertIn("const weekPlus = isWeeklyPlus(period);", body)
-        self.assertIn("lblKdj.style.display = weekPlus ? 'none' : ''", body, "周K及以上折 KDJ")
-        self.assertIn("lblRsi.style.display = weekPlus ? '' : 'none'", body, "日K及以下折 RSI")
-        # 折叠是纯显示层: 面板装配逻辑不得被周期折叠影响 (渲染保持原样)
-        self.assertNotIn("isWeeklyPlus", _extract_fn(self.src, "getIndicatorPanels"))
+    def test_rsi_kdj_available_across_period_switches(self):
+        """切周期后开关仍可用, 副图始终遵循勾选状态。"""
+        script = """
+const ALL_PERIODS = JSON.parse(process.argv[1]);
+const STATE = {};
+const els = {
+  'lbl-rsi': { style: { display: '' } },
+  'lbl-kdj': { style: { display: '' } },
+};
+globalThis.document = { getElementById: id => {
+  if (id.startsWith('chk-')) return els[id] || (els[id] = { checked: false });
+  return els[id] || null;
+} };
+function ensurePeriodVisible() {}
+function isPhoneUi() { return false; }
+function applySidePanels() {}
+function applyIndSheet() {}
+""" + "\n".join(_extract_fn(self.src, fn) for fn in (
+            "isChipPeriod", "isElderPeriod", "applyPeriodUI", "getIndicatorPanels")) + """
+const out = [];
+for (const rsi of [false, true]) {
+  for (const kdj of [false, true]) {
+    document.getElementById('chk-rsi').checked = rsi;
+    document.getElementById('chk-kdj').checked = kdj;
+    for (const period of ALL_PERIODS) {
+      applyPeriodUI(period);
+      out.push({ rsi: els['lbl-rsi'].style.display, kdj: els['lbl-kdj'].style.display,
+                 panels: getIndicatorPanels() });
+    }
+  }
+}
+process.stdout.write(JSON.stringify(out));
+"""
+        periods = ["1d", "1w", "1M", "intraday", "1m", "5m", "15m", "30m", "60m", "1d"]
+        out = self._run(script, periods)
+        expected = []
+        for rsi in (False, True):
+            for kdj in (False, True):
+                panels = (["kdj"] if kdj else []) + (["rsi"] if rsi else [])
+                expected.extend({"rsi": "", "kdj": "", "panels": panels} for _ in periods)
+        self.assertEqual(out, expected)
 
     def test_folding_applied_on_first_paint(self):
-        """不带 ?period= 直接开首页也要过一次 applyPeriodUI, 否则折叠不生效。"""
+        """不带 ?period= 直接开首页也要过一次 applyPeriodUI, 同步周期相关控件。"""
         idx = self.src.index("const jumpPeriod = bootParams.get('period');")
         seg = self.src[idx:idx + 400]
         self.assertIn("applyPeriodUI(jumpPeriod)", seg)

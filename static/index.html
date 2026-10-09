@@ -6379,12 +6379,7 @@ function applyPeriodUI(period) {
     // 内联 'none' 是硬闸门, 任何情况都不显示 (见 test_risk_lines_js 对内联/class 覆盖的说明)。
     lblGap.style.display = showGap ? '' : 'none';
   }
-  // KDJ/RSI 按周期折叠勾选框 (渲染不变): 周K及以上折 KDJ, 日K及以下折 RSI
-  const weekPlus = isWeeklyPlus(period);
-  const lblKdj = document.getElementById('lbl-kdj');
-  if (lblKdj) lblKdj.style.display = weekPlus ? 'none' : '';
-  const lblRsi = document.getElementById('lbl-rsi');
-  if (lblRsi) lblRsi.style.display = weekPlus ? '' : 'none';
+  // KDJ/RSI 开关在所有周期都可用, 副图显隐仅由用户勾选控制。
   // 筹码: 日/周/月 K
   const lblChip = document.getElementById('lbl-chip');
   if (lblChip) lblChip.style.display = isChipPeriod(period) ? '' : 'none';
@@ -6393,7 +6388,7 @@ function applyPeriodUI(period) {
   const lblDepth = document.getElementById('lbl-depth');
   if (lblDepth) lblDepth.style.display = (isPhoneUi() && period !== 'intraday') ? 'none' : '';
   applySidePanels();
-  applyIndSheet();   // 周期变了 → RSI/KDJ 折叠变化, 副图计数与浮层分组要跟着重算
+  applyIndSheet();   // 周期变了 → 副图计数与浮层分组要跟着重算
 }
 
 function switchPeriod(period) {
@@ -6422,12 +6417,6 @@ function isChipPeriod(p) {
 /** Elder 通道 (EMA13±ATR) 与动力系统 (EMA13+MACD柱): 日/周/月K 适用 */
 function isElderPeriod(p) {
   return p === '1d' || p === '1w' || p === '1M';
-}
-
-/** 周K及以上 (周/月K)。注意与 isElderPeriod 不同: 它含日K。
- *  面板栏据此折叠勾选框 —— 周K及以上折 KDJ (日K及以下折 RSI)。 */
-function isWeeklyPlus(p) {
-  return p === '1w' || p === '1M';
 }
 
 function onIndicatorChange() {
@@ -8943,7 +8932,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   const jumpPeriod = bootParams.get('period');
   if (jumpPeriod && ALL_PERIODS.includes(jumpPeriod)) applyPeriodUI(jumpPeriod);
-  else applyPeriodUI(STATE.period);   // 首屏也要过一次: 面板栏的周期折叠 (RSI/KDJ) 靠它落地
+  else applyPeriodUI(STATE.period);   // 首屏也同步周期相关控件的显隐
   syncSymbolUrl(true); // 规范化入口 URL, 浏览器返回键可回溯历史股票
 
   // 浏览器返回/前进: 回到上一只/下一只股票 (对标 TradingView), 周期同样跟随

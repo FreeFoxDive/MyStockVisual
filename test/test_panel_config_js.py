@@ -107,22 +107,18 @@ class PanelBarStaticTest(unittest.TestCase):
         self.assertIn("chk-gap", self.src)
         self.assertIn("chk-patterns", self.src)
 
-    def test_rsi_kdj_folded_by_period(self):
-        """周K及以上折 KDJ、日K及以下折 RSI (只折勾选框)。"""
+    def test_rsi_kdj_controls_always_available(self):
+        """RSI/KDJ 是常驻开关, 不能被周期或「更多」收起。"""
         for anchor in ('id="lbl-kdj"', 'id="lbl-rsi"'):
             i = self.src.index(anchor)
             head = self.src[self.src.rindex("<label", 0, i):i]
             self.assertNotIn(">", head, f"{anchor} 必须是 label 起始标签上的 id")
-            # 折叠靠内联 display, 不能同时挂 extra-ind (两套显隐会互相覆盖)
             tag = self.src[self.src.rindex("<label", 0, i):self.src.index(">", i)]
             self.assertNotIn("extra-ind", tag)
+            self.assertNotIn("display:none", tag)
         body = _extract_fn(self.src, "applyPeriodUI")
-        self.assertIn("weekPlus", body)
-        self.assertIn("isWeeklyPlus(period)", body)
-        helper = _extract_fn(self.src, "isWeeklyPlus")
-        self.assertIn("'1w'", helper)
-        self.assertIn("'1M'", helper)
-        self.assertNotIn("'1d'", helper, "日K及以下折 RSI, 不能把日K算进「周K及以上」")
+        self.assertNotIn("lbl-rsi", body)
+        self.assertNotIn("lbl-kdj", body)
 
     def test_config_functions_wired(self):
         save = _extract_fn(self.src, "saveConfig")
