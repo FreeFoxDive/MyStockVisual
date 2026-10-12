@@ -208,18 +208,19 @@ def get_mr():
 
 
 # ── 静态列表缓存 (指数/股票/港美股: 内存 + 磁盘, 24h TTL, 用到时刷新) ──
-# 静态信息变化缓慢, 一天一更新即可。取用顺序: 内存新鲜 → 直接返回; 否则读磁盘
-# (正常重启零联网); 磁盘也过期/缺失才在锁内同步刷新一次 (single-flight, 无后台线程)。
+# 静态信息变化缓慢, 一天一更新即可。内存/磁盘有旧版就立即返回, 过期后台刷新。
+# 请求路径用 nonblocking=True: 无旧版也只启动后台刷新, 不等待全市场名称列表。
 # 刷新失败保留旧数据并退避 STATIC_LIST_RETRY_DELAY, 避免每个请求都阻塞重试。
 STATIC_LIST_TTL = 24 * 3600
 STATIC_LIST_RETRY_DELAY = 300.0
 
 
 class _StaticListCache:
-    """静态列表的 内存+磁盘 缓存 (24h TTL, 用到时同步刷新)。
+    """静态列表的 内存+磁盘 缓存 (24h TTL, 旧版可用时后台刷新)。
 
     fetcher() 返回非空 list 视为成功; 空/异常视为失败 (保留旧数据)。
     磁盘格式 {"rows": [...], "ts": ...}, 原子写 (临时文件 + replace)。
+    读侧直接读取快照引用; 写侧独立串行刷新, 完成后一次替换快照。
     """
 
     def __init__(self, name, path, fetcher, ttl=STATIC_LIST_TTL,
@@ -229,16 +230,15 @@ class _StaticListCache:
         self.fetcher = fetcher
         self.ttl = ttl
         self.retry_delay = retry_delay
-        self._lock = threading.Lock()
-        self._data = None
-        self._ts = 0.0
+        self._lock = threading.Lock()          # 仅发布快照; 不做网络/磁盘 I/O
+        self._refresh_lock = threading.Lock()  # 写侧 single-flight; 读侧不等待
+        self._snapshot = (None, 0.0)           # rows + ts 一次替换, 读取同一版本
         self._fail_at = 0.0
-        self._refreshing = False
 
     @property
     def ts(self):
         """当前内存数据的时间戳 (0 = 无可用数据)。"""
-        return self._ts
+        return self._snapshot[1]
 
     def _read_disk(self):
         """读磁盘缓存, 返回 (rows, ts); 失败/无则 (None, 0)。"""
@@ -264,70 +264,84 @@ class _StaticListCache:
 
     def _cached(self):
         """内存/磁盘里的旧值 (不联网): 内存优先, 其次磁盘。"""
-        if self._data is not None:
-            return self._data, self._ts
+        snapshot = self._snapshot
+        if snapshot[0] is not None:
+            return snapshot
+        # 冷启动可独立读取原子落盘的旧目录, 不等另一个读盘线程, 也不能把
+        # “正在加载”当成“没有目录”; 后者会让指数被误路由成股票并触发多余联网。
         rows, ts = self._read_disk()
         if rows:
-            self._data, self._ts = rows, ts
-        return rows, ts
+            with self._lock:
+                # 慢读盘不能覆盖已经发布的新版本。
+                if self._snapshot[0] is None:
+                    self._snapshot = (rows, ts)
+        return self._snapshot
 
-    def get(self):
-        """取静态列表; 有旧版时立即返回并后台刷新。永不抛异常。"""
-        now = time.time()
-        if self._data is not None and now - self._ts < self.ttl:
-            return self._data
+    def get(self, nonblocking=False):
+        """取静态列表; 有旧版时立即返回, nonblocking 时冷启动也不等待。"""
+        return self.get_snapshot(nonblocking=nonblocking)[0] or []
 
+    def get_snapshot(self, nonblocking=False):
+        """读侧不获取刷新锁; rows 与版本时间戳来自同一个快照。"""
         rows, ts = self._cached()
-        if rows and now - ts < self.ttl:
-            return rows
+        if rows and time.time() - ts < self.ttl:
+            return rows, ts
 
         # 旧目录仍可用于搜索；刷新决不能卡在用户请求上。
-        if rows:
+        if rows or nonblocking:
             self._schedule_refresh()
-            return rows
+            return rows, ts
 
-        return self._refresh()
+        self._refresh()
+        return self._snapshot
 
     def _schedule_refresh(self):
-        with self._lock:
-            now = time.time()
-            if self._refreshing or (self._fail_at and now - self._fail_at < self.retry_delay):
-                return
-            self._refreshing = True
-        threading.Thread(target=self._refresh_in_background, daemon=True).start()
+        rows, ts = self._snapshot
+        now = time.time()
+        if (rows and now - ts < self.ttl) or (self._fail_at and now - self._fail_at < self.retry_delay):
+            return
+        if not self._refresh_lock.acquire(blocking=False):
+            return
+        try:
+            threading.Thread(target=self._refresh_in_background, daemon=True).start()
+        except Exception as e:
+            self._refresh_lock.release()
+            log.warning(f"启动{self.name}后台刷新失败: {redact_message(e)}")
 
     def _refresh_in_background(self):
         try:
-            self._refresh()
+            self._refresh_locked()
         finally:
-            with self._lock:
-                self._refreshing = False
+            self._refresh_lock.release()
 
     def _refresh(self):
         """Refresh synchronously only when no usable cache exists."""
-        rows, ts = self._cached()
+        with self._refresh_lock:
+            return self._refresh_locked()
 
+    def _refresh_locked(self):
+        """写侧串行取数/落盘; 网络与磁盘慢操作不持快照发布锁。"""
+        rows, ts = self._cached()
+        now = time.time()
+        if rows and now - ts < self.ttl:
+            return rows
+        if self._fail_at and now - self._fail_at < self.retry_delay:
+            return rows or []
+        try:
+            fresh = self.fetcher()
+        except Exception as e:
+            log.warning(f"刷新{self.name}失败: {redact_message(e)}")
+            fresh = None
+        if not fresh:
+            self._fail_at = time.time()
+            return self._snapshot[0] or []
+        ts = time.time()
+        self._write_disk(fresh, ts)
         with self._lock:
-            now = time.time()
-            if self._data is not None and now - self._ts < self.ttl:
-                return self._data
-            if self._fail_at and now - self._fail_at < self.retry_delay:
-                return self._data or rows or []
-            try:
-                fresh = self.fetcher()
-            except Exception as e:
-                log.warning(f"刷新{self.name}失败: {redact_message(e)}")
-                fresh = None
-            if not fresh:
-                self._fail_at = now
-                if self._data is None and rows:
-                    self._data, self._ts = rows, ts
-                return self._data or []
-            ts = time.time()
-            self._data, self._ts, self._fail_at = fresh, ts, 0.0
-            self._write_disk(fresh, ts)
-            log.info(f"已加载{self.name}: {len(fresh)} 条")
-            return fresh
+            self._snapshot = (fresh, ts)
+            self._fail_at = 0.0
+        log.info(f"已加载{self.name}: {len(fresh)} 条")
+        return fresh
 
 
 # ── 麦蕊额度查询 (抓官方证书查询页, 麦蕊无额度 API) ──
@@ -449,31 +463,43 @@ def _index_rows_to_cache(rows):
     return (symbols, names) if symbols else (None, None)
 
 
+def _index_rows_to_symbols(rows):
+    """名称映射尚未派生时, 仅凭原始目录判断类别, 不等待名称构建锁。"""
+    symbols = set()
+    for row in rows or []:
+        if isinstance(row, dict):
+            symbol = str(row.get("dm", "")).strip().upper()
+            if symbol:
+                symbols.add(symbol)
+    return symbols
+
+
 def _load_index_cache(nonblocking=False):
     """沪深指数列表 (symbol 集合 + symbol→名称)。
 
-    底层 _index_cache 是 24h 磁盘缓存: 正常重启零联网, 过期才同步刷新一次。
+    底层 _index_cache 是 24h 磁盘缓存: 正常重启零联网, 过期返回旧版并后台刷新。
     派生结果按缓存版本 (_index_cache.ts) 记忆, _is_index_symbol 热路径零开销。
     返回空集合 = 未知 (既不能确认是指数, 也不能确认不是); 空集合不固化 ——
     固化会让进程内所有指数都被当股票路由 (index_history → stock_history)。
     """
     global _index_symbols, _index_names, _index_derived_ts
     # 请求路径只需要一个尽力而为的指数判断；冷启动无磁盘缓存时不要同步等待
-    # AkShare 港股指数重试（可能几十秒），改为后台刷新，当前请求按普通标的继续。
-    if nonblocking and _index_cache._data is None:
-        rows, disk_ts = _index_cache._cached()
-        if not rows:
-            _index_cache._schedule_refresh()
-            return _index_symbols if _index_symbols is not None else set()
-    rows = _index_cache.get()
-    ts = _index_cache.ts
-    if rows and ts != _index_derived_ts:
-        with _index_lock:
-            if ts != _index_derived_ts:
+    # AkShare 港股指数重试（可能几十秒），改为后台刷新。
+    rows, ts = _index_cache.get_snapshot(nonblocking=nonblocking)
+    if rows and (_index_derived_ts is None or ts > _index_derived_ts):
+        if _index_lock.acquire(blocking=False):
+            try:
+                if _index_derived_ts is not None and ts <= _index_derived_ts:
+                    return _index_symbols if _index_symbols is not None else set()
                 symbols, names = _index_rows_to_cache(rows)
                 if symbols:
                     _index_symbols, _index_names = symbols, names
                 _index_derived_ts = ts
+            finally:
+                _index_lock.release()
+    if _index_symbols is None and rows:
+        # 已有目录但首次名称派生正在进行: 类别判断可直接用代码集合, 名称先回落代码。
+        return _index_rows_to_symbols(rows)
     return _index_symbols if _index_symbols is not None else set()
 
 
@@ -491,13 +517,17 @@ def _lookup_name(symbol):
     if _is_index_symbol(symbol):
         return _index_names.get(symbol, symbol)
     global _name_map, _name_map_ts
-    if _name_map is None or _stock_list_time > _name_map_ts:
-        with _name_map_lock:
-            if _name_map is None or _stock_list_time > _name_map_ts:
-                stocks = _load_stock_list()
-                if stocks:
+    # 名称只是行情的附加信息: 冷启动也不能在名称映射锁内同步拉全市场列表。
+    # 每次读缓存版本, 使后台刷新完成后无需等搜索/预热便能显示新名称。
+    stocks, ts = _stock_cache.get_snapshot(nonblocking=True)
+    if stocks and (_name_map is None or ts > _name_map_ts):
+        if _name_map_lock.acquire(blocking=False):
+            try:
+                if _name_map is None or ts > _name_map_ts:
                     _name_map = {s["symbol"]: s["name"] for s in stocks}
-                    _name_map_ts = _stock_list_time or time.time()
+                    _name_map_ts = ts
+            finally:
+                _name_map_lock.release()
     return (_name_map or {}).get(symbol, symbol)
 
 
@@ -2285,16 +2315,16 @@ def _fetch_stock_list():
 _stock_cache = _StaticListCache("股票列表", STOCK_LIST_FILE, lambda: _fetch_stock_list())
 
 
-def _load_stock_list():
-    """全量A股+ETF列表 (内存 + 磁盘, 24h TTL, 用到时同步刷新)。
+def _load_stock_list(nonblocking=False):
+    """全量A股+ETF列表 (内存 + 磁盘, 24h TTL, 过期后台刷新)。
 
     正常重启零联网 (磁盘缓存直接命中); 过期才刷新一次, 失败保留旧数据并退避
     STATIC_LIST_RETRY_DELAY。app.py 启动时会另起线程调用本函数预热。
     """
     global _stock_list, _stock_list_time
-    _stock_list = _stock_cache.get()
-    _stock_list_time = _stock_cache.ts
-    return _stock_list
+    rows, ts = _stock_cache.get_snapshot(nonblocking=nonblocking)
+    _stock_list, _stock_list_time = rows or [], ts
+    return rows or []
 
 
 _HK_LIST_FILE = SCRIPT_DIR / ".cache" / "hk_list.json"
@@ -2407,14 +2437,14 @@ _hk_cache = _StaticListCache("港股列表", _HK_LIST_FILE, lambda: _fetch_hk_li
 _us_cache = _StaticListCache("美股列表", _US_LIST_FILE, lambda: _fetch_us_list())
 
 
-def _load_universe(attr):
-    """港/美股列表 (内存 + 磁盘, 24h TTL, 用到时同步刷新); 取不到返回 []。"""
+def _load_universe(attr, nonblocking=False):
+    """港/美股列表 (内存 + 磁盘, 24h TTL, 过期后台刷新); 取不到返回 []。"""
     cache = _hk_cache if attr == "hk" else _us_cache
     if not AKSHARE_HKUS_LIST_ENABLED and _hkus_universe_perm_denied:
         # 当前账号未开通 AlphaFeed universe，且 akshare 列表默认关闭：只读已有快照。
         rows, _ = cache._cached()
         return rows or []
-    return cache.get()
+    return cache.get(nonblocking=nonblocking)
 
 
 SEARCH_MAX_RESULTS = 50           # 下拉返回上限 (前端一屏约 18 条, 可滚动)
@@ -2468,11 +2498,12 @@ def _search_catalog_status():
                               ("index", "沪深指数", _index_cache),
                               ("hk", "港股", _hk_cache),
                               ("us", "美股", _us_cache)):
-        available = bool(cache._data)
+        rows, ts = cache._snapshot
+        available = bool(rows)
         sources.append({"key": key, "label": label,
-                        "updated_at": cache.ts if available else None,
+                        "updated_at": ts if available else None,
                         "state": "unavailable" if not available else
-                                 "stale" if now - cache.ts >= cache.ttl else "ready",
+                                 "stale" if now - ts >= cache.ttl else "ready",
                         "refresh_failed": bool(cache._fail_at)})
     index_ts = search_index.index_timestamp(SEARCH_INDEX_FILE)
     return {"sources": sources,
@@ -2566,18 +2597,18 @@ def _search_stocks(query):
     # 只有按完整 symbol 的精确/前缀查询才稳。
     if not indexed and keys[0] != str(query or "").strip().lower():
         indexed = search_index.search(SEARCH_INDEX_FILE, keys[0], limit=SEARCH_CANDIDATES)
-    stocks = indexed if indexed else _load_stock_list()
+    stocks = indexed if indexed else _load_stock_list(nonblocking=True)
     universe = [{"symbol": s["symbol"], "name": s["name"], "code": s["code"],
                  "type": s.get("type") if indexed and s.get("type") else
                          ("etf" if _is_etf(s["symbol"]) else "stock")} for s in stocks]
     if not indexed:
-        _load_index_cache()
+        _load_index_cache(nonblocking=True)
     if not indexed and _index_names:
         for sym, name in _index_names.items():
             universe.append({"symbol": sym, "name": name,
                              "code": sym.split(".")[0], "type": "index"})
-    hk_rows = [] if indexed else _load_universe("hk")
-    us_rows = [] if indexed else _load_universe("us")
+    hk_rows = [] if indexed else _load_universe("hk", nonblocking=True)
+    us_rows = [] if indexed else _load_universe("us", nonblocking=True)
     universe.extend(hk_rows)
     universe.extend(us_rows)
 

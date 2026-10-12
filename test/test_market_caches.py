@@ -2,8 +2,9 @@
 """market.py 缓存健壮性回归测试 (离线, 全 mock)。
 
 覆盖:
-- _load_index_cache: 24h 磁盘缓存命中零联网; 过期同步刷新并落盘; 失败不固化空集合并退避
+- _load_index_cache: 24h 磁盘缓存命中零联网; 失败不固化空集合并退避
 - _lookup_name 跟随股票列表刷新重建 (新股/更名不再固化到进程退出)
+- 名称列表刷新期间或冷启动无缓存时, K线请求不等待名称索引
 
 运行:
     venv/Scripts/python.exe -u visual/test/test_market_caches.py
@@ -13,11 +14,14 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import pandas as pd
 
 _VISUAL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _VISUAL_DIR not in sys.path:
@@ -86,43 +90,242 @@ class IndexCacheTest(unittest.TestCase):
             self.assertEqual(market._load_index_cache(), set())
         self.assertEqual(len(calls), 1)
 
+    def test_reads_old_index_set_while_another_thread_builds_new_set(self):
+        self._new_cache()
+        market._index_symbols = {"000001.SH"}
+        market._index_names = {"000001.SH": "上证指数"}
+        market._index_derived_ts = 100.0
+        results = []
+        with mock.patch.object(market._index_cache, "get_snapshot", return_value=(
+                [{"dm": "399001.sz", "mc": "深证成指"}], 200.0)):
+            market._index_lock.acquire()
+            reader = threading.Thread(target=lambda: results.append(market._load_index_cache(nonblocking=True)))
+            reader.start()
+            try:
+                reader.join(1)
+                self.assertFalse(reader.is_alive(), "指数目录构建不能阻塞旧版读取")
+                self.assertEqual(results, [{"000001.SH"}])
+                self.assertEqual(market._index_names, {"000001.SH": "上证指数"})
+            finally:
+                market._index_lock.release()
+                reader.join(2)
+            self.assertEqual(market._load_index_cache(nonblocking=True), {"399001.SZ"})
+            self.assertEqual(market._index_names, {"399001.SZ": "深证成指"})
+
+    def _assert_index_routes(self):
+        self.assertEqual(market._kline_category("000001.SH", "1d"), "index")
+        api = mock.Mock()
+        api.index_history.return_value = [{"t": day, "o": 3000, "h": 3020,
+                                          "l": 2990, "c": 3010, "v": 1000}
+                                         for day in ("2026-09-14", "2026-09-15", "2026-09-16",
+                                                     "2026-09-17", "2026-09-18")]
+        api.index_real_time.return_value = {"p": 3010, "yc": 3000, "o": 3000,
+                                           "h": 3020, "l": 2990, "v": 1000}
+        with mock.patch.object(market, "get_mr", return_value=api), \
+             mock.patch.object(market, "_fetch_af_quotes", return_value={}), \
+             mock.patch.object(market, "_mr_quote_budget") as budget, \
+             mock.patch.object(market.market_hours, "is_live", return_value=True), \
+             mock.patch.object(market, "_live_info_for_quote", return_value={}), \
+             mock.patch.object(market, "quote_cache", market.TTLCache(60)), \
+             mock.patch.object(market, "quote_snapshot_cache", market.TTLCache(60)):
+            budget.try_acquire.return_value = True
+            self.assertIsNotNone(market._fetch_mr_kline("000001.SH", "1d", 5))
+            out = market._fetch_quotes_locked(["000001.SH"], fresh=True)
+        api.index_history.assert_called_once_with("000001.SH", "d", lt=5)
+        api.stock_history.assert_not_called()
+        api.index_real_time.assert_called_once_with("000001.SH")
+        api.stock_ssjy_more.assert_not_called()
+        self.assertEqual(out["000001.SH"]["last_price"], 3010)
+
+    def _assert_routes_without_waiting(self, release):
+        errors = []
+
+        def request():
+            try:
+                self._assert_index_routes()
+            except Exception as e:
+                errors.append(e)
+
+        reader = threading.Thread(target=request)
+        reader.start()
+        try:
+            reader.join(1)
+            self.assertFalse(reader.is_alive(), "指数取数不能等待名称预热完成")
+            self.assertEqual(errors, [])
+        finally:
+            release.set()
+            reader.join(2)
+
+    def test_valid_disk_catalog_routes_index_during_first_disk_load(self):
+        self._path.write_text(json.dumps({"rows": [{"dm": "000001.sh", "mc": "上证指数"}],
+                                          "ts": time.time()}), encoding="utf-8")
+        self._new_cache()
+        entered, release = threading.Event(), threading.Event()
+        cache = market._index_cache
+        cache.fetcher = mock.Mock(return_value=[])
+        read_disk = cache._read_disk
+
+        def slow_warmup_read():
+            if threading.current_thread() is loader:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("test warmup timed out")
+            return read_disk()
+
+        with mock.patch.object(cache, "_read_disk", side_effect=slow_warmup_read), \
+             mock.patch.object(cache, "_schedule_refresh") as schedule:
+            loader = threading.Thread(target=cache._cached)
+            loader.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self._assert_routes_without_waiting(release)
+                schedule.assert_not_called()
+            finally:
+                release.set()
+                loader.join(2)
+        cache.fetcher.assert_not_called()
+
+    def test_raw_catalog_routes_index_during_first_name_map_build(self):
+        self._new_cache()
+        market._index_cache._snapshot = ([{"dm": "000001.sh", "mc": "上证指数"}], time.time())
+        entered, release = threading.Event(), threading.Event()
+        derive = market._index_rows_to_cache
+
+        def slow_warmup_derive(rows):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test derive timed out")
+            return derive(rows)
+
+        with mock.patch.object(market, "_index_rows_to_cache", side_effect=slow_warmup_derive):
+            loader = threading.Thread(target=market._load_index_cache)
+            loader.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self._assert_routes_without_waiting(release)
+            finally:
+                release.set()
+                loader.join(2)
+        self.assertEqual(market._index_names, {"000001.SH": "上证指数"})
+
 
 class NameMapRefreshTest(unittest.TestCase):
     def setUp(self):
-        self._orig = (market._name_map, market._name_map_ts, market._stock_list_time)
+        self._orig = (market._name_map, market._name_map_ts)
         market._name_map = None
         market._name_map_ts = 0.0
-        market._stock_list_time = 100.0
         self.addCleanup(self._restore)
 
     def _restore(self):
-        market._name_map, market._name_map_ts, market._stock_list_time = self._orig
+        market._name_map, market._name_map_ts = self._orig
 
     def test_follows_stock_list_refresh(self):
         with mock.patch.object(
-            market, "_load_stock_list", side_effect=[
-                [{"symbol": "600000.SH", "name": "浦发银行"}],
-                [{"symbol": "600000.SH", "name": "浦发新名"}],
+            market._stock_cache, "get_snapshot", side_effect=[
+                ([{"symbol": "600000.SH", "name": "浦发银行"}], 100.0),
+                ([{"symbol": "600000.SH", "name": "浦发新名"}], 200.0),
             ],
         ), mock.patch.object(market, "_is_index_symbol", return_value=False):
             self.assertEqual(market._lookup_name("600000.SH"), "浦发银行")
             self.assertEqual(market._name_map_ts, 100.0)
             # 股票列表后台刷新 (时间戳前进) → 名称映射重建
-            market._stock_list_time = 200.0
+            self.assertEqual(market._lookup_name("600000.SH"), "浦发新名")
+            self.assertEqual(market._name_map_ts, 200.0)
+
+    def test_reads_old_map_while_another_thread_builds_new_map(self):
+        market._name_map = {"600000.SH": "浦发银行"}
+        market._name_map_ts = 100.0
+        results = []
+        with mock.patch.object(market._stock_cache, "get_snapshot", return_value=(
+                [{"symbol": "600000.SH", "name": "浦发新名"}], 200.0)), \
+             mock.patch.object(market, "_is_index_symbol", return_value=False):
+            market._name_map_lock.acquire()
+            reader = threading.Thread(target=lambda: results.append(market._lookup_name("600000.SH")))
+            reader.start()
+            try:
+                reader.join(1)
+                self.assertFalse(reader.is_alive(), "名称映射构建不能阻塞旧版读取")
+                self.assertEqual(results, ["浦发银行"])
+            finally:
+                market._name_map_lock.release()
+                reader.join(2)
             self.assertEqual(market._lookup_name("600000.SH"), "浦发新名")
             self.assertEqual(market._name_map_ts, 200.0)
 
     def test_empty_list_does_not_cache(self):
         with mock.patch.object(
-            market, "_load_stock_list", side_effect=[
-                [],
-                [{"symbol": "600000.SH", "name": "浦发银行"}],
+            market._stock_cache, "get_snapshot", side_effect=[
+                ([], 0.0),
+                ([{"symbol": "600000.SH", "name": "浦发银行"}], 100.0),
             ],
         ), mock.patch.object(market, "_is_index_symbol", return_value=False):
             # 首拉失败 (空列表): 不缓存, 后续调用重试直到成功
             self.assertEqual(market._lookup_name("600000.SH"), "600000.SH")
             self.assertIsNone(market._name_map)
             self.assertEqual(market._lookup_name("600000.SH"), "浦发银行")
+
+
+class KlineNameLatencyTest(unittest.TestCase):
+    def _check_kline_without_waiting_for_names(self, cached):
+        with tempfile.TemporaryDirectory() as d:
+            stock_cache = market._StaticListCache("股票列表", Path(d) / "stock.json", mock.Mock())
+            index_cache = market._StaticListCache("指数列表", Path(d) / "index.json", mock.Mock())
+            if cached:
+                stock_cache._snapshot = ([
+                    {"symbol": "600000.SH", "name": "浦发银行", "code": "600000"},
+                    {"symbol": "510300.SH", "name": "沪深300ETF", "code": "510300"},
+                ], 0.0)
+                index_cache._snapshot = ([{"dm": "000001.sh", "mc": "上证指数"}], 0.0)
+            df = pd.DataFrame({"open": [10.0], "high": [11.0], "low": [9.0],
+                               "close": [10.5], "volume": [1000]},
+                              index=pd.to_datetime(["2026-09-18"]))
+            disk = mock.Mock()
+            disk.get.return_value = None
+            returned = threading.Event()
+            results, errors = [], []
+
+            def request():
+                try:
+                    for symbol in ("600000.SH", "510300.SH", "000001.SH"):
+                        results.append(market.fetch_kline_ex(symbol, "1d", 1)[1])
+                except Exception as e:
+                    errors.append(e)
+                finally:
+                    returned.set()
+
+            # 模拟两个名称列表都在联网刷新并持锁, 不触碰真实上游。
+            stock_cache._refresh_lock.acquire()
+            index_cache._refresh_lock.acquire()
+            with mock.patch.multiple(market, _stock_cache=stock_cache, _index_cache=index_cache,
+                                     _name_map=None, _name_map_ts=0.0,
+                                     _stock_list=None, _stock_list_time=0.0,
+                                     _index_symbols=None, _index_names={}, _index_derived_ts=None,
+                                     _disk_cache=disk), \
+                 mock.patch.object(market.kline_source, "fetch_kline_df", return_value=(df, "test")) as fetch, \
+                 mock.patch.object(market.market_hours, "is_live", return_value=False), \
+                 mock.patch.object(market, "_maybe_append_today_bar", return_value=df), \
+                 mock.patch.object(market, "_strip_today_bar_df", return_value=df):
+                reader = threading.Thread(target=request)
+                reader.start()
+                try:
+                    self.assertTrue(returned.wait(1), "K线不能等待全市场名称刷新")
+                    self.assertEqual(errors, [])
+                    self.assertEqual(results, ["浦发银行", "沪深300ETF", "上证指数"] if cached else
+                                     ["600000.SH", "510300.SH", "000001.SH"])
+                    self.assertEqual([c.args[0] for c in fetch.call_args_list],
+                                     ["stock", "fund", "index" if cached else "stock"])
+                    stock_cache.fetcher.assert_not_called()
+                    index_cache.fetcher.assert_not_called()
+                finally:
+                    stock_cache._refresh_lock.release()
+                    index_cache._refresh_lock.release()
+                    reader.join(2)
+
+    def test_kline_uses_old_stock_etf_and_index_names_during_refresh(self):
+        self._check_kline_without_waiting_for_names(cached=True)
+
+    def test_kline_returns_codes_when_no_name_cache_exists(self):
+        self._check_kline_without_waiting_for_names(cached=False)
 
 
 class DiskCacheAtomicWriteTest(unittest.TestCase):

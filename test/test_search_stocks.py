@@ -38,7 +38,7 @@ def _env(stocks, indices=None, hk=None, us=None, indexed=None):
     —— 真实链路里 search_index 对完整代码 (000070.SZ) 会精确命中并只返回那一行。
     """
 
-    def _universe(attr):
+    def _universe(attr, nonblocking=False):
         return list(hk or []) if attr == "hk" else list(us or [])
 
     with mock.patch.object(market, "_load_stock_list", return_value=list(stocks)), \

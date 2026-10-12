@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -111,6 +112,148 @@ class StaticListCacheTest(unittest.TestCase):
         c = self._cache(mock.Mock())
         c.get()
         self.assertEqual(c.ts, ts)
+
+    def _check_read_during_refresh(self, rows, nonblocking=False):
+        """Hold the upstream fetch open; reads must finish before it is released."""
+        entered, release, returned = (threading.Event() for _ in range(3))
+        fresh = [{"new": 1}]
+
+        def fetch():
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test fetch timed out")
+            return fresh
+
+        c = self._cache(mock.Mock(side_effect=fetch))
+        if rows:
+            self._write(rows, 0)
+        worker = threading.Thread(target=c._refresh)
+        result = []
+
+        def read():
+            try:
+                result.extend([c.get(nonblocking=nonblocking) for _ in range(3)])
+            finally:
+                returned.set()
+
+        worker.start()
+        reader = threading.Thread(target=read)
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(c._lock.acquire(blocking=False), "upstream fetch must not hold the publish lock")
+            c._lock.release()
+            reader.start()
+            self.assertTrue(returned.wait(1), "reading old names must not wait for the fetch lock")
+            self.assertEqual(result, [rows] * 3)
+            c.fetcher.assert_called_once()
+        finally:
+            release.set()
+            worker.join(2)
+            if reader.ident is not None:
+                reader.join(2)
+        self.assertEqual(c.get(), fresh)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["rows"], fresh)
+
+    def test_stale_names_remain_readable_while_refresh_holds_lock(self):
+        self._check_read_during_refresh([{"old": 1}])
+
+    def test_cold_nonblocking_read_does_not_wait_for_inflight_fetch(self):
+        self._check_read_during_refresh([], nonblocking=True)
+
+    def test_cold_nonblocking_read_schedules_refresh(self):
+        c = self._cache(mock.Mock(return_value=[{"new": 1}]))
+        with mock.patch.object(c, "_schedule_refresh") as schedule:
+            self.assertEqual(c.get(nonblocking=True), [])
+        schedule.assert_called_once()
+        c.fetcher.assert_not_called()
+
+    def test_slow_disk_write_keeps_old_snapshot_readable(self):
+        entered, release = threading.Event(), threading.Event()
+        old, fresh = [{"old": 1}], [{"new": 1}]
+        c = self._cache(mock.Mock(return_value=fresh))
+        c._snapshot = (old, 1.0)
+
+        def write(rows, ts):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test write timed out")
+
+        with mock.patch.object(c, "_write_disk", side_effect=write):
+            worker = threading.Thread(target=c._refresh)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(c._lock.acquire(blocking=False), "disk write must not hold the publish lock")
+                c._lock.release()
+                for _ in range(20):
+                    self.assertEqual(c.get_snapshot(nonblocking=True), (old, 1.0))
+                c.fetcher.assert_called_once()
+            finally:
+                release.set()
+                worker.join(2)
+        self.assertEqual(c.get(), fresh)
+
+    def test_slow_disk_reader_cannot_overwrite_new_snapshot(self):
+        entered, release = threading.Event(), threading.Event()
+        fresh = [{"new": 1}]
+        c = self._cache(mock.Mock(return_value=fresh))
+        results = []
+
+        def read_disk():
+            if threading.current_thread() is reader:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("test disk read timed out")
+                return [{"old": 1}], 1.0
+            return None, 0.0
+
+        with mock.patch.object(c, "_read_disk", side_effect=read_disk), \
+             mock.patch.object(c, "_write_disk"):
+            reader = threading.Thread(target=lambda: results.append(c._cached()))
+            reader.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(c._refresh(), fresh)
+                published = c._snapshot
+            finally:
+                release.set()
+                reader.join(2)
+        self.assertEqual(results, [published])
+        self.assertEqual(c._snapshot, published)
+
+    def test_simultaneous_cold_requests_start_only_one_background_fetch(self):
+        entered, release, done = (threading.Event() for _ in range(3))
+
+        def fetch():
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test fetch timed out")
+            return [{"new": 1}]
+
+        c = self._cache(mock.Mock(side_effect=fetch))
+        background = c._refresh_in_background
+
+        def run():
+            try:
+                background()
+            finally:
+                done.set()
+
+        with mock.patch.object(c, "_refresh_in_background", side_effect=run) as worker:
+            readers = [threading.Thread(target=lambda: c.get(nonblocking=True)) for _ in range(10)]
+            try:
+                for reader in readers:
+                    reader.start()
+                for reader in readers:
+                    reader.join(1)
+                    self.assertFalse(reader.is_alive(), "cold requests must not wait for each other")
+                self.assertTrue(entered.wait(1))
+                worker.assert_called_once()
+                c.fetcher.assert_called_once()
+            finally:
+                release.set()
+                self.assertTrue(done.wait(2))
+        self.assertEqual(c.get(), [{"new": 1}])
 
 
 if __name__ == "__main__":
