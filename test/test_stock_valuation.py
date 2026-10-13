@@ -1,5 +1,6 @@
 """信息栏估值: 按股 30 分钟缓存、交易时段门禁、落盘及失败保留旧值。"""
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -50,6 +51,86 @@ class StockValuationTest(unittest.TestCase):
 
     def _epoch(self):
         return self.clock.replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+
+    def test_invalid_stock_keys_never_access_files_or_upstream(self):
+        keys = ("../002472", "..\\002472", "/tmp/002472", "C:\\tmp\\002472",
+                "\\\\server\\share\\002472", str(self.root / "002472"),
+                "002472/extra", "002472:stream", "002472\x00", "002472\n",
+                "００２４７２", "٠٠٢٤٧٢", "", None, 2472)
+        with mock.patch.object(Path, "read_text") as read, \
+             mock.patch.object(Path, "mkdir") as mkdir, \
+             mock.patch.object(Path, "write_text") as write, \
+             mock.patch.object(Path, "replace") as replace, \
+             mock.patch.object(Path, "unlink") as unlink:
+            for key in keys:
+                with self.subTest(key=key):
+                    self.assertIsNone(market._read_mr_stock_valuation(key)["data"])
+                    for refresh in (True, False):
+                        self.assertIsNone(market._mr_stock_valuation(key, refresh=refresh))
+                    market._write_mr_valuation_cache(key, {"data": "untrusted"})
+            for operation in (read, mkdir, write, replace, unlink):
+                operation.assert_not_called()
+        self.mr.stock_ssjy_more.assert_not_called()
+        self.budget.acquire.assert_not_called()
+
+    def test_invalid_ranking_keys_never_access_files_or_upstream(self):
+        with mock.patch.object(Path, "read_text") as read, \
+             mock.patch.object(Path, "mkdir") as mkdir, \
+             mock.patch.object(Path, "write_text") as write:
+            for key in ("../pe", "..\\pb", "/tmp/pe", "C:\\tmp\\pb", "PE", "", None):
+                with self.subTest(key=key):
+                    self.assertEqual(market._read_mr_valuation_rank(key)["data"], {})
+                    for refresh in (True, False):
+                        self.assertEqual(market._mr_valuation_rank(key, refresh=refresh), {})
+                    market._write_mr_valuation_cache(key, {}, ranking=True)
+            read.assert_not_called()
+            mkdir.assert_not_called()
+            write.assert_not_called()
+        self.mr.hsdc_himk_syl.assert_not_called()
+        self.mr.hsdc_himk_sjl.assert_not_called()
+        self.budget.acquire.assert_not_called()
+
+    def test_resolved_paths_in_sibling_directory_are_rejected(self):
+        # 模拟现有缓存文件的符号链接解析结果; 不依赖 Windows 创建链接的权限。
+        realpath = os.path.realpath
+        for ranking, key in ((False, "002472"), (True, "pe"), (True, "pb")):
+            directory = market._MR_VALUATION_RANK_DIR if ranking else self.root
+            outside = str(directory) + "_outside" + os.sep + key + ".json"
+
+            def resolve(path):
+                return outside if str(path).endswith(key + ".json") else realpath(path)
+
+            with self.subTest(ranking=ranking, key=key), \
+                 mock.patch.object(market.os.path, "realpath", side_effect=resolve), \
+                 mock.patch.object(Path, "read_text") as read, \
+                 mock.patch.object(Path, "write_text") as write, \
+                 mock.patch.object(Path, "unlink") as unlink:
+                with self.assertRaises(ValueError):
+                    market._mr_valuation_path(key, ranking=ranking)
+                reader = market._read_mr_valuation_rank if ranking else market._read_mr_stock_valuation
+                self.assertFalse(reader(key)["data"])
+                market._write_mr_valuation_cache(key, {}, ranking=ranking)
+                read.assert_not_called()
+                write.assert_not_called()
+                unlink.assert_not_called()
+
+    def test_atomic_write_failure_keeps_old_cache_and_cleans_temp(self):
+        path = self.root / "002472.json"
+        path.write_text('{"old": true}', encoding="utf-8")
+        with mock.patch.object(Path, "replace", side_effect=OSError("disk full")):
+            market._write_mr_valuation_cache("002472", {"new": True})
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"old": True})
+        self.assertEqual(list(self.root.glob("*.tmp")), [])
+
+    def test_safe_cache_filenames_and_atomic_write_roundtrip(self):
+        for ranking, key in ((False, "002472"), (True, "pe"), (True, "pb")):
+            with self.subTest(ranking=ranking, key=key):
+                directory = market._MR_VALUATION_RANK_DIR if ranking else self.root
+                path = market._mr_valuation_path(key, ranking=ranking)
+                self.assertEqual(path, directory.resolve() / f"{key}.json")
+                market._write_mr_valuation_cache(key, {"value": 1}, ranking=ranking)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"value": 1})
+                self.assertEqual(list(directory.glob("*.tmp")), [])
 
     def test_refreshes_at_30_minutes_only_when_queried(self):
         first = market._mr_stock_valuation("002472")

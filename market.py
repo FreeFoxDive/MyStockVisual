@@ -3077,26 +3077,52 @@ def _mr_valuation_values(row, default_date=None):
     return out if any(out[field] is not None for field in _MR_VALUATION_RANKS) else None
 
 
-def _write_mr_valuation_cache(path, payload):
-    tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+def _mr_valuation_path(key, *, ranking=False):
+    """估值缓存路径: 限定文件名, 并在解析符号链接后校验目录边界。"""
+    if ranking:
+        if key == "pe":
+            name = "pe.json"
+        elif key == "pb":
+            name = "pb.json"
+        else:
+            raise ValueError("invalid valuation ranking key")
+        directory = _MR_VALUATION_RANK_DIR
+    else:
+        if not isinstance(key, str) or not re.fullmatch(r"[0-9]{6}", key):
+            raise ValueError("invalid valuation stock code")
+        name = f"{key}.json"
+        directory = _MR_VALUATION_DIR
+    base = os.path.realpath(directory)
+    path = os.path.realpath(os.path.join(base, name))
+    # 带分隔符的前缀避免同名前缀的兄弟目录通过校验 (CodeQL py/path-injection)。
+    if not path.startswith(base + os.sep):
+        raise ValueError("invalid valuation cache path")
+    return Path(path)
+
+
+def _write_mr_valuation_cache(key, payload, *, ranking=False):
+    tmp = None
     try:
+        path = _mr_valuation_path(key, ranking=ranking)
+        tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
         tmp.replace(path)
-    except OSError as e:
-        log.warning("写入估值缓存失败 %s: %s", path.name, _sanitize_error(e))
+    except (OSError, ValueError) as e:
+        log.warning("写入估值缓存失败: %s", _sanitize_error(e))
     finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _read_mr_valuation_rank(field):
     """只读完整磁盘版本; 原子替换确保不需要等待榜单网络锁。"""
     ent = {"ts": 0.0, "data": {}}
     try:
-        raw = json.loads((_MR_VALUATION_RANK_DIR / f"{field}.json").read_text(encoding="utf-8"))
+        raw = json.loads(_mr_valuation_path(field, ranking=True).read_text(encoding="utf-8"))
         ts = _mr_valuation_number(raw.get("ts"))
         data = {}
         for code, row in raw["data"].items():
@@ -3114,13 +3140,14 @@ def _read_mr_valuation_rank(field):
 
 def _mr_valuation_rank(field, *, allow_outside=False, refresh=True):
     """必要时按字段读全市场日榜; 同榜共享锁/12h磁盘缓存, 失败保留旧值。"""
+    if field not in ("pe", "pb"):
+        return {}
     if not refresh:
         # 快照预算不足只禁止回源, 仍可用共享旧榜单; 纯读取不等正在刷榜的锁。
         ent = _mr_valuation_rank_cache.get(field)
         return (ent if ent is not None else _read_mr_valuation_rank(field))["data"]
     method, value_key, _ = _MR_VALUATION_RANKS[field]
     with _mr_valuation_rank_locks[field]:
-        path = _MR_VALUATION_RANK_DIR / f"{field}.json"
         ent = _mr_valuation_rank_cache.get(field)
         if ent is None:
             ent = _read_mr_valuation_rank(field)
@@ -3157,7 +3184,7 @@ def _mr_valuation_rank(field, *, allow_outside=False, refresh=True):
         data = {**ent["data"], **data}
         ent = {"ts": time.time(), "data": data}
         _mr_valuation_rank_cache[field] = ent
-        _write_mr_valuation_cache(path, {"field": field, **ent})
+        _write_mr_valuation_cache(field, {"field": field, **ent}, ranking=True)
         return data
 
 
@@ -3165,7 +3192,7 @@ def _read_mr_stock_valuation(code):
     """只读个股磁盘缓存, 不发布到内存, 避免覆盖并发刷新已发布的新版本。"""
     ent = {"ts": 0.0, "day": None, "data": None}
     try:
-        raw = json.loads((_MR_VALUATION_DIR / f"{code}.json").read_text(encoding="utf-8"))
+        raw = json.loads(_mr_valuation_path(code).read_text(encoding="utf-8"))
         ts = _mr_valuation_number(raw.get("ts"))
         day = dt_mod.date.fromisoformat(raw["day"]).isoformat()
         data = _mr_valuation_values(raw["data"], day)
@@ -3184,7 +3211,7 @@ def _mr_stock_valuation(code, refresh=True):
     首次查询重取; 同日盘中刷新后 30 分钟内不重取, force 信息包也不绕过此期限。
     盘外首次补取也落盘, 但不占用下次盘中查询的刷新机会。
     """
-    if not re.fullmatch(r"\d{6}", code):
+    if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
         return None
     if not refresh:
         # 核心首包永不获取与网络刷新共用的条带锁。内存未命中时只读原子磁盘文件。
@@ -3193,7 +3220,6 @@ def _mr_stock_valuation(code, refresh=True):
         return dict(cached) if cached else None
 
     with _mr_valuation_locks[hash(code) % len(_mr_valuation_locks)]:
-        path = _MR_VALUATION_DIR / f"{code}.json"
         ent = _mr_valuation_cache.get(code)
         if ent is None:
             ent = _read_mr_stock_valuation(code)
@@ -3269,7 +3295,7 @@ def _mr_stock_valuation(code, refresh=True):
         ent = {"ts": time.time(), "day": refresh_clock.date().isoformat(),
                "data": data, "session_refresh": session_refresh}
         _mr_valuation_cache[code] = ent
-        _write_mr_valuation_cache(path, {"code": code, **ent})
+        _write_mr_valuation_cache(code, {"code": code, **ent})
         return dict(data)
 
 
