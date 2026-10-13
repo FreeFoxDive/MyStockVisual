@@ -272,8 +272,8 @@ class SidePanelStaticTest(unittest.TestCase):
         # 股本结构 (流通/份额、质押) 在成交类之后; PE/PB/溢价 同属估值块且在股本之后
         self.assertLess(arr.index("label: '量比'"), arr.index("sharesRow"))
         self.assertLess(arr.index("sharesRow"), arr.index("pledgeRow"))
-        self.assertLess(arr.index("pledgeRow"), arr.index("label: 'PE'"))
-        self.assertLess(arr.index("label: 'PB'"), arr.index("premiumRow"))
+        self.assertLess(arr.index("pledgeRow"), arr.index("valuationRow('pe', 'PE')"))
+        self.assertLess(arr.index("valuationRow('pb', 'PB')"), arr.index("premiumRow"))
         # 区间涨幅紧随估值, 状态收尾
         self.assertLess(arr.index("premiumRow"), arr.index("label: '3日涨幅'"))
         self.assertLess(arr.index("label: '10日涨幅'"), arr.index("label: '状态'"))
@@ -531,6 +531,35 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
         self.assertEqual(rows["流通"]["text"], "1380.00亿")
         self.assertEqual(rows["质押"]["text"], "3.40%")
         self.assertFalse(rows["现价"]["color"] == rows["质押"]["color"], "质押不带涨跌色")
+
+    def test_ranking_values_display_source_date_and_ttm(self):
+        data = dict(self.STOCK, pe=17.053, pb=4.058,
+                    pe_source="pe_ranking", pb_source="pb_ranking",
+                    pe_date="2026-10-12", pb_date="2026-10-09")
+        rows = {r["label"]: r for r in self._rows(data)["rows"]}
+        self.assertEqual(rows["PE"]["text"], "17.05（日榜 10-12）")
+        self.assertEqual(rows["PB"]["text"], "4.06（日榜 10-09）")
+        self.assertIn("PE(TTM)", rows["PE"]["title"])
+        self.assertIn("2026-10-12", rows["PE"]["title"])
+        self.assertIn("市净率日榜", rows["PB"]["title"])
+        self.assertIn("2026-10-09", rows["PB"]["title"])
+
+    def test_snapshot_recovery_removes_ranking_marker(self):
+        data = dict(self.STOCK, pe=13.65, pb=0, pe_source="snapshot", pb_source="snapshot",
+                    pe_date="2026-10-13", pb_date="2026-10-13")
+        rows = {r["label"]: r for r in self._rows(data)["rows"]}
+        self.assertEqual(rows["PE"]["text"], "13.65")
+        self.assertEqual(rows["PB"]["text"], "0.00")
+        self.assertIn("估值快照", rows["PE"]["title"])
+        self.assertNotIn("TTM", rows["PE"]["title"])
+
+    def test_missing_value_is_not_marked_as_ranking(self):
+        data = dict(self.STOCK, pe=None, pe_source="pe_ranking", pe_date="2026-10-12",
+                    pb=0, pb_source="pb_ranking", pb_date="2026-10-12")
+        rows = {r["label"]: r for r in self._rows(data)["rows"]}
+        self.assertEqual(rows["PE"]["text"], "—")
+        self.assertNotIn("title", rows["PE"])
+        self.assertEqual(rows["PB"]["text"], "0.00（日榜 10-12）")
 
     def test_etf_has_shares_and_premium_but_no_pledge(self):
         etf = dict(self.STOCK, is_etf=True, float_shares=2.38e10,

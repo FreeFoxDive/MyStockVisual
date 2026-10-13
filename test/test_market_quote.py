@@ -136,12 +136,14 @@ class TestFetchQuotesAfFirst(unittest.TestCase):
 
     def test_stock_fallback_mairui_when_af_empty(self):
         api = mock.Mock()
-        api.stock_ssjy_more.return_value = [{"dm": "600519", **_mr_row()}]
+        api.stock_ssjy_more.return_value = [{"dm": "600519", **_mr_row(pe=25.36, pb_ratio=2.89)}]
         with mock.patch.object(market_mod, "_fetch_af_quotes", return_value={}):
             with mock.patch.object(market_mod, "get_mr", return_value=api):
                 out = market_mod.fetch_quotes(["600519.SH"], fresh=True)
         api.stock_ssjy_more.assert_called_once()
         self.assertEqual(out["600519.SH"]["last_price"], 10.5)
+        self.assertEqual(out["600519.SH"]["pe"], 25.36)
+        self.assertEqual(out["600519.SH"]["pb"], 2.89)
 
     def test_mairui_fallback_budget_exhausted_skips(self):
         """麦蕊回退预算耗尽时不再打麦蕊, 无缓存则该标的缺失 (保护免费额度)。"""

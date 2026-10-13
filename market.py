@@ -1492,6 +1492,8 @@ def _mr_quote_to_std(q, symbol):
         # 基金/股票实时接口通常用 hs，部分接口才提供 tr；两者均为百分数。
         "turnover_rate": _safe_float(q.get("tr") if q.get("tr") is not None else q.get("hs")),
         "vol_ratio": _safe_float(q.get("lb")),  # 量比 (实时接口)
+        "pe": _safe_float(q.get("pe")),
+        "pb": _safe_float(q.get("pb_ratio")),
         "timestamp": _safe_epoch(q.get("t")),  # 快照更新时间 (epoch 秒, 无则 None)
         "name": _lookup_name(symbol),
     }
@@ -2987,7 +2989,7 @@ def get_daily_bar(symbol, date_str):
 # ═══════════════════════════════════════════════════════════════
 # 麦蕊特色数据 (基本信息侧栏 / 市场数据抽屉)
 # ═══════════════════════════════════════════════════════════════
-# 全市场榜单 (/himk/roe、/higg/zljlr) 一次返回几 MB, 必须长缓存进程内共享;
+# 全市场榜单 (/higg/zljlr) 一次返回几 MB, 必须长缓存进程内共享;
 # 逐股接口 (instrument/concepts/hscp) 按 symbol 缓存, 免费版 500 次/日额度可控。
 
 _MR_FAIL_TTL = 300.0  # 上游失败/无数据的短负缓存, 避免反复打接口
@@ -3034,50 +3036,241 @@ def _memo(key, store, lock, ttl, fetcher):
     return data
 
 
-# ── 全市场 ROE 排行: 一次请求同时拿到 行业(hym) / 市盈率(syld) / 市净率(sjl) ──
-_ROE_TTL = 12 * 3600
-_roe_cache = {"ts": 0.0, "data": None, "ok": False}
-_roe_lock = threading.Lock()
+# 信息栏估值以麦蕊快照为主, 日榜补缺; 盘外只为无缓存的查询个股补取一次。
+_MR_VALUATION_TTL = 30 * 60.0
+_MR_VALUATION_DIR = SCRIPT_DIR / ".cache" / "stock_valuation"
+_MR_VALUATION_RANK_TTL = 12 * 3600.0
+_MR_VALUATION_RANK_DIR = SCRIPT_DIR / ".cache" / "valuation_rankings"
+_MR_VALUATION_RANKS = {
+    "pe": ("hsdc_himk_syl", "dpe", "pe_ranking"),
+    "pb": ("hsdc_himk_sjl", "sjl", "pb_ranking"),
+}
+_mr_valuation_cache: dict = {}
+_mr_valuation_rank_cache: dict = {}
+_mr_valuation_rank_locks = {field: threading.Lock() for field in _MR_VALUATION_RANKS}
+# 固定数量的锁避免无限增长; 同股并发查询只取一次, 其它标的不共用一把网络锁。
+_mr_valuation_locks = tuple(threading.Lock() for _ in range(32))
 
 
-def _mr_roe_map():
-    """{6位代码: {industry, pe, pb}}; 12h 缓存, 失败空 dict + 5min 负缓存。
+def _mr_valuation_number(value):
+    value = _safe_float(value)
+    return value if value is not None and np.isfinite(value) else None
 
-    /himk/roe (ROE 降序) 单次返回全市场, 故 PE/PB/行业 三项共用一次请求。
-    """
-    now = time.time()
-    with _roe_lock:
-        if _roe_cache["data"] is not None:
-            ttl = _ROE_TTL if _roe_cache["ok"] else _MR_FAIL_TTL
-            if now - _roe_cache["ts"] < ttl:
-                return _roe_cache["data"]
 
-    data: dict = {}
-    ok = False
-    if MAIRUI_API_KEY:
-        rows = None
+def _mr_valuation_date(value):
+    try:
+        return dt_mod.date.fromisoformat(str(value)[:10]).isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
+def _mr_valuation_values(row, default_date=None):
+    """缓存旧版无来源字段时按快照读; 缺失数值不携带来源, 避免误标日榜。"""
+    out = {}
+    for field, (_, _, rank_source) in _MR_VALUATION_RANKS.items():
+        value = _mr_valuation_number(row.get(field))
+        out[field] = value
+        if value is not None:
+            source = row.get(f"{field}_source")
+            out[f"{field}_source"] = source if source == rank_source else "snapshot"
+            out[f"{field}_date"] = _mr_valuation_date(row.get(f"{field}_date")) or default_date
+    return out if any(out[field] is not None for field in _MR_VALUATION_RANKS) else None
+
+
+def _write_mr_valuation_cache(path, payload):
+    tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:
+        log.warning("写入估值缓存失败 %s: %s", path.name, _sanitize_error(e))
+    finally:
         try:
-            rows = get_mr().hsdc_himk_roe()
-        except Exception as e:
-            log.warning(f"麦蕊 ROE 排行失败: {_sanitize_error(e)}")
-        if isinstance(rows, list) and rows:
-            for r in rows:
-                if not isinstance(r, dict):
-                    continue
-                dm = str(r.get("dm") or "").strip()
-                if not dm:
-                    continue
-                hy = str(r.get("hym") or "").strip() or None
-                data[dm.zfill(6)] = {
-                    "industry": hy,
-                    "pe": _safe_float(r.get("syld")),
-                    "pb": _safe_float(r.get("sjl")),
-                }
-            ok = True
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-    with _roe_lock:
-        _roe_cache.update({"ts": now, "data": data, "ok": ok})
-    return data
+
+def _read_mr_valuation_rank(field):
+    """只读完整磁盘版本; 原子替换确保不需要等待榜单网络锁。"""
+    ent = {"ts": 0.0, "data": {}}
+    try:
+        raw = json.loads((_MR_VALUATION_RANK_DIR / f"{field}.json").read_text(encoding="utf-8"))
+        ts = _mr_valuation_number(raw.get("ts"))
+        data = {}
+        for code, row in raw["data"].items():
+            if not re.fullmatch(r"\d{6}", code) or not isinstance(row, dict):
+                continue
+            value, date = _mr_valuation_number(row.get("value")), _mr_valuation_date(row.get("date"))
+            if value is not None and date:
+                data[code] = {"value": value, "date": date}
+        if raw.get("field") == field and ts is not None and data:
+            ent.update(ts=ts, data=data)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return ent
+
+
+def _mr_valuation_rank(field, *, allow_outside=False, refresh=True):
+    """必要时按字段读全市场日榜; 同榜共享锁/12h磁盘缓存, 失败保留旧值。"""
+    if not refresh:
+        # 快照预算不足只禁止回源, 仍可用共享旧榜单; 纯读取不等正在刷榜的锁。
+        ent = _mr_valuation_rank_cache.get(field)
+        return (ent if ent is not None else _read_mr_valuation_rank(field))["data"]
+    method, value_key, _ = _MR_VALUATION_RANKS[field]
+    with _mr_valuation_rank_locks[field]:
+        path = _MR_VALUATION_RANK_DIR / f"{field}.json"
+        ent = _mr_valuation_rank_cache.get(field)
+        if ent is None:
+            ent = _read_mr_valuation_rank(field)
+            _mr_valuation_rank_cache[field] = ent
+        now = time.time()
+        if ent["data"] and 0 <= now - ent["ts"] < _MR_VALUATION_RANK_TTL:
+            return ent["data"]
+        if (not MAIRUI_API_KEY or now < ent.get("retry_at", 0)
+                or (not allow_outside and not market_hours.in_session(market_hours.now(), strict=True))):
+            return ent["data"]
+        data = {}
+        try:
+            wait = max(2.0, _mr_quote_budget.interval + 0.5)
+            if not _mr_quote_budget.acquire(timeout=wait):
+                return ent["data"]
+            if not allow_outside and not market_hours.in_session(market_hours.now(), strict=True):
+                return ent["data"]
+            rows = getattr(get_mr(), method)()
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict) or row.get("error"):
+                    continue
+                code = normalize_symbol(str(row.get("dm") or "")).split(".")[0]
+                if not re.fullmatch(r"\d{6}", code):
+                    continue
+                value, date = _mr_valuation_number(row.get(value_key)), _mr_valuation_date(row.get("t"))
+                if value is not None and date:
+                    data[code] = {"value": value, "date": date}
+        except Exception as e:
+            log.warning("麦蕊%s估值日榜失败: %s", field.upper(), _sanitize_error(e))
+        if not data:
+            ent["retry_at"] = time.time() + _MR_FAIL_TTL
+            return ent["data"]
+        # 仅用有效新记录覆盖对应股票; 漏票/无效字段保留旧记录及其原始日期。
+        data = {**ent["data"], **data}
+        ent = {"ts": time.time(), "data": data}
+        _mr_valuation_rank_cache[field] = ent
+        _write_mr_valuation_cache(path, {"field": field, **ent})
+        return data
+
+
+def _read_mr_stock_valuation(code):
+    """只读个股磁盘缓存, 不发布到内存, 避免覆盖并发刷新已发布的新版本。"""
+    ent = {"ts": 0.0, "day": None, "data": None}
+    try:
+        raw = json.loads((_MR_VALUATION_DIR / f"{code}.json").read_text(encoding="utf-8"))
+        ts = _mr_valuation_number(raw.get("ts"))
+        day = dt_mod.date.fromisoformat(raw["day"]).isoformat()
+        data = _mr_valuation_values(raw["data"], day)
+        if raw.get("code") == code and data and ts is not None:
+            ent.update(ts=ts, day=day, data=data,
+                       session_refresh=raw.get("session_refresh") is not False)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return ent
+
+
+def _mr_stock_valuation(code, refresh=True):
+    """按股读取/更新 PE/PB; 已有缓存仅连续交易时段回源, 无缓存可盘外补取。
+
+    refresh=False 为信息栏核心包的纯缓存读取。缓存跨休市保留, 下次交易日
+    首次查询重取; 同日盘中刷新后 30 分钟内不重取, force 信息包也不绕过此期限。
+    盘外首次补取也落盘, 但不占用下次盘中查询的刷新机会。
+    """
+    if not re.fullmatch(r"\d{6}", code):
+        return None
+    if not refresh:
+        # 核心首包永不获取与网络刷新共用的条带锁。内存未命中时只读原子磁盘文件。
+        ent = _mr_valuation_cache.get(code)
+        cached = (ent if ent is not None else _read_mr_stock_valuation(code))["data"]
+        return dict(cached) if cached else None
+
+    with _mr_valuation_locks[hash(code) % len(_mr_valuation_locks)]:
+        path = _MR_VALUATION_DIR / f"{code}.json"
+        ent = _mr_valuation_cache.get(code)
+        if ent is None:
+            ent = _read_mr_stock_valuation(code)
+            _mr_valuation_cache[code] = ent
+
+        clock_now = market_hours.now()
+        now = time.time()
+        day = clock_now.date().isoformat()
+        cached = ent["data"]
+        if not refresh or not MAIRUI_API_KEY:
+            return dict(cached) if cached else None
+        if cached and not market_hours.in_session(clock_now, strict=True):
+            return dict(cached)
+        if (ent.get("session_refresh", True) and ent["day"] == day
+                and 0 <= now - ent["ts"] < _MR_VALUATION_TTL):
+            return dict(cached) if cached else None
+        if ent.get("retry_day") == day and now < ent.get("retry_at", 0):
+            return dict(cached) if cached else None
+
+        data = None
+        snapshot_admitted = False
+        try:
+            # 与行情回退共用原有预算; 已有缓存等待期间跨到午休/收盘不能再刷新。
+            # 默认 20/min 的间隔为 3 秒。核心行情刚用过令牌时必须等完整间隔,
+            # 并留出唤醒余量; 只增加等待, 不改变预算或绕过滚动窗口限额。
+            wait = max(2.0, _mr_quote_budget.interval + 0.5)
+            snapshot_admitted = _mr_quote_budget.acquire(timeout=wait)
+            refresh_clock = market_hours.now()
+            session_refresh = market_hours.in_session(refresh_clock, strict=True)
+            if cached and not session_refresh:
+                return dict(cached)
+            rows = get_mr().stock_ssjy_more([code]) if snapshot_admitted else []
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict) or row.get("error"):
+                    continue
+                if normalize_symbol(str(row.get("dm") or "")).split(".")[0] != code:
+                    continue
+                snapshot_day = _mr_valuation_date(row.get("t")) or refresh_clock.date().isoformat()
+                data = _mr_valuation_values({"pe": row.get("pe"), "pb": row.get("pb_ratio")}, snapshot_day)
+                if data:
+                    break
+        except Exception as e:
+            log.warning("麦蕊估值快照失败 %s: %s", code, _sanitize_error(e))
+        # 按字段取值: 本次快照 > 旧快照 > 当前日榜 > 旧日榜。旧日榜不能挡住
+        # 新快照, 也不能因字段已有数值就永远不再尝试更新对应榜单。
+        fresh, old = data or {}, cached or {}
+        data, updated = {}, False
+        for field, (_, _, rank_source) in _MR_VALUATION_RANKS.items():
+            chosen = fresh
+            if fresh.get(field) is not None:
+                updated = True
+            elif old.get(field) is not None and old.get(f"{field}_source", "snapshot") == "snapshot":
+                chosen = old
+            else:
+                rank = _mr_valuation_rank(field, allow_outside=not bool(cached),
+                                          refresh=snapshot_admitted).get(code)
+                if rank:
+                    chosen = {field: rank["value"], f"{field}_source": rank_source,
+                              f"{field}_date": rank["date"]}
+                    updated = True
+                else:
+                    chosen = old
+            data[field] = chosen.get(field)
+            if data[field] is not None:
+                data[f"{field}_source"] = chosen.get(f"{field}_source", "snapshot")
+                data[f"{field}_date"] = chosen.get(f"{field}_date") or ent.get("day")
+        if not updated:
+            ent.update(retry_day=day, retry_at=time.time() + _MR_FAIL_TTL)
+            return dict(cached) if cached else None
+
+        refresh_clock = market_hours.now()
+        session_refresh = market_hours.in_session(refresh_clock, strict=True)
+        ent = {"ts": time.time(), "day": refresh_clock.date().isoformat(),
+               "data": data, "session_refresh": session_refresh}
+        _mr_valuation_cache[code] = ent
+        _write_mr_valuation_cache(path, {"code": code, **ent})
+        return dict(data)
 
 
 # ── 股票基础信息 (涨停/跌停/前收/市值) ──
@@ -3242,7 +3435,9 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
 
     核心行情字段（量比和 N 日涨幅）先由 ``include_enrichment=False`` 返回，
     以免被行业/估值/涨跌停等麦蕊补充请求阻塞。完整资料会在第二次调用合并。
-    两类结果各自 60s 缓存。港股/美股跳过麦蕊专属字段。
+    两类结果各自 60s 缓存; PE/PB 独立按股缓存 30min, 快照为主、日榜补缺。
+    已有估值仅盘中更新, 盘外无缓存时可首次补取。
+    港股/美股跳过麦蕊专属字段。
     """
     symbol = normalize_symbol(symbol)
     now = time.time()
@@ -3270,11 +3465,11 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
             # 累加缩短为最慢的一段，且不会影响已先返回的行情核心包。
             pool = _stock_info_pool
             meta_task = pool.submit(_fetch_instrument_meta, symbol)
-            roe_task = pool.submit(_mr_roe_map) if plain else None
+            valuation_task = pool.submit(_mr_stock_valuation, code) if plain else None
             industry_task = pool.submit(_mr_industry, code) if plain else None
             instrument_task = pool.submit(_mr_instrument, symbol) if plain else None
             meta = meta_task.result()
-            roe = roe_task.result().get(code) if roe_task else None
+            valuation = valuation_task.result() if valuation_task else None
             ind = industry_task.result() if industry_task else None
             inst = instrument_task.result() if instrument_task else None
 
@@ -3284,9 +3479,8 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
             if meta:
                 extra["limit_up"] = meta.get("limit_up")
                 extra["limit_down"] = meta.get("limit_down")
-            if roe:
-                extra.update(pe=roe.get("pe"), pb=roe.get("pb"),
-                             industry=roe.get("industry"))
+            if valuation:
+                extra.update(valuation)
             if ind:
                 extra["industry"] = ind
             if inst:
@@ -3343,6 +3537,7 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
     else:
         status_code, status_text = "", "—"
 
+    valuation = (_mr_stock_valuation(code, refresh=False) or {}) if is_cn and plain else {}
     info = {
         "symbol": symbol,
         "name": (quote or {}).get("name") or _lookup_name(symbol),
@@ -3351,6 +3546,12 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
         "volume": _safe_float((quote or {}).get("volume")),
         "amount": _safe_float((quote or {}).get("amount")),
         "turnover_rate": _safe_float((quote or {}).get("turnover_rate")),
+        "pe": valuation.get("pe"),
+        "pb": valuation.get("pb"),
+        "pe_source": valuation.get("pe_source"),
+        "pb_source": valuation.get("pb_source"),
+        "pe_date": valuation.get("pe_date"),
+        "pb_date": valuation.get("pb_date"),
         "vol_ratio": _volume_ratio_from_df(df),
         "chg_3d": _n_day_change(closes, 3),
         "chg_5d": _n_day_change(closes, 5),

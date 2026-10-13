@@ -6,6 +6,7 @@
     venv/Scripts/python.exe -u visual/test/test_stock_info.py
 """
 import sys
+import tempfile
 import types
 import unittest
 from datetime import datetime
@@ -38,8 +39,9 @@ def _reset_caches():
     market._stock_info_cache.clear()
     market._stock_info_enrichment_cache.clear()
     market._info_quote_bases.clear()
-    market._roe_cache.update({"ts": 0.0, "data": None, "ok": False})
     market._mr_instrument_cache.clear()
+    market._mr_valuation_cache.clear()
+    market._mr_valuation_rank_cache.clear()
     market._mr_industry_cache.clear()
     market._mr_market_cache.clear()
     market._mr_company_cache.clear()
@@ -50,10 +52,15 @@ class StockInfoTest(unittest.TestCase):
     def setUp(self):
         _reset_caches()
         self.addCleanup(_reset_caches)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         self._patches = [
+            mock.patch.object(market, "_MR_VALUATION_DIR", Path(tmp.name)),
+            mock.patch.object(market, "_MR_VALUATION_RANK_DIR", Path(tmp.name) / "rankings"),
             mock.patch.object(market, "MAIRUI_API_KEY", "TESTKEY"),
             mock.patch.object(market, "_is_etf", return_value=False),
             mock.patch.object(market, "_is_index_symbol", return_value=False),
+            mock.patch.object(market, "_mr_quote_budget"),
             # 涨跌停价首选 AlphaFeed 元数据; 默认置空, 让各用例显式选择要走的分支。
             mock.patch.object(market, "_fetch_instrument_meta", return_value=None),
             mock.patch.object(market.market_hours, "is_trading_day", return_value=True),
@@ -64,6 +71,7 @@ class StockInfoTest(unittest.TestCase):
         for p in self._patches:
             p.start()
             self.addCleanup(p.stop)
+        market._mr_quote_budget.interval = 3.0
 
     def _quote(self, **kw):
         q = {"name": "测试股", "volume": 1000, "amount": 1e7, "turnover_rate": 1.5,
@@ -72,6 +80,9 @@ class StockInfoTest(unittest.TestCase):
         return q
 
     def _fake_mr(self, **kw):
+        kw.setdefault("stock_ssjy_more", lambda codes: [])
+        kw.setdefault("hsdc_himk_syl", lambda: [])
+        kw.setdefault("hsdc_himk_sjl", lambda: [])
         return types.SimpleNamespace(**kw)
 
     def test_cn_full_fields(self):
@@ -84,6 +95,7 @@ class StockInfoTest(unittest.TestCase):
                                     "syld": 4.43, "sjl": 0.49}],
             concepts_of_stock=lambda code: [{"code": "sw_yx", "name": "A股-申万行业-银行"}],
             stock_instrument=lambda s: {"up": 13.04, "dp": 10.67, "pc": 11.85, "fv": 1, "tv": 2},
+            stock_ssjy_more=lambda codes: [{"dm": "000001", "pe": 4.43, "pb_ratio": 0.49}],
         )
         with mock.patch.object(market, "get_mr", return_value=mr), \
              mock.patch.object(market, "fetch_quote", return_value=self._quote()), \
@@ -105,6 +117,122 @@ class StockInfoTest(unittest.TestCase):
         self.assertEqual(info["amount"], 1e7)
         self.assertEqual(info["turnover_rate"], 1.5)
         self.assertEqual((info["trade_status"], info["trade_status_text"]), ("trading", "交易中"))
+
+    def test_shuanghuan_valuation_falls_back_when_roe_empty(self):
+        mr = self._fake_mr(
+            hsdc_himk_roe=lambda: [],
+            concepts_of_stock=lambda code: [],
+            stock_instrument=lambda symbol: {},
+            stock_ssjy_more=mock.Mock(return_value=[
+                {"dm": "002472", "pe": 25.36, "pb_ratio": 2.89}]),
+        )
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote()), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(None, None, None)):
+            info = market.fetch_stock_info("002472.SZ")
+            # 强刷信息包仍复用估值缓存, 不重复消耗上游额度。
+            again = market.fetch_stock_info("002472.SZ", force=True)
+        self.assertEqual((info["pe"], info["pb"]), (25.36, 2.89))
+        self.assertEqual((again["pe"], again["pb"]), (25.36, 2.89))
+        mr.stock_ssjy_more.assert_called_once_with(["002472"])
+        market._mr_quote_budget.acquire.assert_called_once_with(timeout=3.5)
+
+    def test_valuation_uses_snapshot_instead_of_roe(self):
+        mr = self._fake_mr(
+            hsdc_himk_roe=mock.Mock(return_value=[{"dm": "002472", "syld": 24.0, "sjl": 1.0}]),
+            concepts_of_stock=lambda code: [],
+            stock_instrument=lambda symbol: {},
+            stock_ssjy_more=mock.Mock(return_value=[
+                {"dm": "002472", "pe": 25.36, "pb_ratio": "2.89"}]),
+        )
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote()), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(None, None, None)):
+            info = market.fetch_stock_info("002472.SZ")
+        self.assertEqual((info["pe"], info["pb"]), (25.36, 2.89))
+        mr.hsdc_himk_roe.assert_not_called()
+
+    def test_info_exposes_ranking_metadata_in_full_and_cached_core(self):
+        mr = self._fake_mr(
+            concepts_of_stock=lambda code: [], stock_instrument=lambda symbol: {},
+            hsdc_himk_syl=mock.Mock(return_value=[
+                {"dm": "sz000975", "t": "2026-06-29", "dpe": 17.053, "jpe": 999}]),
+            hsdc_himk_sjl=mock.Mock(return_value=[
+                {"dm": "sz000975", "t": "2026-06-29", "sjl": 4.058}]),
+        )
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote()), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(None, None, None)):
+            info = market.fetch_stock_info("000975.SZ")
+            core = market.fetch_stock_info("000975.SZ", force=True, include_enrichment=False)
+        for data in (info, core):
+            self.assertEqual((data["pe"], data["pb"]), (17.053, 4.058))
+            self.assertEqual((data["pe_source"], data["pb_source"]), ("pe_ranking", "pb_ranking"))
+            self.assertEqual((data["pe_date"], data["pb_date"]), ("2026-06-29", "2026-06-29"))
+        mr.hsdc_himk_syl.assert_called_once()
+        mr.hsdc_himk_sjl.assert_called_once()
+
+    def test_000975_off_session_initial_snapshot_populates_info_once(self):
+        mr = self._fake_mr(
+            concepts_of_stock=lambda code: [], stock_instrument=lambda symbol: {},
+            stock_ssjy_more=mock.Mock(return_value=[
+                {"dm": "000975", "pe": 13.65, "pb_ratio": 4.14}]),
+        )
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market.market_hours, "now", return_value=datetime(2026, 10, 13, 15, 13)), \
+             mock.patch.object(market.market_hours, "in_session", return_value=False), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote()), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(None, None, None)):
+            core = market.fetch_stock_info("000975.SZ", include_enrichment=False)
+            self.assertEqual((core["pe"], core["pb"]), (None, None))
+            mr.stock_ssjy_more.assert_not_called()
+            info = market.fetch_stock_info("000975.SZ")
+            again = market.fetch_stock_info("000975.SZ", force=True)
+        self.assertEqual((info["pe"], info["pb"]), (13.65, 4.14))
+        self.assertEqual((again["pe"], again["pb"]), (13.65, 4.14))
+        mr.stock_ssjy_more.assert_called_once_with(["000975"])
+
+    def test_live_quote_does_not_bypass_valuation_cache(self):
+        mr = self._fake_mr(
+            hsdc_himk_roe=lambda: [], concepts_of_stock=lambda code: [],
+            stock_instrument=lambda symbol: {}, stock_ssjy_more=mock.Mock(return_value=[
+                {"dm": "002472", "pe": 25.36, "pb_ratio": 2.89}]),
+        )
+        with mock.patch.object(market, "get_mr", return_value=mr), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote(pe=99, pb=99)), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(None, None, None)):
+            core = market.fetch_stock_info("002472.SZ", include_enrichment=False)
+            info = market.fetch_stock_info("002472.SZ")
+            again = market.fetch_stock_info("002472.SZ", force=True, include_enrichment=False)
+        self.assertEqual((core["pe"], core["pb"]), (None, None))
+        self.assertEqual((info["pe"], info["pb"]), (25.36, 2.89))
+        self.assertEqual((again["pe"], again["pb"]), (25.36, 2.89))
+        mr.stock_ssjy_more.assert_called_once()
+
+    def test_valuation_failures_are_cached_and_do_not_break_info(self):
+        for response in ([], {"error": "unavailable"},
+                         [{"dm": "600000", "pe": 10, "pb_ratio": 1}],
+                         [{"dm": "002472", "pe": "--", "pb_ratio": None}]):
+            with self.subTest(response=response):
+                market._mr_valuation_cache.clear()
+                mr = self._fake_mr(stock_ssjy_more=mock.Mock(return_value=response))
+                with mock.patch.object(market, "get_mr", return_value=mr):
+                    self.assertIsNone(market._mr_stock_valuation("002472"))
+                    self.assertIsNone(market._mr_stock_valuation("002472"))
+                mr.stock_ssjy_more.assert_called_once()
+        market._mr_valuation_cache.clear()
+        mr = self._fake_mr(stock_ssjy_more=mock.Mock(side_effect=RuntimeError("unavailable")))
+        with mock.patch.object(market, "get_mr", return_value=mr):
+            self.assertIsNone(market._mr_stock_valuation("002472"))
+            self.assertIsNone(market._mr_stock_valuation("002472"))
+        mr.stock_ssjy_more.assert_called_once()
+
+    def test_valuation_budget_exhausted_skips_upstream(self):
+        mr = self._fake_mr(stock_ssjy_more=mock.Mock())
+        market._mr_quote_budget.acquire.return_value = False
+        with mock.patch.object(market, "get_mr", return_value=mr):
+            self.assertIsNone(market._mr_stock_valuation("002472"))
+        mr.stock_ssjy_more.assert_not_called()
 
     def test_quote_updates_derived_fields_without_refetching_history(self):
         market._info_quote_bases["000001.SZ"] = {
@@ -196,6 +324,7 @@ class StockInfoTest(unittest.TestCase):
         self.assertIsNone(info["pe"])
         mr.stock_instrument.assert_not_called()
         mr.hsdc_himk_roe.assert_not_called()
+        mr.stock_ssjy_more.assert_not_called()
 
     def test_etf_without_limits_stays_none_not_estimated(self):
         """ETF 取不到涨跌停时保持 None (前端显示「—」), 不用前收估算冒充限制。"""

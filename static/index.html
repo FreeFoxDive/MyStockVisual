@@ -3072,6 +3072,20 @@ function infoPanelRows(d) {
     return { text: (v >= 0 ? '+' : '') + v.toFixed(2) + '%', color: v >= 0 ? up : down };
   };
   const fixed = (v) => (v == null || isNaN(v) ? '—' : Number(v).toFixed(2));
+  const valuationRow = (field, label) => {
+    const row = { label, text: fixed(d[field]), color: null };
+    if (d[field] == null || !Number.isFinite(Number(d[field]))) return row;
+    const date = d[`${field}_date`];
+    if (d[`${field}_source`] === `${field}_ranking`) {
+      const shortDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '') ? ` ${date.slice(5)}` : '';
+      row.text += `（日榜${shortDate}）`;
+      row.title = (field === 'pe' ? '麦蕊市盈率日榜，PE(TTM)' : '麦蕊市净率日榜，PB')
+        + (date ? `，数据日期：${date}` : '');
+    } else if (date) {
+      row.title = `麦蕊估值快照，数据日期：${date}`;
+    }
+    return row;
+  };
   const px = (v, color) => (v == null ? { text: '—', color: null } : { text: fmtPrice3(v), color });
   const statusColor = d.trade_status === 'trading' ? up
     : (d.trade_status === 'halt' ? 'var(--chart-halt)' : gray);
@@ -3133,8 +3147,8 @@ function infoPanelRows(d) {
     { label: '量比', text: fixed(d.vol_ratio), color: null },
     sharesRow,
     pledgeRow,
-    { label: 'PE', text: fixed(d.pe), color: null },
-    { label: 'PB', text: fixed(d.pb), color: null },
+    valuationRow('pe', 'PE'),
+    valuationRow('pb', 'PB'),
     premiumRow,
     { label: '3日涨幅', text: p3.text, color: p3.color },
     { label: '5日涨幅', text: p5.text, color: p5.color },

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as wall_time, timedelta, timezone
 from functools import lru_cache
 import logging
 
@@ -116,11 +116,19 @@ def _mins(h, m):
     return h * 60 + m
 
 
-def in_session(now: datetime | None = None) -> bool:
-    """交易日且落在 09:30-11:30 或 13:00-15:00 (含开盘, 不含 15:00 整点之后)。"""
+def in_session(now: datetime | None = None, *, strict: bool = False) -> bool:
+    """交易日 09:30-11:30 / 13:00-15:00; strict=True 精确到微秒且包含端点。
+
+    默认按分钟判断并包含末分钟, 兼容 K 线时间戳等既有调用。
+    """
     now = now or _now()
     if not is_trading_day(now):
         return False
+    if strict:
+        # 回源门禁精确到秒/微秒; 默认仍保留历史 K 线整分钟的闭区间语义。
+        clock = now.time()
+        return (wall_time(*_AM_START) <= clock <= wall_time(*_AM_END)
+                or wall_time(*_PM_START) <= clock <= wall_time(*_PM_END))
     t = _mins(now.hour, now.minute)
     # 闭区间含 11:30 / 15:00 (1m K 线时间戳常打在整点)
     am = _mins(*_AM_START) <= t <= _mins(*_AM_END)

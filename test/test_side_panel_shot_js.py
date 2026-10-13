@@ -323,6 +323,16 @@ process.stdout.write(JSON.stringify(cases.map(c => fmtDepthVol(c))));
         self.assertLess(etf_out["model"]["content"], 720)
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_ranking_dates_reach_shared_screenshot_model(self):
+        info = {"symbol": "000975.SZ", "pe": 17.053, "pb": 4.058,
+                "pe_source": "pe_ranking", "pb_source": "pb_ranking",
+                "pe_date": "2026-10-12", "pb_date": "2026-10-12"}
+        out = self._collect({"width": 204, "height": 720, "stockInfo": info})
+        texts = [t["t"] for t in out["drawn"]]
+        self.assertIn("17.05（日榜 10-12）", texts)
+        self.assertIn("4.06（日榜 10-12）", texts)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_scale_multiplies_every_coordinate(self):
         one = self._collect({"width": 204, "height": 720, "scale": 1})
         two = self._collect({"width": 204, "height": 720, "scale": 2})
