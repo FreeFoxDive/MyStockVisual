@@ -220,6 +220,7 @@ class MonitorApiTest(unittest.TestCase):
             self.assertIn("dtl1", tls)
             self.assertEqual(tls["dtl1"]["symbol"], self.TL_SYM)
             self.assertEqual(tls["dtl1"]["pct"], 2.0)
+            self.assertEqual(tls["dtl1"]["dir"], "down")
             self.assertEqual(tls["dtl1"]["adjust"], "forward")
             pas = {a["id"]: a for a in data["price_alerts"]}
             self.assertIn(aid, pas)

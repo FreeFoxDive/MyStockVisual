@@ -799,6 +799,7 @@ def _clean_monitored_drawing(d):
         "name": (d.get("name") or "").strip(),
         "line_type": d["type"],
         "pct": pct,
+        "dir": "up" if mon.get("dir") == "up" else "down",
         "adjust": mon.get("adjust") if mon.get("adjust") in ("forward", "hfq", "none") else "forward",
         "points": pts,
     }
@@ -857,9 +858,11 @@ def _resolve_anchor_idx(pt, date_map, n):
     return n - 1 + off
 
 
-def evaluate_trendline_break(points, line_type, pct, dates, price):
-    """纯函数: 现价是否向下突破线值 × (1 - pct/100)。
+def evaluate_trendline_break(points, line_type, pct, dates, price, direction="down"):
+    """纯函数: 现价是否突破线值的百分比带。
 
+    direction="down" (缺省, 以及除 "up" 以外的值): 现价 <= 线值 × (1 - pct/100)。
+    direction="up": 现价 >= 线值 × (1 + pct/100)。
     points: 画线锚点 [{t, p, off}]; dates: bar 日期字符串列表 (升序)。
     trend/ray 按两锚点线性外推到最后一根 bar (监控语义=线向右延伸);
     hline 取锚点价格。触发返回 {value, threshold}, 否则/无法评估返回 None。
@@ -905,8 +908,13 @@ def evaluate_trendline_break(points, line_type, pct, dates, price):
         return None
     if value is None or value <= 0:
         return None
-    threshold = value * (1 - pct / 100.0)
-    if price <= threshold:
+    if direction == "up":
+        threshold = value * (1 + pct / 100.0)
+        hit = price >= threshold
+    else:
+        threshold = value * (1 - pct / 100.0)
+        hit = price <= threshold
+    if hit:
         return {"value": value, "threshold": threshold}
     return None
 
@@ -954,7 +962,7 @@ def _load_bar_dates(symbol, period, adjust="forward"):
 
 
 def _evaluate_trendline_monitors(monitors, quotes, now_dt, persist=True, notify=True):
-    """趋势线跌破: 逐条评估, 每条每日一次, 落库+钉钉/ntfy 推送。"""
+    """趋势线跌破/往上突破: 逐条评估, 每条每日一次, 落库+钉钉/ntfy 推送。"""
     fired = []
     bars_cache = {}   # (symbol, period) -> (dates, n) | None
     today = now_dt.strftime("%Y-%m-%d")
@@ -969,21 +977,25 @@ def _evaluate_trendline_monitors(monitors, quotes, now_dt, persist=True, notify=
         bars_info = bars_cache[key]
         if not bars_info:
             continue
+        up = m.get("dir") == "up"
         r = evaluate_trendline_break(
-            m["points"], m["line_type"], m["pct"], bars_info[0], price)
+            m["points"], m["line_type"], m["pct"], bars_info[0], price,
+            "up" if up else "down")
         if not r:
             continue
         last = trades.get_trendline_fired(m["user_id"], m["drawing_id"])
         if last and str(last)[:10] == today:
             continue
+        verb = "往上突破" if up else "向下突破"
+        alert_type = "trendline_break_up" if up else "trendline_break"
         detail = (
             f"{m['name'] or LINE_TYPE_NAMES.get(m['line_type'], m['line_type'])}"
-            f" 向下突破{m['pct']:g}%: 现价{price:.2f} 线值{r['value']:.2f}"
+            f" {verb}{m['pct']:g}%: 现价{price:.2f} 线值{r['value']:.2f}"
             f" 阈值{r['threshold']:.2f} ({m['period']})"
         )
         if persist:
             trades.insert_monitor_alert(
-                m["user_id"], None, m["symbol"], "trendline_break", today,
+                m["user_id"], None, m["symbol"], alert_type, today,
                 price=price, detail=detail,
             )
             trades.mark_trendline_fired(
@@ -993,9 +1005,17 @@ def _evaluate_trendline_monitors(monitors, quotes, now_dt, persist=True, notify=
         fired.append({"monitor": m, "price": price, "detail": detail})
     if fired and notify:
         now_str = now_dt.strftime("%Y-%m-%d %H:%M")
-        lines = [f"- **{f['monitor']['symbol']}**: {f['detail']}" for f in fired]
-        md = f"## 趋势线跌破预警 {now_str}\n" + "\n".join(lines)
-        notify_mod.notify("趋势线跌破预警", md)
+        titles = {"down": "趋势线跌破预警", "up": "趋势线向上突破预警"}
+        buckets = {"down": [], "up": []}
+        for f in fired:
+            buckets["up" if f["monitor"].get("dir") == "up" else "down"].append(f)
+        for key in ("down", "up"):
+            batch = buckets[key]
+            if not batch:
+                continue
+            lines = [f"- **{f['monitor']['symbol']}**: {f['detail']}" for f in batch]
+            md = f"## {titles[key]} {now_str}\n" + "\n".join(lines)
+            notify_mod.notify(titles[key], md)
     return fired
 
 
@@ -1058,7 +1078,7 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
         except Exception as e:
             log.warning(f"价格预警评估失败: {e}")
 
-    # 趋势线跌破监控 (每条线每日一次)
+    # 趋势线跌破/往上突破监控 (每条线每日一次)
     if line_monitors:
         try:
             _evaluate_trendline_monitors(line_monitors, quotes, now_dt)

@@ -24,12 +24,12 @@ INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
 MONITOR_PY = _VISUAL_DIR / "monitor.py"
 
 # monitor.py 写入 monitor_alerts.alert_type 的全部取值:
-# DAILY_ONCE ∪ ACCEL_TYPES ∪ {price_alert, trendline_break}。
+# DAILY_ONCE ∪ ACCEL_TYPES ∪ {price_alert, trendline_break, trendline_break_up}。
 # 到期提醒的 alert_type 是时段槽 hold_exit_am/pm, 而非 hold_expire (后者从未落库)。
 EXPECTED_ALERT_TYPES = {
     "sl_breached", "tp_reached", "breakeven_hit", "be_broken", "limit_up_sealed",
     "hold_exit_am", "hold_exit_pm", "accel_down", "accel_up",
-    "trendline_break", "price_alert", "risk_missing",
+    "trendline_break", "trendline_break_up", "price_alert", "risk_missing",
 }
 # 选股任务的通知类型 (写库在 api/screener.py, 与持仓告警同一张 monitor_alerts 表)
 SCREENER_ALERT_TYPES = {"screener_start", "screener_progress", "screener_done",
@@ -122,7 +122,7 @@ class MonitorPageStaticTest(unittest.TestCase):
         for token in PRICE_SECTION_TOKENS:
             self.assertIn(token, self.src, token)
         # 两张表的表头文案
-        for head in ("跌破幅度", "复权", "条件 (AND)", "状态"):
+        for head in ("突破幅度", "复权", "条件 (AND)", "状态"):
             self.assertIn(head, self.src, head)
         for fn in PRICE_SECTION_FNS:
             self.assertIn(f"function {fn}", self.src, fn)
@@ -220,6 +220,13 @@ class TrendlineLinkBehaviorTest(unittest.TestCase):
         proc = subprocess.run(["node", "-e", self.script, json.dumps(monitors)],
                               capture_output=True, check=True)
         return proc.stdout.decode("utf-8")
+
+    def test_break_pct_shows_direction(self):
+        down = self._render([self._mon()])
+        self.assertIn("跌破 2%", down)
+        self.assertNotIn("往上突破", down)
+        up = self._render([self._mon(dir="up", pct=3)])
+        self.assertIn("往上突破 3%", up)
 
     def test_weekly_monitor_links_to_weekly_chart(self):
         html = self._render([self._mon()])

@@ -74,12 +74,16 @@
       dir: (d.dir === 'long' || d.dir === 'short') ? d.dir : undefined,
       createdAt: d.createdAt || Date.now(),
     };
-    // 监控趋势线: name 供展示/推送, monitor={enabled, pct} (仅趋势线类可监控)
+    // 监控趋势线: name 供展示/推送, monitor={enabled, pct, dir} (仅趋势线类可监控)
     if (typeof d.name === 'string' && d.name.trim()) out.name = d.name.trim().slice(0, 50);
     if (d.monitor && typeof d.monitor === 'object') {
       var pct = parseFloat(d.monitor.pct);
       if (isFinite(pct) && pct >= 0.1 && pct <= 20) {
         out.monitor = { enabled: !!d.monitor.enabled, pct: pct };
+        // dir 缺省由后端当跌破; 非法值丢掉
+        if (d.monitor.dir === 'up' || d.monitor.dir === 'down') {
+          out.monitor.dir = d.monitor.dir;
+        }
         // 复权空间: 画线价格随图表复权方式变化, 监控须用同一口径取 K 线
         if (['forward', 'hfq', 'none'].indexOf(d.monitor.adjust) >= 0) {
           out.monitor.adjust = d.monitor.adjust;

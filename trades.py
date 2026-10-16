@@ -3225,6 +3225,7 @@ def list_trendline_monitors(user_id):
                 "name": (d.get("name") or "").strip(),
                 "line_type": d["type"],
                 "pct": pct,
+                "dir": "up" if mon.get("dir") == "up" else "down",
                 "adjust": mon.get("adjust") if mon.get("adjust") in ("forward", "hfq", "none") else "forward",
                 "last_fired_at": state.get(did),
             })

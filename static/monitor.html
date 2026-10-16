@@ -154,7 +154,7 @@ td.sym a:hover { color: var(--btn-active); }
     <div class="card"><div class="label">监控标的数</div><div class="value" id="st-n">—</div><div class="sub" id="st-last">最近轮询 —</div></div>
     <div class="card"><div class="label">生效风控持仓</div><div class="value" id="st-risk">—</div><div class="sub">已填止盈/保本/止损</div></div>
     <div class="card"><div class="label">到期提醒持仓</div><div class="value" id="st-hold">—</div><div class="sub">关联模型推荐周期</div></div>
-    <div class="card"><div class="label">趋势线监控</div><div class="value" id="st-tl">—</div><div class="sub">跌破线值即推送</div></div>
+    <div class="card"><div class="label">趋势线监控</div><div class="value" id="st-tl">—</div><div class="sub">跌破或往上突破即推送</div></div>
     <div class="card"><div class="label">条件预警</div><div class="value" id="st-pa">—</div><div class="sub">启用中 / 现价·涨跌幅</div></div>
     <div class="card"><div class="label">近 20 条告警</div><div class="value" id="st-alerts">—</div><div class="sub" id="st-backend">推送后端 —</div></div>
   </div>
@@ -195,13 +195,13 @@ td.sym a:hover { color: var(--btn-active); }
 
   <div class="section-title"><span class="bar"></span>价格监控</div>
   <div id="price-section">
-    <div class="sub-title">趋势线跌破监控 <span class="dim" id="tl-count"></span></div>
+    <div class="sub-title">趋势线突破监控 <span class="dim" id="tl-count"></span></div>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
             <th>标的</th><th>监控名称</th><th>类型</th><th>周期</th>
-            <th>跌破幅度</th><th>复权</th><th>最近触发</th><th style="min-width:170px">操作</th>
+            <th>突破幅度</th><th>复权</th><th>最近触发</th><th style="min-width:170px">操作</th>
           </tr>
         </thead>
         <tbody id="tl-tbody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
@@ -244,7 +244,8 @@ const ALERT_LABELS = {
   be_broken: "保本跌破", limit_up_sealed: "涨停封板", accel_down: "加速下跌",
   accel_up: "加速上涨", hold_expire: "到期提醒",
   hold_exit_am: "到期平仓(上午)", hold_exit_pm: "到期平仓(下午)",
-  trendline_break: "趋势线跌破", price_alert: "价格预警",
+  trendline_break: "趋势线跌破", trendline_break_up: "趋势线向上突破",
+  price_alert: "价格预警",
   risk_missing: "未设风控价",
   screener_start: "选股开始", screener_progress: "选股进度",
   screener_done: "选股完成", screener_error: "选股失败",
@@ -464,7 +465,7 @@ function renderTrendlineMonitors(list) {
     <td>🔔 ${escHtml(m.name || "(未命名)")}</td>
     <td>${escHtml(TL_TYPE_NAMES[m.line_type] || m.line_type || "—")}</td>
     <td>${escHtml(m.period || "—")}</td>
-    <td class="num">${m.pct != null ? m.pct + "%" : "—"}</td>
+    <td class="num">${m.pct != null ? (m.dir === "up" ? "往上突破 " : "跌破 ") + m.pct + "%" : "—"}</td>
     <td class="dim">${escHtml(ADJUST_LABELS[m.adjust] || m.adjust || "前复权")}</td>
     <td class="dim">${fmtTs(m.last_fired_at)}</td>
     <td>

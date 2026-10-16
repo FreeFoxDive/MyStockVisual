@@ -52,6 +52,28 @@ class EvaluateTrendlineBreakTest(unittest.TestCase):
         self.assertIsNone(
             self.mon.evaluate_trendline_break(pts, "hline", 2, self.dates, 98.1))
 
+    def test_hline_up_triggers_at_threshold(self):
+        pts = [{"t": "d005", "p": 100.0, "off": 0}]
+        r = self.mon.evaluate_trendline_break(
+            pts, "hline", 2, self.dates, 102, "up")
+        self.assertIsNotNone(r)
+        self.assertAlmostEqual(r["value"], 100.0)
+        self.assertAlmostEqual(r["threshold"], 102.0)
+
+    def test_hline_up_no_trigger_below_threshold(self):
+        pts = [{"t": "d005", "p": 100.0, "off": 0}]
+        self.assertIsNone(self.mon.evaluate_trendline_break(
+            pts, "hline", 2, self.dates, 101.9, "up"))
+
+    def test_unknown_direction_stays_down(self):
+        pts = [{"t": "d005", "p": 100.0, "off": 0}]
+        r = self.mon.evaluate_trendline_break(
+            pts, "hline", 2, self.dates, 97.9, "sideways")
+        self.assertIsNotNone(r)
+        self.assertAlmostEqual(r["threshold"], 98.0)
+        self.assertIsNone(self.mon.evaluate_trendline_break(
+            pts, "hline", 2, self.dates, 102, "sideways"))
+
     def test_trend_extrapolates_to_last_bar(self):
         # 锚点 (idx10, 10) → (idx110, 20); 最后一根 idx119 处线值 20.9
         pts = [{"t": "d010", "p": 10.0, "off": 0}, {"t": "d110", "p": 20.0, "off": 0}]
@@ -91,10 +113,12 @@ class EvaluateTrendlineBreakTest(unittest.TestCase):
 
 
 def _drawing(did="dtest1", name="支撑线", dtype="trend", pct=2, enabled=True,
-             points=None, period="1d", adjust=None):
+             points=None, period="1d", adjust=None, direction=None):
     mon = {"enabled": enabled, "pct": pct}
     if adjust is not None:
         mon["adjust"] = adjust
+    if direction is not None:
+        mon["dir"] = direction
     return {
         "id": did, "type": dtype,
         "points": points or [{"t": "d010", "p": 10.0, "off": 0},
@@ -295,6 +319,14 @@ class LineMonitorEvalTest(unittest.TestCase):
         self.assertEqual(mons["d1"]["adjust"], "forward")
         self.assertEqual(mons["d2"]["adjust"], "none")
 
+    def test_load_dir_defaults_down_and_keeps_up(self):
+        self._save([_drawing("d1"), _drawing("d2", direction="up"),
+                    _drawing("d3", direction="sideways")])
+        mons = {m["drawing_id"]: m for m in self.mon._load_line_monitors()}
+        self.assertEqual(mons["d1"]["dir"], "down")
+        self.assertEqual(mons["d2"]["dir"], "up")
+        self.assertEqual(mons["d3"]["dir"], "down")
+
     def test_load_bar_dates_passes_adjust(self):
         import market
         fake = _FakeDF(["2026-09-01", "2026-09-02", "2026-09-03"])
@@ -397,6 +429,61 @@ class LineMonitorEvalTest(unittest.TestCase):
         self.assertIsNone(trades.get_trendline_fired(self.uid, "d1"))
         d.assert_not_called()
         n.assert_not_called()
+
+    def test_evaluate_upward_break(self):
+        self._save([_drawing(
+            "dup", name="压力线", dtype="hline", pct=2, direction="up",
+            points=[{"t": "d005", "p": 100.0, "off": 0}])])
+        mons = self.mon._load_line_monitors()
+        self.assertEqual(mons[0]["dir"], "up")
+        now = datetime(2026, 9, 13, 10, 0, 0)
+        with mock.patch.object(self.mon, "_load_bar_dates",
+                               return_value=(_dates(120), 120)):
+            dt, nt = self._patch_notify()
+            with dt as d0, nt as n0:
+                self.assertEqual(self.mon._evaluate_trendline_monitors(
+                    mons, {self.SYM: {"last_price": 101.9}}, now), [])
+                notify.flush(5.0)
+            d0.assert_not_called()
+            n0.assert_not_called()
+            with dt as d, nt as n:
+                fired = self.mon._evaluate_trendline_monitors(
+                    mons, {self.SYM: {"last_price": 102.0}}, now)
+                notify.flush(5.0)
+            self.assertEqual(len(fired), 1)
+            self.assertIn("往上突破", fired[0]["detail"])
+            d.assert_called_once()
+            n.assert_called_once()
+            self.assertIn("趋势线向上突破预警", d.call_args.args[0])
+        alerts = trades.list_monitor_alerts(self.uid)
+        self.assertEqual(alerts[0]["alert_type"], "trendline_break_up")
+        self.assertIn("压力线", alerts[0]["detail"])
+
+    def test_mixed_directions_notify_separately(self):
+        other = "000001.SZ"
+        self._save([_drawing(
+            "dd", name="支撑", dtype="hline", pct=2,
+            points=[{"t": "d005", "p": 100.0, "off": 0}])])
+        self._save([_drawing(
+            "du", name="压力", dtype="hline", pct=2, direction="up",
+            points=[{"t": "d005", "p": 100.0, "off": 0}])], symbol=other)
+        mons = self.mon._load_line_monitors()
+        quotes = {self.SYM: {"last_price": 97.0}, other: {"last_price": 103.0}}
+        now = datetime(2026, 9, 13, 10, 0, 0)
+        with mock.patch.object(self.mon, "_load_bar_dates",
+                               return_value=(_dates(120), 120)):
+            dt, nt = self._patch_notify()
+            with dt as d, nt as n:
+                fired = self.mon._evaluate_trendline_monitors(mons, quotes, now)
+                notify.flush(5.0)
+            self.assertEqual(len(fired), 2)
+            self.assertEqual(d.call_count, 2)
+            titles = [c.args[0] for c in d.call_args_list]
+            self.assertIn("趋势线跌破预警", titles)
+            self.assertIn("趋势线向上突破预警", titles)
+            n.assert_called()
+        types = {a["alert_type"] for a in trades.list_monitor_alerts(self.uid)}
+        self.assertEqual(types, {"trendline_break", "trendline_break_up"})
 
 
 class PollOnceIntegrationTest(unittest.TestCase):

@@ -1114,7 +1114,7 @@ body {
     <button type="button" id="info-more" onclick="toggleInfoMore(event)" aria-expanded="false" title="查看放不下的行情">⋯</button>
   </div>
   <div class="toolbar-right">
-    <button id="monitor-entry" class="nav-btn" onclick="location.href='/monitor.html'" aria-label="监控中心" title="监控中心: 持仓风控/趋势线跌破/条件预警/告警一览"><span class="nav-ico" aria-hidden="true">🛡</span><span class="nav-txt">监控</span></button>
+    <button id="monitor-entry" class="nav-btn" onclick="location.href='/monitor.html'" aria-label="监控中心" title="监控中心: 持仓风控/趋势线突破/条件预警/告警一览"><span class="nav-ico" aria-hidden="true">🛡</span><span class="nav-txt">监控</span></button>
     <button id="screener-entry" class="nav-btn" onclick="location.href='/screener.html'" aria-label="条件选股" title="条件选股: MACD金叉/MA20/筹码获利等"><span class="nav-ico" aria-hidden="true">🎯</span><span class="nav-txt">选股</span></button>
     <button id="trades-entry" class="nav-btn" title="交易记录统计" aria-label="交易记录统计" onclick="location.href='/trades.html'"><span class="nav-ico" aria-hidden="true">📒</span><span class="nav-txt">交易</span></button>
     <span class="search-wrap">
@@ -1236,7 +1236,7 @@ body {
     <button id="dm-width" title="线宽 1px/2px">细</button>
     <button id="dm-value" title="输入精确价格">数值</button>
     <button id="dm-extend" title="向右延伸至最新bar之后 (预测区)">延伸</button>
-    <button id="dm-monitor" title="跌破此线推送预警 (需命名)">🔔监控</button>
+    <button id="dm-monitor" title="跌破或往上突破此线推送预警 (需命名)">🔔监控</button>
     <button id="dm-delete" style="color:#f56c6c">删除</button>
   </div>
   <div id="draw-text-input"><input type="text" id="draw-text-field" maxlength="60" placeholder="输入文字, Enter确认 / Esc取消"></div>
@@ -1252,7 +1252,10 @@ body {
     <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">🔔 趋势线监控 (每日最多提醒一次, 推送钉钉/ntfy) <span id="dmi-adjust" style="color:#e6a23c"></span></div>
     <div style="display:flex;gap:4px;align-items:center">
       <input type="text" id="dmi-name" maxlength="50" placeholder="监控名称 (必填)" style="flex:1;min-width:0">
-      <span style="font-size:11px;color:var(--text-secondary);white-space:nowrap">跌破</span>
+      <select id="dmi-dir" style="font-size:11px">
+        <option value="down">跌破</option>
+        <option value="up">往上突破</option>
+      </select>
       <input type="number" id="dmi-pct" step="0.1" min="0.1" max="20" style="width:52px">
       <span style="font-size:11px;color:var(--text-secondary)">%</span>
     </div>
@@ -7177,6 +7180,7 @@ function refreshSymbolPanels() {
 
 // ── 价格预警管理 ──
 const TL_TYPE_NAMES = { trend: "趋势线", ray: "射线", hline: "水平线" };
+const TL_DIR_LABELS = { down: "跌破", up: "往上突破" };
 
 async function refreshTrendlineMonitors() {
   const box = document.getElementById("tl-list");
@@ -7192,7 +7196,7 @@ async function refreshTrendlineMonitors() {
       <div style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid var(--border)">
         <div style="flex:1;min-width:0">
           <b>${escHtml(m.symbol)}</b> <span style="color:#e6a23c">🔔${escHtml(m.name || "(未命名)")}</span>
-          <span class="dim" style="font-size:12px;color:var(--text-secondary)">${TL_TYPE_NAMES[m.line_type] || m.line_type} · ${escHtml(m.period)} · 跌破${m.pct != null ? m.pct : "?"}% · ${ADJUST_LABELS[m.adjust] || m.adjust || "前复权"}</span>
+          <span class="dim" style="font-size:12px;color:var(--text-secondary)">${TL_TYPE_NAMES[m.line_type] || m.line_type} · ${escHtml(m.period)} · ${TL_DIR_LABELS[m.dir] || "跌破"}${m.pct != null ? m.pct : "?"}% · ${ADJUST_LABELS[m.adjust] || m.adjust || "前复权"}</span>
         </div>
         <span class="dim" style="font-size:11px">${m.last_fired_at ? m.last_fired_at.replace("T", " ").slice(5, 16) : "未触发"}</span>
       </div>`).join("");
@@ -8298,6 +8302,7 @@ function openMonitorInput(d) {
   const wrap = document.getElementById('chart-wrap');
   const nameF = document.getElementById('dmi-name');
   const pctF = document.getElementById('dmi-pct');
+  const dirF = document.getElementById('dmi-dir');
   const stopBtn = document.getElementById('dmi-stop');
   box.style.display = 'block';
   const bounds = drawChromeBounds(wrap);
@@ -8313,6 +8318,7 @@ function openMonitorInput(d) {
   box.style.top = pos.top + 'px';
   nameF.value = d.name || '';
   pctF.value = (d.monitor && d.monitor.pct) || defaultMonitorPct();
+  dirF.value = (d.monitor && d.monitor.dir === 'up') ? 'up' : 'down';
   const adjEl = document.getElementById('dmi-adjust');
   if (adjEl) adjEl.textContent = '· ' + (ADJUST_LABELS[STATE.adjust] || STATE.adjust);
   stopBtn.style.display = (d.monitor && d.monitor.enabled) ? '' : 'none';
@@ -8327,20 +8333,23 @@ function hideMonitorInput() {
 function saveMonitorInput(d) {
   const nameF = document.getElementById('dmi-name');
   const pctF = document.getElementById('dmi-pct');
+  const dirF = document.getElementById('dmi-dir');
   const name = nameF.value.trim();
+  const dir = dirF.value === 'up' ? 'up' : 'down';
+  const verb = TL_DIR_LABELS[dir];
   // 强制命名: 监控趋势线必须有名称 (推送与列表按名字识别)
   if (!name) { showToast('请输入监控名称 (必填)', { type: 'warn' }); nameF.focus(); return; }
   let pct = parseFloat(pctF.value);
   if (!Number.isFinite(pct) || pct < 0.1 || pct > 20) {
-    showToast('跌破幅度须为 0.1-20 之间的数值', { type: 'warn' }); return;
+    showToast(verb + '幅度须为 0.1-20 之间的数值', { type: 'warn' }); return;
   }
   d.name = name.slice(0, 50);
-  d.monitor = { enabled: true, pct, adjust: STATE.adjust };
+  d.monitor = { enabled: true, pct, dir, adjust: STATE.adjust };
   hideMonitorInput();
   scheduleSave();
   redrawDrawings();
   showDrawMenu(); // 刷新菜单按钮为「🔔监控中」
-  showToast(`🔔 监控已开启: 跌破「${d.name}」${pct}% 即推送`);
+  showToast(`🔔 监控已开启: ${verb}「${d.name}」${pct}% 即推送`);
 }
 
 // ── 修正建议浮框 ──

@@ -371,6 +371,20 @@ class TestDrawingsNameMonitor(unittest.TestCase):
             "name: 'x', monitor: {enabled: false, pct: 3}})")
         self.assertEqual(out["monitor"], {"enabled": False, "pct": 3})
 
+    def test_monitor_dir_preserved_or_dropped(self):
+        up = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: true, pct: 2, dir: 'up'}})")
+        self.assertEqual(up["monitor"]["dir"], "up")
+        down = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: true, pct: 2, dir: 'down'}})")
+        self.assertEqual(down["monitor"]["dir"], "down")
+        bad = run_expr(
+            f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
+            "name: 'x', monitor: {enabled: true, pct: 2, dir: 'sideways'}})")
+        self.assertNotIn("dir", bad["monitor"])
+
     def test_monitor_adjust_preserved(self):
         out = run_expr(
             f"D.normalize({{id: 'd1', type: 'trend', points: {self.PTS}, "
