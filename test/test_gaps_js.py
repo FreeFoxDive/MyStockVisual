@@ -134,26 +134,24 @@ class TestGapsJs(unittest.TestCase):
         gaps = scan(klines)
         self.assertEqual(gaps, [])
 
-    def test_max_visible_default_is_two(self):
+    def test_max_visible_default_is_five(self):
         out = json.loads(run_gaps_js(
             "process.stdout.write(JSON.stringify(GapScanner.MAX_VISIBLE));"
         ))
-        self.assertEqual(out, 2)
+        self.assertEqual(out, 5)
 
     def test_max_visible_truncates_oldest(self):
         klines = [bar("2024-01-01", 10, 10.5, 9.5, 10)]
-        # create 5 unfilled up gaps by stepping higher each day
+        # 7 个未回补向上缺口, 默认只留最近 5 个
         price = 10.5
-        for i in range(5):
+        for i in range(7):
             lo = price + 1
             hi = lo + 1
             klines.append(bar(f"2024-01-{i+2:02d}", lo, hi, lo, lo + 0.5))
             price = hi
-        gaps = scan(klines)  # default MAX_VISIBLE=2
-        self.assertEqual(len(gaps), 2)
-        # newest two startIdx should be the last two gap bars
-        self.assertEqual(gaps[0]["startIdx"], 4)
-        self.assertEqual(gaps[1]["startIdx"], 5)
+        gaps = scan(klines)
+        self.assertEqual(len(gaps), 5)
+        self.assertEqual([g["startIdx"] for g in gaps], [3, 4, 5, 6, 7])
 
     def test_find_gap_at_by_price(self):
         klines = [
@@ -168,14 +166,18 @@ class TestGapsJs(unittest.TestCase):
             "process.stdout.write(JSON.stringify({"
             "hit: GapScanner.findGapAt(gaps, 2, 11.5),"
             "miss: GapScanner.findGapAt(gaps, 2, 13.0),"
-            "early: GapScanner.findGapAt(gaps, 0, 11.5)"
+            "prev: GapScanner.findGapAt(gaps, 0, 11.5),"
+            "body: GapScanner.findGapAt(gaps, 0, 10.2)"
             "}));",
             json.dumps(payload),
         ))
         self.assertIsNotNone(out["hit"])
         self.assertEqual(out["hit"]["dir"], "up")
         self.assertIsNone(out["miss"])
-        self.assertIsNone(out["early"])
+        # 灰区从缺口前一根的中心起, 十字线落在前一根的缺口价位上也要提示
+        self.assertIsNotNone(out["prev"])
+        self.assertEqual(out["prev"]["dir"], "up")
+        self.assertIsNone(out["body"])
 
     def test_is_gap_period(self):
         out = json.loads(run_gaps_js(
@@ -210,10 +212,39 @@ class TestGapsJs(unittest.TestCase):
         ))
         self.assertIsNotNone(out)
         self.assertEqual(len(out["data"]), 1)
-        self.assertEqual(out["data"][0][0]["coord"][0], "2024-01-02")
-        self.assertAlmostEqual(out["data"][0][0]["coord"][1], 12.0)
-        self.assertAlmostEqual(out["data"][0][1]["coord"][1], 11.0)
+        # 分类轴数值吸到槽位中心。最新一根上的缺口起止下标相同,
+        # 必须从前一根中心画到这一根中心, 否则宽度为 0。
+        self.assertAlmostEqual(out["data"][0][0]["xAxis"], 0)
+        self.assertAlmostEqual(out["data"][0][0]["yAxis"], 12.0)
+        self.assertAlmostEqual(out["data"][0][1]["xAxis"], 1)
+        self.assertAlmostEqual(out["data"][0][1]["yAxis"], 11.0)
+        self.assertGreater(out["data"][0][1]["xAxis"], out["data"][0][0]["xAxis"])
         self.assertEqual(out["itemStyle"]["color"], "rgba(1,2,3,0.2)")
+
+    def test_588200_20261015_down_gap_has_width(self):
+        """588200.SH 2026-10-15: 高 0.945 < 前低 0.957, 且当时它是最新一根。"""
+        klines = [
+            bar("2026-10-14", 0.990, 1.001, 0.957, 0.960),
+            bar("2026-10-15", 0.925, 0.945, 0.917, 0.938),
+        ]
+        gaps = scan(klines)
+        self.assertEqual(len(gaps), 1)
+        g = gaps[0]
+        self.assertEqual(g["dir"], "down")
+        self.assertAlmostEqual(g["top"], 0.957)
+        self.assertAlmostEqual(g["bottom"], 0.945)
+        self.assertEqual(g["startIdx"], g["endIdx"])
+        dates = [k["date"] for k in klines]
+        out = json.loads(run_gaps_js(
+            "const p = JSON.parse(process.argv[1]);"
+            "const gaps = GapScanner.scanGaps(p.klines);"
+            "process.stdout.write(JSON.stringify(GapScanner.buildMarkArea(gaps, p.dates, {})));",
+            json.dumps({"klines": klines, "dates": dates}),
+        ))
+        self.assertAlmostEqual(out["data"][0][0]["xAxis"], 0)
+        self.assertAlmostEqual(out["data"][0][1]["xAxis"], 1)
+        self.assertAlmostEqual(out["data"][0][0]["yAxis"], 0.957)
+        self.assertAlmostEqual(out["data"][0][1]["yAxis"], 0.945)
 
 
 if __name__ == "__main__":

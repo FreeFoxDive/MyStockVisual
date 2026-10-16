@@ -12,7 +12,7 @@
   'use strict';
 
   const GAP_PERIODS = ['60m', '1d', '1w', '1M'];
-  const MAX_VISIBLE = 2;
+  const MAX_VISIBLE = 5;
   const EPS = 1e-8;
 
   function isHaltBar(bar) {
@@ -141,6 +141,7 @@
   /**
    * 十字线落在缺口灰区内则返回该缺口（优先最近形成的）。
    * 必须同时命中 x（dataIndex）与 y（price）。
+   * 灰区从形成缺口的前一根中心画到末根中心, 所以前一根也算命中。
    */
   function findGapAt(gaps, dataIndex, price) {
     if (!gaps || !gaps.length || dataIndex == null) return null;
@@ -148,7 +149,7 @@
     const px = Number(price);
     for (let i = gaps.length - 1; i >= 0; i--) {
       const g = gaps[i];
-      if (dataIndex < g.startIdx || dataIndex > g.endIdx) continue;
+      if (dataIndex < g.startIdx - 1 || dataIndex > g.endIdx) continue;
       if (px >= g.bottom - EPS && px <= g.top + EPS) return g;
     }
     return null;
@@ -156,28 +157,39 @@
 
   /**
    * 构建 ECharts markArea 配置。
+   * 分类轴上的数值坐标会吸到槽位中心, 半格并不是槽位边缘:
+   * 0.5 与 1 落在同一根中心, 1.5 则落到轴外被裁掉。
+   * 用日期字符串时, 缺口若在最新一根, 起止是同一个中心, 矩形宽度为 0
+   * (588200.SH 2026-10-15 向下缺口当天即此, 两根 K 线之间的空白没有灰区)。
+   * 所以从形成缺口的前一根中心画到末根中心, 最新缺口也能盖住中间那段空白。
    * @param {Array} gaps scanGaps 结果
-   * @param {string[]} dates x 轴类目
+   * @param {string[]} dates x 轴类目 (与 klines 等长, 下标与 startIdx/endIdx 对齐)
    * @param {{gapFill: string, gapBorder: string}} colors
    */
   function buildMarkArea(gaps, dates, colors) {
     if (!gaps || !gaps.length || !dates || !dates.length) return undefined;
     const fill = (colors && colors.gapFill) || 'rgba(158,158,158,0.28)';
     const border = (colors && colors.gapBorder) || 'rgba(120,120,120,0.45)';
+    const last = dates.length - 1;
 
-    const data = gaps.map(function (g) {
-      const x0 = dates[g.startIdx];
-      const x1 = dates[g.endIdx] != null ? dates[g.endIdx] : dates[dates.length - 1];
-      return [
+    const data = [];
+    for (let i = 0; i < gaps.length; i++) {
+      const g = gaps[i];
+      if (g.startIdx == null || g.endIdx == null) continue;
+      if (g.startIdx < 1 || g.endIdx < g.startIdx || g.endIdx > last) continue;
+      data.push([
         {
-          coord: [x0, g.top],
+          xAxis: g.startIdx - 1,
+          yAxis: g.top,
           gapMeta: g,
         },
         {
-          coord: [x1, g.bottom],
+          xAxis: g.endIdx,
+          yAxis: g.bottom,
         },
-      ];
-    });
+      ]);
+    }
+    if (!data.length) return undefined;
 
     // silent:true — 不抢 axis tooltip；缺口文案由主图 axis tooltip 注入
     return {
