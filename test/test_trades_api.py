@@ -134,23 +134,54 @@ class TradesApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.get_json()["error"], "记录不存在")
 
-    def test_missing_bar_validation_is_logged_before_update(self):
+    def test_missing_bar_validation_is_logged_before_write(self):
         created = self._create(symbol="588200.SH", name="科创芯片ETF嘉实")
         self.assertEqual(created.status_code, 201, created.data)
         tid = created.get_json()["trade"]["id"]
         error = "2026-10-08 无日K数据（行情暂不可用、非交易日或未上市，请稍后重试）"
-        with mock.patch("trades.validate_trade", return_value=error), \
-             mock.patch("trades.update_trade") as update, \
+
+        def bar(symbol, date_str):
+            if str(date_str)[:10] == "2026-10-08":
+                return None
+            return _fake_bar(symbol, date_str)
+
+        with mock.patch("market.get_daily_bar", side_effect=bar), \
              self.assertLogs("api", level="WARNING") as logs:
             response = self.client.put(
-                f"/api/trades/{tid}", data=json.dumps({"status": "closed"}),
+                f"/api/trades/{tid}",
+                data=json.dumps({
+                    "status": "closed",
+                    "exit_price": 1.038,
+                    "exit_date": "2026-10-08",
+                    "exit_reason": "止盈(达到目标价)",
+                }),
                 content_type="application/json", headers=self._csrf(self.client),
             )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error"], error)
-        update.assert_not_called()
         self.assertIn(f"更新交易校验拒绝 id={tid} symbol=588200.SH", logs.output[0])
         self.assertIn("2026-10-08 无日K数据", logs.output[0])
+        kept = self.client.get("/api/trades?symbol=588200.SH")
+        self.assertEqual(kept.get_json()["trades"][0]["status"], "open")
+
+    def test_update_looks_up_bars_once(self):
+        created = self._create()
+        self.assertEqual(created.status_code, 201, created.data)
+        tid = created.get_json()["trade"]["id"]
+        calls = []
+
+        def bar(symbol, date_str):
+            calls.append(str(date_str)[:10])
+            return _fake_bar(symbol, date_str)
+
+        with mock.patch("market.get_daily_bar", side_effect=bar):
+            response = self.client.put(
+                f"/api/trades/{tid}",
+                data=json.dumps({"entry_price": 10.5}),
+                content_type="application/json", headers=self._csrf(self.client),
+            )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(calls, ["2026-08-20"])
 
     def test_create_validation_is_logged_without_notes(self):
         with self.assertLogs("api", level="WARNING") as logs:

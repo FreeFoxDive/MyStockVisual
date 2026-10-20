@@ -675,6 +675,22 @@ class PollPipelineTestCase(unittest.TestCase):
         )
         self._bar_patch.start()
         self.addCleanup(self._bar_patch.stop)
+        self._bars_patch = mock.patch(
+            "market.get_daily_bars",
+            side_effect=lambda symbol, dates: {
+                str(d)[:10]: {
+                    "date": str(d)[:10],
+                    "high": 99999.0,
+                    "low": 0.01,
+                    "volume": 1_000_000,
+                    "open": 10.0,
+                    "close": 10.0,
+                }
+                for d in dates
+            },
+        )
+        self._bars_patch.start()
+        self.addCleanup(self._bars_patch.stop)
 
     def tearDown(self):
         monitor.clear_buffers()

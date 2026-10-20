@@ -1374,13 +1374,14 @@ def _hfq_daily_ttl(symbol, count, adj, chain_tag, now, live):
 
 
 def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
-                   quote_fresh=True):
+                   quote_fresh=True, append_today=True):
     """fetch_kline 完整版, 额外返回实际服务的数据源名 (观测/透传 meta 用)。
 
     返回 (标准化 DataFrame, 名称, 数据源名); 失败 (None, None, None)。
     timing: 可选 dict, 填入 disk/fetch_ms/append_bar_ms/quote_ms 观测字段。
     quote_fresh: 当日 bar 的快照新鲜度, False 时复用 quote_cache (见
         _daily_bar_from_quote)。默认 True = 每次强制拉新快照 (旧行为)。
+    append_today: False 时不拼当日快照 (成交校验只要历史 OHLC, 避免每条腿抢快照锁)。
     """
     adj = kline_source.normalize_adjust(adjust)
     category = _kline_category(symbol, period)
@@ -1414,7 +1415,7 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
             if df is None:
                 cached = None
             else:
-                if quote_patch:
+                if quote_patch and append_today:
                     df = _strip_today_bar_df(df)
                     with perf.Span(timing, "append_bar_ms"):
                         df = _maybe_append_today_bar(symbol, df, timing=timing,
@@ -1445,7 +1446,7 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
     if df is None:
         return None, None, None
 
-    if quote_patch:
+    if quote_patch and append_today:
         with perf.Span(timing, "append_bar_ms"):
             df = _maybe_append_today_bar(symbol, df, timing=timing,
                                          fresh=quote_fresh)
@@ -2929,6 +2930,38 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
     }
 
 
+def _daily_lookback_count(today, target):
+    """回溯交易日约 = 自然日*1.6 + 缓冲；下限 30、上限 1500。"""
+    natural = max((today - target).days + 10, 30)
+    return min(max(int(natural * 1.6) + 20, 30), 1500)
+
+
+def _index_daily_bars(df, wanted):
+    """从日K DataFrame 抽出 wanted (datetime.date) 对应的 bar。"""
+    from datetime import date as _date
+
+    found = {}
+    if df is None or len(df) == 0 or not wanted:
+        return found
+    for idx, row in df.iterrows():
+        try:
+            if hasattr(idx, "date"):
+                d = idx.date()
+            else:
+                d = _date.fromisoformat(str(idx)[:10])
+        except (ValueError, TypeError):
+            continue
+        iso = d.isoformat()
+        if d not in wanted or iso in found:
+            continue
+        bar = _row_to_daily_bar(d, row)
+        if bar is not None:
+            found[iso] = bar
+        if len(found) == len(wanted):
+            break
+    return found
+
+
 def get_daily_bar(symbol, date_str):
     """取指定交易日日K: {date, open, high, low, close, volume}；无该日 bar 返回 None。
 
@@ -2953,9 +2986,7 @@ def get_daily_bar(symbol, date_str):
         if quote_bar is not None:
             return quote_bar
 
-    # 回溯交易日约 = 自然日*1.6 + 缓冲；下限 30、上限 1500
-    natural = max((today - target).days + 10, 30)
-    count = min(max(int(natural * 1.6) + 20, 30), 1500)
+    count = _daily_lookback_count(today, target)
 
     df = None
     try:
@@ -2964,26 +2995,61 @@ def get_daily_bar(symbol, date_str):
     except Exception as e:
         log.warning(f"get_daily_bar 失败 {symbol} {date_str}: {e}")
 
-    if df is not None and len(df) > 0:
-        for idx, row in df.iterrows():
-            try:
-                if hasattr(idx, "date"):
-                    d = idx.date()
-                else:
-                    d = _date.fromisoformat(str(idx)[:10])
-            except (ValueError, TypeError):
-                continue
-            if d != target:
-                continue
-            bar = _row_to_daily_bar(d, row)
-            if bar is not None:
-                return bar
+    bar = _index_daily_bars(df, {target}).get(target.isoformat())
+    if bar is not None:
+        return bar
 
     quote_bar = _daily_bar_from_quote(symbol, target)
     if quote_bar is not None:
         return quote_bar
 
     return None
+
+
+def get_daily_bars(symbol, dates):
+    """一次取多日未复权日K。返回 {YYYY-MM-DD: bar 或 None}，缺档为 None。
+
+    含今天时最多取一次成交快照。其余日期按最旧日拉一根日K，且不拼当日快照，
+    避免批次校验对每条腿各刷一次行情。
+    """
+    from datetime import date as _date
+
+    symbol = normalize_symbol(symbol)
+    ordered = []
+    seen = set()
+    for raw in dates:
+        try:
+            d = _date.fromisoformat(str(raw)[:10])
+        except (ValueError, TypeError):
+            continue
+        if d not in seen:
+            seen.add(d)
+            ordered.append(d)
+    out = {d.isoformat(): None for d in ordered}
+    if not ordered:
+        return out
+
+    today = market_hours.now().date()
+    if today in seen:
+        quote_bar = _daily_bar_from_quote(symbol, today, for_trade=True)
+        if quote_bar is not None:
+            out[today.isoformat()] = quote_bar
+            if seen == {today}:
+                return out
+
+    missing = [d for d in ordered if out[d.isoformat()] is None]
+    count = _daily_lookback_count(today, min(missing))
+    df = None
+    try:
+        df, _, _ = fetch_kline_ex(
+            symbol, "1d", count, adjust="none", append_today=False,
+        )
+    except Exception as e:
+        log.warning(f"get_daily_bars 失败 {symbol}: {e}")
+    for iso, bar in _index_daily_bars(df, set(missing)).items():
+        if out.get(iso) is None:
+            out[iso] = bar
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════

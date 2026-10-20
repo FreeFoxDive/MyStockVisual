@@ -384,5 +384,61 @@ class TestDailyDiskTtl(unittest.TestCase):
         self.assertEqual(seen[0], 60.0)
 
 
+class TestGetDailyBars(unittest.TestCase):
+    """批次校验: 多日一次日K, 今天最多一次成交快照, 且不拼当日 bar。"""
+
+    def test_historical_dates_one_kline_no_quote(self):
+        df = _df_with_dates(["2026-08-03", "2026-08-10", "2026-09-01"])
+        with mock.patch.object(market_mod, "fetch_kline_ex", return_value=(df, "n", "t")) as fk, \
+             mock.patch.object(market_mod, "fetch_trade_quote") as fq:
+            out = market_mod.get_daily_bars(
+                "588200.SH", ["2026-08-10", "2026-08-03", "2026-08-10"],
+            )
+        fk.assert_called_once()
+        self.assertEqual(fk.call_args.kwargs["adjust"], "none")
+        self.assertIs(fk.call_args.kwargs["append_today"], False)
+        self.assertEqual(fk.call_args.args[1], "1d")
+        fq.assert_not_called()
+        self.assertEqual(set(out), {"2026-08-03", "2026-08-10"})
+        self.assertEqual(out["2026-08-03"]["date"], "2026-08-03")
+        self.assertEqual(out["2026-08-10"]["high"], 11.0)
+
+    def test_today_quote_once_and_one_kline_for_history(self):
+        today = "2026-09-15"
+        df = _df_with_dates(["2026-08-03", today])
+        df.loc[pd.Timestamp(today), "high"] = 9.0
+        ts = dt.datetime(2026, 9, 15, 10, 30, tzinfo=_CST).timestamp()
+        quote = {
+            "open": 1.0, "high": 1.2, "low": 0.9, "last_price": 1.1,
+            "volume": 1000, "timestamp": ts,
+        }
+        with mock.patch("market_hours.is_trading_day", return_value=True), \
+             mock.patch("market_hours.session_phase", return_value="trading"), \
+             mock.patch.object(market_mod, "fetch_kline_ex", return_value=(df, "n", "t")) as fk, \
+             mock.patch.object(market_mod, "fetch_trade_quote", return_value=quote) as fq:
+            out = market_mod.get_daily_bars("588200.SH", [today, "2026-08-03", today])
+        fq.assert_called_once_with("588200.SH")
+        fk.assert_called_once()
+        self.assertIs(fk.call_args.kwargs["append_today"], False)
+        self.assertEqual(out[today]["high"], 1.2)
+        self.assertEqual(out["2026-08-03"]["date"], "2026-08-03")
+
+    def test_today_only_skips_kline_when_quote_ready(self):
+        today = "2026-09-15"
+        ts = dt.datetime(2026, 9, 15, 10, 30, tzinfo=_CST).timestamp()
+        quote = {
+            "open": 1.0, "high": 1.2, "low": 0.9, "last_price": 1.1,
+            "volume": 1000, "timestamp": ts,
+        }
+        with mock.patch("market_hours.is_trading_day", return_value=True), \
+             mock.patch("market_hours.session_phase", return_value="trading"), \
+             mock.patch.object(market_mod, "fetch_kline_ex") as fk, \
+             mock.patch.object(market_mod, "fetch_trade_quote", return_value=quote) as fq:
+            out = market_mod.get_daily_bars("588200.SH", [today, today])
+        fq.assert_called_once()
+        fk.assert_not_called()
+        self.assertEqual(out[today]["low"], 0.9)
+
+
 if __name__ == "__main__":
     unittest.main()

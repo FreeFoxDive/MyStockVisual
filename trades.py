@@ -1447,19 +1447,8 @@ def _batch_leg_label(i, n):
     return n - i
 
 
-def _validate_price_on_bar(symbol, date_str, price, side_label, leg_prefix=""):
-    """校验价在当日振幅内且成交量>0。返回错误文案或 None。
-
-    side_label: '买入' / '卖出'；leg_prefix: '第N笔 '（可空）。
-    当天优先由实时快照生成 OHLC；历史日期也必须有日 K，避免把非交易日
-    或错价静默写入。
-    """
-    try:
-        from market import get_daily_bar
-        bar = get_daily_bar(symbol, date_str)
-    except Exception:
-        bar = None
-
+def _validate_price_against_bar(bar, date_str, price, side_label, leg_prefix=""):
+    """用已取到的日 K 校验价与成交量。返回错误文案或 None。"""
     pfx = leg_prefix or ""
     if bar is None:
         return f"{pfx}{date_str} 无日K数据（行情暂不可用、非交易日或未上市，请稍后重试）"
@@ -1479,6 +1468,21 @@ def _validate_price_on_bar(symbol, date_str, price, side_label, leg_prefix=""):
             f"[{low:.2f}, {high:.2f}] 内"
         )
     return None
+
+
+def _validate_price_on_bar(symbol, date_str, price, side_label, leg_prefix=""):
+    """校验价在当日振幅内且成交量>0。返回错误文案或 None。
+
+    side_label: '买入' / '卖出'；leg_prefix: '第N笔 '（可空）。
+    当天优先由实时快照生成 OHLC；历史日期也必须有日 K，避免把非交易日
+    或错价静默写入。
+    """
+    try:
+        from market import get_daily_bar
+        bar = get_daily_bar(symbol, date_str)
+    except Exception:
+        bar = None
+    return _validate_price_against_bar(bar, date_str, price, side_label, leg_prefix)
 
 
 def _repo_maturity(entry_date, tenor_days):
@@ -1701,12 +1705,6 @@ def _clean_batch(data, existing=None):
         fut = _reject_future_date(date_str, f"第{leg_no}笔日期")
         if fut:
             return None, fut
-        side_label = "买入" if side == "buy" else "卖出"
-        bar_err = _validate_price_on_bar(
-            symbol, date_str, price, side_label, leg_prefix=f"第{leg_no}笔 ",
-        )
-        if bar_err:
-            return None, bar_err
         time_str = s(leg.get("time")) or None
         if time_str is not None:
             parts = time_str.split(":")
@@ -1722,10 +1720,26 @@ def _clean_batch(data, existing=None):
             "time": time_str,
             "reason": s(leg.get("reason")) or None,
             "note": s(leg.get("note")) or None,
+            "_leg_no": leg_no,
         })
 
     if not has_buy:
         return None, "批次交易至少需要一笔买入"
+
+    try:
+        from market import get_daily_bars
+        bars = get_daily_bars(symbol, [leg["date"] for leg in legs])
+    except Exception:
+        bars = {}
+    for leg in legs:
+        side_label = "买入" if leg["side"] == "buy" else "卖出"
+        bar_err = _validate_price_against_bar(
+            bars.get(leg["date"]), leg["date"], leg["price"], side_label,
+            leg_prefix=f"第{leg['_leg_no']}笔 ",
+        )
+        if bar_err:
+            return None, bar_err
+        del leg["_leg_no"]
 
     # 编辑器/API 数组从上到下 = 第N笔…第1笔; 反转后为笔数序 第1…第N。
     # 理由展示与入库均按笔数, 不按日期/时间重排 (同日同时也保持笔数).
@@ -2291,11 +2305,18 @@ def _insert_legs(conn, trade_id, legs):
     )
 
 
+class TradeValidationError(ValueError):
+    """_clean 的固定校验文案。client_error 可回传客户端, 不是异常栈。"""
+
+    def __init__(self, client_error):
+        super().__init__(client_error)
+        self.client_error = client_error
+
+
 def validate_trade(data, existing=None):
     """交易字段校验: 返回错误文案 (无错为 None)。
 
-    文案由 _clean 的固定规则产生, 不含异常原文。API 先取文案再入库,
-    避免把异常文本回传到响应 (CodeQL py/stack-trace-exposure)。
+    文案由 _clean 的固定规则产生, 不含异常原文。
     """
     return _clean(data, existing)[1]
 
@@ -2303,7 +2324,7 @@ def validate_trade(data, existing=None):
 def create_trade(user_id, data):
     clean, err = _clean(data)
     if err:
-        raise ValueError(err)
+        raise TradeValidationError(err)
     now = _now_iso()
     conn = get_conn()
     try:
@@ -2339,7 +2360,7 @@ def update_trade(user_id, tid, data):
         return None
     clean, err = _clean(data, existing)
     if err:
-        raise ValueError(err)
+        raise TradeValidationError(err)
     conn = get_conn()
     try:
         conn.execute(

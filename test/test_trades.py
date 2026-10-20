@@ -48,6 +48,10 @@ def _permissive_bar(symbol, date_str):
     return dict(_PERMISSIVE_BAR, date=str(date_str)[:10])
 
 
+def _permissive_bars(symbol, dates):
+    return {str(d)[:10]: dict(_PERMISSIVE_BAR, date=str(d)[:10]) for d in dates}
+
+
 class TradesTestCase(unittest.TestCase):
     """每个测试用独立的临时 DB 文件, 保证互相隔离。
 
@@ -62,6 +66,9 @@ class TradesTestCase(unittest.TestCase):
         self._bar_patch = mock.patch("market.get_daily_bar", side_effect=_permissive_bar)
         self._bar_patch.start()
         self.addCleanup(self._bar_patch.stop)
+        self._bars_patch = mock.patch("market.get_daily_bars", side_effect=_permissive_bars)
+        self._bars_patch.start()
+        self.addCleanup(self._bars_patch.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -1721,12 +1728,17 @@ class TestMarketBarValidation(TradesTestCase):
         uid = self._make_user()
         self._bar_patch.stop()
 
-        def bar(symbol, date_str):
-            if date_str == "2026-08-05":
-                return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 0}
-            return {"date": date_str, "high": 11.0, "low": 10.0, "volume": 1000}
+        def bars(symbol, dates):
+            out = {}
+            for raw in dates:
+                date_str = str(raw)[:10]
+                if date_str == "2026-08-05":
+                    out[date_str] = {"date": date_str, "high": 11.0, "low": 10.0, "volume": 0}
+                else:
+                    out[date_str] = {"date": date_str, "high": 11.0, "low": 10.0, "volume": 1000}
+            return out
 
-        with mock.patch("market.get_daily_bar", side_effect=bar):
+        with mock.patch("market.get_daily_bars", side_effect=bars):
             with self.assertRaises(ValueError) as cm:
                 trades.create_trade(uid, {
                     "type": "batch", "symbol": "000001.SZ", "name": "平安银行",
@@ -1744,10 +1756,13 @@ class TestMarketBarValidation(TradesTestCase):
         uid = self._make_user()
         self._bar_patch.stop()
 
-        def bar(symbol, date_str):
-            return {"date": date_str, "high": 26.0, "low": 25.0, "volume": 1000}
+        def bars(symbol, dates):
+            return {
+                str(raw)[:10]: {"date": str(raw)[:10], "high": 26.0, "low": 25.0, "volume": 1000}
+                for raw in dates
+            }
 
-        with mock.patch("market.get_daily_bar", side_effect=bar):
+        with mock.patch("market.get_daily_bars", side_effect=bars):
             with self.assertRaises(ValueError) as cm:
                 trades.create_trade(uid, {
                     "type": "batch", "symbol": "000975.SZ", "name": "山金国际",
@@ -1975,9 +1990,9 @@ class TestDateCanonicalization(TradesTestCase):
 # 时段 × 交易操作矩阵
 #
 # 交易日/非交易日 × 盘中/午休/盘后/盘前 × 单次/平仓/加仓/做T/批次。
-# A 组走真实 market.get_daily_bar (只 mock 底层 fetch_trade_quote / fetch_kline
-# 与时钟), 验证时段对成交校验的影响; B 组直接 mock market.get_daily_bar, 隔离
-# 交易层本身 (查询次数/短路/文案/边界/批次分支)。
+# A 组走真实 market.get_daily_bar / get_daily_bars (只 mock 底层
+# fetch_trade_quote / fetch_kline / fetch_kline_ex 与时钟), 验证时段对成交校验的影响;
+# B 组直接 mock 日K查询, 隔离交易层本身 (查询次数/短路/文案/边界/批次分支)。
 # ---------------------------------------------------------------------------
 
 _SESSION_SYM = "600000.SH"
@@ -2035,17 +2050,22 @@ class _SessionCase(TradesTestCase):
 
     def setUp(self):
         super().setUp()
-        self._bar_patch.stop()  # 用真实 market.get_daily_bar
+        self._bar_patch.stop()  # 用真实 market.get_daily_bar / get_daily_bars
+        self._bars_patch.stop()
 
     @contextmanager
     def _session(self, now, phase, trading=True, quote=None, kline=None):
+        def _kline_ex(*_args, **_kwargs):
+            return (kline, "测试标的", "test")
+
         with mock.patch("market_hours.now", return_value=now), \
              mock.patch.object(trades, "_now", return_value=now), \
              mock.patch("market_hours.is_trading_day", return_value=trading), \
              mock.patch("market_hours.session_phase", return_value=phase), \
              mock.patch("market_hours.in_session", return_value=(phase == "trading")), \
              mock.patch("market.fetch_trade_quote", return_value=quote), \
-             mock.patch("market.fetch_kline", return_value=(kline, "测试标的")):
+             mock.patch("market.fetch_kline", return_value=(kline, "测试标的")), \
+             mock.patch("market.fetch_kline_ex", side_effect=_kline_ex):
             yield
 
     def _open_sym(self, **kw):
@@ -2405,11 +2425,12 @@ class TestBatchClose(_SessionCase):
 
 
 class TestOperationBarLookupMock(TradesTestCase):
-    """直接 mock market.get_daily_bar: 交易层查询次数/短路/文案/边界。"""
+    """直接 mock 日K查询: 交易层查询次数/短路/文案/边界。"""
 
     def setUp(self):
         super().setUp()
         self._bar_patch.stop()
+        self._bars_patch.stop()
 
     @staticmethod
     def _bar(symbol, date_str):
@@ -2443,21 +2464,26 @@ class TestOperationBarLookupMock(TradesTestCase):
             trades.create_trade(uid, self._closed_sym(entry_date=_HIST, exit_date="2026-08-10"))
         self.assertEqual(calls, [(_SESSION_SYM, _HIST), (_SESSION_SYM, "2026-08-10")])
 
-    def test_batch_looks_up_each_leg(self):
+    def test_batch_fetches_unique_dates_once(self):
         uid = self._make_user()
         calls = []
 
-        def bar(symbol, date_str):
-            calls.append(date_str)
-            return self._bar(symbol, date_str)
+        def bars(symbol, dates):
+            calls.append((symbol, [str(d)[:10] for d in dates]))
+            return {str(d)[:10]: self._bar(symbol, d) for d in dates}
 
         legs = _ui_legs(
             {"side": "buy", "price": 10.0, "quantity": 1000, "date": "2026-08-03", "time": "09:30"},
+            {"side": "buy", "price": 10.2, "quantity": 200, "date": "2026-08-03", "time": "10:00"},
             {"side": "sell", "price": 10.5, "quantity": 500, "date": "2026-08-10", "time": "14:00"},
         )
-        with mock.patch("market.get_daily_bar", side_effect=bar):
+        with mock.patch("market.get_daily_bars", side_effect=bars) as gb, \
+             mock.patch("market.get_daily_bar") as one:
             trades.create_trade(uid, _batch_payload(legs))
-        self.assertEqual(sorted(calls), ["2026-08-03", "2026-08-10"])
+        self.assertEqual(gb.call_count, 1)
+        one.assert_not_called()
+        self.assertEqual(calls[0][0], _SESSION_SYM)
+        self.assertEqual(sorted(calls[0][1]), ["2026-08-03", "2026-08-03", "2026-08-10"])
 
     def test_future_entry_skips_bar_lookup(self):
         uid = self._make_user()
@@ -2485,7 +2511,7 @@ class TestOperationBarLookupMock(TradesTestCase):
             {"side": "buy", "price": 10.0, "quantity": 100, "date": "2026-08-03"},
             {"side": "buy", "price": 10.0, "quantity": 100, "date": future},
         )
-        with mock.patch("market.get_daily_bar", return_value=self._bar(_SESSION_SYM, _HIST)) as gb:
+        with mock.patch("market.get_daily_bars") as gb:
             self._assert_value_error(
                 trades.create_trade, uid, _batch_payload(legs), sub="不能晚于今天")
         gb.assert_not_called()

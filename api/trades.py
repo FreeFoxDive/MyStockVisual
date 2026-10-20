@@ -64,15 +64,14 @@ def trades_create():
     body = _read_json_body()
     if body is None:
         return _error("请求体无效 JSON", 400)
-    # 先取 _clean 的固定校验文案 (非异常路径), 避免异常原文回传响应;
-    # create_trade 仍会自行校验, 这里的 except 只兜底非校验类异常。
-    err = trades.validate_trade(body)
-    if err:
-        log.warning("创建交易校验拒绝 symbol=%s: %s",
-                    _sanitize_error(body.get("symbol", "")), _sanitize_error(err))
-        return _error(err, 400)
     try:
         trade = trades.create_trade(user["id"], body)
+    except trades.TradeValidationError as e:
+        # client_error 是 _clean 固定文案, 不是异常栈 (CodeQL py/stack-trace-exposure)。
+        log.warning("创建交易校验拒绝 symbol=%s: %s",
+                    _sanitize_error(body.get("symbol", "")),
+                    _sanitize_error(e.client_error))
+        return _error(e.client_error, 400)
     except ValueError as e:
         log.warning("创建交易失败: %s", _sanitize_error(e))
         return _error("交易数据无效", 400)
@@ -90,14 +89,13 @@ def trades_update(tid):
     existing = trades.get_trade(user["id"], tid)
     if not existing:
         return _error("记录不存在", 404)
-    err = trades.validate_trade(body, existing)
-    if err:
-        log.warning("更新交易校验拒绝 id=%s symbol=%s: %s",
-                    tid, _sanitize_error(body.get("symbol", existing["symbol"])),
-                    _sanitize_error(err))
-        return _error(err, 400)
     try:
         trade = trades.update_trade(user["id"], tid, body)
+    except trades.TradeValidationError as e:
+        log.warning("更新交易校验拒绝 id=%s symbol=%s: %s",
+                    tid, _sanitize_error(body.get("symbol", existing["symbol"])),
+                    _sanitize_error(e.client_error))
+        return _error(e.client_error, 400)
     except ValueError as e:
         log.warning("更新交易失败 id=%s: %s", tid, _sanitize_error(e))
         return _error("交易数据无效", 400)
