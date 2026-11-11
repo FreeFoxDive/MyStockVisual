@@ -47,11 +47,15 @@ class MemguardTest(unittest.TestCase):
             relieve_fn=relieve or (lambda: ["cleared"]),
         )
 
-    def test_warn_notifies_once_inside_cooldown(self):
+    def test_warn_updates_level_without_external_notify(self):
         self._check(800, now=0)          # 80%
         self._check(820, now=10)
-        self.assertEqual(self.notes, ["内存预警"])
+        self.assertEqual(memguard.status()["level"], "warn")
         self.assertFalse(memguard.under_pressure())
+        self.assertEqual(self.notes, [], "75% 档不发钉钉/ntfy")
+        self._check(100, now=20)         # 10% < 65, 没到过紧急
+        self.assertEqual(self.notes, [], "没发过紧急告警就不发恢复通知")
+        self.assertEqual(memguard.status()["level"], "ok")
 
     def test_crit_relieves_once_and_sets_pressure(self):
         calls = {"n": 0}

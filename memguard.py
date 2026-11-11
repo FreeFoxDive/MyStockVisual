@@ -3,10 +3,12 @@
 容器内看不到宿主机上其他服务, 进程被杀之后也发不出消息 —— 那一层由
 scripts/host_memwatch.sh 兜底。这里只负责本进程 / 本 cgroup:
 
-- 用量 >= MEMGUARD_WARN_PCT (默认 75): 钉钉 + ntfy 预警, 同一级别 30 分钟一条
-- 用量 >= MEMGUARD_CRIT_PCT (默认 90): 紧急通知, 并清缓存 / malloc_trim /
-  停掉因子构建子进程 / 置 under_pressure (live 快照、手动重建、新选股拒绝)
-- 回落到 MEMGUARD_RECOVER_PCT (默认 65) 以下: 恢复通知, 清除压力标志
+- 用量 >= MEMGUARD_WARN_PCT (默认 75): 只把内部 level 标成 warn, 不发外部通知
+- 用量 >= MEMGUARD_CRIT_PCT (默认 90): 钉钉 + ntfy 紧急通知 (30 分钟一条),
+  并清缓存 / malloc_trim / 停掉因子构建子进程 / 置 under_pressure
+  (live 快照、手动重建、新选股拒绝)
+- 回落到 MEMGUARD_RECOVER_PCT (默认 65) 以下: 清除压力标志; 仅当之前到过
+  紧急线 (pressure) 才发恢复通知, 避免 75% 上下波动刷屏
 - memory.events 的 oom_kill 计数增加: 立即通知 (cgroup 杀掉了容器内的子进程)
 
 用量口径与 docker stats 一致: memory.current - inactive_file (页缓存不算)。
@@ -403,20 +405,18 @@ def check_once(snap=None, now=None, notify_fn=None, relieve_fn=None, root=None):
             notify_fn("内存紧急", _describe(snap, extra))
             actions.append("notify:crit")
     elif pct >= WARN_PCT:
+        # 75% 只记内部状态。外部渠道从 90% 起才推, 避免日常波动刷钉钉/ntfy。
         actions.append("warn")
         with _lock:
             if not _state["pressure"]:
                 _state["level"] = "warn"
-        if _cooled("warn", now):
-            notify_fn("内存预警", _describe(snap))
-            actions.append("notify:warn")
     elif pct < RECOVER_PCT and (pressure or level != "ok"):
         actions.append("recover")
         with _lock:
             _state["pressure"] = False
             _state["level"] = "ok"
             _state["relieved"] = False
-        if _cooled("recover", now):
+        if pressure and _cooled("recover", now):
             notify_fn("内存恢复", _describe(snap, "已低于恢复线, 重任务重新放行"))
             actions.append("notify:recover")
 
@@ -426,7 +426,7 @@ def check_once(snap=None, now=None, notify_fn=None, relieve_fn=None, root=None):
 
 
 def _run():
-    log.info("内存看门狗已启动 (间隔 %.0fs, 预警 %.0f%%, 紧急 %.0f%%)",
+    log.info("内存看门狗已启动 (间隔 %.0fs, 内部预警 %.0f%%, 外部通知/紧急 %.0f%%)",
              INTERVAL_SEC, WARN_PCT, CRIT_PCT)
     while True:
         try:
