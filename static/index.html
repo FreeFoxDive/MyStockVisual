@@ -582,6 +582,8 @@ body {
 }
 #side-panel .sp-row .sp-label { width: 58px; color: var(--text-secondary); flex-shrink: 0; }
 #side-panel .sp-row .sp-val { flex: 1; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+#side-panel .sp-row.sp-action { cursor: pointer; }
+#side-panel .sp-row.sp-action:hover { background: var(--btn-hover); }
 #side-panel .dp-row {
   display: flex;
   align-items: baseline;
@@ -972,6 +974,19 @@ body {
 #param-pop button { padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border);
   background: transparent; color: var(--text); cursor: pointer; font-size: 12px; }
 #param-pop button.pp-ok { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
+#poscalc-modal input[type="number"] {
+  width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg-card); color: var(--text);
+}
+#poscalc-modal .pc-chip, #poscalc-modal .pc-btn {
+  border: 1px solid var(--border); background: transparent; color: var(--text);
+  border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer;
+}
+#poscalc-modal .pc-chip.pc-on, #poscalc-modal .pc-btn.pc-on {
+  background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active);
+}
+#poscalc-result { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 13px; line-height: 1.7; }
+#poscalc-result .pc-stop { color: var(--down-text); font-weight: 700; }
 
 /* ═══ A股市场数据抽屉 ═══ */
 .cn-tab { padding: 2px 8px; font-size: 11px; border: 1px solid var(--border); border-radius: 4px;
@@ -1142,6 +1157,7 @@ body {
     <span class="separator"></span>
     <button id="btn-refresh" class="icon-btn" onclick="refresh()" title="手动刷新数据 (盘中自动刷新)" aria-label="刷新"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
     <button id="btn-draw" class="icon-btn" onclick="toggleDrawMode()" title="画线模式: 趋势线/水平线/斐波那契/回归通道等"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
+    <button id="btn-poscalc" class="icon-btn" onclick="openPosCalcModal()" title="仓位计算: 按 ATR 止损反推股数" aria-label="仓位计算"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8M8 11h.01M12 11h.01M16 11h.01M8 15h.01M12 15h.01M16 15h.01M8 19h.01M12 19h.01M16 19h.01"/></svg></button>
     <button id="btn-alerts" class="icon-btn" onclick="openAlertsModal()" title="价格预警 (现价/涨跌幅条件)">🔔</button>
     <button id="btn-cndata" class="icon-btn" onclick="toggleCnDrawer()" title="市场数据: 资金流/龙虎榜/分红/公告/交易所公告/主力净流入/股东变化/十大股东/十大流通股东/解禁限售">📊</button>
     <button id="btn-shot" class="icon-btn" onclick="saveChartImage()" title="保存图表为图片"><svg class="ico-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
@@ -1295,6 +1311,59 @@ body {
   <div id="cn-body" style="padding:10px 12px;font-size:12px"></div>
 </div>
 
+<!-- 仓位计算（以损定量） -->
+<div id="poscalc-modal" style="display:none;position:fixed;inset:0;z-index:340;background:rgba(0,0,0,0.45)" onclick="if(event.target.id==='poscalc-modal')closePosCalcModal()">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(440px,94vw);
+       background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;max-height:86vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <b>仓位计算</b>
+      <button onclick="closePosCalcModal()" style="border:none;background:none;color:var(--text-secondary);cursor:pointer;font-size:16px" aria-label="关闭">✕</button>
+    </div>
+    <div id="poscalc-index-note" style="display:none;font-size:12px;color:var(--text-secondary);margin-bottom:8px">指数不可直接按股数建仓，以下按输入价试算。</div>
+    <div style="display:grid;grid-template-columns:72px 1fr;gap:8px 8px;align-items:center;font-size:13px">
+      <span>总资金</span>
+      <div>
+        <input type="number" id="pc-capital" min="1000" step="1000" inputmode="decimal">
+        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">
+          <button type="button" class="pc-chip" data-capital="50000">5万</button>
+          <button type="button" class="pc-chip" data-capital="100000">10万</button>
+          <button type="button" class="pc-chip" data-capital="200000">20万</button>
+          <button type="button" class="pc-chip" data-capital="500000">50万</button>
+          <button type="button" class="pc-chip" data-capital="1000000">100万</button>
+        </div>
+      </div>
+      <span>单笔风险</span>
+      <div>
+        <span style="display:flex;align-items:center;gap:4px"><input type="number" id="pc-risk" min="0.05" max="50" step="0.1" inputmode="decimal" style="width:88px"><span style="color:var(--text-secondary)">%</span></span>
+        <div style="display:flex;gap:4px;margin-top:4px">
+          <button type="button" class="pc-chip" data-risk="1">1%</button>
+          <button type="button" class="pc-chip" data-risk="1.5">1.5%</button>
+          <button type="button" class="pc-chip" data-risk="2">2%</button>
+        </div>
+      </div>
+      <span>ATR</span>
+      <div>
+        <div style="display:flex;gap:4px">
+          <button type="button" class="pc-btn" id="pc-period-14" data-period="14">ATR14</button>
+          <button type="button" class="pc-btn" id="pc-period-20" data-period="20">ATR20</button>
+        </div>
+        <div id="pc-atr-readout" style="margin-top:4px;font-size:12px;color:var(--text-secondary)"></div>
+      </div>
+      <span>止损倍数</span>
+      <span style="display:flex;align-items:center;gap:4px"><input type="number" id="pc-mult" min="0.1" max="20" step="0.1" inputmode="decimal" style="width:88px"><span style="color:var(--text-secondary)">× ATR</span></span>
+      <span>买入价</span>
+      <input type="number" id="pc-entry" min="0" step="0.001" inputmode="decimal">
+      <span>ATR</span>
+      <input type="number" id="pc-atr" min="0" step="0.001" inputmode="decimal" title="默认用日线 ATR，可改成试算">
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button type="button" class="pc-btn" id="pc-follow">跟随现价</button>
+      <button type="button" class="pc-btn" id="pc-reset">恢复默认</button>
+    </div>
+    <div id="poscalc-result"></div>
+  </div>
+</div>
+
 <!-- 价格预警弹窗 -->
 <div id="alerts-modal" style="display:none;position:fixed;inset:0;z-index:340;background:rgba(0,0,0,0.45)">
   <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(560px,94vw);
@@ -1347,6 +1416,7 @@ body {
 <script src="/js/drawings.js"></script>
 <script src="/js/draw-input.js"></script>
 <script src="/js/patterns.js"></script>
+<script src="/js/pos-calc.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════════════
 // 未登录访问 /api/* 返回 401 → 跳登录页 (带 next 回跳)
@@ -1501,6 +1571,7 @@ const STATE = {
   logScale: false,       // 主图对数坐标轴
   maPeriods: [5, 10, 20],// 均线参数 (客户端重算)
   bollParams: { n: 20, k: 2 }, // BOLL 参数 (客户端重算)
+  posCalc: { capital: 100000, riskPct: 2, atrMult: 2, atrPeriod: 14 }, // 以损定量 (跟账号同步)
   draw: {                // 画线模式 (Drawings 模块; 数据模型见 static/js/drawings.js)
     enabled: false,      // 画线模式开关 (工具面板可见)
     tool: 'select',      // 当前工具
@@ -3061,6 +3132,7 @@ function infoPanelRows(d) {
   // 641~900 紧凑侧栏始终显示这些行, 其余加 minor。写在函数内: 截图/面板测试会整段抽走本函数。
   const INFO_KEEP_LABELS = {
     '名称': 1, '代码': 1, '现价': 1, '涨停价': 1, '跌停价': 1,
+    '建议仓位': 1, '止损参考': 1,
     '换手': 1, '量比': 1, 'PE': 1, 'PB': 1, '溢价': 1, '状态': 1,
   };
   const markInfoMinor = (r) => {
@@ -3098,6 +3170,18 @@ function infoPanelRows(d) {
     ? (lastPrice > prevClose ? up : (lastPrice < prevClose ? down : gray))
     : gray;
   const p3 = pct(d.chg_3d), p5 = pct(d.chg_5d), p10 = pct(d.chg_10d);
+  // 建议仓位/止损参考: 无日线 ATR 或指数时 formatSideRows 返回 []，filter 会丢掉。
+  const posRows = (typeof VisualPosCalc !== 'undefined' && VisualPosCalc.formatSideRows)
+    ? VisualPosCalc.formatSideRows({
+        isIndex: !!d.is_index,
+        isEtf: !!d.is_etf,
+        entryPrice: d.last_price,
+        atr14: d.atr14,
+        atr20: d.atr20,
+        config: (typeof STATE !== 'undefined' && STATE.posCalc) || null,
+        downColor: down,
+      })
+    : [];
   // 股本结构: 个股看流通市值, ETF 看份额 —— 与顶栏 updateFundInfo 同一套算法与文案。
   // 结构性缺失 (ETF 没有流通市值、指数两者都没有) 就不出行, 不画 — 的空行。
   const fs = Number(d.float_shares);
@@ -3144,6 +3228,7 @@ function infoPanelRows(d) {
     { label: '行业', text: d.industry || '—', color: null },
     Object.assign({ label: '涨停价' }, px(d.limit_up, up)),
     Object.assign({ label: '跌停价' }, px(d.limit_down, down)),
+    ...posRows,
     { label: '总手', text: fmtLots(d.volume), color: null },
     { label: '成交额', text: d.amount == null ? '—' : fmtCN(d.amount), color: null },
     { label: '换手', text: d.turnover_rate == null ? '—' : Number(d.turnover_rate).toFixed(2) + '%', color: null },
@@ -3164,10 +3249,12 @@ function infoPanelRows(d) {
 function stockInfoRowHtml(r) {
   const id = r.id ? ` id="${r.id}"` : '';
   const style = r.color ? ` style="color:${r.color}"` : '';
-  // title 可选 (目前只有溢价/下一开盘用它给出计算时间与时段说明); escHtml 不管引号, 这里自己补一下
+  // title 可选 (目前只有溢价/下一开盘/算仓用它给出计算时间与时段说明); escHtml 不管引号, 这里自己补一下
   const title = r.title ? ` title="${escHtml(r.title).replace(/"/g, '&quot;')}"` : '';
   const minor = r.minor ? ' sp-minor' : '';
-  return `<div class="sp-row${minor}"${id}${title}><span class="sp-label">${escHtml(r.label)}</span>` +
+  const action = r.action ? ' sp-action' : '';
+  const data = r.action ? ` data-action="${escHtml(r.action)}"` : '';
+  return `<div class="sp-row${minor}${action}"${id}${data}${title}><span class="sp-label">${escHtml(r.label)}</span>` +
     `<span class="sp-val"${style}>${escHtml(r.text)}</span></div>`;
 }
 
@@ -3548,6 +3635,7 @@ VisualMarketStore.watch(() => marketStore.last, (change) => {
   } else if (change.kind === 'info') {
     STATE.stockInfo = change.value;
     renderStockInfo(change.value);
+    if (typeof posCalcModalOpen === 'function' && posCalcModalOpen()) renderPosCalcModal();
   }
 });
 
@@ -3675,6 +3763,16 @@ function updateLiveStockInfo(q, symbol = STATE.symbol) {
     d.is_etf = !!kd.is_etf;
     d.is_index = !!kd.is_index;
     if (kd.float_shares != null) d.float_shares = Number(kd.float_shares);
+  }
+  // 日K 前复权/不复权的末根 ATR 与算仓同口径。stock-info 还没带回 ATR 时先用它，
+  // 后复权价不能拿来当止损距离。
+  if (STATE.period === '1d' && STATE.adjust !== 'hfq') {
+    const kd = STATE.klineData;
+    if (kd && kd.symbol === symbol && kd.klines && kd.klines.length) {
+      const last = kd.klines[kd.klines.length - 1];
+      if (!(Number(d.atr14) > 0) && Number(last.atr14) > 0) d.atr14 = Number(last.atr14);
+      if (!(Number(d.atr20) > 0) && Number(last.atr20) > 0) d.atr20 = Number(last.atr20);
+    }
   }
   if (d.premium_pct != null) {
     const cached = STATE.premium;
@@ -4500,6 +4598,9 @@ function buildConfig() {
     adjust: STATE.adjust,
     maPeriods: STATE.maPeriods,
     bollParams: STATE.bollParams,
+    posCalc: (typeof VisualPosCalc !== 'undefined')
+      ? VisualPosCalc.normalizePosCalcConfig(STATE.posCalc)
+      : STATE.posCalc,
     // 平板/14 寸的「更多」是当次浮层, 不写进配置 (写了会经账号同步把桌面的展开态冲掉)
     indMore: isPadFoldUi() ? readCfg(CFG_KEY).indMore === true : STATE._indMore === true,
   };
@@ -4600,6 +4701,9 @@ function applyConfig(cfg) {
   if (cfg.bollParams && Number.isInteger(cfg.bollParams.n) && cfg.bollParams.n > 1
       && Number.isFinite(cfg.bollParams.k) && cfg.bollParams.k > 0) {
     STATE.bollParams = { n: cfg.bollParams.n, k: cfg.bollParams.k };
+  }
+  if (cfg.posCalc && typeof VisualPosCalc !== 'undefined') {
+    STATE.posCalc = VisualPosCalc.normalizePosCalcConfig(cfg.posCalc);
   }
   // 旧版 periodMore 配置已废弃；周期改为固定单行滚动，不再改变工具栏高度。
   // 平板/14 寸每次打开都收起浮层 (重要项已内联), 不恢复上次的展开。
@@ -8702,12 +8806,264 @@ function dropdownBox(boxLeft, vw) {
   return { width, left };
 }
 
+// ── 仓位计算（以损定量）: 顶栏弹窗 + 侧栏两行共用 VisualPosCalc ──
+let _posCalcFollow = true;
+
+function posCalcModalOpen() {
+  const el = document.getElementById('poscalc-modal');
+  return !!(el && el.style.display === 'block');
+}
+
+function dailyAtrPair() {
+  const info = (STATE.stockInfo && STATE.stockInfo.symbol === STATE.symbol) ? STATE.stockInfo : null;
+  let atr14 = info && Number(info.atr14) > 0 ? Number(info.atr14) : null;
+  let atr20 = info && Number(info.atr20) > 0 ? Number(info.atr20) : null;
+  if (STATE.period === '1d' && STATE.adjust !== 'hfq' && STATE.klineData
+      && STATE.klineData.symbol === STATE.symbol && STATE.klineData.klines
+      && STATE.klineData.klines.length) {
+    const last = STATE.klineData.klines[STATE.klineData.klines.length - 1];
+    if (atr14 == null && Number(last.atr14) > 0) atr14 = Number(last.atr14);
+    if (atr20 == null && Number(last.atr20) > 0) atr20 = Number(last.atr20);
+  }
+  return { atr14: atr14, atr20: atr20 };
+}
+
+function posEntryPrice() {
+  const info = STATE.stockInfo;
+  if (info && info.symbol === STATE.symbol && Number(info.last_price) > 0) return Number(info.last_price);
+  const kd = STATE.klineData;
+  if (!kd || kd.symbol !== STATE.symbol) return null;
+  const q = kd.quote;
+  if (q && Number(q.last_price) > 0) return Number(q.last_price);
+  const ks = kd.klines;
+  if (ks && ks.length && Number(ks[ks.length - 1].close) > 0) return Number(ks[ks.length - 1].close);
+  return null;
+}
+
+function posCalcIsIndex() {
+  const kd = STATE.klineData;
+  if (kd && kd.symbol === STATE.symbol && kd.is_index) return true;
+  return !!(STATE.stockInfo && STATE.stockInfo.symbol === STATE.symbol && STATE.stockInfo.is_index);
+}
+
+function posCalcIsEtf() {
+  const kd = STATE.klineData;
+  if (kd && kd.symbol === STATE.symbol) return !!kd.is_etf;
+  return !!(STATE.stockInfo && STATE.stockInfo.symbol === STATE.symbol && STATE.stockInfo.is_etf);
+}
+
+function fillPosCalcConfigInputs() {
+  const cfg = VisualPosCalc.normalizePosCalcConfig(STATE.posCalc);
+  document.getElementById('pc-capital').value = cfg.capital;
+  document.getElementById('pc-risk').value = cfg.riskPct;
+  document.getElementById('pc-mult').value = cfg.atrMult;
+  document.querySelectorAll('#poscalc-modal [data-capital]').forEach((btn) => {
+    btn.classList.toggle('pc-on', Number(btn.dataset.capital) === Number(cfg.capital));
+  });
+  document.querySelectorAll('#poscalc-modal [data-risk]').forEach((btn) => {
+    btn.classList.toggle('pc-on', Number(btn.dataset.risk) === Number(cfg.riskPct));
+  });
+  document.getElementById('pc-period-14').classList.toggle('pc-on', cfg.atrPeriod === 14);
+  document.getElementById('pc-period-20').classList.toggle('pc-on', cfg.atrPeriod === 20);
+}
+
+/** 结果区用输入框里的数试算; 落库仍走 normalize 后的 STATE.posCalc。 */
+function posCalcDraft() {
+  const cfg = VisualPosCalc.normalizePosCalcConfig(STATE.posCalc);
+  const read = (id, fallback) => {
+    const n = Number(document.getElementById(id).value);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  return {
+    capital: read('pc-capital', cfg.capital),
+    riskPct: read('pc-risk', cfg.riskPct),
+    atrMult: read('pc-mult', cfg.atrMult),
+    atrPeriod: cfg.atrPeriod,
+  };
+}
+
+/** 正在输入的本金/风险/倍数若越界, 不要静默退回已保存值来试算。空串仍交给 posCalcDraft 用已保存值。 */
+function posCalcInputIssue() {
+  const rules = [
+    ['pc-capital', 1000, 1e9, '总资金需在 1000～10亿'],
+    ['pc-risk', 0.05, 50, '单笔风险需在 0.05%～50%'],
+    ['pc-mult', 0.1, 20, '止损倍数需在 0.1～20'],
+  ];
+  for (let i = 0; i < rules.length; i++) {
+    const id = rules[i][0], lo = rules[i][1], hi = rules[i][2], msg = rules[i][3];
+    const raw = document.getElementById(id).value;
+    if (raw === '' || raw == null) continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < lo || n > hi) return msg;
+  }
+  return null;
+}
+
+function renderPosCalcModal(opts) {
+  if (!posCalcModalOpen() || typeof VisualPosCalc === 'undefined') return;
+  if (opts && opts.refill) fillPosCalcConfigInputs();
+  const cfg = posCalcDraft();
+  const pair = dailyAtrPair();
+  const fmtAtr = (v) => (v == null ? '—' : Number(v).toFixed(3));
+  document.getElementById('pc-atr-readout').textContent =
+    '日线 ATR14 ' + fmtAtr(pair.atr14) + ' · ATR20 ' + fmtAtr(pair.atr20);
+  document.getElementById('poscalc-index-note').style.display = posCalcIsIndex() ? 'block' : 'none';
+  document.getElementById('pc-period-14').classList.toggle('pc-on', cfg.atrPeriod === 14);
+  document.getElementById('pc-period-20').classList.toggle('pc-on', cfg.atrPeriod === 20);
+  const entryEl = document.getElementById('pc-entry');
+  const atrEl = document.getElementById('pc-atr');
+  const followedAtr = cfg.atrPeriod === 20 ? pair.atr20 : pair.atr14;
+  if (_posCalcFollow && document.activeElement !== entryEl) {
+    const px = posEntryPrice();
+    entryEl.value = px != null ? String(px) : '';
+  }
+  if (_posCalcFollow && document.activeElement !== atrEl) {
+    atrEl.value = followedAtr != null ? String(followedAtr) : '';
+  }
+  const box = document.getElementById('poscalc-result');
+  const issue = posCalcInputIssue();
+  if (issue) {
+    box.textContent = issue;
+    return;
+  }
+  const r = VisualPosCalc.calcPositionSizing({
+    entryPrice: Number(entryEl.value),
+    atr: Number(atrEl.value),
+    isEtf: posCalcIsEtf(),
+    capital: cfg.capital,
+    riskPct: cfg.riskPct,
+    atrMult: cfg.atrMult,
+    atrPeriod: cfg.atrPeriod,
+  });
+  if (!r) {
+    box.textContent = '无法计算：缺少有效的买入价或 ATR';
+    return;
+  }
+  if (r.reason === 'stop_non_positive') {
+    box.textContent = '无法计算：止损价 ' + VisualPosCalc.formatPrice(r.stopPrice, r.dp) + ' ≤ 0';
+    return;
+  }
+  const pct = (r.stopPrice / r.entryPrice - 1) * 100;
+  const lines = [
+    (r.shares >= 100 ? (r.lots + ' 手 / ' + r.shares + ' 股') : (r.note || '不足1手')),
+    '止损 ' + VisualPosCalc.formatPrice(r.stopPrice, r.dp) + '（' + VisualPosCalc.formatPct(pct) + '%）',
+    '建仓 ' + VisualPosCalc.formatMoney(r.cost) + ' · 仓位 ' + VisualPosCalc.formatPct(r.posPct) + '%',
+    '最大亏损 ' + VisualPosCalc.formatMoney(r.actualRisk) + ' · 占本金 ' + VisualPosCalc.formatPct(r.actualRiskPct) + '%',
+  ];
+  if (r.note && r.shares >= 100) lines.push(r.note);
+  box.textContent = '';
+  lines.forEach((text, i) => {
+    const row = document.createElement('div');
+    if (i === 1) row.className = 'pc-stop';
+    row.textContent = text;
+    box.appendChild(row);
+  });
+}
+
+function commitPosCalc(partial) {
+  const before = VisualPosCalc.normalizePosCalcConfig(STATE.posCalc);
+  STATE.posCalc = VisualPosCalc.normalizePosCalcConfig(Object.assign({}, STATE.posCalc, partial || {}));
+  saveConfig();
+  if (STATE.stockInfo) renderStockInfo(STATE.stockInfo);
+  renderPosCalcModal({ refill: true });
+  if (partial) {
+    const key = Object.keys(partial)[0];
+    const typed = Number(partial[key]);
+    if (Number.isFinite(typed) && Math.abs(STATE.posCalc[key] - typed) > 1e-9
+        && Math.abs(before[key] - typed) > 1e-9) {
+      showToast('已按允许范围修正');
+    }
+  }
+}
+
+function openPosCalcModal() {
+  _posCalcFollow = true;
+  const modal = document.getElementById('poscalc-modal');
+  if (!modal) return;
+  modal.style.display = 'block';
+  renderPosCalcModal({ refill: true });
+  if (!STATE.stockInfo) fetchStockInfo();
+}
+
+function closePosCalcModal() {
+  // 点关闭、点遮罩或按 Esc 都不会再触发 change, 未失焦的本金/风险/倍数要先收下
+  if (posCalcModalOpen() && typeof VisualPosCalc !== 'undefined') {
+    const cfg = VisualPosCalc.normalizePosCalcConfig(STATE.posCalc);
+    const partial = {};
+    [['pc-capital', 'capital'], ['pc-risk', 'riskPct'], ['pc-mult', 'atrMult']].forEach((pair) => {
+      const el = document.getElementById(pair[0]);
+      const typed = el ? Number(el.value) : NaN;
+      if (Number.isFinite(typed) && Math.abs(typed - Number(cfg[pair[1]])) > 1e-9) partial[pair[1]] = typed;
+    });
+    if (Object.keys(partial).length) commitPosCalc(partial);
+  }
+  const modal = document.getElementById('poscalc-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function wirePosCalc() {
+  const body = document.getElementById('info-body');
+  if (body && !body._posCalcWired) {
+    body._posCalcWired = true;
+    body.addEventListener('click', (e) => {
+      const row = e.target && e.target.closest && e.target.closest('[data-action="poscalc"]');
+      if (!row || !body.contains(row)) return;
+      openPosCalcModal();
+    });
+  }
+  const modal = document.getElementById('poscalc-modal');
+  if (!modal || modal._posCalcWired) return;
+  modal._posCalcWired = true;
+  modal.querySelectorAll('[data-capital]').forEach((btn) => {
+    btn.addEventListener('click', () => commitPosCalc({ capital: Number(btn.dataset.capital) }));
+  });
+  modal.querySelectorAll('[data-risk]').forEach((btn) => {
+    btn.addEventListener('click', () => commitPosCalc({ riskPct: Number(btn.dataset.risk) }));
+  });
+  modal.querySelectorAll('[data-period]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _posCalcFollow = true;
+      commitPosCalc({ atrPeriod: Number(btn.dataset.period) });
+    });
+  });
+  document.getElementById('pc-capital').addEventListener('change', () => {
+    commitPosCalc({ capital: Number(document.getElementById('pc-capital').value) });
+  });
+  document.getElementById('pc-risk').addEventListener('change', () => {
+    commitPosCalc({ riskPct: Number(document.getElementById('pc-risk').value) });
+  });
+  document.getElementById('pc-mult').addEventListener('change', () => {
+    commitPosCalc({ atrMult: Number(document.getElementById('pc-mult').value) });
+  });
+  ['pc-capital', 'pc-risk', 'pc-mult', 'pc-entry', 'pc-atr'].forEach((id) => {
+    document.getElementById(id).addEventListener('input', () => {
+      if (id === 'pc-entry' || id === 'pc-atr') _posCalcFollow = false;
+      renderPosCalcModal();
+    });
+  });
+  document.getElementById('pc-follow').addEventListener('click', () => {
+    _posCalcFollow = true;
+    renderPosCalcModal();
+  });
+  document.getElementById('pc-reset').addEventListener('click', () => {
+    _posCalcFollow = true;
+    STATE.posCalc = VisualPosCalc.normalizePosCalcConfig(VisualPosCalc.DEFAULT_POS_CALC);
+    saveConfig();
+    if (STATE.stockInfo) renderStockInfo(STATE.stockInfo);
+    renderPosCalcModal({ refill: true });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && posCalcModalOpen()) closePosCalcModal();
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   initPeriodScroller();
   initIndScroller();
   wireInfoRowFit();
   wireInfoMore();
+  wirePosCalc();
 
   // Restore saved config (theme, panels, etc.)
   loadConfig();
@@ -9036,7 +9392,14 @@ document.addEventListener('DOMContentLoaded', () => {
   ]);
   const bootReady = () => Promise.race([bootSync, new Promise(r => setTimeout(r, 3000))]);
   // 超时兜底: 首屏已渲染后服务端配置才到达 → 重绘一次应用新配置
-  bootSync.then(() => { if (panelCfgApplied && initDone) { syncPosition(); onIndicatorChange(); } });
+  bootSync.then(() => {
+    if (!panelCfgApplied || !initDone) return;
+    syncPosition();
+    onIndicatorChange();
+    // 首屏可能已经按默认 10万/ATR14 画过侧栏, 晚到的账号参数要补一次
+    if (STATE.stockInfo) renderStockInfo(STATE.stockInfo);
+    if (typeof posCalcModalOpen === 'function' && posCalcModalOpen()) renderPosCalcModal({ refill: true });
+  });
   if (!hist.length && !jumpSymbol) {
     bootReady().then(() => {
       const synced = loadHistory();

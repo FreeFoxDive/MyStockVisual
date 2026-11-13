@@ -84,7 +84,7 @@ _BAR_FIELDS = (
     ("macd_dif", _safe_float), ("macd_dea", _safe_float), ("macd_hist", _safe_float),
     ("rsi6", _safe_float), ("rsi12", _safe_float), ("rsi24", _safe_float),
     ("kdj_k", _safe_float), ("kdj_d", _safe_float), ("kdj_j", _safe_float),
-    ("atr14", _safe_float), ("ema13", _safe_float), ("impulse", _safe_int),
+    ("atr14", _safe_float), ("atr20", _safe_float), ("ema13", _safe_float), ("impulse", _safe_int),
     ("obv", _safe_float), ("maobv", _safe_float),
     ("vol_ma5", _safe_float), ("vol_ma10", _safe_float), ("vol_ma20", _safe_float),
     ("boll_mid", _safe_float), ("boll_up", _safe_float), ("boll_low", _safe_float),

@@ -259,7 +259,7 @@ class StockInfoTest(unittest.TestCase):
         self.assertIsNotNone(info["chg_3d"])
         self.assertIsNotNone(info["chg_5d"])
         self.assertIsNotNone(info["chg_10d"])
-        kline.assert_called_once_with("002714.SZ", "1d", 12, quote_fresh=False)
+        kline.assert_called_once_with("002714.SZ", "1d", 25, quote_fresh=False)
         mr.hsdc_himk_roe.assert_not_called()
         mr.concepts_of_stock.assert_not_called()
         mr.stock_instrument.assert_not_called()
@@ -392,8 +392,57 @@ class StockInfoTest(unittest.TestCase):
         self.assertIsNone(info["limit_up"])
         self.assertIsNone(info["limit_down"])
         self.assertFalse(info["limit_estimated"])
+        self.assertTrue(info["is_index"])
+        self.assertIsNone(info["atr14"], "指数不算仓位 ATR")
+        self.assertIsNone(info["atr20"])
+        basis = market._info_quote_bases.get("000001.SH") or {}
+        self.assertNotIn("tr_sum_13", basis)
         meta.assert_not_called()
         mr.stock_instrument.assert_not_called()
+
+    def test_daily_atr_matches_library_and_live_quote_widens_it(self):
+        """仓位 ATR 用前复权日线 MA(TR); 盘中只换今日 TR, 与整段重算一致。"""
+        from stock_indicators_cn import atr as cn_atr
+        n = 30
+        dates = pd.bdate_range(end="2026-06-30", periods=n)
+        close = pd.Series([10 + i * 0.1 for i in range(n)], index=dates, dtype=float)
+        high = close + 0.4
+        low = close - 0.3
+        df = pd.DataFrame({
+            "open": close, "high": high, "low": low, "close": close,
+            "volume": [100.0] * n, "amount": (close * 100).to_numpy(),
+        })
+        with mock.patch.object(market, "get_mr", return_value=self._fake_mr()), \
+             mock.patch.object(market, "fetch_quote", return_value=self._quote(
+                 last_price=float(close.iloc[-1]))), \
+             mock.patch.object(market, "fetch_kline_ex", return_value=(df, "x", "mairui")) as kline:
+            info = market.fetch_stock_info("000001.SZ", include_enrichment=False)
+        self.assertEqual(kline.call_args[0][2], 25)
+        self.assertIs(kline.call_args.kwargs.get("quote_fresh"), False)
+        self.assertAlmostEqual(info["atr14"], float(cn_atr(high, low, close, 14).iloc[-1]), places=6)
+        self.assertAlmostEqual(info["atr20"], float(cn_atr(high, low, close, 20).iloc[-1]), places=6)
+        self.assertFalse(info["is_index"])
+        basis = market._info_quote_bases["000001.SZ"]
+        self.assertEqual(basis["day"], TODAY.date())
+        self.assertGreater(basis["tr_sum_13"], 0)
+        self.assertGreater(basis["tr_sum_19"], 0)
+        live_high = float(high.iloc[-1]) + 1.5
+        live = market._live_info_for_quote("000001.SZ", {
+            "last_price": float(close.iloc[-1]), "high": live_high,
+            "low": float(low.iloc[-1]), "volume": 1000,
+        })
+        widened_h = high.copy()
+        widened_h.iloc[-1] = live_high
+        self.assertAlmostEqual(
+            live["atr14"], float(cn_atr(widened_h, low, close, 14).iloc[-1]), places=6)
+        self.assertAlmostEqual(
+            live["atr20"], float(cn_atr(widened_h, low, close, 20).iloc[-1]), places=6)
+        self.assertGreater(live["atr14"], info["atr14"])
+
+    def test_live_atr_counts_a_flat_bar(self):
+        """平盘 TR=0 仍计入当日 ATR, 不能因为没有波动就停更。"""
+        val = market._live_atr({"high": 10.0, "low": 10.0}, 10.0, 13.0, 14)
+        self.assertAlmostEqual(val, 13.0 / 14)
 
     def test_non_cn_skips_mairui(self):
         df = _daily_df([10] * 8, [100] * 8)

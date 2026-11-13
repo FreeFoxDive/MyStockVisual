@@ -870,7 +870,44 @@ def _normalize_panel_config(raw):
         if (isinstance(n, int) and not isinstance(n, bool) and n > 1
                 and isinstance(k, (int, float)) and not isinstance(k, bool) and k > 0):
             out["bollParams"] = {"n": n, "k": float(k)}
+    pos = _clean_pos_calc(raw.get("posCalc"))
+    if pos is not None:
+        out["posCalc"] = pos
     return out
+
+
+def _clean_pos_calc(raw):
+    """仓位计算参数: 本金 1000..1e9, 风险% 0.05..50, 止损倍数 0.1..20, ATR 14 或 20。
+
+    任一字段非法则整包丢弃, 不把半套参数写进账号。
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    def num(v, lo, hi):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        n = float(v)
+        if n != n or n in (float("inf"), float("-inf")) or n < lo or n > hi:
+            return None
+        return int(n) if n.is_integer() else n
+
+    capital = num(raw.get("capital"), 1000, 1_000_000_000)
+    risk = num(raw.get("riskPct"), 0.05, 50)
+    mult = num(raw.get("atrMult"), 0.1, 20)
+    period = raw.get("atrPeriod")
+    if isinstance(period, bool) or not isinstance(period, (int, float)):
+        return None
+    if float(period) not in (14.0, 20.0):
+        return None
+    if capital is None or risk is None or mult is None:
+        return None
+    return {
+        "capital": capital,
+        "riskPct": risk,
+        "atrMult": mult,
+        "atrPeriod": int(period),
+    }
 
 
 def get_panel_config(user_id):

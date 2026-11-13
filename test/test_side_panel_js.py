@@ -20,6 +20,7 @@ from pathlib import Path
 _VISUAL_DIR = Path(__file__).resolve().parents[1]
 INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
 MARKET_CLOCK_JS = _VISUAL_DIR / "static" / "js" / "market-clock.js"
+POS_CALC_JS = _VISUAL_DIR / "static" / "js" / "pos-calc.js"
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -268,7 +269,8 @@ class SidePanelStaticTest(unittest.TestCase):
                         < arr.index("label: '现价'") < arr.index("label: '行业'"))
         # 涨停/跌停 是现价的价格边界 → 紧跟 行业, 且在成交类之前
         self.assertLess(arr.index("label: '行业'"), arr.index("label: '涨停价'"))
-        self.assertLess(arr.index("label: '跌停价'"), arr.index("label: '总手'"))
+        self.assertLess(arr.index("label: '跌停价'"), arr.index("...posRows,"))
+        self.assertLess(arr.index("...posRows,"), arr.index("label: '总手'"))
         # 股本结构 (流通/份额、质押) 在成交类之后; PE/PB/溢价 同属估值块且在股本之后
         self.assertLess(arr.index("label: '量比'"), arr.index("sharesRow"))
         self.assertLess(arr.index("sharesRow"), arr.index("pledgeRow"))
@@ -326,8 +328,9 @@ class SidePanelStaticTest(unittest.TestCase):
         html = _extract_fn(self.src, "stockInfoRowHtml")
         self.assertIn("sp-minor", html)
         self.assertIn("const INFO_KEEP_LABELS = {", body)
-        for label in ("名称", "代码", "现价", "涨停价", "跌停价", "换手", "量比", "PE", "PB", "溢价", "状态"):
-            self.assertIn("'" + label + "'", body[body.index("INFO_KEEP_LABELS"):body.index("INFO_KEEP_LABELS") + 280])
+        for label in ("名称", "代码", "现价", "涨停价", "跌停价", "建议仓位", "止损参考",
+                      "换手", "量比", "PE", "PB", "溢价", "状态"):
+            self.assertIn("'" + label + "'", body[body.index("INFO_KEEP_LABELS"):body.index("INFO_KEEP_LABELS") + 480])
         self.assertIn("@media (min-width: 641px) and (max-width: 900px)", self.src)
         self.assertIn("#side-panel:not(.sp-expanded) .sp-minor { display: none; }", self.src)
         self.assertIn('id="sp-expand"', self.src)
@@ -492,12 +495,13 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
                          "marketCountdownSec", "marketHintTitle"))
         # 下一开盘行读的是共享时钟 (真模块 + 可控状态), 不是服务端返回的字段
         cls.script = (
-            MARKET_CLOCK_JS.read_text(encoding="utf-8") + "\n"
+            POS_CALC_JS.read_text(encoding="utf-8") + "\n"
+            + MARKET_CLOCK_JS.read_text(encoding="utf-8") + "\n"
             + fns + "\n"
             + "globalThis.C = () => ({ up: 'up', down: 'down' });\n"
             + "globalThis.VisualLive = { price: (v) => (v == null ? '—' : String(+Number(v).toFixed(3))) };\n"
             + "const c = JSON.parse(process.argv[1]);\n"
-            + "globalThis.STATE = { symbol: c.symbol, period: c.period, klineData: null };\n"
+            + "globalThis.STATE = { symbol: c.symbol, period: c.period, klineData: null, posCalc: c.posCalc || null };\n"
             # 真实载荷一定带 time (→ today); 用例不写就默认"目标时刻就在今天"
             + "const mk = Object.assign({ phase: 'trading', at: Date.now() }, c.market || {});\n"
             + "if (!mk.today) mk.today = String(mk.nextOpenAt || mk.nextLiveAt || '').slice(0, 10);\n"
@@ -507,10 +511,10 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
             + " labels: (rows || []).map(r => r.label) }));"
         )
 
-    def _rows(self, info, period="1d", symbol="000001.SZ", market=None, degraded=False):
+    def _rows(self, info, period="1d", symbol="000001.SZ", market=None, degraded=False, pos_calc=None):
         proc = subprocess.run(["node", "-e", self.script,
                                json.dumps({"info": info, "period": period, "symbol": symbol,
-                                           "market": market, "degraded": degraded})],
+                                           "market": market, "degraded": degraded, "posCalc": pos_calc})],
                               capture_output=True, check=True)
         return json.loads(proc.stdout.decode("utf-8"))
 
@@ -531,6 +535,31 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
         self.assertEqual(rows["流通"]["text"], "1380.00亿")
         self.assertEqual(rows["质押"]["text"], "3.40%")
         self.assertFalse(rows["现价"]["color"] == rows["质押"]["color"], "质押不带涨跌色")
+
+    def test_position_rows_follow_atr_and_skip_index(self):
+        """有日线 ATR 时在跌停价后给出建议仓位/止损参考; 指数或没有 ATR 则不出这两行。"""
+        base = dict(self.STOCK, last_price=10, atr14=0.4, atr20=0.55)
+        out = self._rows(base)
+        labels = out["labels"]
+        self.assertLess(labels.index("跌停价"), labels.index("建议仓位"))
+        self.assertLess(labels.index("建议仓位"), labels.index("止损参考"))
+        self.assertLess(labels.index("止损参考"), labels.index("总手"))
+        rows = {r["label"]: r for r in out["rows"]}
+        # 10 - 2×0.4 = 9.20; 2000/0.8 = 2500 股 = 25 手, 仓位正好 25%
+        self.assertEqual(rows["建议仓位"]["text"], "25手 (25%)")
+        self.assertEqual(rows["止损参考"]["text"], "9.20")
+        self.assertEqual(rows["止损参考"]["color"], "down")
+        self.assertEqual(rows["建议仓位"]["action"], "poscalc")
+        self.assertIn("点击修改算仓参数", rows["建议仓位"]["title"])
+        self.assertIn("ATR14", rows["止损参考"]["title"])
+        switched = self._rows(base, pos_calc={
+            "capital": 100000, "riskPct": 2, "atrMult": 2, "atrPeriod": 20,
+        })
+        by_period = {r["label"]: r for r in switched["rows"]}
+        self.assertEqual(by_period["止损参考"]["text"], "8.90")
+        self.assertIn("ATR20", by_period["止损参考"]["title"])
+        self.assertNotIn("建议仓位", self._rows(dict(base, is_index=True))["labels"])
+        self.assertNotIn("建议仓位", self._rows(self.STOCK)["labels"])
 
     def test_ranking_values_display_source_date_and_ttm(self):
         data = dict(self.STOCK, pe=17.053, pb=4.058,

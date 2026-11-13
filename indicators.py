@@ -279,14 +279,17 @@ def compute_all_indicators(df, period="1d",
             "j": _safe_list(j),
         }
 
-    # ATR
+    # ATR14 是图表/通道口径; ATR20 供仓位计算切换 (海龟管线同窗口), 不另开副图
     if with_atr_val:
         a = atr(h, l, c, 14)
+        a20 = atr(h, l, c, 20)
         result_df["atr14"] = a
+        result_df["atr20"] = a20
     if with_atr_val and serialize:
         indicators["atr"] = {
-            "params": {"period": 14},
+            "params": {"period": 14, "period20": 20},
             "values": _safe_list(a),
+            "values20": _safe_list(a20),
         }
 
     # Elder Impulse System: 1=bullish(红), -1=bearish(绿), 0=neutral(蓝)

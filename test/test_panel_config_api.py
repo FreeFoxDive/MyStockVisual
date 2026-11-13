@@ -125,6 +125,25 @@ class PanelConfigApiTest(unittest.TestCase):
                             content_type="application/json", headers=self._csrf(self.client))
         self.assertEqual(r.status_code, 400)
 
+    def test_pos_calc_roundtrip_and_reject(self):
+        good = {"capital": 100000, "riskPct": 1.5, "atrMult": 2, "atrPeriod": 20}
+        r = self._put({"volume": True, "posCalc": good})
+        cfg = r.get_json()["config"]
+        self.assertEqual(cfg["posCalc"], good)
+        self.assertEqual(self.client.get("/api/me/panel-config").get_json()["config"]["posCalc"], good)
+
+        r = self._put({"volume": True, "posCalc": {
+            "capital": 10, "riskPct": 2, "atrMult": 2, "atrPeriod": 14,
+        }})
+        self.assertEqual(r.get_json()["config"], {"volume": True})
+
+        r = self._put({"posCalc": {
+            "capital": 200000, "riskPct": 2, "atrMult": 2.5, "atrPeriod": 14, "extra": 1,
+        }})
+        self.assertEqual(r.get_json()["config"]["posCalc"], {
+            "capital": 200000, "riskPct": 2, "atrMult": 2.5, "atrPeriod": 14,
+        })
+
     def test_unauthorized_401(self):
         anon = self.app.test_client()
         self.assertEqual(anon.get("/api/me/panel-config").status_code, 401)

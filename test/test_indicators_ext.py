@@ -148,6 +148,8 @@ class ComputeAllContractTest(unittest.TestCase):
         self.assertEqual(self.ind["cci"]["params"], {"period": 14})
         self.assertEqual(self.ind["bias"]["params"], {"periods": [6, 12, 24]})
         self.assertEqual(self.ind["dmi"]["params"], {"period": 14, "ma": 6})
+        self.assertEqual(self.ind["atr"]["params"], {"period": 14, "period20": 20})
+        self.assertEqual(len(self.ind["atr"]["values20"]), len(self.df))
         for key in ("mid", "up", "low"):
             self.assertEqual(len(self.ind["boll"][key]), len(self.df))
         for key in ("bias6", "bias12", "bias24"):
@@ -157,7 +159,8 @@ class ComputeAllContractTest(unittest.TestCase):
 
     def test_series_columns_present(self):
         for col in ("boll_mid", "boll_up", "boll_low", "wr14", "cci14",
-                    "bias6", "bias12", "bias24", "dmi_pdi", "dmi_mdi", "dmi_adx"):
+                    "bias6", "bias12", "bias24", "dmi_pdi", "dmi_mdi", "dmi_adx",
+                    "atr14", "atr20"):
             self.assertIn(col, self.result.columns)
 
     def test_nan_becomes_none(self):

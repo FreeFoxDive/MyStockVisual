@@ -55,7 +55,8 @@ ALLOWED_GLOBALS = {
     "screen", "sessionStorage", "setInterval", "setTimeout", "window",
     # 本页加载的全局模块 (vendor + static/js 的 UMD 导出, 见各自 root.X / global.X)
     "ChipChart", "Drawings", "GapScanner", "PatternScanner", "VisualApi", "VisualGaps",
-    "VisualLive", "VisualMarketClock", "VisualMarketStore", "VisualTheme", "Vue", "Pinia",
+    "VisualLive", "VisualMarketClock", "VisualMarketStore", "VisualPosCalc", "VisualTheme",
+    "Vue", "Pinia",
     "echarts",
 }
 

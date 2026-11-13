@@ -3488,6 +3488,79 @@ _info_quote_bases = {}
 _stock_info_enrichment_cache: dict = {}
 
 
+def _finite_positive(v):
+    """正的有限数; 0、NaN、无法解析都当没有。"""
+    v = _safe_float(v)
+    if v is None or not np.isfinite(v) or v <= 0:
+        return None
+    return v
+
+
+def _daily_atr_pack(df):
+    """日线 ATR14/ATR20（通达信 MA(TR,N)）以及盘中重算用的前序 TR 和。
+
+    末根若是今天, 前序和去掉这根, 盘中只换今日 TR:
+    ATR = (sum(TR[-N:-1]) + TR_today) / N，与整段 rolling 同口径。
+    """
+    pack = {
+        "atr14": None, "atr20": None,
+        "prev_close": None, "tr_sum_13": None, "tr_sum_19": None,
+    }
+    if df is None or len(df) < 2 or not {"high", "low", "close"}.issubset(df.columns):
+        return pack
+    high = pd.to_numeric(df["high"], errors="coerce")
+    low = pd.to_numeric(df["low"], errors="coerce")
+    close = pd.to_numeric(df["close"], errors="coerce")
+    from stock_indicators_cn import atr as _cn_atr
+    pack["atr14"] = _finite_positive(_cn_atr(high, low, close, 14).iloc[-1])
+    pack["atr20"] = _finite_positive(_cn_atr(high, low, close, 20).iloc[-1])
+    prev_c = close.shift(1)
+    tr = pd.concat([
+        high - low, (high - prev_c).abs(), (low - prev_c).abs(),
+    ], axis=1).max(axis=1)
+    live = _last_bar_date(df) == market_hours.now().date()
+    prior = tr.iloc[:-1] if live else tr
+    pack["prev_close"] = _finite_positive(close.iloc[-2] if live else close.iloc[-1])
+
+    def _tail_sum(n):
+        if len(prior) < n:
+            return None
+        window = prior.iloc[-n:].to_numpy(dtype=float)
+        if not np.isfinite(window).all():
+            return None
+        total = float(window.sum())
+        if not np.isfinite(total) or total < 0:
+            return None
+        return total
+
+    pack["tr_sum_13"] = _tail_sum(13)
+    pack["tr_sum_19"] = _tail_sum(19)
+    return pack
+
+
+def _live_atr(quote, prev_close, tr_sum, period):
+    """用缓存的前序 TR 和 + 快照高低价重算当日 ATR, 不回源。"""
+    prev = _finite_positive(prev_close)
+    if prev is None or tr_sum is None:
+        return None
+    try:
+        total = float(tr_sum)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(total) or total < 0:
+        return None
+    high = _finite_positive((quote or {}).get("high"))
+    low = _finite_positive((quote or {}).get("low"))
+    if high is None or low is None or high < low:
+        return None
+    tr = max(high - low, abs(high - prev), abs(low - prev))
+    # 平盘 TR=0 仍是合法日波动, 要计入均线; 只丢掉负数和 NaN
+    if not np.isfinite(tr) or tr < 0:
+        return None
+    val = (total + tr) / period
+    return val if np.isfinite(val) and val > 0 else None
+
+
 def _live_info_for_quote(symbol, quote):
     """Update quote-dependent info without refetching instruments/history per tick."""
     code, label = _trade_status(quote)
@@ -3513,6 +3586,12 @@ def _live_info_for_quote(symbol, quote):
     volume = quote.get("volume")
     if avg and avg > 0 and volume is not None and elapsed > 0:
         out["vol_ratio"] = (volume / elapsed) / (avg / 240.0)
+    atr14 = _live_atr(quote, basis.get("prev_close"), basis.get("tr_sum_13"), 14)
+    atr20 = _live_atr(quote, basis.get("prev_close"), basis.get("tr_sum_19"), 20)
+    if atr14 is not None:
+        out["atr14"] = atr14
+    if atr20 is not None:
+        out["atr20"] = atr20
     return out
 
 
@@ -3524,6 +3603,8 @@ _stock_info_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="stock-i
 
 def fetch_stock_info(symbol, force=False, include_enrichment=True):
     """侧栏「基本信息」数据: 行业/总手/成交额/换手/量比/涨跌停/3-5-10日涨幅/PE/PB/交易状态。
+
+    个股/ETF 另附前复权日线 atr14/atr20（仓位计算，指数为 null）。
 
     核心行情字段（量比和 N 日涨幅）先由 ``include_enrichment=False`` 返回，
     以免被行业/估值/涨跌停等麦蕊补充请求阻塞。完整资料会在第二次调用合并。
@@ -3605,7 +3686,8 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
     market = _symbol_market(symbol)
     is_cn = market == "cn"
     code = symbol.split(".")[0]
-    plain = not _is_etf(symbol) and not _is_index_symbol(symbol)
+    is_index = _is_index_symbol(symbol)
+    plain = not _is_etf(symbol) and not is_index
 
     quote = None
     try:
@@ -3616,13 +3698,16 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
     df = None
     try:
         # 行情刚取过一次；日 K 只需补齐历史和今日 bar，勿再强刷快照。
-        df, _name, _src = fetch_kline_ex(symbol, "1d", 12, quote_fresh=False)
+        # 25 根覆盖 ATR20（至少 21 根才有完整前收）; 与原先 12 根同一次请求, 不另烧额度
+        df, _name, _src = fetch_kline_ex(symbol, "1d", 25, quote_fresh=False)
     except Exception as e:
         log.warning(f"基本信息日K失败 {symbol}: {_sanitize_error(e)}")
 
     closes = []
     if df is not None and len(df) > 0:
         closes = [c for c in (_safe_float(x) for x in df["close"].tolist()) if c is not None]
+    # 指数没有可下单的股数; 个股/ETF 的算仓 ATR 固定用前复权日线, 不跟图表周期走
+    atr_pack = None if is_index else _daily_atr_pack(df)
 
     if is_cn:
         status_code, status_text = _trade_status(quote)
@@ -3650,14 +3735,22 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
         "chg_10d": _n_day_change(closes, 10),
         "trade_status": status_code,
         "trade_status_text": status_text,
+        "is_index": is_index,
+        "atr14": None if atr_pack is None else atr_pack["atr14"],
+        "atr20": None if atr_pack is None else atr_pack["atr20"],
     }
     with _stock_info_lock:
         if df is not None and len(df) >= 6:
-            _info_quote_bases[symbol] = {
+            basis = {
                 "day": _last_bar_date(df),
                 "closes": {n: closes[-n - 1] for n in (3, 5, 10) if len(closes) > n},
                 "avg_volume": _safe_float(df["volume"].iloc[-6:-1].mean()),
             }
+            if atr_pack is not None:
+                basis["prev_close"] = atr_pack["prev_close"]
+                basis["tr_sum_13"] = atr_pack["tr_sum_13"]
+                basis["tr_sum_19"] = atr_pack["tr_sum_19"]
+            _info_quote_bases[symbol] = basis
         _stock_info_cache[symbol] = (now, info)
     return info
 

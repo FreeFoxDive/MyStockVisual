@@ -236,6 +236,13 @@ class SplitCfgBehaviorTest(unittest.TestCase):
     def test_empty_cfg_yields_empty_parts(self):
         self.assertEqual(self._run({}), {"checks": {}, "rest": {}})
 
+    def test_pos_calc_stays_in_shared_rest(self):
+        """算仓参数不是勾选态, 手机独立缓存不能把它从共享配置里拆走。"""
+        pos = {"capital": 100000, "riskPct": 2, "atrMult": 2, "atrPeriod": 14}
+        out = self._run({"volume": True, "posCalc": pos})
+        self.assertEqual(out["checks"], {"volume": True})
+        self.assertEqual(out["rest"], {"posCalc": pos})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

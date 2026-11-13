@@ -22,6 +22,7 @@ _VISUAL_DIR = Path(__file__).resolve().parents[1]
 INDEX_HTML = _VISUAL_DIR / "static" / "index.html"
 LIVE_MARKET_JS = _VISUAL_DIR / "static" / "js" / "live-market.js"
 MARKET_CLOCK_JS = _VISUAL_DIR / "static" / "js" / "market-clock.js"
+POS_CALC_JS = _VISUAL_DIR / "static" / "js" / "pos-calc.js"
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -103,9 +104,12 @@ class SidePanelShotModelTest(unittest.TestCase):
     def setUpClass(cls):
         src = INDEX_HTML.read_text(encoding="utf-8")
         live = LIVE_MARKET_JS.read_text(encoding="utf-8")
+        pos_js = str(POS_CALC_JS).replace("\\", "/")
         cls.script = (
+            # require 而不是把源码拼进 -e: 再拼一段就会撞 Windows 32K 命令行上限
+            f"require({json.dumps(pos_js)});\n"
             # 真模块直接加载: openHintText/countdownTargetSec 的口径与页面完全一致
-            MARKET_CLOCK_JS.read_text(encoding="utf-8") + "\n"
+            + MARKET_CLOCK_JS.read_text(encoding="utf-8") + "\n"
             + _extract_const(src, "SIDE_SHOT_LAYOUT") + "\n"
             + _extract_fn(live, "price") + "\n"
             + _extract_fn(src, "fmtPrice3") + "\n"
@@ -167,6 +171,7 @@ const DEPTH = { ask_prices: [11.6, 11.59, 11.58, 11.57, 11.56], ask_volumes: [10
 function collect(step) {
   _infoOn = step.info !== false;
   _depthOn = !!step.depth;
+  STATE.posCalc = step.posCalc || null;
   STATE.stockInfo = step.stockInfo === undefined ? INFO : step.stockInfo;
   STATE.depth = step.depthData === undefined ? DEPTH : step.depthData;
   const ctx = recCtx();
@@ -194,6 +199,21 @@ process.stdout.write(JSON.stringify(collect(JSON.parse(process.argv[1]))));"""
         self.assertEqual(order, sorted(order), f"名称/代码须在现价之前: {texts[:8]}")
         # 代码取完整 symbol (含交易所后缀)
         self.assertIn("000001.SZ", texts)
+        self.assertNotIn("建议仓位", texts, "没有 ATR 时截图不画算仓行")
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_position_rows_reach_the_shot(self):
+        info = {"symbol": "000001.SZ", "name": "平安银行", "last_price": 10, "prev_close": 9.8,
+                "atr14": 0.4, "atr20": 0.55, "trade_status": "trading", "trade_status_text": "连续竞价"}
+        out = self._collect({"width": 204, "height": 720, "stockInfo": info})
+        texts = [t["t"] for t in out["drawn"]]
+        self.assertLess(texts.index("跌停价"), texts.index("建议仓位"))
+        self.assertLess(texts.index("建议仓位"), texts.index("止损参考"))
+        self.assertLess(texts.index("止损参考"), texts.index("总手"))
+        self.assertIn("25手 (25%)", texts)
+        stop = next(t for t in out["drawn"] if t["t"] == "9.20")
+        self.assertEqual(stop["color"], "#14b143")
+        self.assertLess(out["model"]["content"], 720)
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_label_left_and_value_right_aligned(self):
