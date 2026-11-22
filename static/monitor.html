@@ -241,6 +241,7 @@ td.sym a:hover { color: var(--btn-active); }
 <script>
 const ALERT_LABELS = {
   sl_breached: "止损触发", tp_reached: "止盈达成", breakeven_hit: "保本命中",
+  ch_stop: "卖出", ch_close_1449: "按收盘卖", ch_close_1454: "按收盘卖",
   be_broken: "保本跌破", limit_up_sealed: "涨停封板", accel_down: "加速下跌",
   accel_up: "加速上涨", hold_expire: "到期提醒",
   hold_exit_am: "到期平仓(上午)", hold_exit_pm: "到期平仓(下午)",
@@ -361,9 +362,31 @@ function symbolCell(name, symbol, period) {
     + `<a href="${href}" title="${escAttr(code)}"><b>${escHtml(label)}</b></a></td>`;
 }
 
+function localDay() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+
 function condBadges(p, last) {
   const out = [];
   const hitCls = (triggered) => triggered ? "badge on" : "badge";
+  if (p.exit_mode === "chandelier" && Number(p.atr_n) > 0) {
+    const fresh = p.ch_asof === localDay();
+    const stop = fresh && p.ch_stop != null ? p.ch_stop : p.stop_loss;
+    const armed = fresh && p.ch_armed;
+    const stopHit = last != null && stop != null && last <= stop;
+    out.push(`<span class="${stopHit ? "badge risk" : "badge"}" title="现价跌破盘中止损 ${fmt(stop)} 时卖出">盘中止损</span>`);
+    out.push(`<span class="badge" title="截至昨天最高价到过买入价+2.2N">保本${armed ? "开" : "关"}</span>`);
+    const close = fresh ? p.ch_close : null;
+    const closeHit = last != null && close != null && stop != null && close > stop && last < close;
+    const why = fresh && p.ch_reason ? p.ch_reason : "早盘更新";
+    out.push(`<span class="${closeHit ? "badge risk" : "badge"}" title="${escAttr(why)} ${fmt(close)}">收盘线</span>`);
+    const held = fresh ? p.ch_held : null;
+    const expire = fresh && p.ch_expire;
+    out.push(`<span class="badge ${expire ? "expired" : ""}" title="有量交易日，满 15 日收盘卖">持有${held != null ? held + "日" : "—"}</span>`);
+    return out.join("");
+  }
   if (p.has_risk_prices) {
     if (p.stop_loss != null) {
       const hit = last != null && last <= p.stop_loss;
@@ -411,21 +434,35 @@ function renderPositions(positions) {
       const hit = (dir === "up") ? (last != null && last >= level) : (last != null && last <= level);
       return `${fmt(level)} <span class="${hit ? "level-hit" : "dim"}" style="font-size:11px">(${dir === "up" ? "+" : ""}${d == null ? "—" : d.toFixed(1)}%)</span>`;
     };
-    const holdCell = p.has_hold_expire
-      ? `${p.model_name ? escHtml(p.model_name) + "<br>" : ""}<span class="dim" style="font-size:11px">${p.hold_days} 交易日 · 到期 ${p.hold_end_date || "—"}</span>`
-      : '<span class="dim">—</span>';
+    const ch = p.exit_mode === "chandelier" && Number(p.atr_n) > 0;
+    const chFresh = ch && p.ch_asof === localDay();
+    const stopLevel = chFresh && p.ch_stop != null ? p.ch_stop : p.stop_loss;
+    const closeLevel = chFresh ? p.ch_close : null;
+    const holdCell = ch
+      ? `${p.model_name ? escHtml(p.model_name) + "<br>" : ""}<span class="dim" style="font-size:11px">吊灯${chFresh && p.ch_held != null ? " · 持有 " + p.ch_held + "/15 日" : ""}</span>`
+      : (p.has_hold_expire
+        ? `${p.model_name ? escHtml(p.model_name) + "<br>" : ""}<span class="dim" style="font-size:11px">${p.hold_days} 交易日 · 到期 ${p.hold_end_date || "—"}</span>`
+        : '<span class="dim">—</span>');
     const lastA = lastAlertByTrade[p.id] || lastAlertByTrade["s:" + p.symbol];
+    const chCloseCell = (chFresh && closeLevel != null)
+      ? `${fmt(closeLevel)}${p.ch_reason ? ` <span class="dim" style="font-size:11px">(${escHtml(p.ch_reason)})</span>` : ""}`
+      : '<span class="dim">—</span>';
+    const chBeCell = p.breakeven != null
+      ? `${fmt(p.breakeven)} <span class="dim" style="font-size:11px">(${chFresh && p.ch_armed ? "开" : "关"})</span>`
+      : '<span class="dim">—</span>';
     const triggered = (last != null && (
-      (p.stop_loss != null && last <= p.stop_loss) ||
-      (p.take_profit != null && last >= p.take_profit)));
+      (ch
+        ? (stopLevel != null && last <= stopLevel)
+        : ((p.stop_loss != null && last <= p.stop_loss) ||
+           (p.take_profit != null && last >= p.take_profit)))));
     return `<tr class="${triggered ? "triggered" : ""}">
       ${symbolCell(p.name, p.symbol)}
       <td class="num"><span id="q-last-${escAttr(p.symbol)}">${fmt(last)}</span><br><span class="${chg >= 0 ? "pos" : "neg"}" style="font-size:11px" id="q-chg-${escAttr(p.symbol)}">${chg == null ? "—" : pctStr(chg)}</span></td>
       <td class="num">${fmt(p.entry_price)}</td>
       <td class="num">${p.quantity ?? "—"}</td>
-      <td class="num">${riskCell(p.take_profit, "up")}</td>
-      <td class="num">${riskCell(p.breakeven, "up")}</td>
-      <td class="num">${riskCell(p.stop_loss, "down")}</td>
+      <td class="num">${ch ? chCloseCell : riskCell(p.take_profit, "up")}</td>
+      <td class="num">${ch ? chBeCell : riskCell(p.breakeven, "up")}</td>
+      <td class="num">${ch ? riskCell(stopLevel, "down") : riskCell(p.stop_loss, "down")}</td>
       <td>${holdCell}</td>
       <td><div class="cond-badges">${condBadges(p, last)}</div></td>
       <td class="dim" style="font-size:11px">${lastA ? (ALERT_LABELS[lastA.alert_type] || lastA.alert_type) + "<br>" + (lastA.fired_at || "").replace("T", " ").slice(0, 16) : "—"}</td>

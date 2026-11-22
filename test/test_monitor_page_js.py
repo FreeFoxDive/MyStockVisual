@@ -25,11 +25,13 @@ MONITOR_PY = _VISUAL_DIR / "monitor.py"
 
 # monitor.py 写入 monitor_alerts.alert_type 的全部取值:
 # DAILY_ONCE ∪ ACCEL_TYPES ∪ {price_alert, trendline_break, trendline_break_up}。
+# 吊灯持仓另有 ch_stop / ch_close_1449 / ch_close_1454。
 # 到期提醒的 alert_type 是时段槽 hold_exit_am/pm, 而非 hold_expire (后者从未落库)。
 EXPECTED_ALERT_TYPES = {
     "sl_breached", "tp_reached", "breakeven_hit", "be_broken", "limit_up_sealed",
     "hold_exit_am", "hold_exit_pm", "accel_down", "accel_up",
     "trendline_break", "trendline_break_up", "price_alert", "risk_missing",
+    "ch_stop", "ch_close_1449", "ch_close_1454",
 }
 # 选股任务的通知类型 (写库在 api/screener.py, 与持仓告警同一张 monitor_alerts 表)
 SCREENER_ALERT_TYPES = {"screener_start", "screener_progress", "screener_done",
@@ -357,6 +359,29 @@ class CondTextBehaviorTest(unittest.TestCase):
 
     def test_empty_rule(self):
         self.assertEqual(self._run([]), "")
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")
+class ChandelierBadgesTest(unittest.TestCase):
+    def test_chandelier_badges_replace_old_tp_be(self):
+        src = MONITOR_HTML.read_text(encoding="utf-8")
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        script = (
+            "function fmt(v) { return v == null ? '—' : Number(v).toFixed(2); }\n"
+            + "function escAttr(s) { return String(s || ''); }\n"
+            + _extract_fn(src, "localDay") + "\n"
+            + _extract_fn(src, "condBadges") + "\n"
+            + f"const p = {{ exit_mode: 'chandelier', atr_n: 0.5, stop_loss: 9.25, ch_asof: '{today}', "
+            + "ch_stop: 10.1, ch_armed: 1, ch_close: 10.6, ch_reason: '吊灯回撤', ch_held: 4, ch_expire: 0 };\n"
+            + "process.stdout.write(condBadges(p, 10.5));"
+        )
+        proc = subprocess.run(["node", "-e", script], capture_output=True, check=True)
+        html = proc.stdout.decode("utf-8")
+        for token in ("盘中止损", "保本开", "收盘线", "持有4日"):
+            self.assertIn(token, html)
+        for gone in ("止盈", "加速", "涨停", "badge on"):
+            self.assertNotIn(gone, html)
 
 
 if __name__ == "__main__":

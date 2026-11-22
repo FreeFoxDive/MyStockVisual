@@ -134,7 +134,7 @@ td.sym a.sym-link:hover, td.sym a.sym-link:hover .code { text-decoration: underl
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>名称</th><th>策略描述</th><th>推荐持仓</th><th>状态</th><th style="width:180px">操作</th></tr>
+        <tr><th>名称</th><th>策略描述</th><th>推荐持仓</th><th>监控</th><th>状态</th><th style="width:180px">操作</th></tr>
       </thead>
       <tbody id="model-tbody"></tbody>
     </table>
@@ -189,6 +189,9 @@ td.sym a.sym-link:hover, td.sym a.sym-link:hover .code { text-decoration: underl
       <div class="hint">到期日 10:00 / 14:00 钉钉提醒平仓。A/B/C/D 默认 3/20/10/7。</div>
     </div>
     <div class="field"><label>策略描述</label><textarea id="m-description" placeholder="可选，说明该模型的选股/买卖策略"></textarea></div>
+    <div class="field"><label><input type="checkbox" id="m-chandelier"> 吊灯监控</label>
+      <div class="hint">买入时填 N，按海龟规则算初始止损和保本价。盘中盯止损，尾盘盯收盘线。</div>
+    </div>
     <div class="err" id="model-modal-err"></div>
     <div class="actions">
       <button onclick="closeModelModal()">取消</button>
@@ -307,7 +310,7 @@ async function loadModels() {
 function renderAdminModels() {
   const tbody = document.getElementById('model-tbody');
   if (!state.models.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无模型</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无模型</td></tr>';
     return;
   }
   tbody.innerHTML = state.models.map(m => `
@@ -315,6 +318,7 @@ function renderAdminModels() {
       <td>${escHtml(m.name)}</td>
       <td class="reason-cell">${escHtml(m.description || '')}</td>
       <td>${m.hold_days ? m.hold_days + ' 日' : '—'}</td>
+      <td>${m.exit_mode === 'chandelier' ? '<span class="badge closed">吊灯</span>' : '—'}</td>
       <td>${m.active ? '<span class="badge closed">启用</span>' : '<span class="badge open">已删除</span>'}</td>
       <td><div class="row-actions">${m.active ? `
         <button onclick="openModelModal(${m.id})">编辑</button>
@@ -332,6 +336,7 @@ function openModelModal(id) {
   document.getElementById('m-name').value = m ? m.name : '';
   document.getElementById('m-hold-days').value = (m && m.hold_days) ? m.hold_days : '';
   document.getElementById('m-description').value = m ? (m.description || '') : '';
+  document.getElementById('m-chandelier').checked = !!(m && m.exit_mode === 'chandelier');
   document.getElementById('model-modal-err').textContent = '';
   document.getElementById('model-modal-mask').classList.add('show');
   focusFirstInput('model-modal-mask');
@@ -349,6 +354,7 @@ async function saveModel() {
     name: document.getElementById('m-name').value.trim(),
     description: document.getElementById('m-description').value.trim(),
     hold_days: holdRaw === '' ? null : parseInt(holdRaw, 10),
+    exit_mode: document.getElementById('m-chandelier').checked ? 'chandelier' : '',
   };
   try {
     if (modelModalMode === 'add') {

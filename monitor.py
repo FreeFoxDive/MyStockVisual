@@ -55,11 +55,19 @@ COOLDOWN_ACCEL_SEC = 30 * 60
 DAILY_ONCE = frozenset({
     "breakeven_hit", "be_broken", "sl_breached", "tp_reached", "limit_up_sealed",
     "hold_exit_am", "hold_exit_pm", "risk_missing",
+    "ch_stop", "ch_close_1449", "ch_close_1454",
 })
 ACCEL_TYPES = frozenset({"accel_down", "accel_up"})
 HOLD_EXIT_TYPES = frozenset({"hold_exit_am", "hold_exit_pm"})
 # 去重键带 trade_id 的类型: 同一标的的多笔持仓各自提醒, 互不遮挡
-PER_TRADE_TYPES = HOLD_EXIT_TYPES | {"risk_missing"}
+PER_TRADE_TYPES = HOLD_EXIT_TYPES | {
+    "risk_missing", "ch_stop", "ch_close_1449", "ch_close_1454",
+}
+CH_MORNING_START = (9, 0)
+CH_MORNING_END = (9, 15)
+# 每个窗口两分钟，躲开一轮 60 秒的行情退避。当天每个窗口只提醒一次。
+CH_CLOSE_SLOTS = ((14, 49, "ch_close_1449"), (14, 54, "ch_close_1454"))
+CH_CATCHUP_RETRY_SEC = 300
 HOLD_EXIT_AM = (10, 0)         # 到期日上午提醒
 HOLD_EXIT_AM_END = (11, 30)
 HOLD_EXIT_PM = (14, 0)         # 到期日下午提醒
@@ -295,6 +303,99 @@ def _fmt_pct(x):
     return f"{x * 100:+.2f}%"
 
 
+def chandelier_position(position) -> bool:
+    """吊灯提醒只覆盖填了 N 的持仓。模型后改成吊灯、旧仓没有 N 的，仍走原来的止盈止损。"""
+    if not position or position.get("exit_mode") != "chandelier":
+        return False
+    try:
+        return float(position.get("atr_n") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _chandelier_today(position, today):
+    """当日快照里的盘中止损 / 保本开关 / 收盘线。还没跑早盘时退回初始止损。"""
+    fresh = position.get("ch_asof") == today
+    if fresh and position.get("ch_stop"):
+        stop = float(position["ch_stop"])
+        armed = bool(position.get("ch_armed"))
+    else:
+        stop = position.get("stop_loss")
+        stop = float(stop) if stop else None
+        armed = False
+    close = float(position["ch_close"]) if fresh and position.get("ch_close") else None
+    reason = position.get("ch_reason") if fresh else None
+    expire = bool(position.get("ch_expire")) if fresh else False
+    return stop, armed, close, reason, expire
+
+
+def _evaluate_chandelier_stop(position, metrics, now_dt):
+    """盘中只盯盘中止损。跌破或开盘跳空跌破，当天一条「卖出」。"""
+    p = metrics.get("price")
+    if p is None:
+        return []
+    today = now_dt.strftime("%Y-%m-%d")
+    stop, armed, _close, _reason, _expire = _chandelier_today(position, today)
+    if not stop or stop <= 0:
+        return []
+    opened = metrics.get("open")
+    same_day = (position.get("entry_date") or "")[:10] >= today
+    through = p <= stop or (not same_day and opened is not None and opened <= stop)
+    if not through:
+        return []
+    kind = "保本止损" if armed else "初始止损"
+    gap = " 跳空" if (not same_day and opened is not None and opened <= stop and p > stop) else ""
+    return [{
+        "alert_type": "ch_stop",
+        "price": p,
+        "detail": f"卖出 {kind}{stop:.2f} 现价{p:.2f}{gap}",
+    }]
+
+
+def chandelier_close_slot(now_dt):
+    """14:49–14:50 与 14:54–14:55。每个窗口当天只看一次。"""
+    t = now_dt.hour * 60 + now_dt.minute
+    for hour, minute, name in CH_CLOSE_SLOTS:
+        start = hour * 60 + minute
+        if start <= t <= start + 1:
+            return name
+    return None
+
+
+def evaluate_chandelier_close(position, price, now_dt):
+    """收盘线高于盘中止损且现价跌破，或今天满 15 个有量交易日。"""
+    slot = chandelier_close_slot(now_dt)
+    if not slot or not chandelier_position(position) or price is None:
+        return []
+    today = now_dt.strftime("%Y-%m-%d")
+    # 买入当日不出收盘线。回放从次日才开始用这条线。
+    if (position.get("entry_date") or "")[:10] >= today:
+        return []
+    stop, _armed, close, reason, expire = _chandelier_today(position, today)
+    if not stop:
+        return []
+    below = (
+        close is not None and close > stop + 1e-9 and price < close - 1e-9
+    )
+    if not below and not expire:
+        return []
+    if expire and below:
+        detail = f"今日收盘卖 {reason}{close:.2f} 现价{price:.2f}"
+    elif expire:
+        held = position.get("ch_held") or 15
+        detail = f"今日收盘卖 持有{held}日 现价{price:.2f}"
+    else:
+        detail = f"按收盘卖 {reason}{close:.2f} 现价{price:.2f}"
+    return [{"alert_type": slot, "price": price, "detail": detail}]
+
+
+def _chandelier_stop_already(position, today):
+    last = trades.last_monitor_alert(
+        position["user_id"], position["symbol"], "ch_stop", trade_id=position["id"],
+    )
+    return bool(last and last.get("trade_date") == today)
+
+
 def evaluate_alerts(position, metrics, limits=None, depth=None, now_dt=None):
     """纯函数: 返回 [{alert_type, price, detail}, ...]。"""
     if not metrics:
@@ -318,6 +419,9 @@ def evaluate_alerts(position, metrics, limits=None, depth=None, now_dt=None):
         if depth and _ask_pressure(depth) is not None:
             bits.append(f"卖/买压{_ask_pressure(depth):.1f}")
         out.append({"alert_type": atype, "price": p, "detail": " | ".join(bits)})
+
+    if chandelier_position(position):
+        return _evaluate_chandelier_stop(position, metrics, now_dt)
 
     # 1) 止损击穿
     if sl is not None and sl > 0 and p <= sl:
@@ -1090,6 +1194,8 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
     # 按需 depth
     depth_syms = []
     for pos in positions:
+        if chandelier_position(pos):
+            continue
         q = quotes.get(pos["symbol"])
         if not q or q.get("last_price") is None:
             continue
@@ -1121,12 +1227,23 @@ def _poll_once(feed_obj, now_dt=None, persist=True, notify=True):
             session_elapsed_min=elapsed,
             open_price=q.get("open"),
         )
+        if metrics is not None and chandelier_position(pos):
+            metrics["open"] = q.get("open")
         alerts = evaluate_alerts(
             pos, metrics, limits=limits_map.get(pos["symbol"]),
             depth=depths.get(pos["symbol"]), now_dt=now_dt,
         )
+        if metrics is not None and chandelier_position(pos):
+            sold = any(a["alert_type"] == "ch_stop" for a in alerts)
+            if not sold and not _chandelier_stop_already(pos, today):
+                alerts.extend(evaluate_chandelier_close(
+                    pos, metrics.get("price"), now_dt,
+                ))
         for a in alerts:
-            if not should_fire(pos["user_id"], pos["symbol"], a["alert_type"], now_dt=now_dt):
+            if not should_fire(
+                pos["user_id"], pos["symbol"], a["alert_type"],
+                now_dt=now_dt, trade_id=pos["id"],
+            ):
                 continue
             if persist:
                 trades.insert_monitor_alert(
@@ -1162,6 +1279,130 @@ def _prune_alerts_daily(now_dt):
         log.warning(f"monitor_alerts 清理失败: {e}")
 
 
+def _morning_window(now_dt):
+    t = now_dt.hour * 60 + now_dt.minute
+    start = CH_MORNING_START[0] * 60 + CH_MORNING_START[1]
+    end = CH_MORNING_END[0] * 60 + CH_MORNING_END[1]
+    if not (start <= t <= end):
+        return False
+    return market_hours.is_trading_day(now_dt)
+
+
+def _fetch_raw_daily(symbol, entry_date, asof_date=None):
+    """买入日前 20 根到昨天的未复权日 K。"""
+    import market
+    from datetime import date
+
+    ref = asof_date or date.today()
+    entry = date.fromisoformat(str(entry_date)[:10])
+    count = max(120, (ref - entry).days + 60)
+    df, _name, _source = market.fetch_kline_ex(
+        symbol, "1d", count, adjust="none", append_today=False,
+    )
+    if df is None or len(df) == 0:
+        raise RuntimeError(f"未取到 {symbol} 日K")
+    out = []
+    for ts, row in df.iterrows():
+        out.append({
+            "date": ts.strftime("%Y-%m-%d"),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "volume": float(row["volume"] or 0),
+        })
+    return out
+
+
+_ch_retry_at = {}          # trade_id -> 最早可再取数的 epoch 秒
+
+
+def _refresh_chandelier(now_dt, fetch_bars, persist, notify, heading, throttle):
+    """重算当天还没有快照的吊灯持仓。收盘线相对上一份只升不降。"""
+    import chandelier
+
+    today = now_dt.strftime("%Y-%m-%d")
+    now_ts = time.time()
+    pending = []
+    for p in trades.list_chandelier_positions():
+        if p.get("ch_asof") == today:
+            continue
+        if throttle and now_ts < _ch_retry_at.get(p["id"], 0):
+            continue
+        pending.append(p)
+    if not pending:
+        return []
+    fetch_bars = fetch_bars or (lambda sym, ed: _fetch_raw_daily(sym, ed, now_dt.date()))
+    updated = []
+    for p in pending:
+        try:
+            bars = fetch_bars(p["symbol"], p["entry_date"]) or []
+            levels = chandelier.compute_levels(
+                p["entry_price"], p["atr_n"], p["symbol"], bars,
+                today, p["entry_date"],
+            )
+            levels = chandelier.carry_forward(levels, p)
+        except Exception as e:
+            if throttle:
+                _ch_retry_at[p["id"]] = now_ts + CH_CATCHUP_RETRY_SEC
+            log.warning(f"{heading} {p.get('symbol')} 失败: {e}")
+            continue
+        _ch_retry_at.pop(p["id"], None)
+        if persist:
+            trades.save_chandelier_snapshot(p["id"], today, levels)
+        updated.append({
+            "symbol": p["symbol"],
+            "name": p.get("name") or "",
+            "stop": levels["stop"],
+            "armed": levels["armed"],
+            "close": levels["close"],
+            "reason": levels["reason"],
+            "held": levels["held"],
+            "expire": levels["expire"],
+        })
+    if updated and notify:
+        md = chandelier.morning_lines(
+            updated, now_dt.strftime("%Y-%m-%d %H:%M"), heading=heading,
+        )
+        notify_mod.notify(heading, md)
+    return updated
+
+
+def check_chandelier_morning(now_dt=None, fetch_bars=None, persist=True, notify=True):
+    """9:00–9:15 对每笔未平仓吊灯持仓重算一次，合并成一条通知。当天已写过快照的跳过。"""
+    now_dt = now_dt or market_hours.now()
+    if not _morning_window(now_dt):
+        return []
+    return _refresh_chandelier(
+        now_dt, fetch_bars, persist, notify, "吊灯早盘", throttle=False,
+    )
+
+
+def catch_up_chandelier(now_dt=None, fetch_bars=None, persist=True, notify=True):
+    """早盘窗口过后，给当天还没有快照的吊灯持仓补算。
+
+    进程 9:15 后才起来、窗口内取数失败、或盘中才录入的仓，不再整日退回初始止损。
+    取数失败 5 分钟后再试，避免每轮轮询都打行情。
+    """
+    now_dt = now_dt or market_hours.now()
+    if _morning_window(now_dt) or not market_hours.is_trading_day(now_dt):
+        return []
+    t = now_dt.hour * 60 + now_dt.minute
+    if t <= CH_MORNING_END[0] * 60 + CH_MORNING_END[1]:
+        return []
+    return _refresh_chandelier(
+        now_dt, fetch_bars, persist, notify, "吊灯补算", throttle=True,
+    )
+
+
+def _wait_for_session(now):
+    """休市等待。交易日 9:00 前把苏醒点落在早盘窗口里，避免 5 分钟一跳跨过 9:00–9:15。"""
+    wait = min(market_hours.seconds_until_session(now), 300)
+    if market_hours.is_trading_day(now):
+        opening = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now < opening:
+            wait = min(wait, max(5.0, (opening - now).total_seconds()))
+    time.sleep(max(5.0, wait))
+
+
 def _loop(get_af, fallback_quotes):
     global _feed
     _load_env()
@@ -1171,9 +1412,16 @@ def _loop(get_af, fallback_quotes):
     while True:
         try:
             now = market_hours.now()
+            try:
+                check_chandelier_morning(now)
+            except Exception as e:
+                log.warning(f"吊灯早盘失败: {e}")
+            try:
+                catch_up_chandelier(now)
+            except Exception as e:
+                log.warning(f"吊灯补算失败: {e}")
             if not market_hours.in_session(now):
-                wait = min(market_hours.seconds_until_session(now), 300)
-                time.sleep(max(5.0, wait))
+                _wait_for_session(now)
                 continue
             _check_hold_expire(now_dt=now)
             positions = trades.list_monitored_positions()

@@ -713,5 +713,31 @@ class MarkLineLayoutRenderTest(unittest.TestCase):
         self.assertIn("ev.stopPropagation()", self.src)
 
 
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_chandelier_chart_lines(self):
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        script = (
+            _extract_const(self.src, "RISK_ITEMS") + "\n"
+            + _extract_fn(self.src, "localDay") + "\n"
+            + _extract_fn(self.src, "openPositions") + "\n"
+            + _extract_fn(self.src, "pickOpenRiskPrices") + "\n"
+            + _extract_fn(self.src, "priceLineLabel") + "\n"
+            + _extract_fn(self.src, "priceLineItem") + "\n"
+            + _extract_fn(self.src, "buildRiskLineItems") + "\n"
+            + "function riskOn() { return true; }\n"
+            + "function C() { return { riskTp: '#c97a00', riskBe: '#1565c0', riskSl: '#7b3fa0', riskFg: '#f0f0f0' }; }\n"
+            + "function fmtPrice3(v) { return Number(v).toFixed(2); }\n"
+            + "const STATE = { risk: null, riskItems: null, _tagSlots: null };\n"
+            + f"const t = [{{ id: 1, status: 'open', entry_date: '2026-11-16', exit_mode: 'chandelier', atr_n: 0.5, stop_loss: 9.25, ch_asof: '{today}', ch_stop: 10.1, ch_armed: 1, ch_close: 10.6, ch_reason: '吊灯回撤' }}];\n"
+            + "STATE.risk = pickOpenRiskPrices(t);\n"
+            + "const items = buildRiskLineItems().map(x => x.label.formatter);\n"
+            + "process.stdout.write(JSON.stringify(items));"
+        )
+        proc = subprocess.run(["node", "-e", script], capture_output=True, check=True)
+        labels = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(labels, ["保本止损 10.10", "吊灯回撤 10.60"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

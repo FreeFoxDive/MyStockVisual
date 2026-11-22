@@ -298,6 +298,42 @@ console.log(JSON.stringify(results));
         self.assertFalse(data["ok"]["warn"])
         self.assertTrue(data["warn"]["warn"], "止盈/保本顺序不合法仍要高亮")
 
+    def test_chandelier_risk_cell(self):
+        from datetime import datetime
+        d = datetime.now().strftime("%Y-%m-%d")
+        script = """
+const results = {};
+const VisualLive = { price: v => (v == null ? '—' : String(v)) };
+function escHtml(s) { return String(s || ''); }
+%(fmt_price)s
+%(risk_set_status)s
+%(fmt_gap)s
+%(format_risk)s
+results.today = formatRiskPrices({
+  status: 'open', exit_mode: 'chandelier', atr_n: 0.5,
+  stop_loss: 9.25, breakeven: 10.1,
+  ch_asof: '%(today)s', ch_close: 10.6, ch_reason: '吊灯回撤'
+}, 10.8);
+results.closed = formatRiskPrices({
+  status: 'closed', exit_mode: 'chandelier', atr_n: 0.5,
+  stop_loss: 9.25, breakeven: 10.1,
+  ch_asof: '%(today)s', ch_close: 10.6, ch_reason: '吊灯回撤'
+}, 10.8);
+console.log(JSON.stringify(results));
+""" % {
+            "today": d,
+            "risk_set_status": _extract_fn(self.trades, "riskSetStatus"),
+            "fmt_price": _extract_fn(self.trades, "fmtPrice"),
+            "fmt_gap": _extract_fn(self.trades, "fmtGapPct"),
+            "format_risk": _extract_fn(self.trades, "formatRiskPrices"),
+        }
+        data = json.loads(run_node(script))
+        self.assertFalse(data["today"]["warn"])
+        self.assertIn("初始止损", data["today"]["html"])
+        self.assertIn("收盘线", data["today"]["html"])
+        self.assertNotIn("止盈", data["today"]["html"])
+        self.assertNotIn("收盘线", data["closed"]["html"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -457,7 +457,7 @@ td.neg { color: var(--down-text); font-weight: 600; }
       </div>
       <div id="t-model-wrap">
         <label>模型推荐</label>
-        <select id="t-model"><option value="">无</option></select>
+        <select id="t-model" onchange="onTradeModelChange()"><option value="">无</option></select>
       </div>
       <div id="t-quantity-wrap">
         <label>数量 (股) <span style="color:var(--up-text)">*</span></label>
@@ -470,7 +470,7 @@ td.neg { color: var(--down-text); font-weight: 600; }
         <div class="grid">
           <div>
             <label>买入价 <span style="color:var(--up-text)">*</span></label>
-            <input type="number" id="t-entry-price" min="0" step="0.001" placeholder="如 10.50">
+            <input type="number" id="t-entry-price" min="0" step="0.001" placeholder="如 10.50" oninput="refreshChandelierPreview()">
           </div>
           <div>
             <label>买入日期 <span style="color:var(--up-text)">*</span></label>
@@ -518,8 +518,8 @@ td.neg { color: var(--down-text); font-weight: 600; }
       <div id="legs-list"></div>
     </div>
     <fieldset class="panel risk-panel" id="risk-panel">
-      <legend>风控价格（可选，须三个都填或都空）</legend>
-      <div class="grid">
+      <legend id="risk-legend">风控价格（可选，须三个都填或都空）</legend>
+      <div class="grid" id="classic-risk">
         <div>
           <label>止盈价</label>
           <input type="number" id="t-take-profit" min="0" step="0.001" placeholder="最高，须 &gt; 保本">
@@ -531,6 +531,20 @@ td.neg { color: var(--down-text); font-weight: 600; }
         <div>
           <label>止损价</label>
           <input type="number" id="t-stop-loss" min="0" step="0.001" placeholder="最低，须 &lt; 保本">
+        </div>
+      </div>
+      <div class="grid" id="chandelier-risk" style="display:none">
+        <div>
+          <label>N（ATR） <span style="color:var(--up-text)">*</span></label>
+          <input type="number" id="t-atr-n" min="0" step="0.001" placeholder="买入时的 N" oninput="refreshChandelierPreview()">
+        </div>
+        <div>
+          <label>初始止损</label>
+          <input type="text" id="t-ch-stop" readonly tabindex="-1">
+        </div>
+        <div>
+          <label>保本价</label>
+          <input type="text" id="t-ch-be" readonly tabindex="-1">
         </div>
       </div>
     </fieldset>
@@ -1147,6 +1161,9 @@ function pnlClass(v) {
 }
 
 function riskSetStatus(t) {
+  if (t && t.exit_mode === 'chandelier' && Number(t.atr_n) > 0) {
+    return (t.stop_loss > 0 && t.breakeven > 0) ? 'ok' : 'warn';
+  }
   const tp = t.take_profit, sl = t.stop_loss, be = t.breakeven;
   const n = [tp, sl, be].filter(v => v != null).length;
   if (n === 0) return 'empty';
@@ -1163,6 +1180,25 @@ function fmtGapPct(level, last) {
 }
 
 function formatRiskPrices(t, curPrice) {
+  if (t && t.exit_mode === 'chandelier' && Number(t.atr_n) > 0) {
+    const rows = [
+      ['N', t.atr_n],
+      ['初始止损', t.stop_loss],
+      ['保本价', t.breakeven],
+    ];
+    const html = rows.map(([label, val]) =>
+      `<span class="k">${label}</span>${fmtPrice(val)}`).join('<br>');
+    const line = (t.status === 'open' && t.ch_close != null && t.ch_asof)
+      ? (() => {
+          const d = new Date();
+          const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          if (t.ch_asof !== today) return '';
+          return `<br><span class="k">收盘线</span>${fmtPrice(t.ch_close)}`
+            + (t.ch_reason ? ` ${escHtml(t.ch_reason)}` : '');
+        })()
+      : '';
+    return { html: html + line, warn: riskSetStatus(t) !== 'ok' };
+  }
   const status = riskSetStatus(t);
   // 持仓中且三者全空: 直接给出「未设风控」—— 该持仓不会被监控预警,
   // 与每日 09:35 的提醒 (monitor.check_risk_missing) 同口径
@@ -1191,6 +1227,61 @@ function collectRiskPrices() {
     stop_loss: val('t-stop-loss'),
     breakeven: val('t-breakeven'),
   };
+}
+
+const CH_STOP_MULT = 1.5;
+const CH_GEM_FACTOR = 1.2;
+const CH_BE_OFFSET_N = 0.6;
+const CH_BE_FRICTION = 0.004;
+
+function selectedTradeModel() {
+  const id = document.getElementById('t-model').value;
+  return state.models.find(m => String(m.id) === String(id)) || null;
+}
+
+function isChandelierTrade() {
+  const m = selectedTradeModel();
+  return !!(m && m.exit_mode === 'chandelier');
+}
+
+function chandelierGem(symbol) {
+  const c = String(symbol || '').split('.')[0].padStart(6, '0');
+  return c.startsWith('30') || c.startsWith('68');
+}
+
+function onTradeModelChange() {
+  refreshChandelierPreview();
+}
+
+function refreshChandelierPreview() {
+  const on = isChandelierTrade();
+  const classic = document.getElementById('classic-risk');
+  const ch = document.getElementById('chandelier-risk');
+  const legend = document.getElementById('risk-legend');
+  if (classic) classic.style.display = on ? 'none' : '';
+  if (ch) ch.style.display = on ? '' : 'none';
+  if (legend) {
+    legend.textContent = on
+      ? '吊灯（填 N，初始止损和保本价自动算出）'
+      : '风控价格（可选，须三个都填或都空）';
+  }
+  if (!on) return;
+  const entry = parseFloat(document.getElementById('t-entry-price').value);
+  const n = parseFloat(document.getElementById('t-atr-n').value);
+  const sym = state.selectedSymbol && state.selectedSymbol.symbol;
+  const stopEl = document.getElementById('t-ch-stop');
+  const beEl = document.getElementById('t-ch-be');
+  if (!(entry > 0) || !(n > 0)) {
+    if (stopEl) stopEl.value = '';
+    if (beEl) beEl.value = '';
+    return;
+  }
+  const k = CH_STOP_MULT * (chandelierGem(sym) ? CH_GEM_FACTOR : 1);
+  const stop = entry - k * n;
+  const be = Math.max(entry + CH_BE_OFFSET_N * n, entry * (1 + CH_BE_FRICTION));
+  const px = v => (Math.round((v + 1e-10) * 1000) / 1000).toFixed(3);
+  stopEl.value = px(stop);
+  beEl.value = px(be);
 }
 
 function validateRiskPrices(risk) {
@@ -2061,6 +2152,7 @@ function openModal(id) {
   document.getElementById('t-take-profit').value = t && t.take_profit != null ? t.take_profit : '';
   document.getElementById('t-stop-loss').value = t && t.stop_loss != null ? t.stop_loss : '';
   document.getElementById('t-breakeven').value = t && t.breakeven != null ? t.breakeven : '';
+  document.getElementById('t-atr-n').value = t && t.atr_n != null ? t.atr_n : '';
   // 逆回购字段
   document.getElementById('t-repo-code').value = isRepo ? t.symbol : '';
   document.getElementById('t-repo-rate').value = isRepo ? t.entry_price : '';
@@ -2080,6 +2172,7 @@ function openModal(id) {
   if (t) state.selectedSymbol = { symbol: t.symbol, name: t.name };
 
   onTypeChange();
+  refreshChandelierPreview();
   const mask = document.getElementById('modal-mask');
   mask.classList.add('show');
   mask.scrollTop = 0;
@@ -2112,6 +2205,7 @@ function onTypeChange() {
   document.getElementById('risk-panel').style.display = repo ? 'none' : '';
   document.getElementById('repo-panel').style.display = repo ? '' : 'none';
   document.getElementById('t-model-wrap').style.display = repo ? 'none' : '';
+  if (!repo) refreshChandelierPreview();
   document.querySelector('.autocomplete').style.display = repo ? 'none' : '';
   if (batch) {
     seedLegsFromSimple();
@@ -2385,6 +2479,7 @@ function selectSymbol(el) {
   state.selectedSymbol = { symbol, name };
   document.getElementById('t-symbol-input').value = `${name} (${symbol})`;
   hideSymbolDropdown();
+  refreshChandelierPreview();
 }
 
 async function saveTrade() {
@@ -2427,9 +2522,18 @@ async function saveTrade() {
   if (!state.selectedSymbol) { err('请先搜索并选择股票'); return; }
 
   const modelId = document.getElementById('t-model').value;
+  const chandelier = isChandelierTrade();
   const risk = collectRiskPrices();
-  const riskErr = validateRiskPrices(risk);
-  if (riskErr) { err(riskErr); return; }
+  if (chandelier && type === 'batch') { err('吊灯模型只支持单笔交易'); return; }
+  if (!chandelier) {
+    const riskErr = validateRiskPrices(risk);
+    if (riskErr) { err(riskErr); return; }
+  } else {
+    const n = parseFloat(document.getElementById('t-atr-n').value);
+    if (!(n > 0)) { err('请填写 N'); return; }
+    const entryPx = parseFloat(document.getElementById('t-entry-price').value);
+    if (!(entryPx > 0)) { err('请填写买入价'); return; }
+  }
 
   let body;
   if (type === 'batch') {
@@ -2464,7 +2568,7 @@ async function saveTrade() {
       entry_reason: entryReason,
       entry_note: document.getElementById('t-entry-note').value.trim(),
       model_id: modelId ? parseInt(modelId, 10) : null,
-      ...risk,
+      ...(chandelier ? { atr_n: parseFloat(document.getElementById('t-atr-n').value) } : risk),
     };
     if (status === 'closed') {
       body.exit_price = parseFloat(document.getElementById('t-exit-price').value);

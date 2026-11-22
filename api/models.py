@@ -31,7 +31,7 @@ def models_create():
     try:
         mid = trades.create_model(
             body.get("name"), body.get("description", ""),
-            body.get("hold_days"),
+            body.get("hold_days"), body.get("exit_mode") or "",
         )
     except ValueError as e:
         log.warning("创建模型失败: %s", _sanitize_error(e))
@@ -51,8 +51,9 @@ def models_update(mid):
         return _error("请求体无效 JSON", 400)
     try:
         hold_days = body["hold_days"] if "hold_days" in body else trades._UNSET
+        exit_mode = body["exit_mode"] if "exit_mode" in body else trades._UNSET
         updated = trades.update_model(
-            mid, body.get("name"), body.get("description", ""), hold_days,
+            mid, body.get("name"), body.get("description", ""), hold_days, exit_mode,
         )
     except ValueError as e:
         log.warning("更新模型失败 id=%s: %s", mid, _sanitize_error(e))

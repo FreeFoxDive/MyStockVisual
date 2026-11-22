@@ -2124,10 +2124,34 @@ function pickOpenPosition(trades) {
 
 /** 持仓风控价: 取「有风控价的最新一笔持仓」—— 与监控页 list_monitored_positions 同一
  *  取数口径。多笔持仓只用一笔, 不跨交易把不同仓位的价位拼成三条线。无则返回 null。 */
+function localDay() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
 function pickOpenRiskPrices(trades) {
   const t = openPositions(trades)
-    .find(r => r.take_profit != null || r.breakeven != null || r.stop_loss != null);
-  if (!t) return null;
+    .find(r => r.take_profit != null || r.breakeven != null || r.stop_loss != null
+      || (r.exit_mode === 'chandelier' && Number(r.atr_n) > 0));
+  if (!t) { STATE.riskItems = null; return null; }
+  if (t.exit_mode === 'chandelier' && Number(t.atr_n) > 0) {
+    const fresh = t.ch_asof === localDay();
+    const stop = fresh && t.ch_stop != null ? Number(t.ch_stop) : Number(t.stop_loss);
+    const items = [{ key: 'stop_loss', label: (fresh && t.ch_armed) ? '保本止损' : '盘中止损', colorKey: 'riskSl' }];
+    const out = {};
+    if (Number.isFinite(stop) && stop > 0) out.stop_loss = stop;
+    const close = fresh ? Number(t.ch_close) : NaN;
+    const binding = fresh && (t.ch_reason === '吊灯回撤' || t.ch_reason === '20日新低')
+      && Number.isFinite(close) && close > stop;
+    if (binding) {
+      out.close_line = close;
+      items.push({ key: 'close_line', label: t.ch_reason, colorKey: 'riskBe' });
+    }
+    STATE.riskItems = items;
+    return Object.keys(out).length ? out : null;
+  }
+  STATE.riskItems = null;
   const out = {};
   RISK_ITEMS.forEach(it => {
     const v = Number(t[it.key]);
@@ -2151,7 +2175,15 @@ function holdingTip(pos) {
   if (pos.hold_days != null && Number.isFinite(days) && days > 0) {
     parts.push('建议持有 ' + days + ' 交易日');
   }
-  RISK_ITEMS.forEach(it => {
+  if (pos.exit_mode === 'chandelier' && Number(pos.atr_n) > 0) {
+    const items = STATE.riskItems || [];
+    const risk = STATE.risk || {};
+    items.forEach(it => {
+      const v = risk[it.key];
+      if (v != null) parts.push(it.label + ' ' + fmtPrice3(v));
+    });
+    if (pos.ch_held != null) parts.push('持有 ' + pos.ch_held + ' 日');
+  } else RISK_ITEMS.forEach(it => {
     const v = Number(pos[it.key]);
     if (pos[it.key] != null && Number.isFinite(v) && v > 0) parts.push(it.label + ' ' + fmtPrice3(v));
   });
@@ -2188,7 +2220,8 @@ function setTrades(list) {
 function buildRiskLineItems() {
   const risk = STATE.risk;
   if (!riskOn() || !risk) return [];
-  return RISK_ITEMS.filter(it => risk[it.key] != null).map(it => {
+  const items = (STATE.riskItems && STATE.riskItems.length) ? STATE.riskItems : RISK_ITEMS;
+  return items.filter(it => risk[it.key] != null).map(it => {
     const price = risk[it.key];
     return priceLineItem(price, C()[it.colorKey], it.label + ' ' + fmtPrice3(price),
       'insideStartBottom', it.key, C().riskFg);
@@ -2320,8 +2353,9 @@ function layoutPriceTagSlots(bars, livePrice) {
   }
   // 风控档位: 优先级 止损 > 保本 > 止盈 (盘中盯止损), 区间外的线 ECharts 本来就不画。
   // 面板栏「风控线」关掉时不出线, 也就不该占位 —— 否则画线层的框签会被看不见的签推开。
-  const riskPriority = { stop_loss: 1, breakeven: 2, take_profit: 3 };
-  if (riskOn()) RISK_ITEMS.forEach(it => {
+  const riskPriority = { stop_loss: 1, breakeven: 2, take_profit: 3, close_line: 2 };
+  const riskItems = (STATE.riskItems && STATE.riskItems.length) ? STATE.riskItems : RISK_ITEMS;
+  if (riskOn()) riskItems.forEach(it => {
     const price = STATE.risk ? STATE.risk[it.key] : null;
     if (price == null) return;
     const lineY = c.yOf(price);

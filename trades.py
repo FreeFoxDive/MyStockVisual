@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS models (
     name        TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     hold_days   INTEGER,                  -- 推荐持仓交易日, 空=不提醒平仓
+    exit_mode   TEXT NOT NULL DEFAULT '', -- '' 原风控 / 'chandelier' 吊灯
     active      INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL,
     deleted_at  TEXT
@@ -161,6 +162,14 @@ CREATE TABLE IF NOT EXISTS trades (
     take_profit  REAL,                    -- 建议止盈价, 可空
     stop_loss    REAL,                    -- 建议止损价, 可空
     breakeven    REAL,                    -- 建议保本价, 可空
+    atr_n        REAL,                    -- 吊灯 N (ATR), 仅吊灯模型
+    ch_asof      TEXT,                    -- 吊灯当日快照日期
+    ch_stop      REAL,                    -- 当日盘中止损
+    ch_armed     INTEGER,                 -- 保本已开 1/0
+    ch_close     REAL,                    -- 当日收盘线
+    ch_reason    TEXT,                    -- 吊灯回撤 / 20日新低 / 仍是止损 / 保本
+    ch_held      INTEGER,                 -- 含今日的有量持有天数
+    ch_expire    INTEGER,                 -- 今日是第 15 个有量交易日
     repo_days    INTEGER,                 -- 逆回购实际计息天数 (默认=期限, 可覆盖节假日放大)
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
@@ -366,6 +375,18 @@ def init_db(db_path=None):
         # 迁移: 旧库 trades 表补逆回购计息天数列 (可空, 老数据零改动)
         if "repo_days" not in tcols:
             conn.execute("ALTER TABLE trades ADD COLUMN repo_days INTEGER")
+        for col, decl in (
+            ("atr_n", "REAL"),
+            ("ch_asof", "TEXT"),
+            ("ch_stop", "REAL"),
+            ("ch_armed", "INTEGER"),
+            ("ch_close", "REAL"),
+            ("ch_reason", "TEXT"),
+            ("ch_held", "INTEGER"),
+            ("ch_expire", "INTEGER"),
+        ):
+            if col not in tcols:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {decl}")
         # 迁移: 旧库 screener_runs 补 truncated 列 (结果被上限截断的标记; 老数据零改动)
         scols = {r[1] for r in conn.execute("PRAGMA table_info(screener_runs)")}
         if scols and "truncated" not in scols:
@@ -385,6 +406,10 @@ def init_db(db_path=None):
                 conn.execute(
                     "UPDATE models SET hold_days=? WHERE name=?", (days, name)
                 )
+        if "exit_mode" not in mcols:
+            conn.execute(
+                "ALTER TABLE models ADD COLUMN exit_mode TEXT NOT NULL DEFAULT ''"
+            )
         # 种子模型 A–E (仅当 models 表为空时插入, 含停用行也计入)
         n = conn.execute("SELECT COUNT(*) FROM models").fetchone()[0]
         if n == 0:
@@ -1092,12 +1117,22 @@ def _parse_hold_days(value):
     return n
 
 
+def _parse_exit_mode(raw):
+    """'' = 原风控三价; chandelier = 海龟吊灯。"""
+    if raw in (None, "", "classic"):
+        return ""
+    if raw == "chandelier":
+        return "chandelier"
+    raise ValueError("退出方式无效")
+
+
 def list_models(active_only=True):
-    """返回模型列表 {id, name, description, hold_days, active, created_at, deleted_at}。
+    """返回模型列表 {id, name, description, hold_days, exit_mode, active, created_at, deleted_at}。
 
     active_only=True 只返回启用中的 (供交易下拉); False 返回全部 (供管理员列表)。
     """
-    sql = "SELECT id, name, description, hold_days, active, created_at, deleted_at FROM models"
+    sql = ("SELECT id, name, description, hold_days, exit_mode, active, "
+           "created_at, deleted_at FROM models")
     if active_only:
         sql += " WHERE active=1"
     sql += " ORDER BY id"
@@ -1110,6 +1145,7 @@ def list_models(active_only=True):
                 "name": r["name"],
                 "description": r["description"],
                 "hold_days": r["hold_days"],
+                "exit_mode": r["exit_mode"] or "",
                 "active": bool(r["active"]),
                 "created_at": r["created_at"],
                 "deleted_at": r["deleted_at"],
@@ -1120,7 +1156,7 @@ def list_models(active_only=True):
         conn.close()
 
 
-def create_model(name, description, hold_days=None):
+def create_model(name, description, hold_days=None, exit_mode=""):
     """新增模型并返回 model_id。名称非空/启用中重名抛 ValueError。"""
     name = (name or "").strip()
     if not name:
@@ -1129,12 +1165,13 @@ def create_model(name, description, hold_days=None):
         raise ValueError("模型名称过长")
     description = (description or "").strip()
     days = _parse_hold_days(hold_days)
+    mode = _parse_exit_mode(exit_mode)
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO models(name, description, hold_days, active, created_at) "
-            "VALUES(?,?,?,1,?)",
-            (name, description, days, _now_iso()),
+            "INSERT INTO models(name, description, hold_days, exit_mode, active, created_at) "
+            "VALUES(?,?,?,?,1,?)",
+            (name, description, days, mode, _now_iso()),
         )
         conn.commit()
         return cur.lastrowid
@@ -1144,10 +1181,10 @@ def create_model(name, description, hold_days=None):
         conn.close()
 
 
-def update_model(model_id, name, description, hold_days=_UNSET):
-    """更新模型名称/描述/推荐持仓日。模型不存在返回 False；启用中重名抛 ValueError。
+def update_model(model_id, name, description, hold_days=_UNSET, exit_mode=_UNSET):
+    """更新模型名称/描述/推荐持仓日/退出方式。模型不存在返回 False；启用中重名抛 ValueError。
 
-    hold_days 默认不改; 传入 None/'' 清空 (不再提醒平仓)。
+    hold_days、exit_mode 默认不改。hold_days 传入 None/'' 清空 (不再提醒平仓)。
     """
     name = (name or "").strip()
     if not name:
@@ -1155,19 +1192,21 @@ def update_model(model_id, name, description, hold_days=_UNSET):
     if len(name) > 64:
         raise ValueError("模型名称过长")
     description = (description or "").strip()
+    sets = ["name=?", "description=?"]
+    args = [name, description]
+    if hold_days is not _UNSET:
+        sets.append("hold_days=?")
+        args.append(_parse_hold_days(hold_days))
+    if exit_mode is not _UNSET:
+        sets.append("exit_mode=?")
+        args.append(_parse_exit_mode(exit_mode))
+    args.append(model_id)
     conn = get_conn()
     try:
-        if hold_days is _UNSET:
-            cur = conn.execute(
-                "UPDATE models SET name=?, description=? WHERE id=?",
-                (name, description, model_id),
-            )
-        else:
-            days = _parse_hold_days(hold_days)
-            cur = conn.execute(
-                "UPDATE models SET name=?, description=?, hold_days=? WHERE id=?",
-                (name, description, days, model_id),
-            )
+        cur = conn.execute(
+            f"UPDATE models SET {', '.join(sets)} WHERE id=?",
+            args,
+        )
         if cur.rowcount == 0:
             return False
         conn.commit()
@@ -1206,6 +1245,20 @@ def restore_model(model_id):
         return True
     except sqlite3.IntegrityError:
         raise ValueError("模型名与启用中的模型重复")
+    finally:
+        conn.close()
+
+
+def model_exit_mode(model_id):
+    """模型退出方式。无模型或不存在返回 ''。"""
+    if model_id in (None, ""):
+        return ""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT exit_mode FROM models WHERE id=?", (int(model_id),)
+        ).fetchone()
+        return (row["exit_mode"] or "") if row else ""
     finally:
         conn.close()
 
@@ -1641,6 +1694,34 @@ def _clean_reverse_repo(data, existing=None):
 _RISK_KEYS = ("take_profit", "stop_loss", "breakeven")
 
 
+def _chandelier_prices(merged, symbol):
+    """吊灯录入：N 与买入价必填，写出初始止损和保本价，不要求止盈。"""
+    import chandelier
+
+    raw = merged.get("atr_n")
+    if raw in (None, ""):
+        return None, "吊灯模型必须填写 N"
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return None, "N 无效"
+    if n <= 0:
+        return None, "N 必须大于 0"
+    try:
+        entry = float(merged.get("entry_price"))
+    except (TypeError, ValueError):
+        return None, "买入价无效"
+    stop = chandelier.initial_stop(entry, n, symbol)
+    if stop <= 0:
+        return None, "初始止损必须大于 0"
+    return {
+        "atr_n": n,
+        "take_profit": None,
+        "stop_loss": stop,
+        "breakeven": chandelier.breakeven_price(entry, n),
+    }, None
+
+
 def _parse_risk_prices(merged, enforce=True):
     """解析止盈/止损/保本。空串或 None → 清空为 None; 非空须 > 0。
 
@@ -1841,6 +1922,13 @@ def _clean(data, existing=None):
     if ttype not in ("simple", "batch"):
         return None, "type 必须为 simple 或 batch 或 reverse_repo"
     if ttype == "batch":
+        mid = data.get("model_id", (existing or {}).get("model_id"))
+        try:
+            mid_i = int(mid) if mid not in (None, "") else None
+        except (TypeError, ValueError):
+            mid_i = None
+        if mid_i is not None and model_exit_mode(mid_i) == "chandelier":
+            return None, "吊灯模型只支持单笔交易"
         return _clean_batch(data, existing)
 
     merged = {}
@@ -1917,11 +2005,20 @@ def _clean(data, existing=None):
         "model_id": model_id,
     }
 
-    enforce_risk = existing is None or any(k in data for k in _RISK_KEYS)
-    prices, err = _parse_risk_prices(merged, enforce=enforce_risk)
-    if err:
-        return None, err
-    clean.update(prices)
+    exit_mode = model_exit_mode(model_id)
+    clean["exit_mode"] = exit_mode
+    if exit_mode == "chandelier":
+        prices, err = _chandelier_prices(merged, symbol)
+        if err:
+            return None, err
+        clean.update(prices)
+    else:
+        enforce_risk = existing is None or any(k in data for k in _RISK_KEYS)
+        prices, err = _parse_risk_prices(merged, enforce=enforce_risk)
+        if err:
+            return None, err
+        clean.update(prices)
+        clean["atr_n"] = None
 
     if status == "closed":
         try:
@@ -2207,25 +2304,38 @@ def _row_to_dict(row, fee_config=None):
     return d
 
 
+def _chandelier_snapshot_stale(existing, clean):
+    """买入价、N、模型、代码或买入日变了，当日吊灯快照作废。"""
+    if not existing:
+        return False
+    for key in ("entry_price", "atr_n", "model_id", "symbol", "entry_date"):
+        if existing.get(key) != clean.get(key):
+            return True
+    return False
+
+
 def _attach_hold_days(records):
-    """给交易 dict 补 hold_days (来自关联模型, 无模型为 None)。"""
+    """给交易 dict 补 hold_days / exit_mode (来自关联模型, 无模型为 None / '')。"""
     if not records:
         return records
     mids = {d.get("model_id") for d in records if d.get("model_id")}
     hold_map = {}
+    mode_map = {}
     if mids:
         conn = get_conn()
         try:
-            q = "SELECT id, hold_days FROM models WHERE id IN (%s)" % (
+            q = "SELECT id, hold_days, exit_mode FROM models WHERE id IN (%s)" % (
                 ",".join("?" * len(mids))
             )
-            hold_map = {
-                r["id"]: r["hold_days"] for r in conn.execute(q, list(mids))
-            }
+            for r in conn.execute(q, list(mids)):
+                hold_map[r["id"]] = r["hold_days"]
+                mode_map[r["id"]] = r["exit_mode"] or ""
         finally:
             conn.close()
     for d in records:
-        d["hold_days"] = hold_map.get(d["model_id"]) if d.get("model_id") else None
+        mid = d.get("model_id")
+        d["hold_days"] = hold_map.get(mid) if mid else None
+        d["exit_mode"] = mode_map.get(mid, "") if mid else ""
     return records
 
 
@@ -2368,9 +2478,9 @@ def create_trade(user_id, data):
         cur = conn.execute(
             "INSERT INTO trades(user_id, symbol, name, status, entry_price, exit_price, "
             "quantity, entry_date, exit_date, entry_reason, entry_note, exit_reason, "
-            "exit_note, model_id, type, take_profit, stop_loss, breakeven, repo_days, "
+            "exit_note, model_id, type, take_profit, stop_loss, breakeven, atr_n, repo_days, "
             "created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 user_id, clean["symbol"], clean["name"], clean["status"],
                 clean["entry_price"], clean["exit_price"], clean["quantity"],
@@ -2378,7 +2488,7 @@ def create_trade(user_id, data):
                 clean["entry_note"], clean["exit_reason"], clean["exit_note"],
                 clean["model_id"], clean.get("type", "simple"),
                 clean.get("take_profit"), clean.get("stop_loss"), clean.get("breakeven"),
-                clean.get("repo_days"),
+                clean.get("atr_n"), clean.get("repo_days"),
                 now, now,
             ),
         )
@@ -2404,7 +2514,7 @@ def update_trade(user_id, tid, data):
             "UPDATE trades SET symbol=?, name=?, status=?, entry_price=?, exit_price=?, "
             "quantity=?, entry_date=?, exit_date=?, entry_reason=?, entry_note=?, "
             "exit_reason=?, exit_note=?, model_id=?, type=?, "
-            "take_profit=?, stop_loss=?, breakeven=?, repo_days=?, updated_at=? "
+            "take_profit=?, stop_loss=?, breakeven=?, atr_n=?, repo_days=?, updated_at=? "
             "WHERE id=? AND user_id=?",
             (
                 clean["symbol"], clean["name"], clean["status"], clean["entry_price"],
@@ -2413,10 +2523,17 @@ def update_trade(user_id, tid, data):
                 clean["exit_reason"], clean["exit_note"], clean["model_id"],
                 clean.get("type", "simple"),
                 clean.get("take_profit"), clean.get("stop_loss"), clean.get("breakeven"),
-                clean.get("repo_days"),
+                clean.get("atr_n"), clean.get("repo_days"),
                 _now_iso(), tid, user_id,
             ),
         )
+        if _chandelier_snapshot_stale(existing, clean):
+            conn.execute(
+                "UPDATE trades SET ch_asof=NULL, ch_stop=NULL, ch_armed=NULL, "
+                "ch_close=NULL, ch_reason=NULL, ch_held=NULL, ch_expire=NULL "
+                "WHERE id=? AND user_id=?",
+                (tid, user_id),
+            )
         conn.execute("DELETE FROM trade_legs WHERE trade_id=?", (tid,))
         if clean.get("type") == "batch":
             _insert_legs(conn, tid, clean["legs"])
@@ -2725,8 +2842,11 @@ def list_monitored_positions(user_id=None):
         sql = (
             "SELECT t.id, t.user_id, t.symbol, t.name, t.status, t.entry_date, "
             "t.entry_price, t.quantity, t.take_profit, t.stop_loss, t.breakeven, "
+            "t.atr_n, t.model_id, t.ch_asof, t.ch_stop, t.ch_armed, t.ch_close, "
+            "t.ch_reason, t.ch_held, t.ch_expire, m.exit_mode, m.name AS model_name, "
             "u.username, u.is_admin, u.monitor_enabled "
             "FROM trades t JOIN users u ON u.id = t.user_id "
+            "LEFT JOIN models m ON m.id = t.model_id "
             "WHERE t.status='open' "
             "AND t.type != 'reverse_repo' "
             "AND (u.is_admin=1 OR u.monitor_enabled=1) "
@@ -2740,6 +2860,45 @@ def list_monitored_positions(user_id=None):
         sql += "ORDER BY t.user_id, t.symbol"
         rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_chandelier_positions():
+    """未平仓的吊灯持仓（授权用户）。早盘重算和尾盘检查用。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.user_id, t.symbol, t.name, t.entry_date, t.entry_price, "
+            "t.atr_n, t.stop_loss, t.breakeven, t.ch_asof, t.ch_stop, t.ch_armed, "
+            "t.ch_close, t.ch_reason, t.ch_held, t.ch_expire, u.username "
+            "FROM trades t "
+            "JOIN models m ON m.id = t.model_id "
+            "JOIN users u ON u.id = t.user_id "
+            "WHERE t.status='open' AND t.type != 'reverse_repo' "
+            "AND m.exit_mode='chandelier' AND t.atr_n IS NOT NULL "
+            "AND (u.is_admin=1 OR u.monitor_enabled=1) "
+            "ORDER BY t.user_id, t.symbol"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def save_chandelier_snapshot(trade_id, asof, levels):
+    """写入一笔持仓的当日吊灯快照。"""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE trades SET ch_asof=?, ch_stop=?, ch_armed=?, ch_close=?, "
+            "ch_reason=?, ch_held=?, ch_expire=? WHERE id=?",
+            (
+                asof, levels["stop"], 1 if levels["armed"] else 0,
+                levels["close"], levels["reason"], levels["held"],
+                1 if levels["expire"] else 0, trade_id,
+            ),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -2779,6 +2938,7 @@ def list_positions_missing_risk_prices(user_id=None):
 def list_hold_expire_positions():
     """授权用户的 open 持仓, 且关联模型填了 hold_days。不要求风控价。
 
+    吊灯持仓（填了 N）用 15 日到期，不进这里。模型改成吊灯后、还没填 N 的旧仓仍走这里。
     hold_anchor_date: 单笔用买入日; 批次用最晚一笔买入腿日期。
     """
     conn = get_conn()
@@ -2797,6 +2957,8 @@ def list_hold_expire_positions():
             "WHERE t.status='open' "
             "AND (u.is_admin=1 OR u.monitor_enabled=1) "
             "AND m.hold_days IS NOT NULL AND m.hold_days > 0 "
+            "AND (m.exit_mode IS NULL OR m.exit_mode != 'chandelier' "
+            "     OR t.atr_n IS NULL) "
             "ORDER BY t.user_id, t.symbol"
         ).fetchall()
         return [dict(r) for r in rows]
