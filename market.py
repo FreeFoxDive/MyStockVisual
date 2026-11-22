@@ -2856,7 +2856,11 @@ def _maybe_append_today_bar(symbol, df, timing=None, fresh=True):
 _CHART_QUOTE_WAIT_SEC = 1.5
 
 
-def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=False):
+_NO_QUOTE = object()
+
+
+def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=False,
+                          quote=_NO_QUOTE):
     """历史日K尚无当天 bar 时, 用实时快照拼一根 (仅今天 + 交易日 + 成交量>0)。
 
     fresh=False 复用 quote_cache (TTL 1.25s), 不再每次强制走网络: 图表路径用,
@@ -2887,11 +2891,14 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
         # 盘前/集合竞价不拼当日 bar (快照为上一交易日残留)
         return unavailable("当日bar未成型")
     # 观测: 该往返的耗时即 quote_ms, 是 /api/kline 关键路径上的网络成本
-    with perf.Span(timing, "quote_ms"):
-        q = (fetch_trade_quote(symbol) if for_trade
-             else fetch_quotes(
-                 [symbol], fresh=fresh, wait_for_lock=_CHART_QUOTE_WAIT_SEC,
-             ).get(normalize_symbol(symbol)))
+    if quote is not _NO_QUOTE:
+        q = quote
+    else:
+        with perf.Span(timing, "quote_ms"):
+            q = (fetch_trade_quote(symbol) if for_trade
+                 else fetch_quotes(
+                     [symbol], fresh=fresh, wait_for_lock=_CHART_QUOTE_WAIT_SEC,
+                 ).get(normalize_symbol(symbol)))
     if not q:
         return unavailable("未取到快照")
     # 快照自带交易所时间戳时校验日期: 挡住盘前/停牌等陈旧快照被当今日
@@ -3049,6 +3056,165 @@ def get_daily_bars(symbol, dates):
     for iso, bar in _index_daily_bars(df, set(missing)).items():
         if out.get(iso) is None:
             out[iso] = bar
+    return out
+
+
+_DAILY_BARS_BATCH = 100
+
+
+def _daily_none_cache_key(symbol):
+    """未复权日K磁盘缓存的复权口径与数据源链, 与 fetch_kline_ex 一致。"""
+    adj = kline_source.normalize_adjust("none")
+    tag = kline_source.chain_tag(_kline_category(symbol, "1d"))
+    return adj, tag
+
+
+def _daily_none_ttl():
+    now = market_hours.now()
+    if market_hours.is_live(now):
+        return KLINE_DISK_TTL_SEC
+    return KLINE_DISK_TTL_OFF_SEC
+
+
+def _read_daily_none_cache(symbol, count):
+    adj, tag = _daily_none_cache_key(symbol)
+    cached = _disk_cache.get(symbol, "1d", count, _daily_none_ttl(), adjust=adj, chain_tag=tag)
+    if not cached:
+        return None
+    df = _normalize(pd.DataFrame(cached.get("data") or []), prefer_time=False)
+    return df
+
+
+def _write_daily_none_cache(symbol, count, df):
+    if df is None or len(df) == 0:
+        return
+    cache_df = _strip_today_bar_df(df)
+    if cache_df is None or len(cache_df) == 0:
+        return
+    if count and len(cache_df) > count:
+        cache_df = cache_df.tail(count)
+    out = cache_df.reset_index()
+    if out.columns[0] != "trade_date":
+        out = out.rename(columns={out.columns[0]: "trade_date"})
+    payload = {
+        "generated_date": market_hours.now().date().isoformat(),
+        "name": symbol,
+        "source": "alphafeed",
+        "data": json.loads(out.to_json(orient="records", date_format="iso")),
+    }
+    adj, tag = _daily_none_cache_key(symbol)
+    try:
+        _disk_cache.set(symbol, "1d", count, payload, adjust=adj, chain_tag=tag)
+    except Exception:
+        pass
+
+
+def _wait_daily_kline_token():
+    """盯市必须等到日K批量令牌, 取不到不能跳过 (否则整段曲线缺价)。"""
+    import factors
+    bucket = factors.daily_kline_bucket()
+    while not bucket.try_acquire():
+        rate = getattr(bucket, "rate", None)
+        wait = 1.0 / rate if isinstance(rate, (int, float)) and rate > 0 else 1.0
+        time.sleep(min(wait, 5.0))
+
+
+def get_daily_bars_many(symbol_dates):
+    """一次取多标的未复权日K。``symbol_dates`` 为 ``{symbol: [YYYY-MM-DD, ...]}``。
+
+    返回 ``{symbol: {date: bar 或 None}}``。历史日K按最多 100 只一批走
+    ``af.klines.batch`` (与因子库共用日K批量额度, 分析页会等待令牌)。
+    含今天时各标的单独取成交快照; 仅今天的标的不再拉历史。
+    """
+    from datetime import date as _date
+
+    wanted = {}
+    for raw_symbol, raw_dates in (symbol_dates or {}).items():
+        symbol = normalize_symbol(raw_symbol)
+        days = []
+        seen = set()
+        for raw in raw_dates or []:
+            try:
+                day = _date.fromisoformat(str(raw)[:10])
+            except (ValueError, TypeError):
+                continue
+            if day not in seen:
+                seen.add(day)
+                days.append(day)
+        if days:
+            wanted.setdefault(symbol, [])
+            for day in days:
+                if day not in wanted[symbol]:
+                    wanted[symbol].append(day)
+    if not wanted:
+        return {}
+
+    today = market_hours.now().date()
+    out = {symbol: {day.isoformat(): None for day in days} for symbol, days in wanted.items()}
+    need_today = [symbol for symbol, days in wanted.items() if today in days]
+    quotes = {}
+    if need_today and market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
+        try:
+            quotes = fetch_quotes(need_today, fresh=True, wait_for_lock=5.0, for_trade=True)
+        except Exception as exc:
+            log.warning("盯市当日快照失败 n=%s: %s", len(need_today), type(exc).__name__)
+    for symbol in need_today:
+        quote_bar = _daily_bar_from_quote(symbol, today, quote=quotes.get(symbol))
+        if quote_bar is not None:
+            out[symbol][today.isoformat()] = quote_bar
+
+    pending = []
+    fallback = []
+    for symbol, days in wanted.items():
+        missing = [day for day in days if out[symbol][day.isoformat()] is None]
+        if not missing:
+            continue
+        count = _daily_lookback_count(today, min(missing))
+        cached = _read_daily_none_cache(symbol, count)
+        if cached is not None:
+            for iso, bar in _index_daily_bars(cached, set(missing)).items():
+                out[symbol][iso] = bar
+            continue
+        # 港/美股另有限频且混批会被整批拒, 走单只数据源链
+        if _symbol_market(symbol) != "cn":
+            fallback.append((symbol, missing))
+        else:
+            pending.append((count, symbol, missing))
+
+    pending.sort()
+    for start in range(0, len(pending), _DAILY_BARS_BATCH):
+        chunk = pending[start:start + _DAILY_BARS_BATCH]
+        count = max(item[0] for item in chunk)
+        symbols = [item[1] for item in chunk]
+        frames = {}
+        try:
+            _wait_daily_kline_token()
+            frames = get_af().klines.batch(
+                symbols, period="1d", count=count,
+                adjust=_af_adjust("none"), to_dataframe=True,
+            ) or {}
+        except Exception as exc:
+            log.warning("批量日K失败 n=%s: %s", len(symbols), type(exc).__name__)
+        for own_count, symbol, missing in chunk:
+            df = _normalize(frames.get(symbol), prefer_time=False)
+            if df is None:
+                fallback.append((symbol, missing))
+                continue
+            for iso, bar in _index_daily_bars(df, set(missing)).items():
+                if out[symbol].get(iso) is None:
+                    out[symbol][iso] = bar
+            _write_daily_none_cache(symbol, own_count, df)
+
+    # 批量没拿到的 (源故障/无权限/数据不足) 退回单只数据源链, 与旧路径一致
+    for symbol, missing in fallback:
+        try:
+            single = get_daily_bars(symbol, [day.isoformat() for day in missing if day != today])
+        except Exception as exc:
+            log.warning("单只日K回退失败 %s: %s", symbol, type(exc).__name__)
+            continue
+        for iso, bar in single.items():
+            if bar is not None and out[symbol].get(iso) is None:
+                out[symbol][iso] = bar
     return out
 
 

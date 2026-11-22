@@ -11,6 +11,7 @@ api_bp = Blueprint("api", __name__)
 
 # 子模块 import 即在 api_bp 上注册路由 (顺序无依赖)
 from api import admin  # noqa: E402,F401
+from api import analysis  # noqa: E402,F401
 from api import alerts  # noqa: E402,F401
 from api import cn_data  # noqa: E402,F401
 from api import alerts  # noqa: E402,F401

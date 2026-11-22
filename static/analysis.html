@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📈 量化分析 — Visual</title>
+<link rel="stylesheet" href="/css/theme.css">
+<script src="/js/theme.js"></script>
+<script>
+(function () {
+  var hasStored = false;
+  try { hasStored = !!(localStorage.getItem(VisualTheme.KEY) || localStorage.getItem(VisualTheme.LEGACY_KEY)); } catch (e) {}
+  var t = hasStored ? VisualTheme.load().theme
+    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+})();
+</script>
+<style>
+#toolbar .user-wrap { position: relative; }
+#toolbar button.user { background: transparent; border-color: transparent; padding: 6px 8px; cursor: pointer; }
+.user-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; min-width: 160px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.2); z-index: 300; overflow: hidden;
+}
+.user-menu a { display: block; padding: 9px 14px; font-size: 13px; color: var(--text); text-decoration: none; }
+.user-menu a:hover { background: var(--btn-hover); }
+#main-view { padding: 18px 22px 40px; max-width: 1280px; margin: 0 auto; }
+.section-title { font-size: 15px; font-weight: 700; margin: 22px 0 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.section-title .bar { width: 4px; height: 16px; background: var(--btn-active); border-radius: 2px; }
+.section-title .hint { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.controls input[type="number"] { width: 120px; }
+.controls input[type="date"] { width: 148px; }
+.group-label { font-size: 12px; color: var(--text-secondary); }
+.banner { display: none; margin: 8px 0; padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; }
+.banner.show { display: block; }
+.banner.warn { background: rgba(212,160,23,0.12); color: var(--warn-text); }
+.banner.note { background: rgba(var(--btn-active-rgb), 0.08); color: var(--text-secondary); }
+.card-group { margin-top: 14px; }
+.card-group h3 { font-size: 12px; color: var(--text-secondary); margin: 0 0 8px; font-weight: 700; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 10px; }
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.card .label { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px; }
+.card .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .value.pos { color: var(--up-text); }
+.card .value.neg { color: var(--down-text); }
+.card .sub { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.chart-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 6px; }
+.chart-box.wide { grid-column: 1 / -1; }
+.chart-box .chart-title { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; }
+.chart { width: 100%; height: 260px; }
+.chart.tall { height: 340px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { background: var(--bg-panel); color: var(--text-secondary); font-weight: 600; cursor: pointer; }
+td.pos { color: var(--up-text); font-weight: 600; }
+td.neg { color: var(--down-text); font-weight: 600; }
+tr.leg td { background: var(--bg-panel); font-size: 12px; color: var(--text-secondary); }
+tr.click:hover td { background: var(--btn-hover); }
+td.sym a { color: inherit; text-decoration: none; }
+td.sym a:hover { color: var(--btn-active); }
+.badge { padding: 1px 7px; border-radius: 10px; font-size: 11px; background: rgba(var(--btn-active-rgb), 0.12); color: var(--btn-active); }
+.empty { text-align: center; color: var(--text-secondary); padding: 22px 0; }
+#load-state { font-size: 12px; color: var(--text-secondary); min-height: 1.2em; }
+@media (max-width: 900px) { .charts { grid-template-columns: 1fr; } .chart-box.wide { grid-column: auto; } }
+</style>
+<script src="/js/api.js"></script>
+</head>
+<body>
+<div id="toolbar">
+  <span class="title">📈 量化分析</span>
+  <button onclick="location.href='/'" title="返回K线主页">← 主页</button>
+  <button onclick="location.href='/trades.html'" title="交易记录">📒 交易记录</button>
+  <span class="spacer"></span>
+  <div class="user-wrap" id="user-wrap">
+    <button class="user" id="toolbar-user" onclick="toggleUserMenu(event)"></button>
+    <div class="user-menu" id="user-menu" style="display:none">
+      <a href="/admin.html#users">👥 用户管理</a>
+      <a href="/quant.html">📊 量化管理</a>
+    </div>
+  </div>
+  <button id="btn-theme" onclick="toggleTheme()" title="切换主题">🌙</button>
+  <button id="btn-logout" class="danger" onclick="doLogout()" style="display:none">退出登录</button>
+</div>
+
+<div id="main-view" style="display:none">
+  <div class="controls">
+    <span class="group-label">模型</span>
+    <select id="model-select" onchange="savePrefs(); loadAnalysis()"></select>
+    <span class="group-label">初始资金</span>
+    <input id="capital-input" type="number" min="1000" max="1000000000" step="1000" value="100000" onchange="onCapital()">
+    <button type="button" onclick="setCapital(50000)">5万</button>
+    <button type="button" onclick="setCapital(100000)">10万</button>
+    <button type="button" onclick="setCapital(200000)">20万</button>
+    <button type="button" onclick="setCapital(500000)">50万</button>
+    <span class="group-label">区间</span>
+    <input id="date-from" type="date" onchange="loadAnalysis()">
+    <span class="group-label">至</span>
+    <input id="date-to" type="date" onchange="loadAnalysis()" title="留空表示到今天">
+    <button type="button" id="range-all" onclick="setRange('all')">全部</button>
+    <button type="button" id="range-ytd" onclick="setRange('ytd')">今年以来</button>
+    <button type="button" id="range-1m" onclick="setRange('1m')">近1月</button>
+    <button type="button" id="range-3m" onclick="setRange('3m')">近3月</button>
+    <button type="button" id="range-6m" onclick="setRange('6m')">近6月</button>
+    <button type="button" id="range-1y" onclick="setRange('1y')">近1年</button>
+    <button type="button" id="mode-realized" class="active" onclick="setMode('realized')">平仓结算</button>
+    <button type="button" id="mode-mtm" onclick="setMode('mtm')">逐日盯市</button>
+    <label class="group-label"><input id="deduct-fees" type="checkbox" checked onchange="savePrefs(); loadAnalysis()"> 扣除手续费</label>
+  </div>
+  <div id="load-state"></div>
+  <div id="warning-banner" class="banner warn"></div>
+  <div id="note-banner" class="banner note"></div>
+
+  <div id="stat-cards"></div>
+
+  <div class="section-title"><span class="bar"></span>净值曲线<span class="hint" id="nav-hint"></span></div>
+  <div class="chart-box wide"><div class="chart tall" id="nav-chart"></div></div>
+
+  <div class="section-title"><span class="bar"></span>收益与风险</div>
+  <div class="charts">
+    <div class="chart-box"><div class="chart-title">水下回撤（黄带 = 最长衰落）</div><div class="chart" id="dd-chart"></div></div>
+    <div class="chart-box"><div class="chart-title">月度收益率</div><div class="chart" id="month-chart"></div></div>
+    <div class="chart-box"><div class="chart-title">单笔收益分布</div><div class="chart" id="hist-chart"></div></div>
+    <div class="chart-box"><div class="chart-title">退出原因归因</div><div class="chart" id="reason-chart"></div></div>
+    <div class="chart-box"><div class="chart-title">持仓天数 × 收益率</div><div class="chart" id="scatter-chart"></div></div>
+    <div class="chart-box"><div class="chart-title">滚动胜率 / 均收益 <span id="rolling-window"></span></div><div class="chart" id="rolling-chart"></div></div>
+    <div class="chart-box wide"><div class="chart-title">标的盈亏贡献</div><div class="chart" id="symbol-chart"></div></div>
+  </div>
+
+  <div class="section-title"><span class="bar"></span>多模型对比<span class="hint">同一资金、同一区间</span></div>
+  <div class="chart-box wide"><div class="chart" id="compare-chart"></div></div>
+  <div class="table-wrap" style="margin-top:10px">
+    <table>
+      <thead><tr><th>模型</th><th>期末净值</th><th>累计收益</th><th>最大回撤</th><th>夏普</th><th>盈亏比</th><th>胜率</th><th>平仓笔数</th></tr></thead>
+      <tbody id="compare-tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="section-title"><span class="bar"></span>月度明细</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>月份</th><th>交易日</th><th>平仓笔数</th><th>胜率</th><th>权益变化</th><th>月收益率</th><th>月末净值</th><th>月末回撤</th></tr></thead>
+      <tbody id="month-tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="section-title"><span class="bar"></span>区间交易<span class="hint">盈亏是整笔结果；区间已实现是落到本区间净值上的部分。批次可展开逐腿。</span></div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th data-key="symbol" onclick="sortTrades('symbol')">代码 / 名称</th>
+          <th data-key="status" onclick="sortTrades('status')">状态</th>
+          <th data-key="model_name" onclick="sortTrades('model_name')">模型</th>
+          <th data-key="entry_date" onclick="sortTrades('entry_date')">买入</th>
+          <th data-key="exit_date" onclick="sortTrades('exit_date')">卖出</th>
+          <th data-key="holding_days" onclick="sortTrades('holding_days')">天数</th>
+          <th data-key="return_pct" onclick="sortTrades('return_pct')">收益率</th>
+          <th data-key="pnl" onclick="sortTrades('pnl')">盈亏</th>
+          <th data-key="window_pnl" onclick="sortTrades('window_pnl')">区间已实现</th>
+          <th>原因</th>
+        </tr>
+      </thead>
+      <tbody id="trade-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script src="/vendor/echarts-5.5.0.min.js"></script>
+<script>
+const state = { user: null, models: [], data: null, mode: 'realized', sortKey: 'exit_date', sortDir: -1, openLegs: {} };
+let reqSeq = 0;
+
+function escHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+function parseCapital(raw) {
+  if (raw === null || raw === undefined || String(raw).trim() === '') return 100000;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 100000;
+  return Math.min(1000000000, Math.max(1000, Math.round(n)));
+}
+function presetRange(key, todayISO) {
+  const today = todayISO || new Date().toISOString().slice(0, 10);
+  if (key === 'all') return { from: '', to: '' };
+  if (key === 'ytd') return { from: today.slice(0, 4) + '-01-01', to: '' };
+  const days = { '1m': 30, '3m': 91, '6m': 182, '1y': 365 }[key];
+  if (!days) return { from: '', to: '' };
+  const parts = today.split('-').map(Number);
+  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  d.setDate(d.getDate() - days);
+  const p = (n) => String(n).padStart(2, '0');
+  return { from: d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()), to: '' };
+}
+function fmtMoney(v, signed) {
+  if (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v);
+  const abs = Math.abs(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (n > 0) return (signed ? '+' : '') + abs;
+  if (n < 0) return '-' + abs;
+  return abs;
+}
+function fmtPct(v, digits) {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v);
+  const text = n.toFixed(digits === undefined ? 2 : digits) + '%';
+  return n > 0 ? '+' + text : text;
+}
+function fmtNum(v, digits) {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—';
+  return Number(v).toFixed(digits === undefined ? 2 : digits);
+}
+function signClass(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return '';
+  return n > 0 ? 'pos' : 'neg';
+}
+function todayISO() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+async function api(path, options) {
+  return VisualApi.api(path, options, { onUnauthorized: () => { location.href = '/login.html?next=' + encodeURIComponent(location.pathname); } });
+}
+
+function toggleTheme() {
+  VisualTheme.toggle({ buttonId: 'btn-theme' });
+  if (state.data) renderCharts();
+}
+function toggleUserMenu(e) {
+  if (e) e.stopPropagation();
+  if (!state.user || !state.user.is_admin) return;
+  const menu = document.getElementById('user-menu');
+  menu.style.display = menu.style.display === 'none' ? '' : 'none';
+}
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('user-wrap');
+  if (wrap && !wrap.contains(e.target)) document.getElementById('user-menu').style.display = 'none';
+});
+async function doLogout() {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  location.href = '/login.html';
+}
+
+function savePrefs() {
+  try {
+    localStorage.setItem('visual-analysis-capital', String(parseCapital(document.getElementById('capital-input').value)));
+    localStorage.setItem('visual-analysis-mode', state.mode);
+    localStorage.setItem('visual-analysis-deduct', document.getElementById('deduct-fees').checked ? '1' : '0');
+    localStorage.setItem('visual-analysis-model', document.getElementById('model-select').value || 'all');
+  } catch (e) {}
+}
+function restorePrefs() {
+  try {
+    const cap = localStorage.getItem('visual-analysis-capital');
+    if (cap) document.getElementById('capital-input').value = parseCapital(cap);
+    const mode = localStorage.getItem('visual-analysis-mode');
+    if (mode === 'mtm' || mode === 'realized') state.mode = mode;
+    const deduct = localStorage.getItem('visual-analysis-deduct');
+    if (deduct === '0') document.getElementById('deduct-fees').checked = false;
+    state.prefModel = localStorage.getItem('visual-analysis-model') || 'all';
+  } catch (e) {}
+  document.getElementById('mode-realized').classList.toggle('active', state.mode === 'realized');
+  document.getElementById('mode-mtm').classList.toggle('active', state.mode === 'mtm');
+}
+function setCapital(n) {
+  document.getElementById('capital-input').value = n;
+  onCapital();
+}
+function onCapital() {
+  document.getElementById('capital-input').value = parseCapital(document.getElementById('capital-input').value);
+  savePrefs();
+  loadAnalysis();
+}
+function setRange(key) {
+  const range = presetRange(key, todayISO());
+  document.getElementById('date-from').value = range.from;
+  document.getElementById('date-to').value = range.to;
+  loadAnalysis();
+}
+function setMode(mode) {
+  state.mode = mode === 'mtm' ? 'mtm' : 'realized';
+  document.getElementById('mode-realized').classList.toggle('active', state.mode === 'realized');
+  document.getElementById('mode-mtm').classList.toggle('active', state.mode === 'mtm');
+  savePrefs();
+  loadAnalysis();
+}
+function queryString() {
+  const params = new URLSearchParams();
+  params.set('model_id', document.getElementById('model-select').value || 'all');
+  params.set('capital', String(parseCapital(document.getElementById('capital-input').value)));
+  const from = document.getElementById('date-from').value;
+  const to = document.getElementById('date-to').value;
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  params.set('mode', state.mode);
+  params.set('deduct_fees', document.getElementById('deduct-fees').checked ? '1' : '0');
+  params.set('compare', '1');
+  return params.toString();
+}
+
+async function checkAuth() {
+  try {
+    const data = await api('/api/auth/me');
+    state.user = data;
+    document.getElementById('toolbar-user').textContent = '👤 ' + data.username;
+    document.getElementById('btn-logout').style.display = '';
+    document.getElementById('main-view').style.display = '';
+    restorePrefs();
+    document.getElementById('date-from').max = todayISO();
+    document.getElementById('date-to').max = todayISO();
+    await loadModels();
+    await loadAnalysis();
+  } catch (e) {
+    location.href = '/login.html?next=' + encodeURIComponent('/analysis.html');
+  }
+}
+async function loadModels() {
+  const models = await api('/api/models');
+  state.models = models || [];
+  const sel = document.getElementById('model-select');
+  const cur = state.prefModel || 'all';
+  sel.innerHTML = '<option value="all">全部模型</option><option value="none">无模型</option>'
+    + state.models.map(m => `<option value="${m.id}">${escHtml(m.name)}${m.active ? '' : '（已删除）'}</option>`).join('');
+  sel.value = cur;
+  if (!sel.value) sel.value = 'all';
+}
+async function loadAnalysis() {
+  const seq = ++reqSeq;
+  document.getElementById('load-state').textContent = state.mode === 'mtm' ? '逐日盯市计算中，正在补收盘价…' : '计算中…';
+  try {
+    const data = await api('/api/analysis/quant?' + queryString());
+    if (seq !== reqSeq) return;
+    state.data = data;
+    document.getElementById('load-state').textContent = '';
+    render();
+  } catch (e) {
+    if (seq !== reqSeq) return;
+    document.getElementById('load-state').textContent = e.message || '加载失败';
+  }
+}
+
+function render() {
+  const data = state.data || {};
+  const summary = data.summary || {};
+  const notes = data.notes || [];
+  const warnings = data.warnings || [];
+  const noteEl = document.getElementById('note-banner');
+  const warnEl = document.getElementById('warning-banner');
+  noteEl.classList.toggle('show', notes.length > 0);
+  noteEl.textContent = notes.join(' ');
+  warnEl.classList.toggle('show', warnings.length > 0);
+  warnEl.textContent = warnings.join(' ');
+  document.getElementById('nav-hint').textContent = data.mode === 'mtm'
+    ? '逐日盯市：持仓按收盘价估值，区间前已有底仓以期初收盘价为基准'
+    : '平仓结算：卖出日计入已实现盈亏，持仓中的浮盈亏不在曲线里';
+  renderCards(summary);
+  renderCharts();
+  renderMonthTable(data.monthly || []);
+  renderCompareTable(data.model_comparison || []);
+  renderTrades();
+}
+
+function card(label, value, cls, sub, tip) {
+  return `<div class="card" title="${escHtml(tip || '')}"><div class="label">${escHtml(label)}</div><div class="value ${cls || ''}">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
+function renderCards(s) {
+  const t = s.t_stats || {};
+  const tLine = t.count ? `做T ${t.count} 次（正${t.positive}/反${t.reverse}），成功率 ${t.success_rate == null ? '—' : t.success_rate + '%'}，盈亏 ${fmtMoney(t.pnl, true)}` : '';
+  document.getElementById('stat-cards').innerHTML = `
+    <div class="card-group"><h3>收益与净值 ${tLine ? '· ' + escHtml(tLine) : ''}</h3><div class="cards">
+      ${card('期末净值', fmtNum(s.end_nav, 4), '', '权益 ' + fmtMoney(s.end_equity), '期末权益 / 初始资金')}
+      ${card('累计收益率', fmtPct(s.total_return_pct), signClass(s.total_return_pct), '', '区间净值变化')}
+      ${card('年化收益', s.cagr == null ? '—' : fmtPct(s.cagr * 100), signClass(s.cagr), s.cagr_short_sample ? '样本不足 10 个交易日' : '按 252 个交易日', 'CAGR = 期末净值 ^ (252 / 交易日数) - 1')}
+      ${card('累计盈亏', fmtMoney(s.total_pnl, true), signClass(s.total_pnl), '', '净值曲线对应的盈亏，含未平仓批次已实现减仓')}
+      ${card('期末权益', fmtMoney(s.end_equity), '', '初始 ' + fmtMoney(state.data && state.data.capital), '')}
+      ${card('手续费', fmtMoney(s.total_fees), '', state.data && state.data.deduct_fees === false ? '未扣除' : '已从盈亏扣除', '区间内成交的佣金、印花税与过户费')}
+    </div></div>
+    <div class="card-group"><h3>风险调整</h3><div class="cards">
+      ${card('夏普', fmtNum(s.sharpe), signClass(s.sharpe), 'rf = 0', '日收益均值 / 标准差 × √252')}
+      ${card('索提诺', fmtNum(s.sortino), signClass(s.sortino), '', '只拿下行波动做分母')}
+      ${card('卡玛', fmtNum(s.calmar), signClass(s.calmar), '', '年化收益 / |最大回撤|')}
+      ${card('最大回撤', s.max_dd_pct ? fmtPct(-s.max_dd_pct) : '0.00%', s.max_dd_pct ? 'neg' : '', (s.max_dd_peak || '—') + ' → ' + (s.max_dd_date || '—'), '从前期高点到谷底的跌幅')}
+      ${card('最长衰落', (s.max_dd_days || 0) + ' 日', '', (s.dd_start || '—') + ' → ' + (s.dd_end || '—'), '净值低于历史高点的最长连续交易日')}
+      ${card('年化波动', s.volatility == null ? '—' : fmtPct(s.volatility * 100), '', '当前回撤 ' + fmtPct((s.current_drawdown || 0) * 100), '日收益标准差 × √252')}
+    </div></div>
+    <div class="card-group"><h3>交易质量（完全平仓的一笔算一笔，一批次不拆开）</h3><div class="cards">
+      ${card('胜率', s.win_rate == null ? '—' : fmtPct(s.win_rate).replace('+', ''), '', `${s.win_count || 0} 盈 / ${s.loss_count || 0} 亏 / 持仓 ${s.open_count || 0}`, '盈亏持平不计入分母')}
+      ${card('盈亏比', fmtNum(s.profit_factor), '', '单笔均比 ' + fmtNum(s.payoff_ratio), '总盈利 / |总亏损|；副标题是平均盈利 / |平均亏损|')}
+      ${card('期望', s.ev_pct == null ? '—' : fmtPct(s.ev_pct), signClass(s.ev_pct), fmtMoney(s.ev_amount, true) + ' / 笔', '已平仓单笔收益率的平均值')}
+      ${card('凯利 f*', s.kelly == null ? '—' : fmtPct(s.kelly * 100), '', '', '胜率 - (1 - 胜率) / 盈亏比，理论仓位')}
+      ${card('持仓天数', s.avg_holding_days == null ? '—' : fmtNum(s.avg_holding_days, 1), '', `盈 ${fmtNum(s.avg_holding_days_win, 1)} / 亏 ${fmtNum(s.avg_holding_days_loss, 1)}`, '卖出日减买入日的日历天数')}
+      ${card('连胜 / 连亏', `${s.max_win_streak || 0} / ${s.max_loss_streak || 0}`, '', '', '按卖出时间排序，平局打断连击')}
+      ${card('仓位', s.avg_position_pct == null ? '—' : fmtNum(s.avg_position_pct, 1) + '%', '', '峰值 ' + (s.max_position_pct == null ? '—' : fmtNum(s.max_position_pct, 1) + '%') + ' · 最多 ' + (s.max_hold_count || 0) + ' 只', '平仓结算 = 持仓成本 / 初始资金（盈利后用权益）；盯市 = 持仓市值 / 当日权益；可超过 100%，不截断')}
+      ${card('周转', s.turnover == null ? '—' : fmtNum(s.turnover, 2) + ' 倍', '', '已平仓盈亏 ' + fmtMoney(s.closed_pnl, true), '区间买入金额 / 初始资金')}
+    </div></div>`;
+}
+
+function axisText() { return cssVar('--text-secondary', '#6c757d'); }
+function upColor() { return cssVar('--up-color', '#ef232a'); }
+function downColor() { return cssVar('--down-color', '#14b143'); }
+function chartOf(id) {
+  const el = document.getElementById(id);
+  return echarts.getInstanceByDom(el) || echarts.init(el);
+}
+function baseGrid(bottom) {
+  return { left: 12, right: 16, top: 28, bottom: bottom || 28, containLabel: true };
+}
+function emptyOption(text) {
+  return { title: { text: text || '暂无数据', left: 'center', top: 'middle', textStyle: { color: axisText(), fontSize: 13, fontWeight: 400 } } };
+}
+function renderCharts() {
+  renderNav();
+  renderDrawdown();
+  renderMonthly();
+  renderHist();
+  renderReason();
+  renderScatter();
+  renderRolling();
+  renderSymbol();
+  renderCompare();
+  requestAnimationFrame(() => {
+    ['nav-chart','dd-chart','month-chart','hist-chart','reason-chart','scatter-chart','rolling-chart','symbol-chart','compare-chart']
+      .forEach(id => { const inst = echarts.getInstanceByDom(document.getElementById(id)); if (inst) inst.resize(); });
+  });
+}
+function renderNav() {
+  const curve = (state.data && state.data.curve) || {};
+  const dates = curve.dates || [];
+  const chart = chartOf('nav-chart');
+  if (!dates.length) { chart.setOption(emptyOption('这段时间没有交易日'), true); return; }
+  const nav = curve.nav || [];
+  const pos = curve.pos_pct || [];
+  const peak = curve.max_dd_peak_i;
+  const trough = curve.max_dd_i;
+  const marks = [];
+  if (peak != null && nav[peak] != null) marks.push({ coord: [dates[peak], nav[peak]], value: '高点', itemStyle: { color: upColor() } });
+  if (trough != null && nav[trough] != null) marks.push({ coord: [dates[trough], nav[trough]], value: '谷底', itemStyle: { color: downColor() } });
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['净值', '仓位%'], textStyle: { color: axisText() }, top: 0 },
+    grid: baseGrid(48),
+    dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 8 }],
+    xAxis: { type: 'category', data: dates, axisLabel: { color: axisText() } },
+    yAxis: [
+      { type: 'value', name: '净值', scale: true, axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+      { type: 'value', name: '仓位%', axisLabel: { color: axisText(), formatter: '{value}%' }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '净值', type: 'line', showSymbol: false, data: nav, itemStyle: { color: cssVar('--btn-active', '#2962ff') },
+        markLine: { symbol: 'none', data: [{ yAxis: 1 }], lineStyle: { type: 'dashed', color: axisText() }, label: { formatter: '1.00' } },
+        markPoint: { symbol: 'circle', symbolSize: 8, data: marks, label: { color: axisText(), fontSize: 10 } } },
+      { name: '仓位%', type: 'line', yAxisIndex: 1, showSymbol: false, data: pos, areaStyle: { opacity: 0.12 }, itemStyle: { color: cssVar('--chart-amber', '#d4a017') }, lineStyle: { width: 1 } },
+    ],
+  }, true);
+}
+function renderDrawdown() {
+  const curve = (state.data && state.data.curve) || {};
+  const dates = curve.dates || [];
+  const chart = chartOf('dd-chart');
+  if (!dates.length) { chart.setOption(emptyOption(), true); return; }
+  const dd = curve.drawdown || [];
+  const i0 = curve.dd_start_i, i1 = curve.dd_end_i;
+  const area = (i0 != null && i1 != null) ? { itemStyle: { color: 'rgba(212,160,23,0.25)' }, data: [[{ xAxis: dates[i0] }, { xAxis: dates[i1] }]] } : undefined;
+  chart.setOption({
+    backgroundColor: 'transparent', tooltip: { trigger: 'axis', valueFormatter: v => Number(v).toFixed(2) + '%' },
+    grid: baseGrid(24),
+    xAxis: { type: 'category', data: dates, axisLabel: { color: axisText() } },
+    yAxis: { type: 'value', max: 0, axisLabel: { color: axisText(), formatter: '{value}%' }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    series: [{ type: 'line', showSymbol: false, data: dd, areaStyle: { opacity: 0.35 }, itemStyle: { color: downColor() }, markArea: area }],
+  }, true);
+}
+function renderMonthly() {
+  const rows = (state.data && state.data.monthly) || [];
+  const chart = chartOf('month-chart');
+  if (!rows.length) { chart.setOption(emptyOption(), true); return; }
+  chart.setOption({
+    backgroundColor: 'transparent', tooltip: { trigger: 'axis' }, grid: baseGrid(24),
+    xAxis: { type: 'category', data: rows.map(r => r.month), axisLabel: { color: axisText() } },
+    yAxis: { type: 'value', axisLabel: { color: axisText(), formatter: '{value}%' }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    series: [{ type: 'bar', data: rows.map(r => ({ value: r.return_pct, itemStyle: { color: r.return_pct >= 0 ? upColor() : downColor() } })) }],
+  }, true);
+}
+function renderHist() {
+  const hist = (state.data && state.data.return_hist) || { bins: [], counts: [] };
+  const chart = chartOf('hist-chart');
+  if (!hist.counts || !hist.counts.some(n => n)) { chart.setOption(emptyOption('区间内没有已平仓交易'), true); return; }
+  const ev = state.data.summary && state.data.summary.ev_pct;
+  let evBin = null;
+  if (ev != null) {
+    const edges = [-10, -5, 0, 2, 5, 10, 15, 20];
+    evBin = hist.bins[edges.length];
+    for (let i = 0; i < edges.length; i++) if (ev <= edges[i]) { evBin = hist.bins[i]; break; }
+  }
+  chart.setOption({
+    backgroundColor: 'transparent', tooltip: { trigger: 'axis' }, grid: baseGrid(24),
+    xAxis: { type: 'category', data: hist.bins, axisLabel: { color: axisText(), fontSize: 10 } },
+    yAxis: { type: 'value', minInterval: 1, axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    series: [{
+      type: 'bar', data: hist.counts.map((n, i) => ({ value: n, itemStyle: { color: i < 3 ? downColor() : upColor() } })),
+      markLine: evBin == null ? undefined : { symbol: 'none', data: [{ xAxis: evBin, name: 'EV' }], label: { formatter: 'EV ' + Number(ev).toFixed(2) + '%' }, lineStyle: { color: cssVar('--chart-amber', '#d4a017') } },
+    }],
+  }, true);
+}
+function renderReason() {
+  const rows = (state.data && state.data.by_exit_reason) || [];
+  const chart = chartOf('reason-chart');
+  if (!rows.length) { chart.setOption(emptyOption('区间内没有已平仓交易'), true); return; }
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', formatter: ps => { const r = rows[ps[0].dataIndex]; return `${escHtml(r.reason)}<br/>盈亏 ${fmtMoney(r.pnl, true)}<br/>${r.count} 笔 · 胜率 ${r.win_rate == null ? '—' : r.win_rate + '%'} · 均收益 ${fmtPct(r.avg_return_pct)}`; } },
+    grid: baseGrid(24),
+    xAxis: { type: 'category', data: rows.map(r => r.reason), axisLabel: { color: axisText(), fontSize: 10, interval: 0, rotate: rows.length > 4 ? 25 : 0 } },
+    yAxis: { type: 'value', axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    series: [{ type: 'bar', data: rows.map(r => ({ value: r.pnl, itemStyle: { color: r.pnl >= 0 ? upColor() : downColor() } })) }],
+  }, true);
+}
+function renderScatter() {
+  const rows = (state.data && state.data.holding_scatter) || [];
+  const chart = chartOf('scatter-chart');
+  const points = rows.filter(r => r.days != null && r.return_pct != null);
+  if (!points.length) { chart.setOption(emptyOption('区间内没有已平仓交易'), true); return; }
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { formatter: p => `${escHtml(p.data.name)} ${escHtml(p.data.symbol)}<br/>${p.data.days} 天 · ${fmtPct(p.data.ret)}<br/>${fmtMoney(p.data.pnl, true)} · ${escHtml(p.data.reason || '')}` },
+    grid: baseGrid(24),
+    xAxis: { type: 'value', name: '天数', axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.12)' } } },
+    yAxis: { type: 'value', name: '收益率%', axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.12)' } } },
+    series: [{ type: 'scatter', data: points.map(r => ({ value: [r.days, r.return_pct], name: r.name, symbol: r.symbol, days: r.days, ret: r.return_pct, pnl: r.pnl, reason: r.exit_reason, itemStyle: { color: r.return_pct >= 0 ? upColor() : downColor() } })) }],
+  }, true);
+}
+function renderRolling() {
+  const roll = (state.data && state.data.rolling) || { labels: [] };
+  const chart = chartOf('rolling-chart');
+  const hasData = roll.labels && roll.labels.length;
+  document.getElementById('rolling-window').textContent = hasData ? '（每 ' + roll.window + ' 笔）' : '';
+  if (!hasData) { chart.setOption(emptyOption('已平仓不足 2 笔'), true); return; }
+  chart.setOption({
+    backgroundColor: 'transparent', tooltip: { trigger: 'axis' },
+    legend: { data: ['胜率%', '均收益%'], textStyle: { color: axisText() }, top: 0 },
+    grid: baseGrid(24),
+    xAxis: { type: 'category', data: roll.labels, axisLabel: { color: axisText() } },
+    yAxis: [
+      { type: 'value', name: '胜率', axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+      { type: 'value', name: '收益', axisLabel: { color: axisText() }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '胜率%', type: 'line', showSymbol: false, data: roll.win_rate, itemStyle: { color: cssVar('--btn-active', '#2962ff') } },
+      { name: '均收益%', type: 'line', yAxisIndex: 1, showSymbol: false, data: roll.avg_return, itemStyle: { color: cssVar('--chart-amber', '#d4a017') } },
+    ],
+  }, true);
+}
+function renderSymbol() {
+  const rows = symbolSlice((state.data && state.data.by_symbol) || []);
+  const chart = chartOf('symbol-chart');
+  if (!rows.length) { chart.setOption(emptyOption('区间内没有已平仓交易'), true); return; }
+  chart.setOption({
+    backgroundColor: 'transparent', tooltip: { trigger: 'axis', formatter: ps => { const r = rows[ps[0].dataIndex]; return `${escHtml(r.name)} ${escHtml(r.symbol)}<br/>${fmtMoney(r.pnl, true)} · ${r.count} 笔 · 胜率 ${r.win_rate == null ? '—' : r.win_rate + '%'}`; } },
+    grid: { left: 12, right: 24, top: 8, bottom: 8, containLabel: true },
+    xAxis: { type: 'value', axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    yAxis: { type: 'category', data: rows.map(r => r.name), axisLabel: { color: axisText() } },
+    series: [{ type: 'bar', data: rows.map(r => ({ value: r.pnl, itemStyle: { color: r.pnl >= 0 ? upColor() : downColor() } })) }],
+  }, true);
+  chart.off('click');
+  chart.on('click', params => {
+    const row = rows[params.dataIndex];
+    if (row) location.href = '/?symbol=' + encodeURIComponent(row.symbol);
+  });
+}
+function symbolSlice(rows) {
+  if (rows.length <= 16) return rows.slice().sort((a, b) => a.pnl - b.pnl);
+  const sorted = rows.slice().sort((a, b) => b.pnl - a.pnl);
+  const picked = sorted.slice(0, 8).concat(sorted.slice(-8));
+  const seen = new Set();
+  return picked.filter(r => seen.has(r.symbol) ? false : (seen.add(r.symbol), true)).sort((a, b) => a.pnl - b.pnl);
+}
+function renderCompare() {
+  const rows = (state.data && state.data.model_comparison) || [];
+  const dates = (state.data && state.data.curve && state.data.curve.dates) || [];
+  const chart = chartOf('compare-chart');
+  if (!rows.length || !dates.length) { chart.setOption(emptyOption('没有可对比的模型记录'), true); return; }
+  chart.setOption({
+    backgroundColor: 'transparent', tooltip: { trigger: 'axis' },
+    legend: { type: 'scroll', textStyle: { color: axisText() }, top: 0 },
+    grid: baseGrid(24),
+    xAxis: { type: 'category', data: dates, axisLabel: { color: axisText() } },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: axisText() }, splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } } },
+    series: rows.map((row, i) => ({
+      name: row.name, type: 'line', showSymbol: false, data: row.nav,
+      itemStyle: { color: cssVar('--model-c' + (i % 8), '#2563eb') },
+    })),
+  }, true);
+}
+
+function renderMonthTable(rows) {
+  const body = document.getElementById('month-tbody');
+  if (!rows.length) { body.innerHTML = '<tr><td class="empty" colspan="8">暂无月度数据</td></tr>'; return; }
+  body.innerHTML = rows.map(r => `<tr>
+    <td>${escHtml(r.month)}</td><td>${r.days}</td><td>${r.count}</td>
+    <td>${r.win_rate == null ? '—' : r.win_rate + '%'}</td>
+    <td class="${signClass(r.pnl)}">${fmtMoney(r.pnl, true)}</td>
+    <td class="${signClass(r.return_pct)}">${fmtPct(r.return_pct)}</td>
+    <td>${fmtNum(r.end_nav, 4)}</td>
+    <td class="${r.end_drawdown < 0 ? 'neg' : ''}">${fmtPct(r.end_drawdown)}</td>
+  </tr>`).join('');
+}
+function renderCompareTable(rows) {
+  const body = document.getElementById('compare-tbody');
+  if (!rows.length) { body.innerHTML = '<tr><td class="empty" colspan="8">当前账户还没有分模型的交易</td></tr>'; return; }
+  body.innerHTML = rows.map(r => {
+    const s = r.summary || {};
+    const id = r.model_id == null ? 'none' : String(r.model_id);
+    return `<tr class="click" onclick="pickModel('${id}')">
+      <td>${escHtml(r.name)}</td>
+      <td>${fmtNum(s.end_nav, 4)}</td>
+      <td class="${signClass(s.total_return_pct)}">${fmtPct(s.total_return_pct)}</td>
+      <td class="${s.max_dd_pct ? 'neg' : ''}">${s.max_dd_pct ? fmtPct(-s.max_dd_pct) : '0.00%'}</td>
+      <td>${fmtNum(s.sharpe)}</td>
+      <td>${fmtNum(s.profit_factor)}</td>
+      <td>${s.win_rate == null ? '—' : s.win_rate + '%'}</td>
+      <td>${s.closed_count || 0}</td>
+    </tr>`;
+  }).join('');
+}
+function pickModel(id) {
+  document.getElementById('model-select').value = id;
+  if (!document.getElementById('model-select').value) document.getElementById('model-select').value = 'all';
+  savePrefs();
+  loadAnalysis();
+}
+function sortTrades(key) {
+  if (state.sortKey === key) state.sortDir *= -1;
+  else { state.sortKey = key; state.sortDir = (key === 'symbol' || key === 'model_name' || key === 'status') ? 1 : -1; }
+  renderTrades();
+}
+function renderTrades() {
+  const body = document.getElementById('trade-tbody');
+  const rows = ((state.data && state.data.trades) || []).slice().sort((a, b) => {
+    const va = a[state.sortKey], vb = b[state.sortKey];
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    const diff = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
+    return diff * state.sortDir;
+  });
+  if (!rows.length) { body.innerHTML = '<tr><td class="empty" colspan="10">这个区间没有交易</td></tr>'; return; }
+  body.innerHTML = rows.map(t => {
+    const batch = t.type === 'batch';
+    const open = state.openLegs[t.id];
+    const legs = open && t.legs ? `<tr class="leg"><td colspan="10">${t.legs.map(leg => `${escHtml(leg.date)} ${escHtml(leg.time || '')} ${leg.side === 'buy' ? '买' : '卖'} ${leg.price} × ${leg.quantity} 费用 ${fmtMoney(leg.fee)} ${escHtml(leg.reason || '')}`).join('<br>')}${t.t_stats && t.t_stats.count ? `<br>做T ${t.t_stats.count} 次，成功率 ${t.t_stats.success_rate == null ? '—' : t.t_stats.success_rate + '%'}，盈亏 ${fmtMoney(t.t_stats.pnl, true)}` : ''}</td></tr>` : '';
+    return `<tr>
+      <td class="sym"><a href="/?symbol=${encodeURIComponent(t.symbol)}">${escHtml(t.name)}<br><span style="color:var(--text-secondary)">${escHtml(t.symbol)}</span></a></td>
+      <td>${t.status === 'open' ? '持仓' : '已平仓'}${batch ? ` <button type="button" class="badge" onclick="toggleLegs(${t.id})">批次 ${t.leg_count} 笔</button>` : ''}</td>
+      <td>${escHtml(t.model_name || '无')}</td>
+      <td>${escHtml(t.entry_date || '—')}</td>
+      <td>${escHtml(t.exit_date || '—')}</td>
+      <td>${t.holding_days == null ? '—' : t.holding_days}</td>
+      <td class="${signClass(t.return_pct)}">${fmtPct(t.return_pct)}</td>
+      <td class="${signClass(t.pnl)}">${fmtMoney(t.pnl, true)}</td>
+      <td class="${signClass(t.window_pnl)}">${fmtMoney(t.window_pnl, true)}</td>
+      <td>${escHtml(t.exit_reason || '—')}</td>
+    </tr>${legs}`;
+  }).join('');
+}
+function toggleLegs(id) {
+  state.openLegs[id] = !state.openLegs[id];
+  renderTrades();
+}
+window.addEventListener('resize', () => {
+  ['nav-chart','dd-chart','month-chart','hist-chart','reason-chart','scatter-chart','rolling-chart','symbol-chart','compare-chart']
+    .forEach(id => { const inst = echarts.getInstanceByDom(document.getElementById(id)); if (inst) inst.resize(); });
+});
+
+VisualTheme.init({ buttonId: 'btn-theme' });
+checkAuth();
+</script>
+</body>
+</html>

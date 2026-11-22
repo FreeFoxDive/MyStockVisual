@@ -440,5 +440,82 @@ class TestGetDailyBars(unittest.TestCase):
         self.assertEqual(out[today]["low"], 0.9)
 
 
+class _OpenBucket:
+    def try_acquire(self, n=1):
+        return True
+
+
+class TestGetDailyBarsMany(unittest.TestCase):
+    def test_one_batch_for_many_symbols(self):
+        dates = ["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"]
+
+        def batch(symbols, period="1d", count=0, adjust="forward", to_dataframe=True):
+            self.assertGreater(len(symbols), 1)
+            self.assertEqual(period, "1d")
+            self.assertEqual(adjust, "none")
+            self.assertTrue(to_dataframe)
+            return {
+                "600000.SH": _df_with_dates(dates, close=10.0),
+                "000001.SZ": _df_with_dates(dates, close=20.0),
+            }
+
+        af = mock.Mock()
+        af.klines.batch = mock.Mock(side_effect=batch)
+        with mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod._disk_cache, "get", return_value=None), \
+             mock.patch.object(market_mod._disk_cache, "set") as cache_set, \
+             mock.patch("factors.daily_kline_bucket", return_value=_OpenBucket()):
+            out = market_mod.get_daily_bars_many({
+                "600000.SH": ["2026-08-03", "2026-08-07"],
+                "000001.SZ": ["2026-08-07", "2026-08-03"],
+            })
+        af.klines.batch.assert_called_once()
+        self.assertEqual(len(af.klines.batch.call_args.args[0]), 2)
+        self.assertEqual(out["600000.SH"]["2026-08-03"]["close"], 10.0)
+        self.assertEqual(out["000001.SZ"]["2026-08-07"]["close"], 20.0)
+        self.assertEqual(set(out["600000.SH"]), {"2026-08-03", "2026-08-07"})
+        self.assertEqual(cache_set.call_count, 2)
+
+    def test_failed_batch_and_hk_fall_back_to_single_chain(self):
+        af = mock.Mock()
+        af.klines.batch = mock.Mock(side_effect=RuntimeError("boom"))
+
+        def single(symbol, dates):
+            return {day: {"date": day, "close": 7.0, "high": 8.0, "low": 6.0} for day in dates}
+
+        with mock.patch.object(market_mod, "get_af", return_value=af), \
+             mock.patch.object(market_mod._disk_cache, "get", return_value=None), \
+             mock.patch.object(market_mod, "get_daily_bars", side_effect=single) as one, \
+             mock.patch("factors.daily_kline_bucket", return_value=_OpenBucket()):
+            out = market_mod.get_daily_bars_many({
+                "600000.SH": ["2026-08-03"],
+                "00700.HK": ["2026-08-03"],
+            })
+        self.assertEqual(af.klines.batch.call_args.args[0], ["600000.SH"])
+        self.assertEqual({call.args[0] for call in one.call_args_list}, {"600000.SH", "00700.HK"})
+        self.assertEqual(out["00700.HK"]["2026-08-03"]["close"], 7.0)
+        self.assertEqual(out["600000.SH"]["2026-08-03"]["close"], 7.0)
+
+    def test_today_quotes_fetched_in_one_call(self):
+        today = "2026-09-15"
+        ts = dt.datetime(2026, 9, 15, 10, 30, tzinfo=_CST).timestamp()
+        quote = {"open": 1.0, "high": 1.2, "low": 0.9, "last_price": 1.1,
+                 "volume": 1000, "timestamp": ts}
+        with mock.patch("market_hours.is_trading_day", return_value=True), \
+             mock.patch("market_hours.session_phase", return_value="trading"), \
+             mock.patch.object(market_mod, "fetch_quotes",
+                               return_value={"600000.SH": quote, "000001.SZ": quote}) as fq, \
+             mock.patch.object(market_mod, "fetch_trade_quote") as single_quote, \
+             mock.patch.object(market_mod, "get_af") as af:
+            out = market_mod.get_daily_bars_many({
+                "600000.SH": [today], "000001.SZ": [today],
+            })
+        fq.assert_called_once()
+        self.assertEqual(set(fq.call_args.args[0]), {"600000.SH", "000001.SZ"})
+        single_quote.assert_not_called()
+        af.assert_not_called()
+        self.assertEqual(out["000001.SZ"][today]["high"], 1.2)
+
+
 if __name__ == "__main__":
     unittest.main()
