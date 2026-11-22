@@ -2599,11 +2599,6 @@ async function saveTrade() {
   }
 }
 
-// 点击弹窗外关闭
-document.getElementById('modal-mask').addEventListener('click', function (e) {
-  if (e.target === this) closeModal();
-});
-
 document.getElementById('t-symbol-input').addEventListener('input', onSymbolInput);
 
 // 初始化主题 (与主页共享 visual-theme)
