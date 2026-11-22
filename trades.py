@@ -1118,7 +1118,7 @@ def _parse_hold_days(value):
 
 
 def _parse_exit_mode(raw):
-    """'' = 原风控三价; chandelier = 海龟吊灯。"""
+    """'' = 原风控三价; chandelier = 吊灯。"""
     if raw in (None, "", "classic"):
         return ""
     if raw == "chandelier":

@@ -661,15 +661,13 @@ TTL 缓存、不等待。所以最坏情况下被挡住的只有盘口自己的�
 
 ## 10. 持仓监控未自动处理除权除息（遗留，以后彻底解决）
 
-**状态**：未做。2026-11-20 讨论记下；回测/海龟选股已有口径，Visual 监控与画线未闭环。
+**状态**：未做。2026-11-20 记下；Visual 监控与画线未闭环。
 
 ### 现状
 
 | 路径 | 除权相关 |
 |---|---|
-| 回测管线 T | 信号前复权 + 回放跨除权走前复权价（`adjusted_arrays` / `_turtle_arrays`），日期量跌停仍未复权 |
-| 海龟实盘 `turtle_screen` | 持仓表写未复权成交价；跟踪时用 `qfq_scale_at` 换成前复权再递推 |
-| Visual 吊灯 / 止盈保本止损 | 刻意未复权：`entry_price`、`atr_n`、风控绝对价 vs 实时 `last_price`；早盘吊灯用 `adjust=none` 日 K |
+| 吊灯 / 止盈保本止损 | 未复权：`entry_price`、`atr_n`、风控绝对价 vs 实时 `last_price`；早盘吊灯用 `adjust=none` 日 K |
 | 趋势线监控 | 画线可记 `adjust`，评估仍用原始 `last_price`（见 `data-interaction-review-2026-09-30.md` P1） |
 
 没有单独的除权事件表或 `adj_factor` 业务调用（额度表里有 `adj_factor_symbol`，未接线）。
@@ -687,7 +685,7 @@ TTL 缓存、不等待。所以最坏情况下被挡住的只有盘口自己的�
 3. 画线存复权口径与基准日，除权后可迁移或标失效。
 4. 回归：送转腰斩、纯现金分红、因子晚到、非除权暴跌 四类用例。
 
-相关代码：`visual/chandelier.py`、`visual/monitor.py`、`visual/trades.py`；对照实现：`turtle_screen.qfq_scale_at` / `adjusted_arrays`。
+相关代码：`visual/chandelier.py`、`visual/monitor.py`、`visual/trades.py`。
 
 
 ## L2 数据（十档/逐笔）获取方式调研

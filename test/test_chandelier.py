@@ -23,16 +23,6 @@ def _bar(day, high, low, volume=1000):
 
 
 class LevelTests(unittest.TestCase):
-    def test_constants_match_turtle(self):
-        import turtle_screen as ts
-        self.assertEqual(chandelier.STOP_MULT, ts.T_STOP_MULT)
-        self.assertEqual(chandelier.GEM_STOP_FACTOR, ts.T_GEM_STOP_FACTOR)
-        self.assertEqual(chandelier.TRAIL_MULT, ts.T_TRAIL_MULT)
-        self.assertEqual(chandelier.LOW_WINDOW, ts.T_LOW_WINDOW)
-        self.assertEqual(chandelier.BE_TRIGGER_N, ts.T_BE_TRIGGER_N)
-        self.assertEqual(chandelier.BE_OFFSET_N, ts.T_BE_OFFSET_N)
-        self.assertEqual(chandelier.HOLD_MAX, ts.T_HOLD_MAX)
-
     def test_initial_and_breakeven(self):
         self.assertEqual(chandelier.initial_stop(10, 0.5, "000001.SZ"), 9.25)
         self.assertEqual(chandelier.breakeven_price(10, 0.5), 10.3)
@@ -245,7 +235,7 @@ class AlertTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         trades.init_db(os.path.join(tmp.name, "p.db"))
         trades.PBKDF2_ITERATIONS = 1000
-        mid = trades.create_model("T 海龟", "", 15, "chandelier")
+        mid = trades.create_model("吊灯", "", 15, "chandelier")
         uid = trades.create_user("alice", "secret123", is_admin=True)
         with mock.patch("market.get_daily_bar", return_value={
             "date": "2026-11-16", "open": 1, "high": 100, "low": 1, "close": 10, "volume": 1,
@@ -307,7 +297,7 @@ class TradeSaveTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def test_model_flag_and_computed_prices(self):
-        mid = trades.create_model("T 海龟", "", None, "chandelier")
+        mid = trades.create_model("吊灯", "", None, "chandelier")
         models = {m["id"]: m for m in trades.list_models(active_only=False)}
         self.assertEqual(models[mid]["exit_mode"], "chandelier")
         self.assertEqual(models[1]["exit_mode"], "")
@@ -339,7 +329,7 @@ class TradeSaveTests(unittest.TestCase):
             })
 
     def test_morning_writes_snapshot_once(self):
-        mid = trades.create_model("T 海龟", "", None, "chandelier")
+        mid = trades.create_model("吊灯", "", None, "chandelier")
         uid = trades.create_user("alice", "secret123", is_admin=True)
         row = trades.create_trade(uid, {
             "symbol": "000001.SZ", "name": "平安银行", "status": "open",
@@ -368,7 +358,7 @@ class TradeSaveTests(unittest.TestCase):
         self.assertNotIn("止盈", note.call_args[0][1])
 
     def test_hold_expire_excludes_chandelier_and_stale_snapshot_clears(self):
-        mid = trades.create_model("T 海龟", "", 15, "chandelier")
+        mid = trades.create_model("吊灯", "", 15, "chandelier")
         uid = trades.create_user("alice", "secret123", is_admin=True)
         row = trades.create_trade(uid, {
             "symbol": "000001.SZ", "name": "平安银行", "status": "open",
@@ -391,7 +381,7 @@ class TradeSaveTests(unittest.TestCase):
             })
 
     def test_morning_failure_does_not_write_snapshot(self):
-        mid = trades.create_model("T 海龟", "", None, "chandelier")
+        mid = trades.create_model("吊灯", "", None, "chandelier")
         uid = trades.create_user("alice", "secret123", is_admin=True)
         row = trades.create_trade(uid, {
             "symbol": "000001.SZ", "name": "平安银行", "status": "open",
@@ -408,7 +398,7 @@ class TradeSaveTests(unittest.TestCase):
         self.assertIsNone(trades.get_trade(uid, row["id"])["ch_asof"])
 
     def test_catch_up_after_the_morning_window(self):
-        mid = trades.create_model("T 海龟", "", None, "chandelier")
+        mid = trades.create_model("吊灯", "", None, "chandelier")
         uid = trades.create_user("alice", "secret123", is_admin=True)
         row = trades.create_trade(uid, {
             "symbol": "000001.SZ", "name": "平安银行", "status": "open",
@@ -443,7 +433,7 @@ class TradeSaveTests(unittest.TestCase):
         self.assertEqual(note.call_args[0][0], "吊灯补算")
 
     def test_catch_up_retries_a_failure_after_five_minutes(self):
-        mid = trades.create_model("T 海龟", "", None, "chandelier")
+        mid = trades.create_model("吊灯", "", None, "chandelier")
         uid = trades.create_user("alice", "secret123", is_admin=True)
         trades.create_trade(uid, {
             "symbol": "000001.SZ", "name": "平安银行", "status": "open",

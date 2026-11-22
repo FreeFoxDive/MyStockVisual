@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""吊灯持仓的价位。口径与 turtle_screen 实盘默认一致，价用未复权。
+"""吊灯持仓的价位。价用未复权。
 
 盘中止损：保本未开用初始止损（主板 1.5N，创业板/科创板 ×1.2），已开用保本价。
 保本价在买入时定死：max(买入价+0.6N, 买入价×1.004)。
@@ -75,7 +75,7 @@ def compute_levels(entry, n, code, bars, today, entry_date) -> dict:
     """早盘用：bars 为未复权日 K，today / entry_date 为 YYYY-MM-DD。
 
     只使用 date < today 的有量 K。今天还没走完，不拿今天的高低价抬线。
-    收盘线逐日只升不降，和 turtle_screen.simulate_trade 的清仓线同一口径。
+    收盘线逐日只升不降。
     """
     entry = float(entry)
     n = float(n)
