@@ -38,16 +38,31 @@ class DailyTailJsTest(unittest.TestCase):
         self.assertIsNotNone(m, f"index.html 中未找到函数 {name}")
         return m.group(0)
 
-    def _run_apply(self, klines, bars, period="1d"):
+    def _deps(self):
+        const = re.search(r"^const BAR_OHLCV_KEYS = .*;$", self.src, re.M)
+        self.assertIsNotNone(const, "缺少 BAR_OHLCV_KEYS")
+        names = (
+            "extractBarQuoteStamp", "isSnapshotNewerThanTail", "quoteStampFromQuote",
+            "isQuoteFreshForDailyBar",
+        )
+        return const.group(0) + "\n" + "\n".join(self._extract(n) for n in names) + "\n"
+
+    def _run_apply(self, klines, bars, period="1d", frame=None, stamp=None):
+        state = {"period": period, "klineData": {"klines": klines}}
+        if stamp is not None:
+            state["klineData"]["_lastQuoteStamp"] = stamp
         js = (
-            "function STATE_(){return %s;}\n" % json.dumps({"period": period, "klineData": {"klines": klines}})
+            "function STATE_(){return %s;}\n" % json.dumps(state)
             + "let STATE = STATE_();\n"
+            + self._deps()
             + self._extract("applyServerBars") + "\n"
             + "const bars = JSON.parse(process.argv[1]);\n"
-            + "const changed = applyServerBars(bars);\n"
-            + "process.stdout.write(JSON.stringify({changed, klines: STATE.klineData.klines}));"
+            + "const frame = JSON.parse(process.argv[2]);\n"
+            + "const changed = applyServerBars(bars, frame);\n"
+            + "process.stdout.write(JSON.stringify({changed, klines: STATE.klineData.klines,"
+            " stamp: STATE.klineData._lastQuoteStamp}));"
         )
-        return json.loads(run_node(js, json.dumps(bars)))
+        return json.loads(run_node(js, json.dumps(bars), json.dumps(frame)))
 
     def test_source_no_longer_synthesizes_bar(self):
         # 前端不得再从快照新增 bar, 也不得再本地重算指标。
@@ -124,6 +139,7 @@ class DailyTailJsTest(unittest.TestCase):
             "  if (prev && rev && rev < prev) return false;"
             "  this.stored = payload; return true;}};\n"
             + "function ensureQuoteStream(){}\n"
+            + self._deps()
             + self._extract("applyServerBars") + "\n"
             + self._extract("reconcileLiveBars") + "\n"
             + "const data = {symbol:'S', period:'1d', meta:{adjust:'forward'}, _revision:5,"
@@ -143,6 +159,7 @@ class DailyTailJsTest(unittest.TestCase):
             "const STATE = " + json.dumps(state) + ";\n"
             + "const draws = [];\n"
             + "function requestBarPatchDraw(){ draws.push(1); }\n"
+            + self._deps()
             + self._extract("patchTodayBarOhlcv") + "\n"
             + "const q = JSON.parse(process.argv[1]);\n"
             + "const changed = patchTodayBarOhlcv(q, 'S');\n"
@@ -264,6 +281,66 @@ class DailyTailJsTest(unittest.TestCase):
         self.assertTrue(out["changed"], "无时间戳时用服务端交易日 + server_time")
         self.assertEqual(out["last"]["close"], 1.5)
         self.assertEqual(out["last"]["ma5"], 8)
+
+    def test_newer_snapshot_keeps_ohlcv_when_tail_is_older(self):
+        klines = [{"date": "2026-09-30", "open": 10, "high": 12, "low": 9, "close": 11.5,
+                   "volume": 3000, "ma5": 1, "macd_dif": 0.1}]
+        stamp = {"date": "2026-09-30", "ts": 200, "rev": 20}
+        bar = {"date": "2026-09-30", "open": 10, "high": 11, "low": 9, "close": 10.2,
+               "volume": 1000, "ma5": 9.5, "macd_dif": 0.8}
+        frame = {"meta": {"today_quote_timestamp": 100, "today_quote_revision": 10}, "_revision": 10}
+        out = self._run_apply(klines, [bar], frame=frame, stamp=stamp)
+        self.assertTrue(out["changed"])
+        last = out["klines"][-1]
+        self.assertEqual(last["close"], 11.5, "更新的快照 OHLCV 不被旧 tail 回滚")
+        self.assertEqual(last["volume"], 3000)
+        self.assertEqual(last["ma5"], 9.5, "tail 指标仍然合入")
+        self.assertEqual(last["macd_dif"], 0.8)
+        self.assertEqual(out["stamp"]["ts"], 200, "保护 OHLCV 时不把 stamp 退回 tail")
+
+    def test_newer_tail_overwrites_bar_and_advances_stamp(self):
+        klines = [{"date": "2026-09-30", "open": 10, "high": 11, "low": 9, "close": 10.2,
+                   "volume": 1000, "ma5": 1}]
+        stamp = {"date": "2026-09-30", "ts": 100, "rev": 10}
+        bar = {"date": "2026-09-30", "open": 10.4, "high": 12.2, "low": 10, "close": 12,
+               "volume": 4000, "ma5": 8}
+        frame = {"meta": {"today_quote_timestamp": 300, "today_quote_revision": 30}, "_revision": 30}
+        out = self._run_apply(klines, [bar], frame=frame, stamp=stamp)
+        last = out["klines"][-1]
+        self.assertEqual(last["close"], 12)
+        self.assertEqual(last["ma5"], 8)
+        self.assertEqual(out["stamp"]["ts"], 300)
+
+    def test_quote_rejects_auction_and_older_snapshot(self):
+        state = {
+            "symbol": "S", "period": "1d", "adjust": "forward",
+            "klineData": {
+                "symbol": "S", "period": "1d",
+                "meta": {"adjust": "forward", "session_phase": "auction",
+                         "server_time": "2026-09-30 09:20:00", "is_trading_day": True},
+                "klines": [{"date": "2026-09-30", "open": 10, "high": 11, "low": 9,
+                            "close": 10.5, "volume": 1000, "amount": 10000}],
+                "_lastQuoteStamp": {"date": "2026-09-30", "ts": 500, "rev": 50},
+            },
+        }
+        quote = {"timestamp": 1790733600, "session_phase": "auction", "is_trading_day": True,
+                 "open": 10, "high": 15, "low": 8, "last_price": 14, "volume": 2000,
+                 "_revision": 80}
+        out = self._run_patch(state, quote)
+        self.assertFalse(out["changed"], "集合竞价快照不改当日 bar")
+        self.assertEqual(out["last"]["close"], 10.5)
+
+        state["klineData"]["meta"]["session_phase"] = "trading"
+        quote["session_phase"] = "trading"
+        import calendar
+        from datetime import datetime, timezone
+        later = calendar.timegm(datetime(2026, 9, 30, 2, 0, tzinfo=timezone.utc).utctimetuple())
+        state["klineData"]["_lastQuoteStamp"] = {"date": "2026-09-30", "ts": later, "rev": 50}
+        quote["timestamp"] = later - 60
+        quote["_revision"] = 10
+        out = self._run_patch(state, quote)
+        self.assertFalse(out["changed"], "更旧的快照不回滚 OHLCV")
+        self.assertEqual(out["last"]["close"], 10.5)
 
 
 if __name__ == "__main__":

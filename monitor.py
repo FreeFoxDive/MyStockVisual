@@ -948,13 +948,36 @@ def _load_line_monitors():
     return out
 
 
-def _resolve_anchor_idx(pt, date_map, n):
-    """与前端 resolveIdx 一致: 锚点 t 命中日期表取 idx, 否则 n-1+off。"""
+def _period_bucket(date_str, period):
+    """与前端 Drawings.periodBucket 一致: 周K → 该周周一, 月K → YYYY-MM, 其余 None。
+
+    各数据源周/月K日期标签不同 (麦蕊周日 / AF 末个交易日), 锚点按桶匹配才能跨源。
+    """
+    if not date_str:
+        return None
+    s = str(date_str)[:10]
+    if period == "1M":
+        return s[:7]
+    if period != "1w":
+        return None
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def _resolve_anchor_idx(pt, date_map, n, bucket_map=None, period=None):
+    """与前端 resolveIdx 一致: 锚点 t 命中日期表取 idx, 周/月K再按桶匹配, 否则 n-1+off。"""
     t = pt.get("t")
     if t:
         idx = date_map.get(str(t)[:10])
         if idx is not None:
             return idx
+        if bucket_map:
+            idx = bucket_map.get(_period_bucket(t, period))
+            if idx is not None:
+                return idx
     try:
         off = float(pt.get("off") or 0)
     except (TypeError, ValueError):
@@ -962,7 +985,8 @@ def _resolve_anchor_idx(pt, date_map, n):
     return n - 1 + off
 
 
-def evaluate_trendline_break(points, line_type, pct, dates, price, direction="down"):
+def evaluate_trendline_break(points, line_type, pct, dates, price, direction="down",
+                             period=None):
     """纯函数: 现价是否突破线值的百分比带。
 
     direction="down" (缺省, 以及除 "up" 以外的值): 现价 <= 线值 × (1 - pct/100)。
@@ -983,9 +1007,14 @@ def evaluate_trendline_break(points, line_type, pct, dates, price, direction="do
     if n < 2:
         return None
     date_map = {}
+    bucket_map = {} if period in ("1w", "1M") else None
     for i, d in enumerate(dates):
         if d not in date_map:
             date_map[d] = i
+        if bucket_map is not None:
+            key = _period_bucket(d, period)
+            if key is not None and key not in bucket_map:
+                bucket_map[key] = i
 
     def _price(pt):
         try:
@@ -1002,8 +1031,8 @@ def evaluate_trendline_break(points, line_type, pct, dates, price, direction="do
         p1, p2 = _price(points[0]), _price(points[1])
         if p1 is None or p2 is None:
             return None
-        i1 = _resolve_anchor_idx(points[0], date_map, n)
-        i2 = _resolve_anchor_idx(points[1], date_map, n)
+        i1 = _resolve_anchor_idx(points[0], date_map, n, bucket_map, period)
+        i2 = _resolve_anchor_idx(points[1], date_map, n, bucket_map, period)
         if i2 == i1:
             value = p1
         else:
@@ -1084,7 +1113,7 @@ def _evaluate_trendline_monitors(monitors, quotes, now_dt, persist=True, notify=
         up = m.get("dir") == "up"
         r = evaluate_trendline_break(
             m["points"], m["line_type"], m["pct"], bars_info[0], price,
-            "up" if up else "down")
+            "up" if up else "down", period=m["period"])
         if not r:
             continue
         last = trades.get_trendline_fired(m["user_id"], m["drawing_id"])

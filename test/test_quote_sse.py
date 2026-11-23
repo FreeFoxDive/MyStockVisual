@@ -223,7 +223,7 @@ class QuoteSseTest(unittest.TestCase):
             _, frames = self._frames_data(
                 f"/api/stream/quotes?symbols={SYM}&tail=1d&count=1006&adjust=none", n=2)
         self.assertTrue(frames[1].startswith("event: bars\ndata: "))
-        build.assert_called_once_with(SYM, "1d", 1006, "none")
+        build.assert_called_once_with(SYM, "1d", 1006, "none", quote_fresh=False)
 
     def test_symbols_truncated_to_max(self):
         fetch = mock.Mock(return_value={})

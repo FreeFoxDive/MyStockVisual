@@ -220,10 +220,37 @@ class TestDefaultRouting(KlineSourceTestBase):
     def test_index_defaults_to_mairui(self):
         with _no_kline_env(), \
              mock.patch.object(market, "_is_index_symbol", return_value=True), \
-             mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr:
+             mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()) as mr, \
+             mock.patch.object(market, "_fetch_af_kline") as af:
             _df, src = kline_source.fetch_kline_df("index", "000300.SH", "1w", 100)
         self.assertEqual(src, "mairui")
         mr.assert_called_once_with("000300.SH", "1w", 100, adjust="forward")
+        af.assert_not_called()
+
+    def test_index_weekly_falls_back_to_alphafeed(self):
+        # 麦蕊失败时指数周K应走 AF (原生 1w), 不再只剩抖动的 akshare
+        with _no_kline_env(), \
+             mock.patch.object(market, "_is_index_symbol", return_value=True), \
+             mock.patch.object(market, "_fetch_mr_kline", return_value=None), \
+             mock.patch.object(market, "_fetch_af_kline", return_value=_norm_df()) as af, \
+             mock.patch.object(kline_source.AkshareSource, "fetch") as ak:
+            df, src = kline_source.fetch_kline_df("index", "000001.SH", "1w", 200)
+        self.assertEqual(src, "alphafeed")
+        self.assertEqual(len(df), 30)
+        af.assert_called_once_with("000001.SH", "1w", 200, adjust="forward")
+        ak.assert_not_called()
+
+    def test_index_hfq_uses_alphafeed(self):
+        # 麦蕊指数无 hfq → supports 跳过; AF 用 backward 承接
+        with _no_kline_env(), \
+             mock.patch.object(market, "_is_index_symbol", return_value=True), \
+             mock.patch.object(market, "_fetch_mr_kline") as mr, \
+             mock.patch.object(market, "_fetch_af_kline", return_value=_norm_df()) as af:
+            _df, src = kline_source.fetch_kline_df(
+                "index", "000001.SH", "1w", 100, adjust="hfq")
+        self.assertEqual(src, "alphafeed")
+        mr.assert_not_called()
+        af.assert_called_once_with("000001.SH", "1w", 100, adjust="hfq")
 
     def test_all_sources_fail_returns_none(self):
         with _no_kline_env(), \
@@ -389,14 +416,15 @@ class TestFailover(KlineSourceTestBase):
         self.assertEqual(src, "akshare")
 
     def test_unsupported_source_skipped_without_request(self):
-        # alphafeed 不支持指数 -> 即使排在前位也不该发起请求
-        with _no_kline_env(KLINE_SOURCE_INDEX="alphafeed,mairui"), \
-             mock.patch.object(market, "_is_index_symbol", return_value=True), \
-             mock.patch.object(market, "_fetch_af_kline") as af, \
-             mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()):
-            _df, src = kline_source.fetch_kline_df("index", "000300.SH", "1d", 100)
-        self.assertEqual(src, "mairui")
-        af.assert_not_called()
+        # 麦蕊基金仅未复权; 图表默认 forward 时即使链上有 mairui 也不发起请求
+        with _no_kline_env(KLINE_SOURCE_FUND="mairui,alphafeed"), \
+             mock.patch.object(market, "_is_etf", return_value=True), \
+             mock.patch.object(market, "_fetch_fund_kline") as mr, \
+             mock.patch.object(market, "_fetch_af_kline", return_value=_norm_df()) as af:
+            _df, src = kline_source.fetch_kline_df("fund", "510300.SH", "1d", 100)
+        self.assertEqual(src, "alphafeed")
+        mr.assert_not_called()
+        af.assert_called_once()
 
     def test_mairui_not_used_for_1m(self):
         # 麦蕊 fsjy 不支持 1m (实测 HTTP 422), 1m 应直接落到 alphafeed

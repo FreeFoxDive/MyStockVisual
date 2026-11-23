@@ -165,6 +165,39 @@ class KlineTailRouteTest(unittest.TestCase):
             r = self.client.get(f"/api/kline/tail?symbol={SYM}")
         self.assertEqual(r.status_code, 404)
 
+    def test_meta_carries_quote_stamp_and_ttl_stays_under_sse_interval(self):
+        from api.stream import INDICATOR_SSE_INTERVAL
+        self.assertLess(self.kline_mod.KLINE_TAIL_TTL, INDICATOR_SSE_INTERVAL)
+        df = _kline_df()
+        df.attrs["today_quote_meta"] = {"timestamp": 1_700_000_000.0, "revision": 42}
+
+        def _with_meta(*a, **kw):
+            self.assertTrue(kw.get("quote_fresh", True), "HTTP tail 默认仍强制新鲜快照")
+            return (df, "双环传动", "alphafeed")
+
+        with mock.patch.object(self.kline_mod, "fetch_kline_ex", side_effect=_with_meta), \
+                mock.patch.object(self.kline_mod, "fetch_quote", return_value=None), \
+                mock.patch.object(self.kline_mod, "_fetch_instrument_meta", return_value=None):
+            body = self.client.get(f"/api/kline/tail?symbol={SYM}&n=1").get_json()
+        self.assertEqual(body["meta"]["today_quote_timestamp"], 1_700_000_000.0)
+        self.assertEqual(body["meta"]["today_quote_revision"], 42)
+
+    def test_missing_today_bar_is_not_cached(self):
+        df = _kline_df()
+        df.attrs["today_bar_missing"] = True
+        calls = []
+
+        def _missing(*a, **kw):
+            calls.append(kw.get("quote_fresh", True))
+            return (df, "双环传动", "alphafeed")
+
+        with mock.patch.object(self.kline_mod, "fetch_kline_ex", side_effect=_missing), \
+                mock.patch.object(self.kline_mod, "fetch_quote", return_value=None), \
+                mock.patch.object(self.kline_mod, "_fetch_instrument_meta", return_value=None):
+            self.client.get(f"/api/kline/tail?symbol={SYM}&n=1")
+            self.client.get(f"/api/kline/tail?symbol={SYM}&n=1")
+        self.assertEqual(calls, [True, True], "缺今日 bar 不得写入 tail 缓存")
+
 
 if __name__ == "__main__":
     unittest.main()

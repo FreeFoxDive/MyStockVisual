@@ -22,7 +22,7 @@ from api import api_bp
 from api.common import _error, _json, _require_user
 
 QUOTE_SSE_INTERVAL = max(1.25, float(os.environ.get("QUOTE_SSE_INTERVAL", "1.25")))
-INDICATOR_SSE_INTERVAL = max(5.0, float(os.environ.get("INDICATOR_SSE_INTERVAL", "15")))
+INDICATOR_SSE_INTERVAL = max(5.0, float(os.environ.get("INDICATOR_SSE_INTERVAL", "5")))
 DEPTH_SSE_INTERVAL = 60.0 / market.DEPTH_RATE_PER_MIN
 QUOTE_SSE_MAX_CLIENTS = max(1, int(os.environ.get("QUOTE_SSE_MAX_CLIENTS", "3")))
 # 保活/断线探测间隔: 客户端断开后最多 ~1s 归还并发槽, 避免连续换股叠满 3 槽返回 429
@@ -125,6 +125,9 @@ def stream_quotes():
                 # 完整的 market_status() 只在切换那一刻算一次。
                 phase = market_hours.session_phase()
                 if phase != last_phase:
+                    # 09:30 刚开盘: 当拍就推 tail, 不必再等满一个指标间隔才出今日 bar。
+                    if phase == "trading" and last_phase != "trading":
+                        last_tail = now - INDICATOR_SSE_INTERVAL
                     last_phase = phase
                     yield _market_frame()
                 if now - last_push >= QUOTE_SSE_INTERVAL:
@@ -164,7 +167,9 @@ def stream_quotes():
                     last_tail = now
                     try:
                         from api.kline import build_kline_tail
-                        bars = build_kline_tail(symbols[0], tail_period, tail_count, tail_adjust)
+                        bars = build_kline_tail(
+                            symbols[0], tail_period, tail_count, tail_adjust,
+                            quote_fresh=False)
                         payload = json.dumps({symbols[0]: bars}, ensure_ascii=False, cls=market.NumpyEncoder)
                         yield f"event: bars\ndata: {payload}\n\n"
                     except Exception:

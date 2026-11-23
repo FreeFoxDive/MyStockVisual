@@ -93,6 +93,27 @@ class TestDrawingsCoordinate(unittest.TestCase):
         self.assertIsNone(out["ptFuture"]["t"])
         self.assertEqual(out["ptFuture"]["off"], 3)  # i=12, n-1=9
 
+    def test_resolve_idx_weekly_monthly_bucket(self):
+        out = run_expr("""(() => {
+          const af = [{date: '2026-11-06'}, {date: '2026-11-13'}, {date: '2026-11-20'}];
+          const dmW = D.buildDateIndexMap(af, '1w');
+          const mr = [{date: '2026-09-30'}, {date: '2026-10-31'}, {date: '2026-11-30'}];
+          const dmM = D.buildDateIndexMap(mr, '1M');
+          const dmD = D.buildDateIndexMap(af, '1d');
+          return {
+            sunday: D.resolveIdx({t: '2026-11-15', p: 1, off: -2}, dmW, 3),
+            monday: D.resolveIdx({t: '2026-11-16', p: 1, off: -2}, dmW, 3),
+            month: D.resolveIdx({t: '2026-10-30', p: 1, off: -2}, dmM, 3),
+            daily: D.resolveIdx({t: '2026-11-15', p: 1, off: -2}, dmD, 3),
+            bucket: D.periodBucket('2026-11-22', '1w'),
+          };
+        })()""")
+        self.assertEqual(out["sunday"], 1, "周日标签落到同周周五那根")
+        self.assertEqual(out["monday"], 2)
+        self.assertEqual(out["month"], 1)
+        self.assertEqual(out["daily"], 0, "日K不按桶匹配, 走 off")
+        self.assertEqual(out["bucket"], "2026-11-16")
+
     def test_clip_seg(self):
         out = run_expr("""(() => {
           const r = {left: 0, right: 100, top: 0, bottom: 100};
@@ -351,6 +372,32 @@ class TestDrawingsSmart(unittest.TestCase):
         self.assertAlmostEqual(out["reg_ext"], 24.0)         # extendRight 延伸至未来区
         self.assertIsNone(out["reg_noext"], "回归通道未开延伸时超出区间应返回 null")
         self.assertIsNone(out["unsupported"], "rect 等非线型不参与相交提示")
+
+    def test_ray_value_at_past_second_anchor(self):
+        # 第二锚点远离末根: 旧逻辑 idx>hi+FUTURE_BARS 会误裁掉末几根 tip
+        bars = [{"date": f"2026-01-{i + 1:02d}", "open": 10, "high": 10,
+                 "low": 10, "close": 10} for i in range(20)]
+        out = run_expr(f"""(() => {{
+          const bars = {json.dumps(bars)};
+          const dm = D.buildDateIndexMap(bars);
+          const ctx = {{n: bars.length, dateMap: dm, bars: bars}};
+          const ray = D.normalize({{
+            id: 'r', type: 'ray',
+            points: [{{t: bars[0].date, p: 10}}, {{t: bars[5].date, p: 15}}],
+            style: {{color: '#fff', width: 1, dash: false}},
+          }});
+          return {{
+            mid: D.valueAt(ray, 10, ctx),
+            last: D.valueAt(ray, 19, ctx),
+            future: D.valueAt(ray, 22, ctx),
+            far: D.valueAt(ray, 40, ctx),
+          }};
+        }})()""")
+        # 线斜率 (15-10)/(5-0)=1 → idx10=20, idx19=29, idx22=32
+        self.assertAlmostEqual(out["mid"], 20.0)
+        self.assertAlmostEqual(out["last"], 29.0, msg="末根仍应有射线 tip")
+        self.assertAlmostEqual(out["future"], 32.0, msg="未来区相对图末延伸")
+        self.assertIsNone(out["far"])
 
 
 class TestDrawingsNameMonitor(unittest.TestCase):

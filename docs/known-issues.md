@@ -107,10 +107,11 @@
   用服务端 `is_trading_day` + `meta.server_time`，不用浏览器本地日期），且
   `volume>0`。只写 open/high/low/close/volume/amount，指标字段不动。非交易日
   末根不是“今天”，这条路径是 no-op，不会再凭空多一根。
-- 指标与权威 OHLCV 仍由 `GET /api/kline/tail?symbol=&period=1d&count=<与图表同>&n=2`
-  纠正（与 `/api/kline` 同一 `fetch_kline_ex` + `compute_all_indicators` 口径），
-  按 `date` 合并/追加（`applyServerBars`）；非交易日/盘前后端本就不含“今日”bar，
-  合并即 no-op。
+- 指标与权威 OHLCV 仍由 `GET /api/kline/tail`（SSE `event: bars` 默认 5s，`KLINE_TAIL_TTL` 默认 2s）
+  纠正。图表 `/api/kline` 在快照缓存未命中时短等下一枚行情令牌（不放大 48/min），
+  避免换股首包缺今日 bar。响应 `meta` 带 `today_quote_timestamp` / `today_quote_revision`。
+  前端按这个时间比较：快照新于 tail 时保住快照 OHLCV，只合入 tail 的指标；tail 更新则整根覆盖。
+  盘中没拼出今日 bar 的 tail 不写入短缓存。09:30 切入连续竞价当拍推一帧 tail。
 - `count` 必须与图表一致，否则 OBV 等全序列指标会漂移。
 - 交易日/时段判定只保留 `market_hours.session_phase()` 一处；接口 meta 透传
   `is_trading_day` / `session_phase`。
@@ -225,6 +226,43 @@ Bugbot 审查补修：首次非阻塞尝试后，重试在预算锁内先检查�
 - 测试：`visual/test/test_kline_source.py`
   - `TestDefaultRouting.test_stock_weekly_defaults_to_alphafeed`
   - 原 `_fetch_af_daily_kline` mock/断言同步更新为 `_fetch_af_kline(symbol, period, ...)`
+
+---
+
+## 3b. 指数周/月K被 AlphaFeed 适配器挡掉 → 麦蕊单点失败即 404
+
+**状态**：已修复（2026-11-23）。
+
+### 现象
+
+监控或图表拉取指数周K（如 `000001.SH` `period=1w`）时报
+`无法获取 … 的K线数据` / 监控趋势线取K失败；日K往往仍正常。
+
+### 根因
+
+- `AlphaFeedSource.supports` 在问题 3 修完后仍只放行 `stock`/`fund`，**排除 `index`** ——
+  尽管 `af.klines.batch(["000001.SH"], period="1w")` 实测 HTTP 200。
+- 默认链 `KLINE_SOURCE_INDEX=mairui,akshare`（不少环境 `.env` 还写成仅 `mairui`）
+  不含 AF；麦蕊超时/熔断或指数 `hfq`（麦蕊 `supports` 直接跳过）时只剩抖动的 akshare，
+  或完全无源 → 404 / 监控静默失败。
+
+### 修复
+
+- `AlphaFeedSource.supports`：`category in ("stock","fund","index")` 且 `1d`/`1w`/`1M`。
+- 默认链改为 `mairui,alphafeed,akshare`；指数 `hfq` 由 AF（`backward`）承接。
+- 若 `.env` 仍是 `KLINE_SOURCE_INDEX=mairui`，需改成含 `alphafeed` 或删掉该行用默认链。
+
+### 换源后的周/月K日期标签
+
+麦蕊周K标**周日**（`2026-11-15`）且不含未走完的本周；AF 标**末个交易日**（`2026-11-13`）
+并含本周（`2026-11-23`）。量/额口径一致。画线锚点与趋势线监控原按日期**精确**匹配，换源后
+锚点落空回退 `n-1+off`，线值错位甚至误报。现 `1w`/`1M` 在精确未命中时按「所在周（周一）/
+所在月」再匹配一次（前端 `Drawings.periodBucket` + `resolveIdx`，后端 `monitor._period_bucket`
++ `_resolve_anchor_idx`，两边同口径）；日K不受影响。
+
+- 代码：`visual/kline_source.py`、`visual/market.py`、`visual/static/js/drawings.js`、`visual/monitor.py`
+- 测试：`test_index_weekly_falls_back_to_alphafeed`、`test_index_hfq_uses_alphafeed`、
+  `test_weekly_anchor_matches_across_source_labels`、`test_resolve_idx_weekly_monthly_bucket`
 
 
 ## 4. 东财 push2his（个股资金流历史）在部分网络整段不可达

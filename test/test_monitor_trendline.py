@@ -98,6 +98,35 @@ class EvaluateTrendlineBreakTest(unittest.TestCase):
         # value = 10 + 10*(119-9)/(110-9) = 20.891
         self.assertAlmostEqual(r["value"], 10 + 10 * 110 / 101, places=6)
 
+    def test_weekly_anchor_matches_across_source_labels(self):
+        # 麦蕊周K标周日, AF 标周五: 换源后锚点按「所在周」仍命中同一根 bar
+        af_dates = ["2026-10-30", "2026-11-06", "2026-11-13", "2026-11-20"]
+        mr_pts = [{"t": "2026-11-01", "p": 10.0, "off": -3},
+                  {"t": "2026-11-15", "p": 12.0, "off": -1}]
+        r = self.mon.evaluate_trendline_break(
+            mr_pts, "trend", 2, af_dates, 1.0, period="1w")
+        self.assertAlmostEqual(r["value"], 13.0)  # idx0→10, idx2→12, idx3 外推 13
+        mr_dates = ["2026-11-01", "2026-11-08", "2026-11-15", "2026-11-22"]
+        af_pts = [{"t": "2026-10-30", "p": 10.0, "off": -3},
+                  {"t": "2026-11-13", "p": 12.0, "off": -1}]
+        r = self.mon.evaluate_trendline_break(
+            af_pts, "trend", 2, mr_dates, 1.0, period="1w")
+        self.assertAlmostEqual(r["value"], 13.0)
+
+    def test_monthly_anchor_matches_by_month(self):
+        dates = ["2026-08-31", "2026-09-30", "2026-10-30", "2026-11-23"]
+        pts = [{"t": "2026-08-29", "p": 10.0, "off": 0},
+               {"t": "2026-10-31", "p": 12.0, "off": 0}]
+        r = self.mon.evaluate_trendline_break(pts, "trend", 2, dates, 1.0, period="1M")
+        self.assertAlmostEqual(r["value"], 13.0)
+
+    def test_daily_does_not_bucket_match(self):
+        dates = ["2026-11-16", "2026-11-17", "2026-11-18"]
+        pts = [{"t": "2026-11-15", "p": 10.0, "off": -2},
+               {"t": "2026-11-17", "p": 12.0, "off": 0}]
+        r = self.mon.evaluate_trendline_break(pts, "trend", 2, dates, 1.0, period="1d")
+        self.assertAlmostEqual(r["value"], 14.0)  # 日K不按周桶: 走 off → idx0
+
     def test_rejects_invalid_inputs(self):
         pts = [{"t": "d010", "p": 10.0, "off": 0}, {"t": "d110", "p": 20.0, "off": 0}]
         self.assertIsNone(self.mon.evaluate_trendline_break(pts, "poly", 2, self.dates, 1.0))

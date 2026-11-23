@@ -93,19 +93,41 @@
     return out;
   }
 
-  /** klines → {map: {date: idx}, dates: [date...]} */
-  function buildDateIndexMap(klines) {
+  /** 周/月K 的归属桶: 周 = 该周周一, 月 = YYYY-MM; 其余周期 null。
+   *  各数据源周/月K的日期标签不同 (麦蕊周日 / AF 末个交易日), 锚点按桶匹配才能跨源。 */
+  function periodBucket(date, period) {
+    if (date == null) return null;
+    var s = String(date).slice(0, 10);
+    if (period === '1M') return s.slice(0, 7);
+    if (period !== '1w') return null;
+    var ms = Date.parse(s + 'T00:00:00Z');
+    if (!isFinite(ms)) return null;
+    var dow = new Date(ms).getUTCDay();
+    return new Date(ms - ((dow + 6) % 7) * 86400000).toISOString().slice(0, 10);
+  }
+
+  /** klines → {map: {date: idx}, dates: [date...], bucket: {key: idx}|null, period} */
+  function buildDateIndexMap(klines, period) {
     var map = {}, dates = [];
+    var bucket = (period === '1w' || period === '1M') ? {} : null;
     for (var i = 0; i < klines.length; i++) {
       var t = klines[i].date;
       dates.push(t);
       if (map[t] === undefined) map[t] = i;
+      if (bucket) {
+        var key = periodBucket(t, period);
+        if (key != null && bucket[key] === undefined) bucket[key] = i;
+      }
     }
-    return { map: map, dates: dates };
+    return { map: map, dates: dates, bucket: bucket, period: period || null };
   }
 
   function resolveIdx(pt, dateMap, n) {
     if (pt.t != null && dateMap.map[pt.t] !== undefined) return dateMap.map[pt.t];
+    if (pt.t != null && dateMap.bucket) {
+      var idx = dateMap.bucket[periodBucket(pt.t, dateMap.period)];
+      if (idx !== undefined) return idx;
+    }
     return n - 1 + (pt.off || 0);
   }
 
@@ -583,9 +605,14 @@
         lo = Math.min(rp[0].i, rp[1].i);
         hi = Math.max(rp[0].i, rp[1].i);
         if (idx < lo) return null;
-        // 第二锚点在右 → 向右延伸 (含未来区); 否则与渲染一致仅到第二锚点
-        if (rp[1].i > rp[0].i && idx > hi + FUTURE_BARS) return null;
-        if (rp[1].i <= rp[0].i && idx > hi) return null;
+        // 第二锚点在右 → 向右延伸至图末 + 未来区 (FUTURE_BARS 相对 n-1, 不是相对 hi;
+        // 旧写法 idx>hi+FUTURE 会在第二锚点后第 9 根起丢 tip, 而线仍画到图末)。
+        if (rp[1].i > rp[0].i) {
+          if (idx > n - 1 + FUTURE_BARS) return null;
+          return lineValue(rp[0], rp[1], idx);
+        }
+        // 第二锚点在左/重合: 与渲染一致仅到较右锚点
+        if (idx > hi) return null;
         return lineValue(rp[0], rp[1], idx);
       case 'hline':
         return rp[0].p;
@@ -649,6 +676,7 @@
     createDrawing: createDrawing,
     normalize: normalize,
     buildDateIndexMap: buildDateIndexMap,
+    periodBucket: periodBucket,
     resolveIdx: resolveIdx,
     pointFromIdx: pointFromIdx,
     pointSegDist: pointSegDist,

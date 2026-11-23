@@ -2637,6 +2637,9 @@ async function fetchData(opts) {
       const ttl = MINUTE_PERIODS.includes(period) ? 60 : (period === '1d' ? 120 : 300);
       if (Date.now() - cached.ts < ttl * 1000 && cached.data) {
         STATE.klineData = cached.data;
+        adoptKlineQuoteStamp(STATE.klineData);
+        const liveQ = liveQuotes.get(symbol, 'quote');
+        if (liveQ) patchTodayBarOhlcv(liveQ, symbol);
         applyPremiumToKlines();   // 整包替换会丢 bar 上的 premium, 用内存副本回填
         reconcileLiveBars(cached.data);
         updateInfo(cached.data);
@@ -2670,6 +2673,9 @@ async function fetchData(opts) {
     syncAdjustMeta(data);
     ensureQuoteStream();
     STATE.klineData = data;
+    adoptKlineQuoteStamp(STATE.klineData);
+    const liveQ = liveQuotes.get(data.symbol, 'quote');
+    if (liveQ) patchTodayBarOhlcv(liveQ, data.symbol);
     applyPremiumToKlines();   // 与缓存命中同理: 新响应不含 premium
     reconcileLiveBars(data);
     document.getElementById('symbol-input').value = data.symbol; // 同步服务端标准化后的 symbol
@@ -3536,35 +3542,76 @@ function matchBarIndex(dates, d) {
 
 // K线 markPoint 共用提示框: 交易点带 name+value, 形态/金叉死叉点只有 name;
 // 缺项必须跳过, 否则 ECharts 会把缺失的 value 渲染成字面量 "undefined"。
+// 标记本身 silent (见 buildTradeMarkers / extraMarks): item tooltip 会顶掉 axis tooltip,
+// 画线相交价只写在 axis formatter 里。这份 formatter 只作非 silent 标记的兜底。
 const KLINE_MARKPOINT_TOOLTIP = {
   trigger: 'item',
   formatter: (p) => [p.name, p.value].filter(Boolean).join('<br/>'),
 };
 
+/** 一笔买卖的提示文案 (markPoint.name/value 与 axis tooltip 共用, 避免两处文案漂移)。 */
+function tradeLegTip(side, date, price, qty) {
+  if (!date || price == null || isNaN(price)) return null;
+  const isBuy = side === 'buy';
+  const qtyText = (qty != null && qty !== '') ? (qty + ' 股') : '';
+  return {
+    isBuy,
+    name: isBuy ? '买入' : '卖出',
+    value: fmtPrice3(price) + ' 元' + (qtyText ? ' · ' + qtyText : '') + ' (' + date + ')',
+  };
+}
+
+function forEachTradeLeg(trades, fn) {
+  if (!trades) return;
+  for (const t of trades) {
+    if (t.type === 'batch') {
+      for (const l of (t.legs || [])) fn(l.side, l.date, l.price, l.quantity);
+    } else {
+      fn('buy', t.entry_date, t.entry_price, t.quantity);
+      if (t.status === 'closed') fn('sell', t.exit_date, t.exit_price, t.quantity);
+    }
+  }
+}
+
+/** 该 bar 上的买卖摘要 (axis tooltip 注入; 标记 silent 后 item tooltip 不再弹出)。 */
+function tradeTipsHtml(dates, idx) {
+  const rows = [];
+  forEachTradeLeg(STATE.trades, (side, date, price, qty) => {
+    if (matchBarIndex(dates, date) !== idx) return;
+    const tip = tradeLegTip(side, date, price, qty);
+    if (!tip) return;
+    const color = tip.isBuy ? C().up : C().down;
+    rows.push(`<div><span style="color:${color};font-weight:700">${escHtml(tip.name)}</span> ${escHtml(tip.value)}</div>`);
+  });
+  if (!rows.length) return '';
+  return `<div style="margin-top:4px;padding-top:4px;border-top:1px solid ${C().tipBorder}">${rows.join('')}</div>`;
+}
+
 // 依据交易记录构建 ECharts markPoint (同花顺样式: 红底白B挂柱体下/绿底白S挂柱体上, 不遮实体)
+// silent: 不抢鼠标, 悬停继续走 K 线 axis tooltip (含买卖摘要与画线相交价)。
 function buildTradeMarkers(klines, dates) {
   const trades = STATE.trades;
-  if (!trades || !trades.length) return { symbol: 'none', tooltip: KLINE_MARKPOINT_TOOLTIP };
+  if (!trades || !trades.length) return { symbol: 'none', silent: true, tooltip: KLINE_MARKPOINT_TOOLTIP };
 
   const points = [];
   const push = (side, date, price, qty) => {
-    if (!date || price == null || isNaN(price)) return;
+    const tip = tradeLegTip(side, date, price, qty);
+    if (!tip) return;
     const idx = matchBarIndex(dates, date);
     if (idx < 0) return; // K 线窗口外不显示
     const bar = klines[idx];
-    const isBuy = side === 'buy';
-    const qtyText = (qty != null && qty !== '') ? (qty + ' 股') : '';
     points.push({
-      coord: [idx, isBuy ? bar.low : bar.high],
+      coord: [idx, tip.isBuy ? bar.low : bar.high],
       symbol: 'circle',
       symbolSize: 14,
-      symbolOffset: [0, isBuy ? 8 : -8],
-      name: isBuy ? '买入' : '卖出',
-      value: fmtPrice3(price) + ' 元' + (qtyText ? ' · ' + qtyText : '') + ' (' + date + ')',
-      itemStyle: { color: isBuy ? C().up : C().down },
+      symbolOffset: [0, tip.isBuy ? 8 : -8],
+      silent: true,
+      name: tip.name,
+      value: tip.value,
+      itemStyle: { color: tip.isBuy ? C().up : C().down },
       label: {
         show: true,
-        formatter: isBuy ? 'B' : 'S',
+        formatter: tip.isBuy ? 'B' : 'S',
         color: '#fff',
         fontSize: 10,
         fontWeight: 'bold',
@@ -3573,18 +3620,10 @@ function buildTradeMarkers(klines, dates) {
     });
   };
 
-  for (const t of trades) {
-    if (t.type === 'batch') {
-      const legs = t.legs || [];
-      for (const l of legs) push(l.side, l.date, l.price, l.quantity);
-    } else {
-      push('buy', t.entry_date, t.entry_price, t.quantity);
-      if (t.status === 'closed') push('sell', t.exit_date, t.exit_price, t.quantity);
-    }
-  }
+  forEachTradeLeg(trades, push);
 
-  if (!points.length) return { symbol: 'none', tooltip: KLINE_MARKPOINT_TOOLTIP };
-  return { tooltip: KLINE_MARKPOINT_TOOLTIP, data: points };
+  if (!points.length) return { symbol: 'none', silent: true, tooltip: KLINE_MARKPOINT_TOOLTIP };
+  return { silent: true, tooltip: KLINE_MARKPOINT_TOOLTIP, data: points };
 }
 
 /** 服务端实际生效的复权回填选项 (hfq 无数据回退 forward 时保持一致) */
@@ -3644,7 +3683,7 @@ const liveQuotes = new VisualLive.LiveMarket({
       if (klineTailNeedsRecovery(symbol, data)) scheduleKlineRecovery();
       return;
     }
-    if (applyServerBars(data.bars)) {
+    if (applyServerBars(data.bars, data)) {
       if (STATE.period === '1d') requestBarPatchDraw();
       else updateChart(false);
     }
@@ -3710,32 +3749,85 @@ function reconcileLiveBars(data) {
   const latest = liveQuotes.get(data.symbol, 'bars');
   const sameView = (frame) => frame && frame.period === STATE.period
     && frame.meta && frame.meta.adjust === STATE.adjust;
-  if (sameView(latest)) applyServerBars(latest.bars);
+  if (sameView(latest)) applyServerBars(latest.bars, latest);
   if (!prev || prev === latest || !sameView(prev)) return;
   const klines = STATE.klineData && STATE.klineData.klines;
   if (!klines || !klines.length) return;
   const lastDate = String(klines[klines.length - 1].date).slice(0, 10);
   const newer = (prev.bars || []).filter((b) => b && b.date && String(b.date).slice(0, 10) > lastDate);
-  if (newer.length) applyServerBars(newer);
+  if (newer.length) applyServerBars(newer, prev);
+}
+
+const BAR_OHLCV_KEYS = ['open', 'high', 'low', 'close', 'volume', 'amount'];
+
+/** 从 kline/tail 的 meta 取出拼当日 bar 时用的快照时间。rev 优先快照 revision, 否则用帧 revision。 */
+function extractBarQuoteStamp(meta, barDate, fallbackRev) {
+  const m = meta || {};
+  const ts = Number(m.today_quote_timestamp);
+  const revRaw = (m.today_quote_revision != null && m.today_quote_revision !== '')
+    ? m.today_quote_revision : fallbackRev;
+  const rev = Number(revRaw);
+  return {
+    date: barDate ? String(barDate).slice(0, 10) : '',
+    ts: Number.isFinite(ts) && ts > 0 ? ts : 0,
+    rev: Number.isFinite(rev) && rev > 0 ? rev : 0,
+  };
+}
+
+/** 同一交易日内, 当前快照是否新于这份 tail。只比交易所时间, 其次比服务端 revision。 */
+function isSnapshotNewerThanTail(curStamp, tailStamp) {
+  if (!curStamp || !tailStamp) return false;
+  if (curStamp.date && tailStamp.date && curStamp.date !== tailStamp.date) return false;
+  if (curStamp.ts > 0 && tailStamp.ts > 0 && curStamp.ts !== tailStamp.ts) {
+    return curStamp.ts > tailStamp.ts;
+  }
+  if (curStamp.rev > 0 && tailStamp.rev > 0) return curStamp.rev > tailStamp.rev;
+  return false;
+}
+
+function quoteStampFromQuote(q, day) {
+  let ts = Number(q && q.timestamp);
+  if (Number.isFinite(ts) && ts > 1e12) ts = ts / 1000;
+  const rev = Number(q && q._revision);
+  return {
+    date: day || '',
+    ts: Number.isFinite(ts) && ts > 0 ? ts : 0,
+    rev: Number.isFinite(rev) && rev > 0 ? rev : 0,
+  };
+}
+
+/** 快照能否刷新已有的当日 bar。缺 session_phase 不拦 (报价帧不一定带相位), 已知盘前/竞价则拒绝。 */
+function isQuoteFreshForDailyBar(q, meta) {
+  if (!q || STATE.period !== '1d') return false;
+  meta = meta || {};
+  if ((meta.adjust || STATE.adjust) === 'hfq') return false;
+  const trading = typeof q.is_trading_day === 'boolean' ? q.is_trading_day
+    : (typeof meta.is_trading_day === 'boolean' ? meta.is_trading_day : null);
+  if (trading === false) return false;
+  const phase = q.session_phase || meta.session_phase;
+  if (phase && !['trading', 'break', 'closed'].includes(phase)) return false;
+  if (!(Number(q.volume) > 0)) return false;
+  return true;
+}
+
+function adoptKlineQuoteStamp(data) {
+  if (!data || !Array.isArray(data.klines) || !data.klines.length) return;
+  const last = data.klines[data.klines.length - 1];
+  data._lastQuoteStamp = extractBarQuoteStamp(data.meta, last.date, data._revision);
 }
 
 /** 用同日快照刷新后端已经产出的当日 bar 的 OHLCV。
  *  不新增 bar、不改指标: 有没有当日 bar 仍由后端决定, 指标由 tail 帧纠正。
  *  后复权价格与原始快照口径不同, 不走这条快路径。日期取快照时间戳的北京时间;
- *  没有时间戳时只用服务端交易日 + server_time, 不用浏览器本地日期。 */
+ *  没有时间戳时只用服务端交易日 + server_time, 不用浏览器本地日期。
+ *  比当前 _lastQuoteStamp 更旧的快照不回写 OHLCV。 */
 function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
   if (!q || symbol !== STATE.symbol || STATE.period !== '1d') return false;
   const kd = STATE.klineData;
   if (!kd || kd.symbol !== symbol || (kd.period && kd.period !== STATE.period)
       || !Array.isArray(kd.klines) || !kd.klines.length) return false;
   const meta = kd.meta || {};
-  if ((meta.adjust || STATE.adjust) === 'hfq') return false;
-  const trading = typeof q.is_trading_day === 'boolean' ? q.is_trading_day
-    : (kd.quote && typeof kd.quote.is_trading_day === 'boolean' ? kd.quote.is_trading_day
-      : meta.is_trading_day);
-  if (trading === false) return false;
-  const vol = Number(q.volume);
-  if (!(vol > 0)) return false;
+  if (!isQuoteFreshForDailyBar(q, meta)) return false;
   let day = '';
   const ts = Number(q.timestamp);
   if (Number.isFinite(ts) && ts > 0) {
@@ -3744,6 +3836,7 @@ function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
     const p = (n) => String(n).padStart(2, '0');
     day = d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
   } else {
+    const trading = typeof q.is_trading_day === 'boolean' ? q.is_trading_day : meta.is_trading_day;
     if (trading && meta.server_time) day = String(meta.server_time).slice(0, 10);
   }
   if (!day) return false;
@@ -3751,8 +3844,10 @@ function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
   if (serverDay && serverDay !== day) return false;
   const last = kd.klines[kd.klines.length - 1];
   if (String(last.date).slice(0, 10) !== day) return false;
+  const incoming = quoteStampFromQuote(q, day);
+  if (isSnapshotNewerThanTail(kd._lastQuoteStamp, incoming)) return false;
   const fields = {
-    open: q.open, high: q.high, low: q.low, close: q.last_price, volume: vol, amount: q.amount,
+    open: q.open, high: q.high, low: q.low, close: q.last_price, volume: Number(q.volume), amount: q.amount,
   };
   let changed = false;
   for (const k of Object.keys(fields)) {
@@ -3764,6 +3859,7 @@ function patchTodayBarOhlcv(q, symbol = STATE.symbol) {
     last[k] = k === 'volume' ? Math.round(v) : v;
     changed = true;
   }
+  kd._lastQuoteStamp = incoming;
   if (changed) requestBarPatchDraw();
   return changed;
 }
@@ -3830,24 +3926,39 @@ function scheduleQuoteStream() { ensureQuoteStream(); }
 
 /** 应用后端权威末根 bar (含指标): 按 date 合并/追加, 有变动返回 true。
  *  数据只来自服务端, 前端不派生 OHLCV。合并用 Object.assign 以保留服务端
- *  未提供的字段 (如 ETF premium)。旧于末根的 bar 忽略。 */
-function applyServerBars(bars) {
+ *  未提供的字段 (如 ETF premium)。旧于末根的 bar 忽略。
+ *  同日且当前快照新于这份 tail 时, 保住快照 OHLCV, 只合入 tail 的指标。 */
+function applyServerBars(bars, frame) {
   if (!['1d', '1w', '1M'].includes(STATE.period) || !STATE.klineData || !STATE.klineData.klines) return false;
   if (!Array.isArray(bars) || !bars.length) return false;
   const klines = STATE.klineData.klines;
   if (!klines.length) return false;
+  const meta = (frame && frame.meta) || {};
+  const adjust = (STATE.klineData.meta && STATE.klineData.meta.adjust) || STATE.adjust;
   let changed = false;
   for (const bar of bars) {
     if (!bar || !bar.date) continue;
     const d = String(bar.date).slice(0, 10);
     const last = klines[klines.length - 1];
     const lastDate = String(last.date).slice(0, 10);
+    const tailStamp = extractBarQuoteStamp(meta, d, frame && frame._revision);
     if (d > lastDate) {
       klines.push(bar);
       changed = true;
+      if (STATE.period === '1d') STATE.klineData._lastQuoteStamp = tailStamp;
     } else if (d === lastDate) {
+      const protect = STATE.period === '1d' && adjust !== 'hfq'
+        && isSnapshotNewerThanTail(STATE.klineData._lastQuoteStamp, tailStamp);
       const before = JSON.stringify(last);
-      Object.assign(last, bar);
+      if (protect) {
+        const keep = {};
+        BAR_OHLCV_KEYS.forEach((k) => { keep[k] = last[k]; });
+        Object.assign(last, bar);
+        BAR_OHLCV_KEYS.forEach((k) => { if (keep[k] !== undefined) last[k] = keep[k]; });
+      } else {
+        Object.assign(last, bar);
+        if (STATE.period === '1d') STATE.klineData._lastQuoteStamp = tailStamp;
+      }
       if (JSON.stringify(last) !== before) changed = true;
     }
     // d < lastDate: 过期 bar, 忽略
@@ -5902,11 +6013,11 @@ function updateChart(reTheme) {
       if (a[i] == null || a[i - 1] == null || c20[i] == null || c20[i - 1] == null) continue;
       if (a[i - 1] <= c20[i - 1] && a[i] > c20[i]) {
         extraMarks.push({ coord: [i, klines[i].low], symbol: 'triangle', symbolSize: 8,
-          symbolRotate: 0, itemStyle: { color: C().up }, name: '金叉',
+          symbolRotate: 0, itemStyle: { color: C().up }, name: '金叉', silent: true,
           label: { show: true, position: 'bottom', formatter: '金叉', fontSize: 9, color: C().up } });
       } else if (a[i - 1] >= c20[i - 1] && a[i] < c20[i]) {
         extraMarks.push({ coord: [i, klines[i].high], symbol: 'triangle', symbolSize: 8,
-          symbolRotate: 180, itemStyle: { color: C().down }, name: '死叉',
+          symbolRotate: 180, itemStyle: { color: C().down }, name: '死叉', silent: true,
           label: { show: true, position: 'top', formatter: '死叉', fontSize: 9, color: C().down } });
       }
     }
@@ -5918,8 +6029,8 @@ function updateChart(reTheme) {
         symbol: pt.dir > 0 ? 'triangle' : 'triangle', symbolSize: 7,
         symbolRotate: pt.dir > 0 ? 0 : 180,
         itemStyle: { color: pt.dir > 0 ? C().up : C().down, opacity: 0.85 },
-        name: pt.name, value: pt.note,
-        label: { show: false },   // 形态只在悬浮提示里说明, 不往图上写字
+        name: pt.name, value: pt.note, silent: true,
+        label: { show: false },   // 形态只在 axis 悬浮提示里说明, 不往图上写字; silent 以免 item tooltip 顶掉画线相交价
       });
     });
   }
@@ -6265,6 +6376,8 @@ function updateChart(reTheme) {
             + `<span style="color:${patternTip.dir > 0 ? C().up : C().down};font-weight:700">▲ ${escHtml(patternTip.name)}</span>`
             + ` <span class="dim">${escHtml(patternTip.note || '')}</span></div>`;
         }
+        // 买卖标记 silent, 明细改由 axis tooltip 注入 (与画线相交价同一提示框)
+        html += tradeTipsHtml(dates, idx);
         // 线型画线与该 bar 相交时: 相交价 + 相对 close 的偏离百分比 (正负着色)
         html += drawingCrossTooltipHtml(idx, k.close);
         return html;
@@ -6687,9 +6800,11 @@ function drawSupported() {
 /** 画线纯逻辑上下文: {n, dateMap:{map,dates}, bars} */
 function drawCtx() {
   if (!drawSupported()) return null;
-  if (!STATE.draw._dateMap || STATE.draw._dateMapKey !== STATE.klineData.klines[STATE.klineData.klines.length - 1].date + ':' + STATE.klineData.klines.length) {
-    STATE.draw._dateMap = Drawings.buildDateIndexMap(STATE.klineData.klines);
-    STATE.draw._dateMapKey = STATE.klineData.klines[STATE.klineData.klines.length - 1].date + ':' + STATE.klineData.klines.length;
+  const dateMapKey = STATE.period + ':' + STATE.klineData.klines[STATE.klineData.klines.length - 1].date
+    + ':' + STATE.klineData.klines.length;
+  if (!STATE.draw._dateMap || STATE.draw._dateMapKey !== dateMapKey) {
+    STATE.draw._dateMap = Drawings.buildDateIndexMap(STATE.klineData.klines, STATE.period);
+    STATE.draw._dateMapKey = dateMapKey;
   }
   return {
     n: STATE.klineData.klines.length,

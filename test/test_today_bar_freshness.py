@@ -230,6 +230,41 @@ def _epoch(moment):
 
 
 class TestFreshnessPolicy(_Harness):
+    def test_chart_wait_budget_is_opt_in_and_pins_symbol_first(self):
+        seen = {}
+
+        def _locked(symbols, fresh=False, budget_deadline=None):
+            seen["symbols"] = list(symbols)
+            seen["deadline"] = budget_deadline
+            seen["fresh"] = fresh
+            return {}
+
+        with mock.patch.object(market_mod, "_fetch_quotes_locked", side_effect=_locked):
+            market_mod.fetch_quotes(
+                [SYM, "000001.SH"], fresh=False, wait_for_lock=1.5, wait_for_budget=True)
+        self.assertEqual(seen["symbols"][0], SYM)
+        self.assertIsNotNone(seen["deadline"])
+        self.assertFalse(seen["fresh"])
+
+        seen.clear()
+        with mock.patch.object(market_mod, "_fetch_quotes_locked", side_effect=_locked):
+            market_mod.fetch_quotes([SYM], fresh=False, wait_for_lock=1.5, wait_for_budget=False)
+        self.assertIsNone(seen["deadline"], "不显式等待时不得堵住报价桶")
+
+    def test_today_bar_records_quote_stamp(self):
+        df, _, _ = self._chart(quote_fresh=False, quote_wait_budget=True)
+        meta = df.attrs.get("today_quote_meta")
+        self.assertIsInstance(meta, dict)
+        self.assertAlmostEqual(meta["timestamp"], STAMP)
+        self.assertGreater(meta["revision"], 0)
+        self.assertEqual(float(_today_row(df)["close"]), 11.5)
+
+    def test_missing_quote_marks_today_bar_missing(self):
+        with mock.patch.object(market_mod, "fetch_quotes", return_value={}):
+            df, _, _ = self._chart(quote_fresh=False, quote_wait_budget=True)
+        self.assertTrue(df.attrs.get("today_bar_missing"))
+        self.assertIsNone(_today_row(df))
+
     def test_policy_defaults_to_reuse(self):
         if os.environ.get("KLINE_TODAY_BAR_FRESH"):
             self.skipTest("本机显式设置了 KLINE_TODAY_BAR_FRESH")

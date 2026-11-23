@@ -214,10 +214,13 @@ class FutureZoneWiringTest(unittest.TestCase):
 
 
 class MarkPointTooltipTest(unittest.TestCase):
-    """K线 markPoint 提示框: 形态/金叉死叉点只有 name 没有 value, 缺项必须跳过。
+    """K线 markPoint 不抢 axis tooltip。
 
-    回归: 形态倒三角悬浮显示 "943 undefined" —— 943 是 coord 横坐标(该 bar 下标),
-    undefined 是缺失的 value, 由 buildTradeMarkers 里无条件拼接的 formatter 渲染出来。
+    形态/金叉/交易点的 item tooltip 会整段替换 axis tooltip, 水平线/射线相交价
+    (drawingCrossTooltipHtml) 因此消失。标记必须 silent, 形态走 axis patternTip,
+    买卖摘要走 tradeTipsHtml。
+
+    另保留: 形态倒三角曾显示 "943 undefined" —— formatter 缺项必须跳过。
     """
 
     @classmethod
@@ -230,15 +233,29 @@ class MarkPointTooltipTest(unittest.TestCase):
         end = self.src.index("const klineMarkPoint", start)
         return self.src[start:end]
 
+    def _trade_markers_block(self):
+        start = self.src.index("function buildTradeMarkers")
+        end = self.src.index("function syncAdjustMeta", start)
+        return self.src[start:end]
+
     def test_formatter_skips_missing_fields(self):
         self.assertIn("[p.name, p.value].filter(Boolean).join('<br/>')", self.src)
         self.assertNotIn("p.name + '<br/>' + p.value", self.src,
                          "无条件拼接会把缺失的 value 渲染成 undefined")
 
-    def test_tooltip_attached_even_without_trades(self):
-        # 否则没有交易记录的标的, 形态三角悬浮完全无反应
-        self.assertIn("return { symbol: 'none', tooltip: KLINE_MARKPOINT_TOOLTIP }", self.src)
-        self.assertIn("return { tooltip: KLINE_MARKPOINT_TOOLTIP, data: points }", self.src)
+    def test_marks_silent_so_axis_tooltip_wins(self):
+        block = self._marks_block()
+        self.assertGreaterEqual(block.count("silent: true"), 3,
+                                "金叉/死叉/形态标记都要 silent, 否则 item tooltip 顶掉画线相交价")
+        trades = self._trade_markers_block()
+        self.assertIn("silent: true", trades)
+        self.assertIn("return { symbol: 'none', silent: true, tooltip: KLINE_MARKPOINT_TOOLTIP }", trades)
+        self.assertIn("return { silent: true, tooltip: KLINE_MARKPOINT_TOOLTIP, data: points }", trades)
+
+    def test_axis_tooltip_injects_trades_and_drawings(self):
+        self.assertIn("html += tradeTipsHtml(dates, idx);", self.src)
+        self.assertIn("html += drawingCrossTooltipHtml(idx, k.close);", self.src)
+        self.assertIn("function tradeTipsHtml(dates, idx)", self.src)
 
     def test_pattern_items_carry_name_value_and_hide_label(self):
         block = self._marks_block()

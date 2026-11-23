@@ -144,7 +144,7 @@ visual/
 |------|------|
 | `GET /` | 提供 index.html |
 | `GET /api/kline?symbol=600519.SH&period=1d&count=1006` | K线数据 + 全部预计算指标（含 OBV/MAOBV/量均线）+ 流通股本元数据（日K默认 1006≈3年可见+RSI250 warmup） |
-| `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 10s，须短于 SSE 指标推送间隔 `INDICATOR_SSE_INTERVAL`（默认 15s）；缓存末 10 根，不同 `n` 与多个连接共用一次全量指标计算）。前端用它纠正末根与指标；同日快照只刷新后端已经产出的那根 bar 的 OHLCV，不新增 bar |
+| `GET /api/kline/tail?symbol=600519.SH&period=1d&count=1006&n=2` | 末 N 根日/周/月K（含全部指标），供图表增量刷新。与 `/api/kline` 同口径，`count` 须与图表一致；短 TTL（`KLINE_TAIL_TTL`，默认 2s，须短于 SSE 指标推送间隔 `INDICATOR_SSE_INTERVAL`（默认 5s，可调回 15s 观察 CPU）；缓存末 10 根，不同 `n` 与多个连接共用一次全量指标计算。盘中没拼出今日 bar 时不写入这份缓存）。`meta` 带 `today_quote_timestamp` / `today_quote_revision`。前端用它纠正末根与指标；同日快照只刷新后端已经产出的那根 bar 的 OHLCV，且快照新于 tail 时不回滚 OHLCV，只合入指标。不新增 bar |
 | `GET /api/quote?symbol=600519.SH` | 实时快照（含换手率，AF 小数→百分数；附 `is_trading_day`） |
 | `GET /api/chips?symbol=600519.SH&period=1w` | 筹码分布（股票/ETF；`period` 1d/1w/1M 决定日线回看窗口 210/600/600 根，返回直方图+汇总+`source`/`period`；指数返回 null）。默认 AlphaFeed 近似（`CHIPS_SOURCE=af`），`em` 切东财精确源 |
 | `GET /api/depth?symbol=600519.SH` | 五档盘口（所有周期可用；AlphaFeed 优先，空数据/限流时回退麦蕊 `stock_real_five`；独立滚动预算 24/min）。档位价 `null` = 该档不存在：上游缺档时补 `0.0`，后端清洗成 `null`（前端画「`—`」），价与量一起置空，全 `0` 的盘口当「没拿到数据」处理。当日快照（`.cache/depth_day.json`，盘后/周末回放）**只收完整盘口**：两个集合竞价窗口（09:15–09:30 / 14:57–15:00）与盘前不留档，买1==卖1／单档的塌陷盘口不留档（被拒时打 warning + `perf` 计数），且只新不旧；盘后/周末读到**收盘前抓的**或塌陷的旧快照时花一个令牌回源换成收盘那份（实测盘后上游给的就是当天最后一份连续竞价盘口），换来的那份之后所有视图直接回放。规则详见 `docs/known-issues.md` 第 9 条 |
@@ -264,7 +264,7 @@ K线按类别（分时/分钟/股票/指数/基金）经 `kline_source.py` 注�
 KLINE_SOURCE_MINUTE=alphafeed,akshare      # 默认
 KLINE_SOURCE_INTRADAY=alphafeed_intraday   # 默认 (分时图; 只回当日, 不兜 akshare)
 KLINE_SOURCE_STOCK=mairui,alphafeed,akshare # 默认
-KLINE_SOURCE_INDEX=mairui,akshare           # 默认
+KLINE_SOURCE_INDEX=mairui,alphafeed,akshare # 默认
 KLINE_SOURCE_FUND=alphafeed,akshare         # 默认 (麦蕊 jj/lskx 无前复权)
 ```
 
@@ -278,7 +278,7 @@ AlphaFeed 日内走势接口 `/v1/klines/intraday`（限额 60/min，与「分�
 | 数据源 | 分钟K | 股票/指数/基金 日周月K | 说明 |
 |---|---|---|---|
 | `mairui` | 5m/15m/30m/60m（`hszbl/fsjy`，仅未复权；1m/北交所不支持） | 股票等比前复权 `fr`；指数无复权；基金 `jj/lskx` 仅未复权 | 付费证书；分钟/基金在图表前复权链上会被跳过 |
-| `alphafeed` | ✓ 全周期前复权（`minute` 类别） | 仅股票/ETF 日K（指数未验证） | 付费证书 `AF_API_KEY` |
+| `alphafeed` | ✓ 全周期前复权（`minute` 类别） | 股票/ETF/指数 日周月K（指数 `000001.SH` 等已实测；hfq→`backward`） | 付费证书 `AF_API_KEY` |
 | `alphafeed_intraday` | 分时（`intraday` 类别）：日内走势接口，只回当日 | — | 分时图主源（默认链只有它）；权限不可用时当日退回 `klines.batch`，故 A股 恒有数据 |
 | `akshare` | ✓（东财源，1m 仅近 5 个交易日） | ✓ 免费前复权 `qfq` | 无需 key，作兜底；东财限流期可能持续失败 |
 

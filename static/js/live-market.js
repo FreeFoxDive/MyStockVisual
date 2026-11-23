@@ -132,8 +132,8 @@
     }
     healthy(kind, symbol) {
       const h = this.health.get(this.key(kind, symbol));
-      // 指标尾巴服务端每 15s 推一帧 (INDICATOR_SSE_INTERVAL); 健康窗口取 3 倍,
-      // 两帧之间以及偶发丢一帧都不判 bars 陈旧, 免得 SSE 活着还去轮询 /api/kline/tail。
+      // 指标尾巴服务端默认每 5s 推一帧 (INDICATOR_SSE_INTERVAL, 可调回 15s);
+      // 健康窗口仍取 45s, 调回 15s 时两帧之间以及偶发丢帧都不判 bars 陈旧。
       const stale = kind === 'bars' ? (this.options.barsStaleMs || 45000) : (this.options.staleMs || 15000);
       return !!h && Date.now() - h.at < stale;
     }

@@ -1222,10 +1222,10 @@ def _fetch_minute_kline(symbol, period, count, adjust="forward"):
 
 
 def _fetch_af_kline(symbol, period, count, adjust="forward"):
-    """从 AlphaFeed 拉取日/周/月K (股票/ETF), 返回标准化 DataFrame 或 None。
+    """从 AlphaFeed 拉取日/周/月K (股票/ETF/指数), 返回标准化 DataFrame 或 None。
 
-    AlphaFeed 原生支持 1d/1w/1M; 股票/ETF 日K为备选源, 周/月K为主源
-    (周/月K不依赖抖动的 akshare)。
+    AlphaFeed 原生支持 1d/1w/1M (指数如 000001.SH 已实测); 股票/ETF/指数
+    周月K可走本源, 不依赖抖动的 akshare。
 
     日K与因子库构建共用「日K批量 60/min」额度: 构建吃掉 90% 后取不到令牌就
     直接返回 None, 由 kline_source 走下一数据源, 而不是打出 429。
@@ -1374,13 +1374,16 @@ def _hfq_daily_ttl(symbol, count, adj, chain_tag, now, live):
 
 
 def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
-                   quote_fresh=True, append_today=True):
+                   quote_fresh=True, append_today=True, quote_wait_budget=False):
     """fetch_kline 完整版, 额外返回实际服务的数据源名 (观测/透传 meta 用)。
 
     返回 (标准化 DataFrame, 名称, 数据源名); 失败 (None, None, None)。
     timing: 可选 dict, 填入 disk/fetch_ms/append_bar_ms/quote_ms 观测字段。
     quote_fresh: 当日 bar 的快照新鲜度, False 时复用 quote_cache (见
         _daily_bar_from_quote)。默认 True = 每次强制拉新快照 (旧行为)。
+    quote_wait_budget: 仅图表 /api/kline 使用。缓存未命中时在拿锁期限内等下一枚
+        令牌, 避免撞上 SSE 节拍就缺今日 bar。SSE tail 复用缓存时保持 False,
+        不在报价流里阻塞等桶。
     append_today: False 时不拼当日快照 (成交校验只要历史 OHLC, 避免每条腿抢快照锁)。
     """
     adj = kline_source.normalize_adjust(adjust)
@@ -1419,7 +1422,8 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
                     df = _strip_today_bar_df(df)
                     with perf.Span(timing, "append_bar_ms"):
                         df = _maybe_append_today_bar(symbol, df, timing=timing,
-                                                     fresh=quote_fresh)
+                                                     fresh=quote_fresh,
+                                                     wait_for_budget=quote_wait_budget)
                 return df, cached.get("name", symbol), cached.get("source")
         else:
             # 分钟线优先 trade_time: JSON 常同时带 trade_date(日) 与 trade_time,
@@ -1449,7 +1453,8 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
     if quote_patch and append_today:
         with perf.Span(timing, "append_bar_ms"):
             df = _maybe_append_today_bar(symbol, df, timing=timing,
-                                         fresh=quote_fresh)
+                                         fresh=quote_fresh,
+                                         wait_for_budget=quote_wait_budget)
 
     # 存入磁盘缓存 (日K 当日 bar 不写入，默认 dirty)
     cache_df = _strip_today_bar_df(df) if quote_patch else df
@@ -1655,7 +1660,8 @@ def publish_quote_snapshot(symbol, quote):
     quote_snapshot_cache.set(sym, std)
 
 
-def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0, for_trade=False):
+def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0, for_trade=False,
+                  wait_for_budget=False):
     """批量获取实时快照。
 
     ``wait_for_lock`` 仅供成交校验等强一致性调用使用：常规 UI 轮询继续
@@ -1664,6 +1670,10 @@ def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0, for_trade=False):
 
     ``for_trade`` 只刷新提交交易的标的，并在同一等待期限内等原快照桶放行。
     页面轮询仍非阻塞，限额不变。
+
+    ``wait_for_budget`` 仅供图表拼当日 bar：缓存未命中且令牌桶刚被 SSE 用完时，
+    在 ``wait_for_lock`` 期限内等下一枚令牌（不放大 48/min），并把本次标的排到
+    首批。SSE / HTTP 轮询不传此参数，保持非阻塞。
     """
     global _quote_cursor
     symbols = list(dict.fromkeys(normalize_symbol(s) for s in symbols if s))
@@ -1692,14 +1702,19 @@ def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0, for_trade=False):
                 watched = {s for group in _quote_interests.values() for s in group}
             # One symbol query can serve every connected page (never a universes query).
             combined = sorted(watched.union(symbols))
-            if combined:
+            if combined and wait_for_budget and wait_for_lock:
+                # 图表要的标的排到首批, 不被多页面轮转挤到没令牌的后续批次。
+                wanted = set(symbols)
+                rest = [s for s in combined if s not in wanted]
+                combined = list(symbols) + rest
+            elif combined:
                 offset = _quote_cursor % len(combined)
                 combined = combined[offset:] + combined[:offset]
         with _quote_fetch_condition:
             global _quote_fetch_inflight, _quote_fetch_symbols
             _quote_fetch_inflight = True
             _quote_fetch_symbols = set(combined)
-        if for_trade:
+        if for_trade or (wait_for_budget and wait_for_lock):
             result = _fetch_quotes_locked(
                 combined, fresh=fresh, budget_deadline=budget_deadline)
         else:
@@ -2810,11 +2825,16 @@ def _apply_quote_bar_to_df(df, quote_bar):
     if "amount" in df.columns:
         amt = quote_bar.get("amount")
         row["amount"] = float(amt) if amt is not None else float("nan")
+    meta = {
+        "timestamp": quote_bar.get("_quote_timestamp"),
+        "revision": quote_bar.get("_quote_revision"),
+    }
     last_date = _last_bar_date(df)
     if last_date is not None and last_date == ts.date():
         for col, val in row.items():
             if col in df.columns:
                 df.iloc[-1, df.columns.get_loc(col)] = val
+        df.attrs["today_quote_meta"] = meta
         return df
     new_row = pd.DataFrame([row], index=[ts])
     for col in df.columns:
@@ -2822,10 +2842,11 @@ def _apply_quote_bar_to_df(df, quote_bar):
             new_row[col] = float("nan") if col == "amount" else 0.0
     out = pd.concat([df, new_row]).sort_index()
     out.index.name = df.index.name or "trade_date"
+    out.attrs["today_quote_meta"] = meta
     return out
 
 
-def _maybe_append_today_bar(symbol, df, timing=None, fresh=True):
+def _maybe_append_today_bar(symbol, df, timing=None, fresh=True, wait_for_budget=False):
     """日K: 用实时快照补/刷新当日 bar。
 
     交易日只要快照可用就覆盖末根「今天」OHLCV (盘中/收盘后一致);
@@ -2846,8 +2867,12 @@ def _maybe_append_today_bar(symbol, df, timing=None, fresh=True):
         return df
     if last_date > today:
         return df
-    quote_bar = _daily_bar_from_quote(symbol, today, timing=timing, fresh=fresh)
+    quote_bar = _daily_bar_from_quote(symbol, today, timing=timing, fresh=fresh,
+                                      wait_for_budget=wait_for_budget)
     if not quote_bar:
+        # 盘中本该有今日 bar 但快照没拿到: 标上, 让 tail 不要把这份残缺结果缓存住。
+        if last_date < today:
+            df.attrs["today_bar_missing"] = True
         return df
     return _apply_quote_bar_to_df(df, quote_bar)
 
@@ -2860,7 +2885,7 @@ _NO_QUOTE = object()
 
 
 def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=False,
-                          quote=_NO_QUOTE):
+                          quote=_NO_QUOTE, wait_for_budget=False):
     """历史日K尚无当天 bar 时, 用实时快照拼一根 (仅今天 + 交易日 + 成交量>0)。
 
     fresh=False 复用 quote_cache (TTL 1.25s), 不再每次强制走网络: 图表路径用,
@@ -2898,6 +2923,7 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
             q = (fetch_trade_quote(symbol) if for_trade
                  else fetch_quotes(
                      [symbol], fresh=fresh, wait_for_lock=_CHART_QUOTE_WAIT_SEC,
+                     wait_for_budget=bool(wait_for_budget) and not fresh and not for_trade,
                  ).get(normalize_symbol(symbol)))
     if not q:
         return unavailable("未取到快照")
@@ -2926,6 +2952,16 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
     close = _safe_float(q.get("last_price"))
     if close is None:
         close = _safe_float(q.get("open"))
+    raw_ts = q.get("timestamp")
+    try:
+        quote_ts = float(raw_ts) if raw_ts is not None else None
+    except (TypeError, ValueError):
+        quote_ts = None
+    raw_rev = q.get("_revision")
+    try:
+        quote_rev = int(raw_rev) if raw_rev is not None else None
+    except (TypeError, ValueError):
+        quote_rev = None
     return {
         "date": target.isoformat(),
         "open": _safe_float(q.get("open")),
@@ -2934,6 +2970,8 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
         "close": close,
         "volume": volume,
         "amount": _safe_float(q.get("amount")),
+        "_quote_timestamp": quote_ts,
+        "_quote_revision": quote_rev,
     }
 
 

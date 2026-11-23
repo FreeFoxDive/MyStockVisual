@@ -8,7 +8,7 @@ volume/amount, 升序)。图表默认前复权 (forward); 成交校验等可显�
     KLINE_SOURCE_MINUTE=alphafeed,akshare
     KLINE_SOURCE_INTRADAY=alphafeed_intraday
     KLINE_SOURCE_STOCK=mairui,alphafeed,akshare
-    KLINE_SOURCE_INDEX=mairui,akshare
+    KLINE_SOURCE_INDEX=mairui,alphafeed,akshare
     KLINE_SOURCE_FUND=alphafeed,akshare
 
 day-only 的 "intraday" 类别 (分时图) 与 "minute" 类别分开: 后者是跨天分钟K历史,
@@ -316,9 +316,10 @@ class MairuiSource(KlineSource):
 
 
 class AlphaFeedSource(KlineSource):
-    """AlphaFeed: 分钟K主源 + 股票/ETF 日/周/月K (forward/none)。
+    """AlphaFeed: 分钟K主源 + 股票/ETF/指数 日/周/月K。
 
-    周/月K原生支持, 作为股票/ETF 周月K主源, 不再依赖抖动的 akshare。
+    周/月K原生支持 (含 000001.SH 等指数); 股票/ETF/指数周月K不再只靠抖动的 akshare。
+    指数后复权走 API ``backward`` (麦蕊指数链无 hfq, 由本源承接)。
     """
 
     name = "alphafeed"
@@ -330,7 +331,7 @@ class AlphaFeedSource(KlineSource):
         if category in ("hk", "us"):
             # 港/美股 v1: 仅日/周/月K (分时能力待探测)
             return period in ("1d", "1w", "1M")
-        return category in ("stock", "fund") and period in ("1d", "1w", "1M")
+        return category in ("stock", "fund", "index") and period in ("1d", "1w", "1M")
 
     def fetch(self, symbol, period, count, adjust=ADJUST_FORWARD):
         import market
@@ -504,7 +505,9 @@ DEFAULT_CHAINS = {
     # KLINE_SOURCE_INTRADAY=alphafeed_intraday,akshare。
     "intraday": "alphafeed_intraday",
     "stock": "mairui,alphafeed,akshare",
-    "index": "mairui,akshare",
+    # 指数: 麦蕊优先; AF 实测支持 000001.SH 等 1d/1w/1M (含 backward),
+    # 承接麦蕊失败 / 指数 hfq (麦蕊 supports 会跳过 hfq)。
+    "index": "mairui,alphafeed,akshare",
     "fund": "alphafeed,akshare",
     # 港/美股: AlphaFeed 优先，akshare 日/周/月及分钟兜底
     "hk": "alphafeed,akshare",

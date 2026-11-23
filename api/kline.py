@@ -41,8 +41,9 @@ DAILY_COUNT = 3 * 252 + 250  # 1006
 # 图表当日 bar 的快照新鲜度: 默认复用 quote_cache (TTL 1.25s), 不再每次强制一次
 # 实时行情往返 —— 实测该往返在 0~700ms 抖动, 是磁盘 TTL 抬高后热路径上仅剩的
 # 耗时来源。当日 bar 仍**完全由后端快照产出** (契约不变: 前端不派生 OHLCV),
-# 只是允许最多旧 1.25s; 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (10-15s,
-# 仍走强制新鲜快照) 持续纠正末根 bar。
+# 只是允许最多旧 1.25s; 缓存未命中时图表路径短等下一枚令牌 (不放大 48/min)。
+# 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (SSE 默认 5s, 缓存 2s)
+# 持续纠正末根 bar。
 # 成交校验 (market.get_daily_bar) 不经过这里, 始终强制新鲜快照。
 # KLINE_TODAY_BAR_FRESH=1 → 恢复"每次强制拉新快照"的旧行为 (更实时, 但慢)。
 TODAY_BAR_QUOTE_FRESH = os.environ.get("KLINE_TODAY_BAR_FRESH", "").strip().lower() in (
@@ -50,12 +51,36 @@ TODAY_BAR_QUOTE_FRESH = os.environ.get("KLINE_TODAY_BAR_FRESH", "").strip().lowe
 )
 
 # 末根增量接口的短 TTL: 多客户端共用一次全量指标计算。
-# 默认 10s。必须短于 SSE 的 INDICATOR_SSE_INTERVAL (15s): 否则 SSE 每帧可能拿到
-# 同一份缓存, revision 不变, 前端 live-market 的 bars 健康时间戳就刷不上。
-# 单次约 30ms (1006 根, 磁盘命中); 15s 推送对几个页面是 1GB 机器上约 2% 单核。
-KLINE_TAIL_TTL = max(5.0, float(os.environ.get("KLINE_TAIL_TTL", "10")))
+# 默认 2s, 下限 1s。必须短于 SSE 的 INDICATOR_SSE_INTERVAL (默认 5s): 否则 SSE
+# 连续两帧命中同一份缓存, revision 不变, 前端会把活着的流判成指标停滞。
+# 单次约 30ms (1006 根, 磁盘命中); 5s 推送先试跑, 环境变量可调回 15s 观察 CPU。
+KLINE_TAIL_TTL = max(1.0, float(os.environ.get("KLINE_TAIL_TTL", "2")))
 _tail_cache = TTLCache(KLINE_TAIL_TTL, max_entries=30)
 _TAIL_CACHE_BARS = 10
+
+
+def _today_quote_fields(df):
+    """拼当日 bar 所用快照的交易所时间与服务端 revision; 没有则都是 None。"""
+    raw = getattr(df, "attrs", {}).get("today_quote_meta") if df is not None else None
+    if not isinstance(raw, dict):
+        return {"today_quote_timestamp": None, "today_quote_revision": None}
+    ts, rev = raw.get("timestamp"), raw.get("revision")
+    try:
+        ts = float(ts) if ts is not None else None
+    except (TypeError, ValueError):
+        ts = None
+    try:
+        rev = int(rev) if rev is not None else None
+    except (TypeError, ValueError):
+        rev = None
+    return {"today_quote_timestamp": ts, "today_quote_revision": rev}
+
+
+def _tail_omits_today_bar(df, period, adjust):
+    """盘中日K (非后复权) 没拼出今日 bar 时, 不要把这份残缺结果冻进 tail 缓存。"""
+    if period != "1d" or adjust == kline_source.ADJUST_HFQ or df is None:
+        return False
+    return bool(getattr(df, "attrs", {}).get("today_bar_missing"))
 
 
 def _attach_quote(resp, symbol):
@@ -230,7 +255,8 @@ def _kline_body(timing):
     try:
         df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
                                          timing=timing,
-                                         quote_fresh=TODAY_BAR_QUOTE_FRESH)
+                                         quote_fresh=TODAY_BAR_QUOTE_FRESH,
+                                         quote_wait_budget=not TODAY_BAR_QUOTE_FRESH)
     except Exception as e:
         log.warning("获取K线失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("获取K线失败，请稍后重试", 500)
@@ -245,7 +271,8 @@ def _kline_body(timing):
         try:
             df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
                                              timing=timing,
-                                             quote_fresh=TODAY_BAR_QUOTE_FRESH)
+                                             quote_fresh=TODAY_BAR_QUOTE_FRESH,
+                                             quote_wait_budget=not TODAY_BAR_QUOTE_FRESH)
         except Exception as e:
             log.warning("复权回退获取失败 %s: %s", symbol, _sanitize_error(e))
         if df is None:
@@ -254,6 +281,7 @@ def _kline_body(timing):
     if df is None:
         return _error(f"无法获取 {symbol} 的K线数据", 404)
 
+    quote_fields = _today_quote_fields(df)
     try:
         with perf.Span(timing, "indicators_ms"):
             df, indicators = compute_all_indicators(df, period)
@@ -298,6 +326,7 @@ def _kline_body(timing):
             "source": source,
             "adjust": adjust,
             "adjust_fallback": adjust_fallback,
+            **quote_fields,
             # 慢派生字段清单: 客户端据此拉 /api/kline/deferred 补齐 (现仅 ETF 溢价)
             "deferred": deferred,
         },
@@ -347,8 +376,10 @@ def kline_tail():
         return _error("指标更新失败", 500)
 
 
-def build_kline_tail(symbol, period, count, adjust, n=2):
+def build_kline_tail(symbol, period, count, adjust, n=2, quote_fresh=True):
     # n 不进 key: 缓存末 _TAIL_CACHE_BARS 根, 不同 n / 多客户端共用一次计算。
+    # quote_fresh: HTTP /api/kline/tail 默认 True (强制新快照)。SSE 传 False,
+    # 复用刚刚写入的 quote_cache, 不再跟自己抢同一枚令牌。
     cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
     cached = _tail_cache.get(cache_key)
     if cached is not None:
@@ -360,12 +391,15 @@ def build_kline_tail(symbol, period, count, adjust, n=2):
 
     revision = time.time_ns() // 1000
     try:
-        df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust)
+        df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
+                                           quote_fresh=quote_fresh)
     except Exception as e:
         log.warning("获取K线失败(tail) %s %s: %s", symbol, period, _sanitize_error(e))
         raise RuntimeError("获取K线失败") from e
     if df is None:
         raise LookupError(f"无法获取 {symbol} 的K线数据")
+    quote_fields = _today_quote_fields(df)
+    omit_cache = _tail_omits_today_bar(df, period, adjust)
     try:
         df, _ind = compute_all_indicators(df, period, serialize=False)
     except Exception as e:
@@ -386,9 +420,11 @@ def build_kline_tail(symbol, period, count, adjust, n=2):
             "last_trade_date": bars[-1]["date"] if bars else None,
             "source": source,
             "adjust": adjust,
+            **quote_fields,
         },
     }
-    _tail_cache.set(cache_key, stored)
+    if not omit_cache:
+        _tail_cache.set(cache_key, stored)
     out_bars = list(bars[-n:])
     resp = dict(stored)
     resp["bars"] = out_bars
