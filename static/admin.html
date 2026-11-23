@@ -70,6 +70,9 @@ tr:hover td { background: var(--btn-hover); }
   <div class="section-title" id="factors"><span class="bar"></span>因子库
     <span style="flex:1"></span>
     <span id="fac-updated" style="font-size:12px;color:var(--text-secondary)"></span>
+    <label style="cursor:pointer;font-size:13px;margin-right:8px">
+      <input type="checkbox" id="fac-auto" onchange="setFactorAuto(this.checked)"> 自动构建
+    </label>
     <button onclick="rebuildFactors(false)">手动重建</button>
     <button onclick="rebuildFactors(true)">强制重建</button>
   </div>
@@ -364,12 +367,14 @@ const FAC_STATE_TEXT = { idle: "未构建", running: "构建中", done: "完成"
                          error: "失败", missing: "未构建" };
 
 let facTimer = null;
+let facStatus = null;   // 最近一次状态 (强制重建确认框用)
 
 async function loadFactors() {
   clearTimeout(facTimer);
   let delay = 60000;
   try {
     const s = await api('/api/factors/status');
+    facStatus = s;
     const running = s.state === 'running';
     delay = running ? 5000 : 60000;
     const el = document.getElementById('fac-status');
@@ -377,19 +382,27 @@ async function loadFactors() {
     if (running) {
       prog.style.display = '';
       document.getElementById('fac-prog-fill').style.width = (s.percent || 0) + '%';
+      const modeLabel = s.auto_mode ? '交易日自动更新' : '手动模式';
       el.textContent = `构建中 ${s.percent || 0}%（阶段 ${s.phase || '-'}，第 ${s.attempts || 1} 次尝试）`
-        + ` · 计划时刻 ${s.build_at} · 交易日自动更新`;
+        + ` · 计划时刻 ${s.build_at} · ${modeLabel}`;
     } else {
       prog.style.display = 'none';
+      const modeText = s.auto_mode
+        ? `自动构建 ${s.build_at}（仅交易日）`
+        : '手动模式（需点重建）';
       const parts = [
         `最新快照：${s.snapshot_day || '（无）'}`,
         `入表 ${s.n_rows == null ? '-' : s.n_rows} 只`,
-        `自动构建 ${s.build_at}（仅交易日）`,
+        modeText,
         `单次拉 ${s.bars_count} 根日K`,
       ];
+      if (s.provisional) parts.push(`⚠ 临时快照（${s.build_at} 前构建，缺收盘后数据，需重建）`);
+      else if (s.outdated) parts.push(`过时（应为 ${s.expected_day || '-'}）`);
       if (s.state === 'error') parts.push(`⚠ 今日失败：${s.error || ''}（已重试 ${s.attempts || 0} 次）`);
       el.textContent = parts.join(' · ');
     }
+    const autoBox = document.getElementById('fac-auto');
+    if (autoBox) autoBox.checked = !!s.auto_mode;
     document.getElementById('fac-tbody').innerHTML = (s.last_days || []).map(r => `
       <tr>
         <td>${escHtml(r.day)}</td>
@@ -408,10 +421,26 @@ async function loadFactors() {
   facTimer = setTimeout(loadFactors, delay);
 }
 
+async function setFactorAuto(on) {
+  const box = document.getElementById('fac-auto');
+  try {
+    await api('/api/factors/mode', { method: 'POST', body: JSON.stringify({ auto: !!on }) });
+    await loadFactors();
+  } catch (e) {
+    if (box) box.checked = !on;
+    alert('切换失败：' + e.message);
+  }
+}
+
 async function rebuildFactors(force) {
-  const tip = force
-    ? '强制重建因子库（忽略"只在 18:00 后构建"与今日已完成，会重新拉全市场价格）？'
-    : '立即构建因子库？未到 18:00 会被拒绝（需用「强制重建」）';
+  const at = (facStatus && facStatus.build_at) || '18:00';
+  let tip = force
+    ? `强制重建因子库（忽略"只在 ${at} 后构建"与今日已完成，会重新拉全市场价格）？`
+    : `立即构建因子库？未到 ${at} 会被拒绝（需用「强制重建」）`;
+  if (force && facStatus && facStatus.rebuild_provisional) {
+    tip += `\n\n现在构建的是临时快照，缺龙虎榜/质押等收盘后数据；`
+      + (facStatus.auto_mode ? `${at} 后会自动再覆盖。` : `当前为手动模式，${at} 后需再重建一次。`);
+  }
   if (!confirm(tip)) return;
   try {
     const r = await api('/api/factors/rebuild', { method: 'POST', body: JSON.stringify({ force }) });

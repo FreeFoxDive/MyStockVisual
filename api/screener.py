@@ -2,7 +2,7 @@
 
 任务化 + 队列 (第一批) + 因子库扫描 (第二批):
 
-- **扫因子库, 不拉K线**: 判定读每日 18:00 构建的全市场因子快照 (visual/factors.py),
+- **扫因子库, 不拉K线**: 判定读因子库快照 (visual/factors.py; 默认手动构建),
   7800 只逐行判定 → 秒级; 条件定义在 screener_metrics 注册表 (前后端共用);
 - **AND / OR**: `mode="or"` 时命中任一条件即入选, 结果带 `hit_count` 与逐条明细
   (「满足 N 项」分组/筛选由页面完成);
@@ -323,7 +323,7 @@ def _execute(run):
         # A versioned live table may be empty after OHLC admission rejects all
         # symbols. It is a completed scan with zero results, not a missing store.
         if df is None or (len(df) == 0 and not live_available):
-            raise RuntimeError("因子库尚未构建 (交易日 18:00 自动更新)")
+            raise RuntimeError(factors.missing_snapshot_message())
 
         cap = _max_symbols()
         if cap and len(df) > cap:
@@ -489,7 +489,7 @@ def screener_run():
 
     df, data_version = factors.snapshot()
     if df is None:
-        return _error("因子库尚未构建, 交易日 18:00 自动更新后即可扫描", 503)
+        return _error(factors.missing_snapshot_message(for_scan=True), 503)
     options = metrics.text_field_options(
         df, [m["field"] for m in metrics.METRICS if m["kind"] == "text"])
     clean, err = metrics.clean(body.get("conditions"), options)

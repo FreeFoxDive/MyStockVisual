@@ -35,7 +35,7 @@ _FNS = (
 )
 _FACTOR_FNS = (
     "scheduleFactorBar", "setFactorRebuildVisible", "refreshFactorBar",
-    "rebuildFactorsNow",
+    "factorStaleMessage", "factorRebuildTip", "rebuildFactorsNow",
 )
 
 
@@ -80,13 +80,19 @@ let runCache = {};
 let displayId = null;
 let hitFilter = null;
 let factorDay = null;
+let factorStatus = null;
+let scanStarting = false;
 let isAdmin = false;
 let factorBarTimer = null;
 const LIVE_QUOTE_MAX = 200;
 const els = {};
 function el(id) {
   if (!els[id]) els[id] = { id, value: "", textContent: "", innerHTML: "",
-                            disabled: false, style: {}, classList: { add(){}, remove(){} } };
+                            disabled: false, style: {}, classList: {
+                              _set: {},
+                              add(...names) { names.forEach(n => { this._set[n] = true; }); },
+                              remove(...names) { names.forEach(n => { delete this._set[n]; }); },
+                            } };
   return els[id];
 }
 const document = { getElementById: el, hidden: false };
@@ -708,6 +714,142 @@ class FactorRebuildTest(unittest.TestCase):
         self.assertEqual(json.loads(out["body"]), {"force": True})
         self.assertEqual(out["display"], "none", "触发后进入构建中, 按钮应隐藏")
         self.assertIn("构建中", out["text"])
+
+    def test_outdated_snapshot_shows_rebuild_for_admin(self):
+        out = self._run("""
+(async () => {
+  isAdmin = true;
+  globalThis.__apiResult = { state: "idle", snapshot_day: "2026-09-17", snapshot_rows: 10,
+    outdated: true, expected_day: "2026-09-18", auto_mode: false, build_at: "18:00" };
+  await refreshFactorBar();
+  console.log(JSON.stringify({
+    display: el("factor-rebuild").style.display,
+    text: el("factor-text").textContent,
+    bad: !!el("factor-bar").classList._set.bad,
+    outdated: factorStatus.outdated,
+  }));
+})();
+""")
+        self.assertEqual(out["display"], "inline-block")
+        self.assertIn("2026-09-17", out["text"])
+        self.assertIn("2026-09-18", out["text"])
+        self.assertTrue(out["bad"])
+        self.assertTrue(out["outdated"])
+
+    def test_provisional_snapshot_flagged_on_bar(self):
+        out = self._run("""
+(async () => {
+  isAdmin = true;
+  globalThis.__apiResult = { state: "done", snapshot_day: "2026-09-18", outdated: true,
+    provisional: true, expected_day: "2026-09-18", auto_mode: false, build_at: "18:00" };
+  await refreshFactorBar();
+  console.log(JSON.stringify({ text: el("factor-text").textContent,
+                               display: el("factor-rebuild").style.display }));
+})();
+""")
+        self.assertIn("临时构建", out["text"])
+        self.assertEqual(out["display"], "inline-block")
+
+    def test_rebuild_tip_warns_provisional_by_mode(self):
+        out = self._run("""
+console.log(JSON.stringify({
+  manual: factorRebuildTip({ rebuild_provisional: true, auto_mode: false, build_at: "18:00" }),
+  auto: factorRebuildTip({ rebuild_provisional: true, auto_mode: true, build_at: "18:00" }),
+  plain: factorRebuildTip({ rebuild_provisional: false }),
+}));
+""")
+        self.assertIn("需再重建一次", out["manual"])
+        self.assertIn("自动再覆盖", out["auto"])
+        self.assertNotIn("临时快照", out["plain"])
+
+    def _run_scan(self, extra: str) -> dict:
+        src = SCREENER_HTML.read_text(encoding="utf-8")
+        fns = "\n".join(_extract_fn(src, name)
+                        for name in _FACTOR_FNS + ("runScan", "submitScan"))
+        prelude = """
+async function refreshStatus() { return {}; }
+async function pollStatus() {}
+conditions = [{ metric: "above_ma20" }];
+function statusWith(st) {
+  globalThis.__apiHandler = (path) => {
+    if (path === "/api/screener/run") return { ok: true, from_cache: true, n_results: 2, truncated: false };
+    if (path === "/api/factors/status") {
+      if (st instanceof Error) throw st;
+      return st;
+    }
+    return {};
+  };
+}
+const runPosts = () => apiPosts.filter(c => c.path === "/api/screener/run").length;
+"""
+        proc = subprocess.run(["node", "-e", _PRELUDE + fns + "\n" + prelude + extra],
+                              capture_output=True, check=True, text=True, encoding="utf-8")
+        return json.loads(proc.stdout)
+
+    def test_run_scan_confirms_when_outdated(self):
+        out = self._run_scan("""
+(async () => {
+  statusWith({ state: "done", snapshot_day: "2026-09-17", outdated: true,
+               expected_day: "2026-09-18", build_at: "18:00" });
+  globalThis.__confirm = false;
+  await runScan();
+  const cancelled = runPosts() === 0;
+  const cancelMsg = confirms[0] || "";
+  globalThis.__confirm = true;
+  confirms.length = 0;
+  await runScan();
+  const afterConfirm = runPosts();
+  statusWith({ state: "done", snapshot_day: "2026-09-18", outdated: false });
+  confirms.length = 0;
+  await runScan();
+  console.log(JSON.stringify({ cancelled, cancelMsg, afterConfirm,
+                               total: runPosts(), freshConfirms: confirms.length }));
+})();
+""")
+        self.assertTrue(out["cancelled"])
+        self.assertIn("2026-09-17", out["cancelMsg"])
+        self.assertIn("2026-09-18", out["cancelMsg"])
+        self.assertEqual(out["afterConfirm"], 1)
+        self.assertEqual(out["total"], 2)
+        self.assertEqual(out["freshConfirms"], 0, "数据新鲜时不弹确认")
+
+    def test_run_scan_uses_fresh_status_not_cache(self):
+        """缓存还是「新鲜」, 现拉的状态已过时 → 仍要确认。"""
+        out = self._run_scan("""
+(async () => {
+  factorStatus = { outdated: false };
+  statusWith({ state: "done", snapshot_day: "2026-09-17", outdated: true,
+               expected_day: "2026-09-18" });
+  globalThis.__confirm = false;
+  await runScan();
+  console.log(JSON.stringify({ confirms: confirms.length, posts: runPosts() }));
+})();
+""")
+        self.assertEqual(out, {"confirms": 1, "posts": 0})
+
+    def test_run_scan_confirms_when_status_unavailable(self):
+        out = self._run_scan("""
+(async () => {
+  statusWith(new Error("network"));
+  globalThis.__confirm = false;
+  await runScan();
+  console.log(JSON.stringify({ msg: confirms[0] || "", posts: runPosts() }));
+})();
+""")
+        self.assertIn("无法获取", out["msg"])
+        self.assertEqual(out["posts"], 0)
+
+    def test_run_scan_provisional_message(self):
+        out = self._run_scan("""
+(async () => {
+  statusWith({ state: "done", snapshot_day: "2026-09-18", outdated: true, provisional: true,
+               expected_day: "2026-09-18", build_at: "18:00" });
+  globalThis.__confirm = false;
+  await runScan();
+  console.log(JSON.stringify({ msg: confirms[0] || "" }));
+})();
+""")
+        self.assertIn("临时构建", out["msg"])
 
 
 @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端行为测试")

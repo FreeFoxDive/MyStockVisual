@@ -69,3 +69,25 @@ def factors_rebuild():
         log.warning("手动构建因子库拉起失败: %s", e)
         return _json({"ok": False, "started": False, "reason": "拉起构建失败", "force": force})
     return _json({"ok": True, "started": True, "force": force, "day": day})
+
+
+@api_bp.route("/api/factors/mode", methods=["POST"])
+def factors_mode():
+    """切换因子库自动/手动构建（仅管理员）。调度线程下轮读取，无需重启。"""
+    admin = _require_admin()
+    if admin is None:
+        return _error("未登录", 401)
+    if admin is False:
+        return _error("无权限", 403)
+    body = request.get_json(silent=True) or {}
+    auto = body.get("auto")
+    if not isinstance(auto, bool):
+        return _error("auto 须为布尔值")
+    try:
+        factors.set_auto_mode(auto)
+        data = factors.status()
+    except Exception as e:
+        log.warning("切换因子库构建模式失败: %s", e)
+        return _error("切换失败", 500)
+    data["ok"] = True
+    return _json(data)

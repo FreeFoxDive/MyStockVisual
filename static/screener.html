@@ -159,6 +159,8 @@ let runCache = {};          // 任务详情 (含 results), 按 id 缓存且不�
 let displayId = null;       // 结果区当前展示的任务 id
 let hitFilter = null;       // 命中数筛选 (null = 全部)
 let factorDay = null;       // 因子库数据版本
+let factorStatus = null;    // 最近一次 /api/factors/status (重建确认框用)
+let scanStarting = false;   // 确认框与提交期间防重复点击
 let isAdmin = false;        // 因子库重建仅管理员可触发
 let factorBarTimer = null;  // 构建中 5s 刷新, 平时 60s
 // 现价订阅上限: 结果最多 SCREENER_RESULT_MAX 行, 全量订阅会让本页每 2.5s 发几十个
@@ -489,13 +491,19 @@ function setFactorRebuildVisible(show) {
   btn.style.display = show ? "inline-block" : "none";
   if (!show) btn.disabled = false;
 }
+/** 刷新状态条; 返回本次拿到的状态, 拉取失败返回 null。 */
 async function refreshFactorBar() {
   let delay = 60000;
+  let s = null;
   try {
-    const s = await api("/api/factors/status");
+    s = await api("/api/factors/status");
+    factorStatus = s;
     const bar = document.getElementById("factor-bar");
     const txt = document.getElementById("factor-text");
     bar.classList.remove("bad", "busy");
+    const autoHint = s.auto_mode
+      ? `交易日 ${s.build_at || "18:00"} 自动更新`
+      : "当前为手动模式";
     let needRebuild = false;
     if (s.state === "running") {
       bar.classList.add("busy");
@@ -510,8 +518,8 @@ async function refreshFactorBar() {
     } else if (!s.snapshot_day) {
       bar.classList.add("bad");
       txt.textContent = isAdmin
-        ? "因子库尚未构建 —— 交易日 18:00 自动更新，或点右侧立即构建"
-        : "因子库尚未构建 —— 交易日 18:00 自动更新，或由管理员手动重建";
+        ? `因子库尚未构建 —— ${autoHint}，或点右侧立即构建`
+        : `因子库尚未构建 —— ${autoHint}，或由管理员手动重建`;
       needRebuild = true;
     } else {
       const rows = s.snapshot_rows == null ? "" : ` · ${s.snapshot_rows} 只`;
@@ -521,6 +529,15 @@ async function refreshFactorBar() {
         extra = ` · 今日更新失败：${s.error || ""}`;
         needRebuild = true;
       }
+      if (s.provisional) {
+        bar.classList.add("bad");
+        extra += ` · ${s.build_at || "18:00"} 前临时构建，缺收盘后数据`;
+        needRebuild = true;
+      } else if (s.outdated) {
+        bar.classList.add("bad");
+        extra += ` · 落后于 ${s.expected_day || ""}`;
+        needRebuild = true;
+      }
       txt.textContent = `因子库 ${s.snapshot_day}${rows}${extra}`;
       factorDay = s.snapshot_day;
     }
@@ -528,10 +545,31 @@ async function refreshFactorBar() {
     setFactorRebuildVisible(isAdmin && needRebuild && s.state !== "running");
   } catch (e) { /* 状态条失败不影响扫描 */ }
   scheduleFactorBar(delay);
+  return s;
+}
+/** 选股前的过时提示文案; 不需要确认时返回空串。 */
+function factorStaleMessage(s) {
+  if (!s) return "暂时无法获取因子库状态，数据可能过时，仍要扫描？";
+  if (!s.outdated) return "";
+  if (s.provisional) {
+    return `因子库 ${s.snapshot_day} 是 ${s.build_at || "18:00"} 前临时构建的，`
+      + "缺龙虎榜/质押等收盘后数据，仍要扫描？";
+  }
+  return `因子库为 ${s.snapshot_day || "无"}，应为 ${s.expected_day || "未知"}，数据可能过时，仍要扫描？`;
+}
+/** 强制重建确认文案: 到点前会产出临时快照, 手动模式下还要再建一次。 */
+function factorRebuildTip(s) {
+  let tip = "立即构建因子库？将重新拉取全市场日K（未到构建时刻也会强制开跑）。";
+  if (s && s.rebuild_provisional) {
+    const at = s.build_at || "18:00";
+    tip += `\n\n现在构建的是临时快照，缺龙虎榜/质押等收盘后数据；`
+      + (s.auto_mode ? `${at} 后会自动再覆盖。` : `当前为手动模式，${at} 后需再重建一次。`);
+  }
+  return tip;
 }
 async function rebuildFactorsNow() {
   if (!isAdmin) return;
-  if (!confirm("立即构建因子库？将重新拉取全市场日K（未到 18:00 也会强制开跑）。")) return;
+  if (!confirm(factorRebuildTip(factorStatus))) return;
   const btn = document.getElementById("factor-rebuild");
   if (btn) btn.disabled = true;
   try {
@@ -559,6 +597,18 @@ async function runScan() {
   if (busy) return;
   if (editingIndex != null) { showErr("请先保存或取消修改"); return; }
   if (!conditions.length) { showErr("请先添加条件"); return; }
+  if (scanStarting) return;
+  scanStarting = true;
+  try {
+    // 现拉一次: 定时刷新 60s 一轮, 页面刚打开或刚过收盘时缓存的状态靠不住
+    const stale = factorStaleMessage(await refreshFactorBar());
+    if (stale && !confirm(stale)) return;
+    await submitScan();
+  } finally {
+    scanStarting = false;
+  }
+}
+async function submitScan() {
   showErr("");
   document.getElementById("prog-wrap").style.display = "block";
   try {

@@ -721,6 +721,9 @@ class FactorsRouteTest(ScreenerTestBase):
         self.assertEqual(len(data["last_days"]), 5)
         self.assertEqual(data["last_days"][0]["state"], "done")
         self.assertIn("build_at", data)
+        self.assertFalse(data["auto_mode"])
+        self.assertIn("outdated", data)
+        self.assertIn("expected_day", data)
 
     def test_rebuild_admin_only_and_runs_in_background(self):
         self.assertEqual(self._post("/api/factors/rebuild").status_code, 403)
@@ -787,6 +790,29 @@ class FactorsRouteTest(ScreenerTestBase):
             admin_view = self.admin.get("/api/factors/status").get_json()
         self.assertNotIn("internal.example", user_view["error"])
         self.assertIn("internal.example", admin_view["error"])
+
+    def test_mode_requires_admin_and_persists(self):
+        anon = self.app.test_client()
+        self.assertEqual(
+            anon.post("/api/factors/mode", data=json.dumps({"auto": True}),
+                      content_type="application/json").status_code, 401)
+        self.assertEqual(self._post("/api/factors/mode", {"auto": True}).status_code, 403)
+        bad = self._post("/api/factors/mode", {"auto": "yes"}, client=self.admin)
+        self.assertEqual(bad.status_code, 400)
+        try:
+            with mock.patch.object(factors, "_spawn_build") as spawn:
+                on = self._post("/api/factors/mode", {"auto": True}, client=self.admin)
+                body = on.get_json()
+                self.assertEqual(on.status_code, 200)
+                self.assertTrue(body["ok"])
+                self.assertTrue(body["auto_mode"])
+                self.assertTrue(factors.get_auto_mode())
+                off = self._post("/api/factors/mode", {"auto": False}, client=self.admin)
+                self.assertFalse(off.get_json()["auto_mode"])
+                self.assertFalse(factors.get_auto_mode())
+            spawn.assert_not_called()
+        finally:
+            factors.set_auto_mode(False)
 
 
 class ScreenerWorkerTest(ScreenerTestBase):

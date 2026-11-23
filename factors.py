@@ -7,15 +7,16 @@
 
 存储 (``.cache/``):
 
-- ``factors.db``                     SQLite: ``bars`` / ``meta`` / ``builds`` 三张表
+- ``factors.db``                     SQLite: ``bars`` / ``meta`` / ``builds`` / ``settings``
 - ``factors/snapshot_<day>.pkl.gz``  当日全市场因子表 (扫描直接读它)
 
 指标口径与图表一致: 技术指标一律用 ``indicators.compute_all_indicators``
 (同一套 stock-indicators-cn 实现), 筹码用 ``chips.compute_chips``。
 
-只在交易日跑: 调度线程每 5 分钟巡检, 交易日到点且当日未成功才构建; 失败每 30
-分钟重试, 最多 3 次。开始/完成/异常都会通知管理员 (站内 + 钉钉/ntfy), 进度
-(phase/percent) 落 ``builds`` 表供页面查询。
+调度线程每 5 分钟巡检。``settings.auto_mode`` 缺省为手动 (不自动拉起);
+切到自动后, 交易日到点且当日未成功才构建。失败每 30 分钟重试, 最多 3 次。
+开始/完成/异常都会通知管理员 (站内 + 钉钉/ntfy), 进度 (phase/percent)
+落 ``builds`` 表供页面查询。
 """
 from __future__ import annotations
 
@@ -189,11 +190,17 @@ CREATE TABLE IF NOT EXISTS builds (
     started_at TEXT,
     done_at    TEXT
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT
+);
 """
 
 _build_lock = threading.Lock()
 _build_state = {"day": None, "running": False}
 _ready = False
+_schema_path = None
 _snap_lock = threading.Lock()
 _snap_cache = {"key": None, "df": None, "day": None}
 _thread = None
@@ -214,15 +221,20 @@ def last_closed_trading_day(now=None):
     """最近**已收盘**的交易日 (YYYY-MM-DD): 交易日 15:00 后算今天, 否则往前找。"""
     import market_hours
     now = now or market_hours.now()
-    day = now.date()
     if market_hours.is_trading_day(now) and (now.hour, now.minute) >= (15, 0):
-        return day.isoformat()
+        return now.date().isoformat()
+    return _prev_trading_day(now)
+
+
+def _prev_trading_day(now):
+    """今天之前最近的交易日 (不含今天)。"""
+    import market_hours
     probe = now - timedelta(days=1)
     for _ in range(30):
         if market_hours.is_trading_day(probe):
             return probe.date().isoformat()
         probe -= timedelta(days=1)
-    return day.isoformat()
+    return now.date().isoformat()
 
 
 def due_day(now=None):
@@ -262,16 +274,19 @@ def build_at():
 
 
 def _conn():
-    global _ready
+    global _ready, _schema_path
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=8000")
-    if not _ready:
+    # 测试会换 DB_PATH；只记「曾经建过表」会连到新库却跳过 settings。
+    path = str(DB_PATH)
+    if not _ready or _schema_path != path:
         conn.executescript(_SCHEMA)
         conn.commit()
         _ready = True
+        _schema_path = path
     return conn
 
 
@@ -284,6 +299,48 @@ def init_store():
     finally:
         conn.close()
     SNAP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+_AUTO_MODE_KEY = "auto_mode"
+
+
+def get_auto_mode():
+    """是否到点自动构建。缺省 False（手动），管理页可改。"""
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key=?", (_AUTO_MODE_KEY,)).fetchone()
+    finally:
+        conn.close()
+    return bool(row and row["value"] == "1")
+
+
+def set_auto_mode(on):
+    """持久化自动/手动。调度线程每轮读取，无需重启。"""
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+            "updated_at=excluded.updated_at",
+            (_AUTO_MODE_KEY, "1" if on else "0", _iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return bool(on)
+
+
+def missing_snapshot_message(for_scan=False):
+    """因子库还没有快照时给用户的说明（随手动/自动变化）。"""
+    if get_auto_mode():
+        hhmm = "%02d:%02d" % build_at()
+        if for_scan:
+            return "因子库尚未构建, 交易日 %s 自动更新后即可扫描" % hhmm
+        return "因子库尚未构建 (交易日 %s 自动更新)" % hhmm
+    if for_scan:
+        return "因子库尚未构建, 请管理员手动重建后再扫描"
+    return "因子库尚未构建 (请管理员手动重建)"
 
 
 # ── K 线存取 ──
@@ -1372,6 +1429,45 @@ def available_days():
     return sorted(days, reverse=True)
 
 
+def expected_snapshot_day(now=None, auto=None):
+    """选股提示口径下「应当已有」的快照日。
+
+    手动: 最近已收盘交易日 (交易日 15:00 起算今天), 收盘后就该有人去重建。
+    自动: 到 ``build_at`` 才算今天, 之前等的是调度, 不该每天 15:00~18:00 都提示。
+    """
+    now = now or _now_dt()
+    if auto is None:
+        auto = get_auto_mode()
+    if auto:
+        return due_day(now) or _prev_trading_day(now)
+    return last_closed_trading_day(now)
+
+
+def freshness(now=None, snapshot_day=None, auto=None):
+    """{outdated, expected_day, provisional}: 选股前是否需要二次确认。
+
+    ``provisional``: 最新快照是 ``build_at`` 前强制构建的临时快照, 且已经过了
+    它能代表「当天最新」的时段 (当天到点后, 或已是隔日) —— 缺龙虎榜/质押等列。
+    手动模式下调度不会再覆盖它, 只能靠这里提示。
+    """
+    now = now or _now_dt()
+    if snapshot_day is None:
+        days = available_days()
+        snapshot_day = days[0] if days else None
+    expected = expected_snapshot_day(now, auto)
+    provisional = False
+    if snapshot_day and _is_provisional_row(get_build(snapshot_day)):
+        today = now.date().isoformat()
+        provisional = snapshot_day < today or not before_build_at(now)
+    outdated = (not snapshot_day) or snapshot_day < expected or provisional
+    return {"outdated": bool(outdated), "expected_day": expected,
+            "provisional": provisional}
+
+
+def is_outdated(now=None, snapshot_day=None):
+    return freshness(now, snapshot_day)["outdated"]
+
+
 def snapshot(day=None):
     """(因子表 DataFrame, day); 无快照返回 (None, None)。内存缓存按 mtime 失效。"""
     days = available_days()
@@ -1653,6 +1749,8 @@ def status(last_days=5):
     cur = by_day.get(today) or {}
     running = bool(_build_state["running"])
     snap_day = days[0] if days else None
+    auto = get_auto_mode()
+    fresh = freshness(now, snap_day or "", auto)
     return {
         "state": "running" if running else (cur.get("state") or "idle"),
         "day": today, "phase": cur.get("phase"), "percent": int(cur.get("percent") or 0),
@@ -1665,12 +1763,18 @@ def status(last_days=5):
         "last_days": history,
         "build_at": "%02d:%02d" % build_at(),
         "bars_count": BARS_COUNT,
+        "auto_mode": auto,
+        "outdated": fresh["outdated"],
+        "expected_day": fresh["expected_day"],
+        "provisional": fresh["provisional"],
+        # 现在强制重建会不会产出临时快照 (缺收盘后数据), 供确认框提醒
+        "rebuild_provisional": _should_mark_provisional(last_closed_trading_day(now), now),
     }
 
 
-# ── 调度: 只在交易日 18:00 后构建一次 ──
+# ── 调度: 自动模式下只在交易日到点后构建一次 ──
 def should_build(now=None):
-    """(是否该构建, 原因)。**只在交易日 18:00 后**构建, 无补建。
+    """(是否该构建, 原因)。手动模式不自动拉起; 自动模式**只在交易日到点后**构建, 无补建。
 
     到点后目标日 = 今天; 已成功/已有快照/重试用尽/距上次失败不足 ``RETRY_MIN_SEC``
     都不再跑 (退避对 error 与 running 同样生效)。
@@ -1679,6 +1783,8 @@ def should_build(now=None):
     now = now or _now_dt()
     if not market_hours.is_trading_day(now):
         return False, "non_trading_day"
+    if not get_auto_mode():
+        return False, "manual_mode"
     day = due_day(now)
     if not day:
         return False, "before_build_at"

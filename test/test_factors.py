@@ -297,7 +297,11 @@ class StoreTestCase(StoreTestCaseBase):
 
 
 class ScheduleTest(StoreTestCaseBase):
-    def _should(self, now, trading=True, at=(18, 0), snapshot_day=None, build_row=None):
+    def _should(self, now, trading=True, at=(18, 0), snapshot_day=None, build_row=None,
+                auto=True):
+        # 缺省手动; 这些用例测的是到点门控, 先打开自动。
+        factors.init_store()
+        factors.set_auto_mode(auto)
         if snapshot_day:
             factors._write_snapshot(snapshot_day, pd.DataFrame([{"symbol": "X"}]))
         if build_row:
@@ -308,6 +312,34 @@ class ScheduleTest(StoreTestCaseBase):
              mock.patch("market_hours.is_trading_day", lambda v=None: trading), \
              mock.patch.object(factors, "_now_dt", lambda: now):
             return factors.should_build(now)
+
+    def test_manual_mode_skips_due_build(self):
+        ok, why = self._should(datetime(2026, 9, 18, 18, 5), snapshot_day="2026-09-17",
+                               auto=False)
+        self.assertEqual((ok, why), (False, "manual_mode"))
+        # 非交易日优先于手动模式
+        self.assertEqual(
+            self._should(datetime(2026, 9, 19, 18, 5), trading=False, auto=False),
+            (False, "non_trading_day"))
+
+    def test_loop_does_not_spawn_in_manual_mode(self):
+        factors.init_store()
+        factors.set_auto_mode(False)
+        sleeps = {"n": 0}
+
+        def fake_sleep(_sec):
+            sleeps["n"] += 1
+            if sleeps["n"] >= 1:
+                raise SystemExit
+
+        now = datetime(2026, 9, 18, 18, 5)
+        with mock.patch.object(factors, "_now_dt", lambda: now), \
+             mock.patch("market_hours.is_trading_day", lambda v=None: True), \
+             mock.patch.object(factors, "_spawn_build") as spawn, \
+             mock.patch("time.sleep", fake_sleep):
+            with self.assertRaises(SystemExit):
+                factors._loop()
+        spawn.assert_not_called()
 
     def test_non_trading_day_never_builds(self):
         # 周六 10:00, 快照已过期也不构建
@@ -525,8 +557,70 @@ class StatusTest(StoreTestCaseBase):
         self.assertEqual(st["last_days"][0]["day"], "2026-09-18")
         self.assertEqual(st["last_days"][0]["state"], "done")
         self.assertIn("build_at", st)
+        self.assertFalse(st["auto_mode"])
+        self.assertEqual(st["expected_day"], "2026-09-18")
+        self.assertFalse(st["outdated"])
         for row in st["last_days"]:
             self.assertIn("state", row)
+
+    def test_auto_mode_defaults_manual_and_persists(self):
+        factors.init_store()
+        self.assertFalse(factors.get_auto_mode())
+        self.assertTrue(factors.set_auto_mode(True))
+        self.assertTrue(factors.get_auto_mode())
+        factors.set_auto_mode(False)
+        self.assertFalse(factors.get_auto_mode())
+
+    def _status_at(self, now):
+        with mock.patch.object(factors, "_now_dt", lambda: now), \
+             mock.patch.object(factors, "build_at", lambda: (18, 0)), \
+             mock.patch("market_hours.is_trading_day", lambda v=None: True):
+            return factors.status()
+
+    def test_manual_outdated_from_market_close(self):
+        factors.init_store()
+        factors._write_snapshot("2026-09-17", pd.DataFrame([{"symbol": "X", "close": 1.0}]))
+        # 15:00 前: 期望日是上一交易日, 快照对齐则不算过时
+        morning = self._status_at(datetime(2026, 9, 18, 10, 0))
+        self.assertEqual(morning["expected_day"], "2026-09-17")
+        self.assertFalse(morning["outdated"])
+        # 手动模式收盘后就该重建: 昨日快照过时
+        afternoon = self._status_at(datetime(2026, 9, 18, 16, 0))
+        self.assertEqual(afternoon["expected_day"], "2026-09-18")
+        self.assertTrue(afternoon["outdated"])
+        self.assertTrue(afternoon["rebuild_provisional"], "16:00 强制构建会是临时快照")
+        evening = self._status_at(datetime(2026, 9, 18, 19, 0))
+        self.assertFalse(evening["rebuild_provisional"])
+        with mock.patch("market_hours.is_trading_day", lambda v=None: True):
+            self.assertTrue(factors.is_outdated(datetime(2026, 9, 18, 10, 0), ""))
+
+    def test_auto_mode_not_outdated_until_build_at(self):
+        """自动模式 15:00~18:00 等的是调度, 不能每天都提示过时。"""
+        factors.init_store()
+        factors.set_auto_mode(True)
+        factors._write_snapshot("2026-09-17", pd.DataFrame([{"symbol": "X", "close": 1.0}]))
+        for hm in ((15, 5), (17, 59)):
+            st = self._status_at(datetime(2026, 9, 18, *hm))
+            self.assertEqual(st["expected_day"], "2026-09-17", hm)
+            self.assertFalse(st["outdated"], hm)
+        late = self._status_at(datetime(2026, 9, 18, 18, 30))
+        self.assertEqual(late["expected_day"], "2026-09-18")
+        self.assertTrue(late["outdated"], "到点后仍没有当天快照 (构建失败/未跑) 要提示")
+
+    def test_provisional_snapshot_outdated_after_build_at(self):
+        """18:00 前强制出的临时快照: 当天到点前算新鲜, 到点后/隔日算过时 (缺收盘后数据)。"""
+        factors.init_store()
+        factors._write_snapshot("2026-09-18", pd.DataFrame([{"symbol": "X", "close": 1.0}]))
+        factors._ensure_build_row("2026-09-18")
+        factors._update_build("2026-09-18", state="done", sources='{"_provisional": true}')
+        before = self._status_at(datetime(2026, 9, 18, 16, 30))
+        self.assertFalse(before["outdated"])
+        self.assertFalse(before["provisional"])
+        after = self._status_at(datetime(2026, 9, 18, 18, 30))
+        self.assertTrue(after["outdated"])
+        self.assertTrue(after["provisional"])
+        next_morning = self._status_at(datetime(2026, 9, 21, 10, 0))
+        self.assertTrue(next_morning["provisional"], "隔日仍是缺列的临时快照")
 
 
 class ExternalMetaTest(unittest.TestCase):
@@ -725,6 +819,7 @@ class BuildTest(StoreTestCaseBase):
         row = factors.get_build("2026-09-18")
         self.assertIn("_provisional", row["sources"])
         evening = datetime(2026, 9, 18, 19, 0)
+        factors.set_auto_mode(True)
         with mock.patch("market_hours.is_trading_day", lambda v=None: True), \
              mock.patch.object(factors, "build_at", lambda: (18, 0)), \
              mock.patch.object(factors, "_now_dt", lambda: evening):

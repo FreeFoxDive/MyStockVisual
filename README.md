@@ -64,8 +64,8 @@ venv/Scripts/python.exe -u visual/server.py
 | 搜索增强 | 覆盖 A股/ETF/指数/港股/美股，结果带类型徽标（指数/ETF/港/美）；排序 股票(含港/美) > ETF > 指数，下拉最多 50 条。查询先按 NFKC + 交易所标记（后缀/前缀）归一成「完整 symbol / 裸代码 / 原串」多个比对键再取最高分，避免完整代码被自己的打分过滤掉 |
 | 价格预警 | 自定义条件（现价/涨跌幅 ≥/≤ 数值，AND 组合），监控循环盘中评估，30 分钟冷却，钉钉/ntfy 推送；工具栏 🔔 管理。`change_pct` 全线统一为百分数（AF 官方小数在 `feed._row_to_quote` 出口 ×100，见 docs/known-issues.md §5） |
 | 趋势线监控 | 选中趋势线/射线/水平线 → 画线菜单「🔔监控」→ 强制命名 + 跌破幅度%（默认 个股 2 / ETF·指数 3）→ 现价跌破线值×(1−pct%) 时盘中推送钉钉/ntfy，每条线每日一次；监控配置随画线保存（含复权口径），拖动即跟随，预警弹窗可总览；日/周/月K 支持。监控中心「去图表」跳回该监控线所在周期（`/?symbol=…&period=1w`） |
-| 条件选股 | `/screener.html`：**40+ 指标**（技术指标 / 量价 / 基本面估值 / 资金与筹码四组，见 [docs/screener.md](docs/screener.md)）任意组合。**AND / OR 两种模式**：OR 时结果带「命中 N 项」并可按满足项数筛选，每行展开逐条件 ✅/❌ 与实测值。**扫的是因子库**（交易日 18:00 全市场构建，见 [docs/factors.md](docs/factors.md)）→ 秒级、不再逐只拉K；**同日同条件不重扫**（cache_key 命中直接复用结果）。任务化 + FIFO 队列：按用户隔离，看不到也停不了别人的（管理员在 `/admin.html` 有队列视图与因子库面板）。条件框扫描中锁定、支持 ✎ 修改；历史最多 3 次（含 0 命中与「已取消（保留部分结果）」）；开始/阶段（默认 50%）/完成各推一次钉钉/ntfy + 站内告警 |
-| 因子库 | 交易日 18:00 自动构建全市场日K级因子（技术/量价/筹码本地计算 + 基本面/资金/龙虎榜/质押/ETF溢价外部快照），开始/完成/异常通知管理员，页面可见进度与**最近 5 个交易日**完成情况；失败 30 分钟退避重试最多 3 次，管理员可手动/强制重建（开不了跑会如实回报原因）。存储 `.cache/factors.db` + `snapshot_<交易日>.pkl.gz`，详见 [docs/factors.md](docs/factors.md) |
+| 条件选股 | `/screener.html`：**40+ 指标**（技术指标 / 量价 / 基本面估值 / 资金与筹码四组，见 [docs/screener.md](docs/screener.md)）任意组合。**AND / OR 两种模式**：OR 时结果带「命中 N 项」并可按满足项数筛选，每行展开逐条件 ✅/❌ 与实测值。**扫的是因子库**（默认手动构建，管理页可改回交易日 18:00 自动；见 [docs/factors.md](docs/factors.md)）→ 秒级、不再逐只拉K；**同日同条件不重扫**（cache_key 命中直接复用结果）。任务化 + FIFO 队列：按用户隔离，看不到也停不了别人的（管理员在 `/admin.html` 有队列视图与因子库面板）。条件框扫描中锁定、支持 ✎ 修改；历史最多 3 次（含 0 命中与「已取消（保留部分结果）」）；开始/阶段（默认 50%）/完成各推一次钉钉/ntfy + 站内告警 |
+| 因子库 | 全市场日K级因子（技术/量价/筹码本地计算 + 基本面/资金/龙虎榜/质押/ETF溢价外部快照）。**默认手动构建**，管理页可切换为交易日 18:00 自动；开始/完成/异常通知管理员，页面可见进度与**最近 5 个交易日**完成情况。快照过时（手动：落后于最近已收盘日；自动：到构建时刻后仍没有当天快照；或是缺收盘后数据的临时快照）时选股前二次确认。失败 30 分钟退避重试最多 3 次，管理员可手动/强制重建（开不了跑会如实回报原因）。存储 `.cache/factors.db` + `snapshot_<交易日>.pkl.gz`，详见 [docs/factors.md](docs/factors.md) |
 | 市场数据抽屉 | 主面板 📊：个股资金流向（东财 push2his→push2delay 自动回退）、龙虎榜、分红送配、公告（akshare/东财源 + 缓存）；麦蕊源：交易所公告（日期倒序）、主力净流入（当前股单票键值视图 + 全市场排名）、股东户数变化（上方近三年折线图，横轴刻度=每期公布的截至日期，纵轴=股东户数；下方明细表常显并列出全部记录，抽屉按图表/表格较宽者自适应）、十大股东、十大流通股东、解禁限售（含解禁市值/占流通股%） |
 
 ## 文件结构
@@ -84,7 +84,7 @@ visual/
 │   ├── models.py      # /api/models*
 │   ├── admin.py       # /api/admin/users*、/api/admin/screener/runs (选股队列视图)
 │   ├── screener.py    # /api/screener/* 条件选股任务 (队列 worker + 因子库扫描 + 通知)
-│   ├── factors.py     # /api/factors/status|rebuild (因子库状态与手动重建)
+│   ├── factors.py     # /api/factors/status|rebuild|mode (因子库状态、重建、手动/自动)
 │   ├── me.py          # /api/me/search-history (GET/PUT/DELETE)、/api/me/panel-config、/api/monitor/status
 │   └── drawings.py    # /api/drawings 画线同步 (用户+代码+周期)
 ├── security.py        # CSP / 限流 / 登录锁定 / 会话 Cookie / CSRF
@@ -95,7 +95,7 @@ visual/
 ├── chips.py           # 东财筹码分布 (CYQ 算法移植 + 取数/缓存)
 ├── trades.py          # 交易记录后端 (DB / 鉴权 / CRUD / 统计 / 选股任务表)
 ├── monitor.py         # 持仓监控循环 (快照序列 + 告警 + 风控价缺失提醒 + 钉钉/ntfy)
-├── factors.py         # 每日因子库 (交易日 18:00 全市场构建; 调度/存储/外部快照)
+├── factors.py         # 每日因子库 (默认手动; 可切交易日 18:00 自动; 调度/存储/外部快照)
 ├── screener_metrics.py# 选股条件注册表 (指标目录 + 判定, 前后端共用)
 ├── af_limits.py       # AlphaFeed Pro 限额表与取数预算折算
 ├── feed.py            # AlphaFeed REST 行情接入 (令牌桶)
@@ -177,8 +177,9 @@ visual/
 | `POST /api/admin/users/{id}/reset-password` | 重置密码 `{password}`（仅管理员） |
 | `POST /api/admin/users/{id}/monitor` | `{enabled}` 授权持仓监控（仅管理员） |
 | `GET /api/admin/screener/runs` | 选股队列 + 最近完成（全用户，仅管理员；`limit` 默认 20） |
-| `GET /api/factors/status` | 因子库状态：当前构建（state/phase/percent/attempts/error）+ 最近 5 个交易日完成情况 + 最新快照日 |
+| `GET /api/factors/status` | 因子库状态：当前构建 + 最近 5 个交易日 + 最新快照日 + `auto_mode` / `outdated` / `expected_day` |
 | `POST /api/factors/rebuild` | 手动构建因子库 `{force, day}`（仅管理员，子进程执行，进度看 status） |
+| `POST /api/factors/mode` | `{auto: bool}` 切换自动/手动构建（仅管理员；缺省手动） |
 | `GET /api/screener/metrics` | 指标目录（四组 + 每种类型的取值方式；文本类带可选值） |
 | `POST /api/screener/run` | 提交选股任务 `{conditions,mode,price_mode}`；同日同条件命中缓存时直接返回 `from_cache`；本人已有排队/运行中返回 409 |
 | `GET /api/screener/status` | 本人当前任务（`active`）+ 最近 3 次历史（`recent`）+ 当前展示的 `current`（默认**不含** `results`，用 `?full=1` 或 `/runs/{id}` 取详情）+ 因子库版本 |
