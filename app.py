@@ -344,6 +344,13 @@ def start_background_jobs():
         log.warning(f"因子库调度启动失败: {e}")
 
     try:
+        import build_daily_chart_cache as _chart_cache
+        _chart_cache.start_scheduler()
+        log.info("图表日K预热调度已启动")
+    except Exception as e:
+        log.warning(f"图表日K预热调度启动失败: {e}")
+
+    try:
         import watchdog as _wd
         _wd.start_background(market.get_af, fallback_quotes=market.fetch_quotes)
         log.info("看门狗线程已启动")

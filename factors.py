@@ -1317,7 +1317,8 @@ def _build_inner(day):
         except Exception as e:
             log.warning("股本刷新失败: %s", e)
 
-    # 按批写 bars + 计算因子, 一批算完就丢掉 DataFrame
+    # 按批写 bars + 计算因子, 一批算完就丢掉 DataFrame。
+    # 图表日K仓已覆盖目标日时直接切片，避免和 16:05 全量再打一次全市场日K。
     tags = {"bars": 0, "factors": 0, "meta": 0}
     rows = []
     missing = 0
@@ -1325,9 +1326,29 @@ def _build_inner(day):
     bar_stats = {"batches": 0, "failed_batches": 0}
     n_symbols = max(1, len(symbols))
     conn = _conn()
+    bar_source = None
+    from_chart = False
     try:
-        for batch, bar_stats in fetch_bars(symbols, progress_cb=on_bars):
+        import daily_chart_store as _chart_store
+        bar_source = _chart_store.factor_batches(
+            symbols, BARS_COUNT, day, progress_cb=on_bars, batch_size=BATCH_SIZE)
+        if bar_source is not None:
+            from_chart = True
+            log.info("因子库复用图表日K仓 (as_of>=%s, tail=%d)", day, BARS_COUNT)
+    except Exception as e:
+        log.warning("图表日K仓不可用, 因子库回退拉K: %s", e)
+        bar_source = None
+    if bar_source is None:
+        bar_source = fetch_bars(symbols, progress_cb=on_bars)
+    seen = set()
+
+    def consume(source):
+        nonlocal got, missing, bar_stats
+        last = None
+        for batch, stats in source:
+            last = stats
             for sym, df in batch.items():
+                seen.add(sym)
                 got += 1
                 view = _bars_as_of(df, day)
                 try:
@@ -1369,6 +1390,21 @@ def _build_inner(day):
             # 即使本批缺数据或末尾标的被跳过，也要在下一次取数进度回调前释放写锁。
             conn.commit()
             del batch
+        if last:
+            bar_stats = {
+                "batches": int(bar_stats.get("batches") or 0) + int(last.get("batches") or 0),
+                "failed_batches": (int(bar_stats.get("failed_batches") or 0)
+                                   + int(last.get("failed_batches") or 0)),
+            }
+
+    try:
+        consume(bar_source)
+        if from_chart:
+            # 仓 as_of 够，但全量里失败的批次不会在仓里。缺的只补拉这几只，不重拉全市场。
+            absent = [sym for sym in symbols if sym not in seen]
+            if absent:
+                log.info("图表日K仓缺 %d 只, 回退补拉", len(absent))
+                consume(fetch_bars(absent, progress_cb=on_bars))
         conn.commit()
     finally:
         conn.close()

@@ -6,9 +6,9 @@
 1. `TypeError: Cannot read properties of undefined (reading 'queryComponents')`
    `echarts.init()` 之后、首次 `setOption` 之前 `chart._model` 是 undefined, 而 ECharts 内部
    `convertToPixel` 只挡了 `_disposed` 没挡 `_model` → `queryComponents` 抛错。可达路径:
-   * 日/周/月 K 冷启动: `fetchData` 先写 `STATE.klineData = data` 再 `await loadTrades(...)`,
-     这个窗口里任何一个行情快照 tick 都会走 flush:'sync' 的 watcher → `updateLivePriceLine`
-     → `tagColumnCtx` → `priceYMapper` → `convertToPixel` 抛错 (用户贴的栈就是这个);
+   * 日/周/月 K 冷启动: `fetchData` 先写 `STATE.klineData = data`, 再 `renderFetchedKline`
+     (其间若插了别的 await, 行情快照 tick 会走 flush:'sync' 的 watcher → `updateLivePriceLine`
+     → `tagColumnCtx` → `priceYMapper` → `convertToPixel` 抛错; 用户贴的栈就是这个);
    * 分时冷启动: `fetchIntraday` 写 `STATE.intradayData` 后先 `applyQuoteData(quote)` 同步触发
      同一个 watcher, `renderIntraday` 还没跑 → 抛错被外层 catch 吞掉, 分时图永久白屏。
 

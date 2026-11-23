@@ -1373,6 +1373,81 @@ def _hfq_daily_ttl(symbol, count, adj, chain_tag, now, live):
     return KLINE_DISK_TTL_OFF_SEC
 
 
+def _serve_chart_store(symbol, period, count, adj, timing, quote_fresh, append_today,
+                       quote_wait_budget):
+    """前复权日/周/月优先读 visual 自管日K仓。未命中返回 None，调用方走原缓存/源链。
+
+    当日 bar 仍由快照拼。周/月由日K重采样，采样前先并入当日 bar。
+    仓里的历史在全量构建换指针前保持旧 mmap，这里只读已发布的世代。
+    仓落后于上一交易日（构建失败/停机）时不用，否则中间几天快照补不回来。
+    日K若仓容量截断且凑不够 count，回退源链。周/月仓内大约只有
+    200 周 / 50 月，前端常要 300 根——仍用仓内重采样结果（偏短但本地毫秒级），
+    否则几乎永远 miss，白做一遍再去 AlphaFeed，体感和没预热一样。
+    """
+    if adj != kline_source.ADJUST_FORWARD or period not in ("1d", "1w", "1M"):
+        return None
+    if count < 5:
+        return None
+    try:
+        import daily_chart_store as chart_store
+        daily = chart_store.daily_frame(symbol, min_as_of=chart_store.required_as_of())
+    except Exception as exc:
+        log.warning("图表日K仓读取失败 %s: %s", symbol, _sanitize_error(exc))
+        return None
+    if daily is None:
+        return None
+    capacity = int(daily.attrs.get("chart_capacity") or 0)
+    truncated = capacity > 0 and len(daily) >= capacity
+    if period == "1d" and truncated and len(daily) < count:
+        return None
+    try:
+        anchor = chart_store.anchor_close(daily, market_hours.now().date())
+    except Exception:
+        anchor = None
+
+    def _with_today(frame):
+        if not append_today:
+            return frame
+        # 收盘后全量仓已含当日终值 bar：再去抢快照只会让首屏多等一次网络，
+        # 体感跟没预热差不多。盘中/午休仍要快照刷新未完成的当日 bar。
+        if (market_hours.session_phase() == "closed"
+                and _last_bar_date(frame) == market_hours.now().date()):
+            return frame
+        frame = _strip_today_bar_df(frame)
+        with perf.Span(timing, "append_bar_ms"):
+            frame = _maybe_append_today_bar(symbol, frame, timing=timing,
+                                            fresh=quote_fresh,
+                                            wait_for_budget=quote_wait_budget)
+        # 只有当日 bar 真的由快照拼上时，快照的昨收才是对齐的上一交易日收盘。
+        if frame is not None and frame.attrs.get("today_quote_meta"):
+            try:
+                chart_store.observe_alignment(symbol, anchor)
+            except Exception:
+                pass
+        return frame
+
+    if period == "1d":
+        out = _with_today(daily.iloc[-count:].copy() if len(daily) > count else daily)
+        if out is None or len(out) < 5:
+            return None
+    else:
+        base = _with_today(daily)
+        if base is None or len(base) < 5:
+            return None
+        try:
+            bars = chart_store.resample_bars(base, period)
+        except Exception as exc:
+            log.warning("图表日K重采样失败 %s %s: %s", symbol, period, _sanitize_error(exc))
+            return None
+        if bars is None or len(bars) < 5:
+            return None
+        out = bars.tail(count)
+    if timing is not None:
+        timing["disk"] = "chart"
+        timing["source"] = "daily_chart"
+    return out, _lookup_name(symbol), "daily_chart"
+
+
 def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
                    quote_fresh=True, append_today=True, quote_wait_budget=False):
     """fetch_kline 完整版, 额外返回实际服务的数据源名 (观测/透传 meta 用)。
@@ -1387,6 +1462,10 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
     append_today: False 时不拼当日快照 (成交校验只要历史 OHLC, 避免每条腿抢快照锁)。
     """
     adj = kline_source.normalize_adjust(adjust)
+    chart_hit = _serve_chart_store(
+        symbol, period, count, adj, timing, quote_fresh, append_today, quote_wait_budget)
+    if chart_hit is not None:
+        return chart_hit
     category = _kline_category(symbol, period)
     ct = kline_source.chain_tag(category)  # 缓存按数据源链隔离, 改链即失效
     # 未复权快照不能拼入后复权序列；旧版本写过混合价格的缓存也不能继续读。
@@ -1551,6 +1630,17 @@ _instrument_meta_lock = threading.Lock()
 INSTRUMENT_META_TTL = 24 * 3600  # 股本/类型/涨跌停变化缓慢, 24h 足够
 
 
+def peek_instrument_meta(symbol):
+    """只读内存里的标的元数据, 不发网络。过期或没有返回 None。"""
+    symbol = normalize_symbol(symbol)
+    now = time.time()
+    with _instrument_meta_lock:
+        ent = _instrument_meta_cache.get(symbol)
+        if ent and now - ent[0] < INSTRUMENT_META_TTL:
+            return ent[1]
+    return None
+
+
 def _fetch_instrument_meta(symbol):
     """AlphaFeed 标的元数据 (float_shares/total_shares/type/limit_up/limit_down), 24h 内存缓存。
 
@@ -1560,11 +1650,10 @@ def _fetch_instrument_meta(symbol):
     """
     if not AF_API_KEY:
         return None
-    now = time.time()
-    with _instrument_meta_lock:
-        ent = _instrument_meta_cache.get(symbol)
-        if ent and now - ent[0] < INSTRUMENT_META_TTL:
-            return ent[1]
+    symbol = normalize_symbol(symbol)
+    cached = peek_instrument_meta(symbol)
+    if cached is not None:
+        return cached
     try:
         inst = get_af().instruments.get(symbol)
     except Exception as e:
@@ -1583,7 +1672,7 @@ def _fetch_instrument_meta(symbol):
         "limit_down": _safe_float(ext.get("limit_down")),
     }
     with _instrument_meta_lock:
-        _instrument_meta_cache[symbol] = (now, meta)
+        _instrument_meta_cache[symbol] = (time.time(), meta)
     return meta
 
 
@@ -3856,6 +3945,9 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
             if meta:
                 extra["limit_up"] = meta.get("limit_up")
                 extra["limit_down"] = meta.get("limit_down")
+                # /api/kline 不再同步等 instruments，股本由这里带回侧栏
+                extra["float_shares"] = meta.get("float_shares")
+                extra["total_shares"] = meta.get("total_shares")
             if valuation:
                 extra.update(valuation)
             if ind:

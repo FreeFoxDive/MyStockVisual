@@ -207,7 +207,8 @@ class TestFetchAfChipBars(unittest.TestCase):
     def test_lots_unit_hsl(self):
         import market as market_mod
         df = _af_df(n=30, vol=1_000_000.0, close=10.0, amount_factor=100.0)
-        with mock.patch.object(market_mod, "_fetch_af_kline", return_value=df), \
+        with mock.patch.object(market_mod, "fetch_kline_ex",
+                              return_value=(df, "浦发", "daily_chart")), \
              mock.patch.object(market_mod, "_fetch_instrument_meta",
                               return_value={"float_shares": 1.0e9}):
             bars = chips.fetch_af_chip_bars("600000.SH")
@@ -218,7 +219,8 @@ class TestFetchAfChipBars(unittest.TestCase):
     def test_shares_unit_hsl(self):
         import market as market_mod
         df = _af_df(n=10, vol=1_000_000.0, close=10.0, amount_factor=1.0)
-        with mock.patch.object(market_mod, "_fetch_af_kline", return_value=df), \
+        with mock.patch.object(market_mod, "fetch_kline_ex",
+                              return_value=(df, "浦发", "daily_chart")), \
              mock.patch.object(market_mod, "_fetch_instrument_meta",
                               return_value={"float_shares": 1.0e9}):
             bars = chips.fetch_af_chip_bars("600000.SH")
@@ -228,7 +230,8 @@ class TestFetchAfChipBars(unittest.TestCase):
     def test_no_float_shares_returns_none(self):
         import market as market_mod
         df = _af_df()
-        with mock.patch.object(market_mod, "_fetch_af_kline", return_value=df), \
+        with mock.patch.object(market_mod, "fetch_kline_ex",
+                              return_value=(df, "浦发", "daily_chart")), \
              mock.patch.object(market_mod, "_fetch_instrument_meta", return_value=None):
             self.assertIsNone(chips.fetch_af_chip_bars("600000.SH"))
 

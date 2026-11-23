@@ -310,6 +310,11 @@ class TestDailyDiskTtl(unittest.TestCase):
 
     SYM = "000975.SZ"
 
+    def setUp(self):
+        chart_p = mock.patch("daily_chart_store.daily_frame", return_value=None)
+        chart_p.start()
+        self.addCleanup(chart_p.stop)
+
     @staticmethod
     def _payload(dates, name="山金国际", source="alphafeed"):
         df = _df_with_dates(dates)

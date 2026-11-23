@@ -26,6 +26,17 @@ if str(_VISUAL_DIR) not in sys.path:
 import factors  # noqa: E402
 import screener_metrics as sm  # noqa: E402
 
+_chart_env = mock.patch.dict("os.environ", {"DAILY_CHART_DISABLE": "1"})
+
+
+def setUpModule():
+    # 本机若已有 visual/.cache/daily_chart 全量仓, 构建会复用它而绕过这里 mock 的 fetch_bars
+    _chart_env.start()
+
+
+def tearDownModule():
+    _chart_env.stop()
+
 
 def _df(closes, volumes=None, freq="D", start="2026-01-01", amount=None, end=None):
     n = len(closes)
@@ -701,6 +712,38 @@ class BuildTest(StoreTestCaseBase):
         self.assertIsNotNone(v)
         self.assertGreater(v, 0)
         self.assertEqual(len(factors.load_bars("600000.SH")), 120)
+
+    def test_chart_holes_are_fetched(self):
+        """仓覆盖目标日但缺票时，只补拉缺的，不把它们当成停牌丢掉。"""
+        factors.init_store()
+        frames = self._frames()
+        fetched = []
+
+        def chart_batches(symbols, count, day, progress_cb=None, batch_size=100):
+            def _iter():
+                yield ({"600000.SH": frames["600000.SH"]},
+                       {"batches": 1, "done": 1, "failed_batches": 0, "source": "daily_chart"})
+            return _iter()
+
+        def fetch(symbols, count=factors.BARS_COUNT, progress_cb=None):
+            fetched.append(list(symbols))
+
+            def _iter():
+                yield ({sym: frames[sym] for sym in symbols if sym in frames},
+                       {"batches": 1, "done": 1, "failed_batches": 0})
+            return _iter()
+
+        with mock.patch("daily_chart_store.factor_batches", chart_batches), \
+             mock.patch.object(factors, "universe",
+                               lambda: [("600000.SH", "浦发银行"), ("000001.SZ", "平安银行")]), \
+             mock.patch.object(factors, "fetch_bars", fetch), \
+             mock.patch.object(factors, "_fetch_shares", lambda syms: {}), \
+             mock.patch.object(factors, "external_meta", lambda day, syms: ({}, {})), \
+             mock.patch.object(factors, "_notify_state", lambda *a, **k: None):
+            out = factors.build(day="2026-09-18", notify=False)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(fetched, [["000001.SZ"]])
+        self.assertEqual(out["n_rows"], 2)
 
     def test_build_skips_when_already_done(self):
         factors.init_store()

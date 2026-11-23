@@ -707,6 +707,10 @@ class TestFetchKlineEx(KlineSourceTestBase):
         ct_p = mock.patch.object(kline_source, "chain_tag", return_value="t1")
         ct_p.start()
         self.addCleanup(ct_p.stop)
+        # 本机若已有图表日K仓，不能让它抢走这些「应走磁盘/源链」的用例。
+        chart_p = mock.patch("daily_chart_store.daily_frame", return_value=None)
+        chart_p.start()
+        self.addCleanup(chart_p.stop)
 
     def test_returns_source_and_records_cache(self):
         with mock.patch.object(market, "_fetch_mr_kline", return_value=_norm_df()):

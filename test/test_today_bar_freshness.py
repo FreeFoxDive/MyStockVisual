@@ -101,6 +101,7 @@ class _Harness(unittest.TestCase):
             mock.patch.object(market_mod.kline_source, "fetch_kline_df",
                               return_value=(_df_ending_yesterday(), "alphafeed")),
             mock.patch("market_hours.is_trading_day", return_value=True),
+            mock.patch("daily_chart_store.daily_frame", return_value=None),
             _phase("trading"),
         ):
             p.start()

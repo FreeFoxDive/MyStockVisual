@@ -2713,16 +2713,21 @@ async function fetchData(opts) {
         data.is_index ? 'index' : (data.is_etf ? 'etf' : deriveSymbolType(data.symbol)));
     }
     updateInfo(data);
+    // 先出主图再拉持仓/筹码: 否则 await trades 或筹码打 AlphaFeed 会把「加载中」拖到 2s+
+    renderFetchedKline(data);
+    if (!silent && STATE._fetchTs === fetchTs) {
+      STATE._foregroundLoading = false;
+      document.getElementById('btn-refresh')?.classList.remove('loading');
+      if (STATE.chart) STATE.chart.hideLoading();
+    }
     if (!silent) {
       await loadTrades(data.symbol);
       if (STATE._fetchTs !== fetchTs) return;
-      // 缓存命中时上面已渲染过 (renderFetchedKline 见同 key 直接返回), 这里拿到交易记录后
-      // 需要补一次重绘, 否则买卖点与持仓风控线要等下一次刷新才出现
+      // 拿到交易记录后补一次重绘, 否则买卖点与持仓风控线要等下一次刷新才出现
       if (STATE.klineData && klineRenderKey(STATE.klineData) === STATE._fetchedKlineRenderKey) updateChart(false);
       fetchChips(data.symbol);
     }
     if (retainPanels && isChipPeriod(period)) fetchChips(data.symbol);
-    renderFetchedKline(data);
     fetchPremium(data.symbol, data.period, count, fetchTs, !silent);  // 慢派生字段异步补齐
   } catch (e) {
     if (e && e.name === 'AbortError') return;  // 已被新的切换取消, 不是错误
@@ -3875,7 +3880,7 @@ function updateLiveStockInfo(q, symbol = STATE.symbol) {
   // ETF 快照源有时不返回换手率；用实时成交量和 K 线返回的份额即时回算，
   // 让基本信息面板不必等待下一次 /api/stock-info（换手率只作近似展示）。
   if (q.turnover_rate == null && STATE.klineData && STATE.klineData.is_etf) {
-    const fs = Number(STATE.klineData.float_shares);
+    const fs = Number(STATE.klineData.float_shares ?? d.float_shares);
     const vol = Number(q.volume);
     // 单位自证: 只在 amount 可用时由 amount/(vol*px) 推断 volume 是股还是手;
     // amount 缺失时不猜 (猜错差 100 倍), 宁可不显示

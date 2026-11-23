@@ -309,7 +309,8 @@ class StockInfoTest(unittest.TestCase):
         """
         df = _daily_df([10] * 8, [100] * 8)
         mr = mock.Mock()
-        meta = {"type": "etf", "limit_up": 5.007, "limit_down": 4.097}
+        meta = {"type": "etf", "limit_up": 5.007, "limit_down": 4.097,
+                "float_shares": 3.2e10, "total_shares": 3.2e10}
         with mock.patch.object(market, "_is_etf", return_value=True), \
              mock.patch.object(market, "get_mr", return_value=mr), \
              mock.patch.object(market, "_fetch_instrument_meta", return_value=meta), \
@@ -318,6 +319,8 @@ class StockInfoTest(unittest.TestCase):
             info = market.fetch_stock_info("510300.SH")
         self.assertEqual(info["limit_up"], 5.007)
         self.assertEqual(info["limit_down"], 4.097)
+        # /api/kline 不再同步等 instruments, 份额改由 stock-info 带回
+        self.assertEqual(info["float_shares"], 3.2e10)
         self.assertFalse(info["limit_estimated"], "AlphaFeed 真实值不应标记为估算")
         # 行业/PE/PB 仍只对个股有意义
         self.assertIsNone(info["industry"])

@@ -20,7 +20,7 @@
 ETF 的换手率分母用份额回算 (份额随申赎变动, 属近似口径)。
 
 数据源由环境变量 CHIPS_SOURCE 控制:
-    af   (默认) AlphaFeed 前复权日K + 当前流通股本回算换手率 (近似, 无需东财);
+    af   (默认) 前复权日K (优先图表预热仓, 否则 AlphaFeed) + 当前流通股本回算换手率;
     em   东财日K (含真实换手率, 精确), 走 http→https→备用主机 回退重试;
     auto 先东财, 失败再 AlphaFeed。
 东财在部分网络/代理下不可达 (push2his 的 https 被阻断、直连被墙), 故默认用 af。
@@ -167,16 +167,22 @@ def _volume_to_shares_mult(df):
 
 
 def fetch_af_chip_bars(symbol, count=WINDOW):
-    """用 AlphaFeed 前复权日K + 当前流通股本回算换手率, 返回 bar list 或 None。
+    """用前复权日K + 当前流通股本回算换手率, 返回 bar list 或 None。
 
     换手率 = 成交量(股) / 流通股本 × 100 (%)。近似点: 用当前流通股本回算,
     忽略历史股本变化; 价格前复权, 与图表价格轴对齐。
+
+    日K走 ``fetch_kline_ex``: 有图表预热仓时本地切 210/600 根, 不再每次切股
+    打 AlphaFeed; 仓未命中才回退源链。
     """
     import market  # 惰性导入, 避免与 api/ 包的导入顺序纠缠
     try:
-        df = market._fetch_af_kline(symbol, "1d", count, adjust="forward")
+        df, _name, _src = market.fetch_kline_ex(
+            symbol, "1d", count, adjust="forward",
+            quote_fresh=False, append_today=True,
+        )
     except Exception as e:
-        log.warning("AlphaFeed 取筹码K线失败 %s: %s", symbol, redact_message(str(e)))
+        log.warning("取筹码K线失败 %s: %s", symbol, redact_message(str(e)))
         return None
     if df is None or len(df) == 0:
         return None

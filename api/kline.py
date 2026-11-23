@@ -20,7 +20,7 @@ from market import (
     MINUTE_COUNTS,
     MINUTE_PERIODS,
     TTLCache,
-    _fetch_instrument_meta,
+    _fetch_instrument_meta,  # 测试仍 patch 此名; 热路径改用 peek_instrument_meta
     _is_etf,
     _is_index_symbol,
     _safe_float,
@@ -31,6 +31,8 @@ from market import (
     kline_cache_long,
     kline_cache_minute,
     normalize_symbol,
+    peek_instrument_meta,
+    _quote_cache_lookup,
 )
 
 log = logging.getLogger("api")
@@ -84,13 +86,17 @@ def _tail_omits_today_bar(df, period, adjust):
 
 
 def _attach_quote(resp, symbol):
-    """给 kline 响应挂实时快照 (30s 缓存); 失败静默, quote 缺席即可。
+    """给 kline 响应挂实时快照; 失败静默, quote 缺席即可。
 
-    fetch_quote 返回 quote_cache 共享条目, 复制后再挂 is_trading_day, 避免
-    污染缓存; 前端据此得知当日 bar 是否可用。
+    盘中走 fetch_quote (缓存优先)。盘后只读本地快照 (含长 TTL 收盘快照), 不发网络:
+    本地日K已命中时再等一次 AlphaFeed 会让切股一直「加载中」。
     """
     try:
-        q = fetch_quote(symbol)
+        sym = normalize_symbol(symbol)
+        if market_hours.is_live():
+            q = fetch_quote(sym)
+        else:
+            q = _quote_cache_lookup(sym, True)
         if q:
             now = market_hours.now()
             quote = dict(q)
@@ -302,7 +308,8 @@ def _kline_body(timing):
     with perf.Span(timing, "serialize_ms"):
         klines = serialize_bars(df, period)
 
-    inst_meta = _fetch_instrument_meta(symbol) or {}
+    # 股本不挡主图: 只读内存缓存。缺的时候由同时发出的 /api/stock-info 补全并带回 float_shares。
+    inst_meta = peek_instrument_meta(symbol) or {}
     now = market_hours.now()
     resp = {
         "symbol": symbol,

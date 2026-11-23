@@ -79,6 +79,10 @@ class KlineCacheTest(unittest.TestCase):
         kline_cache.clear()
         kline_cache_long.clear()
         kline_cache_minute.clear()
+        # 盘后 _attach_quote 只读本地快照不调 fetch_quote; 这里测的是盘中挂新鲜快照的契约
+        live = mock.patch("market_hours.is_live", return_value=True)
+        live.start()
+        self.addCleanup(live.stop)
 
     def _patches(self, quotes=None, quote_exc=None):
         """mock fetch_kline_ex / fetch_quote / _is_index_symbol (不碰真实行情)。"""
@@ -96,7 +100,7 @@ class KlineCacheTest(unittest.TestCase):
             mock.patch.object(self.api, "fetch_quote",
                               side_effect=quote_exc or quote_side),
             mock.patch.object(self.api, "_is_index_symbol", return_value=False),
-            mock.patch.object(self.api, "_fetch_instrument_meta",
+            mock.patch.object(self.api, "peek_instrument_meta",
                               return_value={"float_shares": 1.0e9,
                                             "total_shares": 1.1e9,
                                             "type": "stock"}),
@@ -200,6 +204,18 @@ class KlineCacheTest(unittest.TestCase):
         for key in ("obv", "maobv", "vol_ma5", "vol_ma10", "vol_ma20"):
             self.assertIn(key, last)
 
+
+    def test_off_session_quote_from_local_snapshot_without_fetch(self):
+        """盘后挂收盘快照 (长 TTL) 但不发网络: 1.25s 的 quote_cache 早过期, 不能因此丢 quote。"""
+        p1, p2, p3, p4 = self._patches(quotes=[{"last_price": 99.0}])
+        snap = {"last_price": 10.5, "prev_close": 10.0}
+        with p1, p2 as fq, p3, p4, \
+                mock.patch("market_hours.is_live", return_value=False), \
+                mock.patch.object(self.api, "_quote_cache_lookup", return_value=snap) as lk:
+            b = self._get().get_json()
+        fq.assert_not_called()
+        lk.assert_called_with(self.SYMBOL, True)
+        self.assertEqual(b["quote"]["last_price"], 10.5)
 
     def test_etf_kline_defers_premium(self):
         """ETF 溢价不再内联在主路径: 只预热 + meta.deferred 声明, bar 不带 premium。
