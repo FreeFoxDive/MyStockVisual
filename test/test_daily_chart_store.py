@@ -88,6 +88,17 @@ class ChartStoreTest(unittest.TestCase):
         gens = [path.name for path in Path(self.tmp.name).iterdir() if path.is_dir()]
         self.assertEqual(len(gens), 1)
 
+    def test_patch_path_stays_inside_patch_dir(self):
+        gen = Path(self.tmp.name) / "gen"
+        patch_dir = Path(os.path.normpath(gen / "patch"))
+        safe = store._patch_file(gen, "600000.SH")
+        self.assertEqual(safe, patch_dir / "600000.SH.npz")
+        self.assertIsNone(store._patch_file(gen, ""))
+        for raw in ("../600000.SH", "..\\600000.SH", "/etc/passwd", "600000.SH/../../x"):
+            got = store._patch_file(gen, raw)
+            if got is not None:
+                self.assertEqual(got.parent, patch_dir, raw)
+
     def test_patch_replaces_one_symbol(self):
         store.publish_frames({
             "600000.SH": _frame([10, 11, 12, 13, 14, 15]),

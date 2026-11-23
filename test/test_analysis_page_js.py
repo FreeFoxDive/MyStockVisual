@@ -29,6 +29,32 @@ STATIC_DIR = _VISUAL_DIR / "static"
 ANALYSIS_HTML = STATIC_DIR / "analysis.html"
 
 
+def _inline_scripts(src: str) -> list[str]:
+    """取出没有 src 的 script 正文。
+
+    按 `<script` / `</script` 的字面边界截，认属性、大小写和 `</script ...>`。
+    不用正则切标签。
+    """
+    blocks = []
+    lower = src.lower()
+    pos = 0
+    while True:
+        start = lower.find("<script", pos)
+        if start < 0:
+            break
+        tag_end = src.find(">", start)
+        if tag_end < 0:
+            break
+        opener = lower[start:tag_end]
+        close = lower.find("</script", tag_end + 1)
+        if close < 0:
+            break
+        if "src" not in opener:
+            blocks.append(src[tag_end + 1:close])
+        pos = close + len("</script")
+    return blocks
+
+
 def _extract_fn(src: str, name: str) -> str:
     m = re.search(r"(?:async\s+)?function\s+" + re.escape(name) + r"\s*\(", src)
     if not m:
@@ -54,7 +80,7 @@ class AnalysisPageStaticTest(unittest.TestCase):
         cls.login = (STATIC_DIR / "login.html").read_text(encoding="utf-8")
 
     def test_inline_scripts_parse(self):
-        blocks = re.findall(r"<script>(.*?)</script>", self.src, flags=re.S)
+        blocks = _inline_scripts(self.src)
         self.assertGreaterEqual(len(blocks), 2)
         for block in blocks:
             with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:

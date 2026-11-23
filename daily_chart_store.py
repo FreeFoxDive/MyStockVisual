@@ -301,13 +301,27 @@ def _to_frame(days: np.ndarray, columns: dict) -> pd.DataFrame | None:
     return pd.DataFrame(data, index=pd.DatetimeIndex(index))
 
 
-def _patch_file(gen_dir: Path, symbol: str) -> Path:
-    return gen_dir / "patch" / f"{symbol}.npz"
+def _patch_file(gen_dir: Path, symbol: str) -> Path | None:
+    """补丁路径必须落在该世代的 patch 目录里。
+
+    symbol 来自请求。先去掉目录成分，再 normpath，并确认结果仍在 patch 目录下，
+    避免 ``../`` 或绝对路径写出这个目录。
+    """
+    base_path = os.path.normpath(os.path.join(os.fspath(gen_dir), "patch"))
+    filename = os.path.basename(f"{symbol}.npz")
+    if filename in ("", ".", "..", ".npz"):
+        return None
+    fullpath = os.path.normpath(os.path.join(base_path, filename))
+    if not fullpath.startswith(base_path):
+        return None
+    if os.path.dirname(fullpath) != base_path:
+        return None
+    return Path(fullpath)
 
 
 def _load_patch(gen_dir: Path, symbol: str) -> pd.DataFrame | None:
     path = _patch_file(gen_dir, symbol)
-    if not path.is_file():
+    if path is None or not path.is_file():
         return None
     try:
         with np.load(path, allow_pickle=False) as data:
@@ -629,10 +643,13 @@ def patch_frames(frames: dict[str, pd.DataFrame]) -> int:
         frame = frame[frame.index <= as_of].tail(count)
         if frame.empty:
             continue
-        tmp = patch_dir / f".{symbol}-{uuid.uuid4().hex[:8]}.tmp.npz"
+        dest = _patch_file(gen_dir, symbol)
+        if dest is None:
+            continue
+        tmp = dest.with_name(f".{uuid.uuid4().hex[:8]}.tmp.npz")
         payload = {name: frame[name].to_numpy(dtype=np.float32) for name in FIELDS}
         np.savez(tmp, dates=_epoch_days(frame.index), **payload)
-        os.replace(tmp, _patch_file(gen_dir, symbol))
+        os.replace(tmp, dest)
         changed += 1
     return changed
 
