@@ -100,18 +100,27 @@ def cut_to_day(frames: dict, day: str) -> dict:
     return out
 
 
-def _pull(symbols: list[str]) -> dict:
+def _pull(symbols: list[str]):
+    """按批交出日K。全市场大约 80 批，调用方写完一批就必须丢掉。
+
+    因子库的内存看门狗默认 400MB，到 90% 会清空主页 K 线缓存。
+    若把 8000 只 DataFrame 攒齐再落盘，峰值大约 1GB，会直接触发它。
+    """
     import factors
-    frames = {}
     if not symbols:
-        return frames
+        return
 
     def on_progress(done, total):
         store.update_meta(progress={"done": done, "total": total})
 
-    for batch, _stats in factors.fetch_bars(symbols, count=store.chart_count(), progress_cb=on_progress):
-        frames.update(batch)
-    return frames
+    yield from factors.fetch_bars(
+        symbols, count=store.chart_count(), progress_cb=on_progress)
+
+
+def _stream_into(writer, symbols: list[str], day: str) -> None:
+    for batch, _stats in _pull(symbols):
+        store.write_gen_batch(writer, batch, day)
+        del batch
 
 
 def _in_session(now) -> bool:
@@ -176,14 +185,29 @@ def run_full(*, force: bool = False) -> dict:
     )
     try:
         stocks, indexes = universe()
-        frames, index_error = collect_frames(_pull, stocks, indexes)
-        frames = cut_to_day(frames, day)
-        if not frames:
-            raise RuntimeError("没有拉到可用日K")
-        manifest = store.publish_frames(
-            frames, count=store.chart_count(), as_of=day,
-            index_symbols=set(indexes), index_error=index_error,
+        ordered = list(dict.fromkeys([*stocks, *indexes]))
+        writer = store.open_gen(
+            ordered, count=store.chart_count(), as_of=day, index_symbols=set(indexes),
         )
+        index_error = None
+        try:
+            _stream_into(writer, stocks, day)
+            if indexes:
+                try:
+                    _stream_into(writer, indexes, day)
+                except Exception as exc:
+                    index_error = str(exc)
+                    log.warning("指数日K拉取失败，股票仓照常落盘: %s", exc)
+            if not writer.filled:
+                raise RuntimeError("没有拉到可用日K")
+            manifest = store.seal_gen(writer, index_error=index_error)
+        except Exception as exc:
+            store.abort_gen(writer)
+            if not writer.sealed:
+                raise
+            # 指针已经切过去。再记成失败会占掉重试次数，下一轮又因「已是最新」不再补跑。
+            log.warning("图表日K已发布，收尾失败: %s", exc)
+            manifest = json.loads((writer.path / "manifest.json").read_text(encoding="utf-8"))
         store.note_full_pull(day)
         elapsed = round(time.time() - started, 1)
         store.update_meta(

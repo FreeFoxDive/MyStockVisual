@@ -300,6 +300,137 @@ class ChartStoreTest(unittest.TestCase):
             self.assertIn("盘中", chart_build._block_reason(mid, force=False) or "")
             self.assertIsNone(chart_build._block_reason(mid, force=True))
 
+    def _pull_batches(self, frames):
+        def pull(symbols):
+            batch = {symbol: frames[symbol] for symbol in symbols if symbol in frames}
+            yield batch, {"batches": 1, "done": 1, "failed_batches": 0}
+        return pull
+
+    def test_run_full_writes_each_batch_and_skips_missing(self):
+        frames = {
+            "600000.SH": _frame(range(10, 16)),
+            "000001.SH": _frame(range(20, 26)),
+        }
+        with mock.patch.object(chart_build, "_now", return_value=datetime(2026, 11, 23, 16, 10)), \
+             mock.patch.object(chart_build, "target_day", return_value="2026-11-23"), \
+             mock.patch.object(chart_build, "universe",
+                               return_value=(["600000.SH", "000001.SZ"], ["000001.SH"])), \
+             mock.patch.object(chart_build, "_pull", side_effect=self._pull_batches(frames)):
+            out = chart_build.run_full(force=False)
+        self.assertTrue(out.get("ok"), out)
+        self.assertEqual(out["symbol_count"], 2)
+        self.assertEqual(out["index_count"], 1)
+        written = store.daily_frame("600000.SH")
+        self.assertEqual(len(written), 6)
+        self.assertAlmostEqual(float(written["close"].iloc[-1]), 15.0)
+        self.assertIsNone(store.daily_frame("000001.SZ"))
+        self.assertEqual(store.pulls_today("2026-11-23"), 1)
+
+    def test_shorter_rewrite_drops_stale_head(self):
+        writer = store.open_gen(["600000.SH"], count=20, as_of="2026-11-20")
+        store.write_gen_batch(writer, {"600000.SH": _frame(range(10, 18))}, "2026-11-20")
+        store.write_gen_batch(writer, {"600000.SH": _frame(range(30, 35))}, "2026-11-20")
+        store.seal_gen(writer)
+        frame = store.open_store().frame("600000.SH")
+        self.assertEqual(len(frame), 5)
+        self.assertAlmostEqual(float(frame["close"].iloc[0]), 30.0)
+        self.assertAlmostEqual(float(frame["close"].iloc[-1]), 34.0)
+
+    def test_abort_keeps_generation_named_by_pointer(self):
+        writer = store.open_gen(["600000.SH"], count=20, as_of="2026-11-20")
+        store.write_gen_batch(writer, {"600000.SH": _frame(range(10, 16))}, "2026-11-20")
+        store.seal_gen(writer)
+        writer.sealed = False
+        store.abort_gen(writer)
+        self.assertTrue(writer.sealed)
+        self.assertTrue(writer.path.is_dir())
+        self.assertEqual(len(store.daily_frame("600000.SH")), 6)
+
+    def test_abort_removes_unsealed_generation(self):
+        writer = store.open_gen(["600000.SH"], count=20, as_of="2026-11-20")
+        store.write_gen_batch(writer, {"600000.SH": _frame(range(10, 16))}, "2026-11-20")
+        store.abort_gen(writer)
+        self.assertFalse(writer.path.exists())
+        self.assertIsNone(store.daily_frame("600000.SH"))
+
+    def test_publish_then_raise_still_counts_success(self):
+        real = store._publish_pointer
+
+        def boom(gen, manifest):
+            real(gen, manifest)
+            raise RuntimeError("drop old gen failed")
+
+        frames = {"600000.SH": _frame(range(10, 16))}
+        with mock.patch.object(chart_build, "_now", return_value=datetime(2026, 11, 23, 16, 10)), \
+             mock.patch.object(chart_build, "target_day", return_value="2026-11-23"), \
+             mock.patch.object(chart_build, "universe", return_value=(["600000.SH"], [])), \
+             mock.patch.object(chart_build, "_pull", side_effect=self._pull_batches(frames)), \
+             mock.patch.object(store, "_publish_pointer", side_effect=boom):
+            out = chart_build.run_full(force=False)
+        self.assertTrue(out.get("ok"), out)
+        self.assertEqual(store.pulls_today("2026-11-23"), 1)
+        self.assertEqual(len(store.daily_frame("600000.SH")), 6)
+        self.assertEqual(store.failed_today("2026-11-23"), 0)
+
+    def test_run_full_keeps_stocks_when_index_pull_fails(self):
+        def pull(symbols):
+            if symbols == ["000001.SH"]:
+                raise RuntimeError("index down")
+            yield {"600000.SH": _frame(range(10, 16))}, {"batches": 1, "done": 1, "failed_batches": 0}
+
+        with mock.patch.object(chart_build, "_now", return_value=datetime(2026, 11, 23, 16, 10)), \
+             mock.patch.object(chart_build, "target_day", return_value="2026-11-23"), \
+             mock.patch.object(chart_build, "universe",
+                               return_value=(["600000.SH"], ["000001.SH"])), \
+             mock.patch.object(chart_build, "_pull", side_effect=pull):
+            out = chart_build.run_full(force=False)
+        self.assertTrue(out.get("ok"), out)
+        self.assertIn("index down", out.get("index_error") or "")
+        self.assertIsNotNone(store.daily_frame("600000.SH"))
+        self.assertEqual(store.pulls_today("2026-11-23"), 1)
+
+    def test_index_partial_write_is_not_published_as_valid_data(self):
+        frames = {
+            "600000.SH": _frame(range(10, 16)),
+            "000001.SH": _frame(range(20, 26)),
+        }
+        real_setitem = np.memmap.__setitem__
+
+        for rewrite in (False, True):
+            with self.subTest(rewrite=rewrite):
+                index_writes = 0
+
+                def fail_high_write(array, key, values):
+                    nonlocal index_writes
+                    real_setitem(array, key, values)
+                    if Path(array.filename).name == "high.npy" and key[1] == 1:
+                        index_writes += 1
+                        if index_writes == (2 if rewrite else 1):
+                            raise OSError("index field write failed")
+
+                def pull(symbols):
+                    batch = {symbol: frames[symbol] for symbol in symbols}
+                    yield batch, {"batches": 1, "done": 1, "failed_batches": 0}
+                    if rewrite and symbols == ["000001.SH"]:
+                        yield batch, {"batches": 2, "done": 2, "failed_batches": 0}
+
+                with mock.patch.object(chart_build, "_now", return_value=datetime(2026, 11, 23, 16, 10)), \
+                     mock.patch.object(chart_build, "target_day", return_value="2026-11-23"), \
+                     mock.patch.object(chart_build, "universe",
+                                       return_value=(["600000.SH"], ["000001.SH"])), \
+                     mock.patch.object(chart_build, "_pull", side_effect=pull), \
+                     mock.patch.object(np.memmap, "__setitem__", new=fail_high_write):
+                    out = chart_build.run_full(force=True)
+
+                self.assertTrue(out.get("ok"), out)
+                self.assertIn("index field write failed", out.get("index_error") or "")
+                self.assertEqual(out["symbol_count"], 1)
+                self.assertEqual(out["index_count"], 0)
+                self.assertAlmostEqual(float(store.daily_frame("600000.SH")["close"].iloc[-1]), 15.0)
+                opened = store.open_store()
+                self.assertIsNone(opened.frame("000001.SH"))
+                self.assertFalse((opened.dates[:, opened.index["000001.SH"]] > 0).any())
+
     def test_failed_full_does_not_count(self):
         with mock.patch.object(chart_build, "_now", return_value=datetime(2026, 11, 23, 16, 10)), \
              mock.patch.object(chart_build, "target_day", return_value="2026-11-23"), \
@@ -311,6 +442,7 @@ class ChartStoreTest(unittest.TestCase):
         self.assertEqual(store.pulls_today("2026-11-23"), 0)
         self.assertIsNone(store.full_pull_block_reason("2026-11-23", force=True))
         self.assertEqual(store.failed_today("2026-11-23"), 1)
+        self.assertIsNone(store._read_pointer())
 
     def test_failures_stop_auto_retry_but_not_force(self):
         evening = datetime(2026, 11, 23, 20, 0)

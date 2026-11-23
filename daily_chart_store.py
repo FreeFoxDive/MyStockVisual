@@ -503,6 +503,182 @@ def _epoch_days(index) -> np.ndarray:
     return (pd.DatetimeIndex(index) - pd.Timestamp("1970-01-01")).days.to_numpy(dtype=np.int32)
 
 
+def _close_mmap(arr) -> None:
+    """关掉 memmap。全市场矩阵大约 220MB，不能在构建进程里一直映射着。"""
+    if arr is None:
+        return
+    mapped = getattr(arr, "_mmap", None)
+    if mapped is None:
+        return
+    try:
+        arr.flush()
+    except Exception:
+        pass
+    try:
+        mapped.close()
+    except Exception:
+        pass
+
+
+def _create_memmap(path: Path, dtype, shape) -> None:
+    """建好 .npy 头和稀疏文件后立即解除映射，避免整块进入 RSS。"""
+    mapped = np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=shape)
+    _close_mmap(mapped)
+
+
+@dataclass
+class GenWriter:
+    """全市场落盘的一代。列在开建时按标的表排好，每批只改自己的列，然后关映射。"""
+
+    gen: str
+    path: Path
+    count: int
+    as_of: str
+    symbols: list[str]
+    cols: dict[str, int]
+    index_symbols: set[str]
+    filled: set[str] = field(default_factory=set)
+    sealed: bool = False
+
+
+def open_gen(symbols: list[str], *, count: int, as_of: str,
+             index_symbols: set[str] | None = None) -> GenWriter:
+    """为已知标的表预建列式文件。失败的标的留空列，不占用 DataFrame。"""
+    ordered = []
+    seen = set()
+    for raw in symbols:
+        text = str(raw or "").strip()
+        if not text or len(text) > 16 or text in seen:
+            if text and len(text) > 16:
+                log.warning("跳过过长的图表日K代码 %s", text)
+            continue
+        seen.add(text)
+        ordered.append(text)
+    if not ordered:
+        raise ValueError("没有可落盘的日K")
+    gen = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    gen_dir = ROOT / gen
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    shape = (int(count), len(ordered))
+    try:
+        np.save(gen_dir / "symbols.npy", np.array(ordered, dtype="<U16"), allow_pickle=False)
+        _create_memmap(gen_dir / "dates.npy", np.int32, shape)
+        for name in FIELDS:
+            _create_memmap(gen_dir / f"{name}.npy", np.float32, shape)
+    except Exception:
+        shutil.rmtree(gen_dir, ignore_errors=True)
+        raise
+    return GenWriter(
+        gen=gen,
+        path=gen_dir,
+        count=int(count),
+        as_of=str(as_of),
+        symbols=ordered,
+        cols={symbol: idx for idx, symbol in enumerate(ordered)},
+        index_symbols=set(index_symbols or ()),
+    )
+
+
+def write_gen_batch(writer: GenWriter, frames: dict[str, pd.DataFrame], day: str) -> int:
+    """把一批日K截到目标日并写入对应列。返回后调用方可以丢掉这批 DataFrame。"""
+    if writer.sealed or not frames:
+        return 0
+    as_of = pd.Timestamp(day)
+    dates = None
+    arrays: dict = {}
+    wrote = 0
+    try:
+        dates = np.load(writer.path / "dates.npy", mmap_mode="r+")
+        arrays = {
+            name: np.load(writer.path / f"{name}.npy", mmap_mode="r+")
+            for name in FIELDS
+        }
+        for symbol, raw in frames.items():
+            col = writer.cols.get(str(symbol))
+            if col is None:
+                continue
+            frame = normalize_daily(raw)
+            if frame is None:
+                continue
+            frame = frame[frame.index <= as_of].tail(writer.count)
+            if frame.empty:
+                continue
+            start = writer.count - len(frame)
+            # 日期是读端的有效标记。先作废整列，字段全部写完后才提交日期；
+            # 重写失败时也不能留下上一轮日期，让读端看到半新半旧的字段。
+            dates[:, col] = 0
+            writer.filled.discard(str(symbol))
+            try:
+                days = _epoch_days(frame.index)
+                for name in FIELDS:
+                    arrays[name][start:, col] = frame[name].to_numpy(dtype=np.float32)
+                dates[start:, col] = days
+            except Exception:
+                dates[:, col] = 0
+                raise
+            writer.filled.add(str(symbol))
+            wrote += 1
+        if dates is not None:
+            dates.flush()
+        for values in arrays.values():
+            values.flush()
+    finally:
+        _close_mmap(dates)
+        for values in arrays.values():
+            _close_mmap(values)
+    return wrote
+
+
+def abort_gen(writer: GenWriter | None) -> None:
+    """构建失败时删掉未发布的一代。指针已经指向它时不删。"""
+    if writer is None or writer.sealed:
+        return
+    current = _read_pointer()
+    if current and current.get("gen") == writer.gen:
+        writer.sealed = True
+        return
+    shutil.rmtree(writer.path, ignore_errors=True)
+
+
+def seal_gen(writer: GenWriter, *, index_error: str | None = None) -> dict:
+    """写 manifest 并切换指针。调用前至少写入过一只。"""
+    if not writer.filled:
+        raise ValueError("没有可落盘的日K")
+    index_count = sum(1 for symbol in writer.filled if symbol in writer.index_symbols)
+    manifest = {
+        "version": STORE_VERSION,
+        "adjust": "forward",
+        "role": "visual_chart",
+        "count": writer.count,
+        "fields": list(FIELDS),
+        "as_of": writer.as_of,
+        "symbols": int(len(writer.symbols)),
+        "symbols_with_data": int(len(writer.filled)),
+        "symbol_count": int(len(writer.filled)),
+        "index_count": int(index_count),
+        "index_error": index_error,
+        "full_pulls_today": pulls_today(writer.as_of),
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    with open(writer.path / "manifest.json", "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    _publish_pointer(writer.gen, manifest)
+    writer.sealed = True
+    try:
+        nbytes = disk_bytes()
+        update_meta(
+            as_of=writer.as_of,
+            symbol_count=len(writer.filled),
+            index_count=index_count,
+            index_error=index_error,
+            bytes=nbytes,
+            error=None,
+        )
+    except Exception:
+        log.warning("图表日K已发布，状态写回失败", exc_info=True)
+    return manifest
+
+
 def _write_gen(gen_dir: Path, frames: dict[str, pd.DataFrame], *, count: int,
                as_of: str, index_symbols: set[str], index_error: str | None) -> dict:
     symbols = np.array(sorted(frames), dtype="<U16")
