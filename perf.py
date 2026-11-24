@@ -1,8 +1,8 @@
 """轻量性能观测: 请求耗时分解 + 上游健康计数。
 
 用于定位「切换 symbol 忽快忽慢」的耗时构成 (磁盘命中 / 实际数据源 / 强制行情
-往返 / 指标计算 / 序列化)。设 KLINE_PERF_LOG=1 时 /api/kline 打一条结构化日志;
-默认关闭时只多几次 dict 写入, 可忽略。
+往返 / 指标计算 / 序列化)。/api/kline 通过 Server-Timing 返回分段耗时；
+设 KLINE_PERF_LOG=1 时另打结构化日志。
 
 计数 (bump) 无条件累计, 便于把「回退 / 429 / 单源失败」的频率随日志一并输出,
 确认慢请求是否集中在少数坏源上。
@@ -59,11 +59,13 @@ class Span:
         self._key = key
 
     def __enter__(self):
-        self._t0 = time.perf_counter()
+        if self._sink is not None:
+            self._t0 = time.perf_counter()
         return self
 
     def __exit__(self, *exc):
-        add_ms(self._sink, self._key, (time.perf_counter() - self._t0) * 1000.0)
+        if self._sink is not None:
+            add_ms(self._sink, self._key, (time.perf_counter() - self._t0) * 1000.0)
         return False
 
 

@@ -142,47 +142,25 @@ AlphaFeed 的 403 文案直接点明了授权粒度 —— `No permission for �
    `intraday_batch` / 兜底 `klines.batch` 也都**按市场分组**发请求，一只没权限的港/美股
    不会把整批（含 A股）一起 403 掉（`test_seed_mixed_markets_does_not_blame_cn`）。
 
-### 能力缺口不计源故障（`SourceSkip`）
+### K 线回退只影响本次请求
 
-分时默认链只有 `alphafeed_intraday` **一个**源，而源健康计数是按**源名**记、与市场无关：
-只要"取不到数据"就 `_note_fail`，累计 3 次整源冷却 60s（冷却结束后第一次尝试是 probe，
-**一次失败就立刻再冷却**）。于是港/美股 403（常态）或任意一个当日没有数据的代码，都能
-把整个源压在冷态 —— 冷却期内路由跳过整个源，**全站 A股 分时一起 404**，且这是进程级共享
-状态、前端每 60s 自动刷新，等于把独立额度变成了单点。
-
-修法（`kline_source.SourceSkip`，与既有 `SourceBusy` 同理）：源可以明确声明"这个市场/标的
-我服务不了"，路由据此**不记失败**、直接下沉下一源。判据在 `market._fetch_intraday_kline`：
+单个标的无数据、异常或超时只让本次请求尝试下一源，后续仍按配置顺序取数。
+`SourceSkip` 标记能力缺口，`SourceBusy` 标记本地并发或额度不足，两者与上游故障分别计数。
+日 K 图表回源时，SQLite 共享桶的锁等待预算为 250 ms；构建仍可等待并重试，共享额度不变。
+分时的具体判据在 `market._fetch_intraday_kline`：
 
 | 情形 | 处置 |
 |---|---|
 | 本市场当日已被判定无权限（403 熔断过） | `SourceSkip`（能力缺口） |
 | 上游**答复了**（HTTP 200）但两个接口都没数据 | `SourceSkip`（这个标的没数据） |
-| 上游异常 / 超时（没答复） | 返回 `None` → 记源故障，该冷却照旧冷却 |
+| 上游异常 / 超时（没答复） | 本次回退，计入失败指标 |
 | A股 权限被拒但原接口有数据 | 正常返回（「权限有问题就退原来的接口」不变） |
 
-`test_kline_source.py::test_source_skip_is_not_counted_as_failure` 连造 4 次 SourceSkip 后
-断言源**没有**进冷却；`test_upstream_error_is_a_real_failure` 钉住真故障仍然计失败。
+### 麦蕊 429 退避通知
 
-### 熔断/退避会推通知（每源每天一条）
-
-源熔断原来只在日志里，没人盯日志等于没发生；而"冷却 → probe 失败 → 再冷却"能反复触发，
-所以配了**每个源每天最多一条**的告警（`visual/source_alert.py` 的当日闸门，按源名记、
-跨日自动恢复；`SOURCE_ALERT_DISABLED=1` 可关）：
-
-- **K 线源熔断**：`kline_source._note_fail` 的 `if entered:` 处推一条，正文带最后失败的那次
-  请求（`symbol period (category)`，由 `_try_source` 传入）。
-- **麦蕊 429 退避**：`market._mr_note_429` 处推一条；detail 由 SDK 路径给"方法名 + 标的"、
-  直连路径给**去掉 licence 段**的 URL（证书 key 绝不进通知；SDK 路径只在首参是纯代码形态时
-  才带上）。
-- 麦蕊的 429 与连续失败**共用同一条当日配额**（闸门 key 是源名，`_gate_key()` 一行可拆）。
-- 发送走 `error_notify.notify_alert`（同一队列/工作线程/每源 5 分钟聚合窗口/全局 5 条每分钟
-  预算 + `redact_message` 脱敏），未配置的通道自动跳过 —— 告警绝不落在取数请求线程上。
-- 测试：`test_source_alert.py`（闸门语义）、`test_error_notify.py::NotifyAlertTest`（通道）、
-  `test_kline_source.py::test_cooldown_notifies_once_per_source_per_day`、
-  `test_market_backoff.py::BackoffAlertTest`。全部离线打桩，不发真实通知 —— 触发熔断的测试
-  基类会打桩 `source_alert.notify`（单文件单跑兜底），`test_source_alert.py` 还在模块级把
-  `SOURCE_ALERT_DISABLED` 默认置 1（`unittest discover` 先 import 完所有模块再跑，覆盖整轮）。
-  改这条链路时请保留这两层，否则跑一次测试就会往真实群里发消息。
+`market._mr_note_429` 在供应商明确返回 429 时触发异步通知，每源每天最多一条
+（`SOURCE_ALERT_DISABLED=1` 可关闭）。通知带退避时长及脱敏后的最后一次请求信息。
+相关测试为 `test_source_alert.py` 和 `test_market_backoff.py`，通过打桩隔离真实通知。
 
 ### 那 intraday 到底比 K 线强在哪
 

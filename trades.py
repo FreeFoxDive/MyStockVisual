@@ -904,7 +904,8 @@ def _normalize_panel_config(raw):
 def _clean_pos_calc(raw):
     """仓位计算参数: 本金 1000..1e9, 风险% 0.05..50, 止损倍数 0.1..20, ATR 14 或 20。
 
-    任一字段非法则整包丢弃, 不把半套参数写进账号。
+    ATR 四字段任一非法则整包丢弃。半凯利是可选展示: 脏字段回退默认, 不抹掉合法 ATR。
+    手填胜率/盈亏比在模型源下也保留, 计算不读它们, 切回手动时还在。
     """
     if not isinstance(raw, dict):
         return None
@@ -914,6 +915,21 @@ def _clean_pos_calc(raw):
             return None
         n = float(v)
         if n != n or n in (float("inf"), float("-inf")) or n < lo or n > hi:
+            return None
+        return int(n) if n.is_integer() else n
+
+    def opt_num(v, lo, hi, *, open_lo=False):
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        n = float(v)
+        if n != n or n in (float("inf"), float("-inf")) or n > hi:
+            return None
+        if open_lo:
+            if n <= lo:
+                return None
+        elif n < lo:
             return None
         return int(n) if n.is_integer() else n
 
@@ -927,11 +943,32 @@ def _clean_pos_calc(raw):
         return None
     if capital is None or risk is None or mult is None:
         return None
+    source = raw.get("hkSource")
+    if source not in ("manual", "model"):
+        source = "manual"
+    model_id = raw.get("hkModelId")
+    if isinstance(model_id, bool):
+        model_id = None
+    elif isinstance(model_id, int) and model_id > 0:
+        pass
+    elif isinstance(model_id, float) and model_id.is_integer() and model_id > 0:
+        model_id = int(model_id)
+    elif model_id == "none":
+        pass
+    else:
+        model_id = None
+    win = opt_num(raw.get("hkWinRate"), 0, 100)
+    payoff = opt_num(raw.get("hkPayoff"), 0, 1000, open_lo=True)
     return {
         "capital": capital,
         "riskPct": risk,
         "atrMult": mult,
         "atrPeriod": int(period),
+        "halfKelly": raw.get("halfKelly") is True,
+        "hkSource": source,
+        "hkWinRate": win,
+        "hkPayoff": payoff,
+        "hkModelId": model_id,
     }
 
 

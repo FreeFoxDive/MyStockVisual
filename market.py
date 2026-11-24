@@ -33,7 +33,8 @@ import kline_source  # noqa: E402  (K线数据源注册/回退路由; kline_sour
 import market_hours  # noqa: E402
 import perf  # noqa: E402
 import search_index  # noqa: E402
-import source_alert  # noqa: E402  (数据源熔断/429 退避告警, 每源每天一条)
+import source_alert  # noqa: E402  (429 退避告警, 每源每天一条)
+from shared_budget import FOREGROUND_LOCK_WAIT_S
 
 # ── AlphaFeed ──
 AF_API_KEY = os.environ.get("AF_API_KEY", "")
@@ -1228,18 +1229,18 @@ def _fetch_af_kline(symbol, period, count, adjust="forward"):
     周月K可走本源, 不依赖抖动的 akshare。
 
     日K与因子库构建共用「日K批量 60/min」额度: 构建吃掉 90% 后取不到令牌就
-    直接返回 None, 由 kline_source 走下一数据源, 而不是打出 429。
+    按本地忙处理，由 kline_source 走下一数据源，而不是打出 429。
     """
     if period == "1d":
         import factors as _factors
         try:
-            permitted = _factors.daily_kline_bucket().try_acquire()
+            permitted = _factors.daily_kline_bucket().try_acquire(lock_wait_s=FOREGROUND_LOCK_WAIT_S)
         except Exception as e:
             log.warning("日K共享配额不可用 %s: %s", symbol, _sanitize_error(e))
             permitted = False
         if not permitted:
-            log.info(f"日K额度让给因子库构建, 跳过 AlphaFeed {symbol}")
-            return None
+            log.info("日K共享额度暂不可用，跳过 AlphaFeed %s", symbol)
+            raise kline_source.SourceBusy("日K共享额度暂不可用")
     adj = _af_adjust(adjust)
     try:
         af = get_af()
@@ -1390,7 +1391,8 @@ def _serve_chart_store(symbol, period, count, adj, timing, quote_fresh, append_t
         return None
     try:
         import daily_chart_store as chart_store
-        daily = chart_store.daily_frame(symbol, min_as_of=chart_store.required_as_of())
+        with perf.Span(timing, "chart_read_ms"):
+            daily = chart_store.daily_frame(symbol, min_as_of=chart_store.required_as_of())
     except Exception as exc:
         log.warning("图表日K仓读取失败 %s: %s", symbol, _sanitize_error(exc))
         return None
@@ -1485,7 +1487,8 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
             ttl = _hfq_daily_ttl(symbol, count, adj, ct, now, live)
     else:
         ttl = 600
-    cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj, chain_tag=ct)
+    with perf.Span(timing, "disk_read_ms"):
+        cached = _disk_cache.get(symbol, period, count, ttl, adjust=adj, chain_tag=ct)
     if cached:
         if timing is not None:
             timing["disk"] = "hit"
@@ -1520,7 +1523,7 @@ def fetch_kline_ex(symbol, period, count, adjust="forward", timing=None,
         timing["disk"] = "miss"
     with perf.Span(timing, "fetch_ms"):
         df, source = kline_source.fetch_kline_df(
-            category, symbol, period, count, adjust=adj
+            category, symbol, period, count, adjust=adj, timing=timing
         )
     if timing is not None:
         timing["source"] = source

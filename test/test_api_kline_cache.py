@@ -137,6 +137,19 @@ class KlineCacheTest(unittest.TestCase):
         self.assertNotIn("quote", b2)
         self.assertEqual(len(b2["klines"]), 30)
 
+    def test_server_timing_includes_final_quote_and_json_on_both_cache_paths(self):
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3, p4, mock.patch.object(self.api.perf, "ENABLED", False):
+            cold = self._get()
+            warm = self._get()
+        for response in (cold, warm):
+            self.assertEqual(response.status_code, 200)
+            header = response.headers["Server-Timing"]
+            for phase in ("app", "attach_quote", "json"):
+                self.assertRegex(header, rf"(?:^|, ){phase};dur=\d+(?:\.\d+)?")
+        self.assertIn("indicators;dur=", cold.headers["Server-Timing"])
+        self.assertNotIn("indicators;dur=", warm.headers["Server-Timing"])
+
     def test_chips_endpoint_returns_payload(self):
         payload = {"buckets": [{"price": 10.0, "weight": 1.0}], "avgCost": 10.0}
         with mock.patch.object(self.api, "get_chips", return_value=payload) as gc, \

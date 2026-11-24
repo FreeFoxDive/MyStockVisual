@@ -16,7 +16,7 @@ day-only 的 "intraday" 类别 (分时图) 与 "minute" 类别分开: 后者是�
 
 默认链 = 券商/付费源优先, akshare 只兜底 (分时是例外: 默认只走 alphafeed_intraday,
 不兜 akshare —— 见 DEFAULT_CHAINS 里的说明)。基金默认不含麦蕊 (jj/lskx 无复权)。
-主源失败自动切换下一源并记日志。分钟数据带新鲜度守卫: 末根 bar 距今超过
+主源失败只在本次请求内切换下一源并记日志。分钟数据带新鲜度守卫: 末根 bar 距今超过
 MINUTE_STALE_DAYS 天视为该源失败 (防止滞后窗口的旧数据被当成功渲染)。
 """
 from __future__ import annotations
@@ -31,7 +31,6 @@ from datetime import timedelta
 
 import market_hours
 import perf
-import source_alert
 
 log = logging.getLogger("kline_source")
 
@@ -43,21 +42,17 @@ MINUTE_STALE_DAYS = 30
 # 请求一起拖住 (waitress 只有 8 个线程), 表现为"同一只票忽快忽慢"。超时即判该源
 # 失败并下沉到下一源。
 SOURCE_TIMEOUT_SEC = max(1.0, float(os.environ.get("KLINE_SOURCE_TIMEOUT_SEC", "8")))
-# 源级熔断: 连续失败达阈值后, 冷却期内直接跳过该源 (不再重吃同一份超时)。
-SOURCE_FAIL_THRESHOLD = max(1, int(os.environ.get("KLINE_SOURCE_FAIL_THRESHOLD", "3")))
-SOURCE_COOLDOWN_SEC = max(1.0, float(os.environ.get("KLINE_SOURCE_COOLDOWN_SEC", "60")))
 SOURCE_MAX_INFLIGHT = max(1, int(os.environ.get("KLINE_SOURCE_MAX_INFLIGHT", "2")))
 SOURCE_MAX_TOTAL = max(1, int(os.environ.get("KLINE_SOURCE_MAX_TOTAL", "6")))
 
-_health_lock = threading.Lock()
-_health = {}   # name -> {"fails": 连续失败数, "until": 冷却截止 ts}
+_active_lock = threading.Lock()
 _active = {}   # 实际存活的工作数; join 超时不能释放配额
 _flight_lock = threading.Lock()
 _flights = {}  # (category, symbol, period, count, adj) -> 进行中的取数; 见 fetch_kline_df
 
 
 class SourceBusy(Exception):
-    """本地容量不足，不计作上游故障。"""
+    """本地并发容量或调用额度不足。"""
 
 
 class SourceTimeout(Exception):
@@ -65,86 +60,7 @@ class SourceTimeout(Exception):
 
 
 class SourceSkip(Exception):
-    """本源明确不服务这个标的 (能力缺口)，不计作上游故障。
-
-    由 `KlineSource.fetch` 抛出, 用于区分两种"没拿到数据":
-      * **能力缺口** —— 上游正常答了, 只是这个市场/标的没有这个功能或没有数据
-        (典型: 本套餐的港/美股日内分时 403; 或某代码当日一根 bar 都没有)。
-        这不是故障, 记进源健康计数只会让**同一源**在别的市场/标的上一起被冷却。
-      * **上游故障** —— 异常/超时, 该记失败 (返回 None)。
-
-    与 SourceBusy 同一路子: 释放 probe 标记、`perf.bump("src_skip_<name>")`, 不记失败。
-    单源链 (如分时的 alphafeed_intraday) 尤其依赖这条 —— 冷却整个源等于全市场 404。
-    """
-
-
-def _admit(name):
-    with _health_lock:
-        ent = _health.setdefault(name, {"fails": 0, "until": 0.0,
-                                        "probe": False, "generation": 0})
-        if ent["until"] > time.monotonic() or ent["probe"]:
-            return None
-        if ent["until"]:
-            ent["probe"] = True
-        return ent, ent["generation"]
-
-
-def _current(name, token):
-    ent = _health.get(name)
-    return ent is not None and (token is None or
-        (ent is token[0] and ent["generation"] == token[1]))
-
-
-def reset_health():
-    """清空源级健康状态 (测试隔离用)。
-
-    连数据源告警的当日闸门一起清: "每源每天一条"是进程级状态, 用例之间不清会串味
-    (前一个用例发过通知, 后一个断言"该发"就永远不成立)。
-    """
-    with _health_lock:
-        _health.clear()
-    source_alert.reset()
-
-
-def _in_cooldown(name):
-    with _health_lock:
-        ent = _health.get(name)
-    return bool(ent and (ent["until"] > time.monotonic() or ent["probe"]))
-
-
-def _note_ok(name, token=None):
-    with _health_lock:
-        if _current(name, token):
-            _health.pop(name, None)
-
-
-def _note_fail(name, token=None, detail=""):
-    """连续失败计一次; 达阈值则进入冷却窗口。
-
-    detail 是"最后失败的那一次"的上下文 (标的/周期/类别), 只用于熔断通知文案 ——
-    进冷却时推一条 (每源每天最多一条), 便于不翻日志就知道是哪个市场/周期在坏。
-    """
-    now = time.monotonic()
-    entered = False
-    with _health_lock:
-        if token is not None and not _current(name, token):
-            return
-        ent = _health.setdefault(name, {"fails": 0, "until": 0.0,
-                                        "probe": False, "generation": 0})
-        ent["fails"] += 1
-        if ent["probe"] or ent["fails"] >= SOURCE_FAIL_THRESHOLD:
-            ent["until"] = now + SOURCE_COOLDOWN_SEC
-            ent["fails"] = 0
-            ent["probe"] = False
-            ent["generation"] += 1
-            entered = True
-    if entered:
-        perf.bump(f"src_cooldown_{name}")
-        log.warning("数据源 %s 连续失败 %d 次, 冷却 %.0fs 内跳过 (%s)",
-                    name, SOURCE_FAIL_THRESHOLD, SOURCE_COOLDOWN_SEC, detail)
-        # 通知放在锁外 (推送含入队 + 日志, 别占着健康锁); 失败也只记日志
-        source_alert.notify(name, f"连续失败 {SOURCE_FAIL_THRESHOLD} 次",
-                            detail=detail, cooldown_sec=SOURCE_COOLDOWN_SEC)
+    """本源明确不服务这个市场或标的，例如分时无权限或当日无数据。"""
 
 
 def _fetch_bounded(src, symbol, period, count, adj, name):
@@ -154,14 +70,14 @@ def _fetch_bounded(src, symbol, period, count, adj, name):
     释放配额，故永久挂起也不会无界创建线程。
     """
     box = {}
-    with _health_lock:
+    with _active_lock:
         if (_active.get(name, 0) >= SOURCE_MAX_INFLIGHT
                 or sum(_active.values()) >= SOURCE_MAX_TOTAL):
             raise SourceBusy(name)
         _active[name] = _active.get(name, 0) + 1
 
     def _release():
-        with _health_lock:
+        with _active_lock:
             _active[name] -= 1
             if not _active[name]:
                 del _active[name]
@@ -192,27 +108,15 @@ def _fetch_bounded(src, symbol, period, count, adj, name):
 
 
 def _try_source(name, symbol, period, count, adj, category, idx, chain):
-    """单源尝试: 有界取数 + 新鲜度守卫 + 健康计数。返回 df 或 None。"""
+    """单源尝试: 有界取数 + 新鲜度守卫。失败只影响本次请求。"""
     src = SOURCES[name]
-    token = _admit(name)
-    if token is None:
-        return None
     why = "该源无返回"
     try:
         df = _fetch_bounded(src, symbol, period, count, adj, name)
     except SourceBusy:
-        with _health_lock:
-            if _current(name, token):
-                token[0]["probe"] = False
         perf.bump(f"src_busy_{name}")
         return None
     except SourceSkip as e:
-        # 本源的"能力缺口": 它自己说清了这个市场/标的它服务不了。与 SourceBusy 同理,
-        # 不记失败 —— 否则单源链会被"别的市场没权限/别的标的没数据"打进冷却, 连带
-        # 让有数据的市场一起 404。
-        with _health_lock:
-            if _current(name, token):
-                token[0]["probe"] = False
         perf.bump(f"src_skip_{name}")
         log.info("数据源 %s 不服务 %s %s (%s), 直接下沉", name, symbol, period, e)
         return None
@@ -230,17 +134,10 @@ def _try_source(name, symbol, period, count, adj, category, idx, chain):
         why = "分钟数据过旧"
         df = None
     if df is not None:
-        _note_ok(name, token)
         if idx > 0:
             perf.bump("fallback")
             log.info("%s %s 已回退到数据源 %s", symbol, period, name)
         return df
-    # 该源本次未取到数据 (异常/空/过旧/超时): 计健康计数, 用于确认慢请求是否
-    # 集中在个别坏源上 (回退链会把其耗时叠加到用户请求上)
-    cat = {"index": "指数", "fund": "基金", "stock": "股票", "minute": "分钟",
-           "intraday": "分时", "hk": "港股", "us": "美股"}.get(category, category)
-    detail = f"{symbol} {period} {cat}，{why}"
-    _note_fail(name, token, detail=detail)
     perf.bump(f"src_fail_{name}")
     if idx < len(chain) - 1:
         log.warning("数据源 %s 获取 %s %s 失败 (%s), 回退 %s",
@@ -346,8 +243,8 @@ class AlphaFeedIntradaySource(AlphaFeedSource):
 
     与 "minute" 类别分开的原因: 分钟K视图 (1m/5m/15m/30m/60m) 是跨天历史
     (前端 1m 要 1200 根 ≈ 5 个交易日), 而日内走势只回当日 —— 两者不能共用一条链,
-    分开后回退链、源健康计数、chain_tag 缓存 key 都天然隔离。
-    真正"日内走势优先"的取舍与当日熔断在 market._fetch_intraday_kline 里。
+    分开后回退链和 chain_tag 缓存 key 各自独立。
+    日内走势权限判定在 market._fetch_intraday_kline 里。
     """
 
     name = "alphafeed_intraday"
@@ -565,7 +462,7 @@ def _minute_fresh(df):
         return False
 
 
-def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD):
+def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD, *, timing=None):
     """按类别数据源链依次尝试, 返回 (标准 df, 源名) 或 (None, None)。
 
     单源失败 (异常/空数据/分钟数据过旧) 记 warning 后继续下一源; 全部失败
@@ -585,14 +482,16 @@ def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD):
     if not owner:
         perf.bump("kline_coalesced")
         # 首发者每个源都有 SOURCE_TIMEOUT_SEC 硬超时, 整条链跑完不会超过这个上限
-        if not flight["event"].wait(SOURCE_TIMEOUT_SEC * max(1, len(_chain(category)))):
+        with perf.Span(timing, "coalesced_wait_ms"):
+            ready = flight["event"].wait(SOURCE_TIMEOUT_SEC * max(1, len(_chain(category))))
+        if not ready:
             perf.bump("kline_coalesced_timeout")
             log.warning("等待同参数取数超时 %s %s, 放弃", symbol, period)
             return None, None
         df, name = flight["result"]
         return (df.copy() if df is not None else None), name
     try:
-        df, name = _fetch_chain(category, symbol, period, count, adj)
+        df, name = _fetch_chain(category, symbol, period, count, adj, timing=timing)
         # 调用方拿到 df 就可能原地改, 跟随者读的是交出前的快照
         flight["result"] = ((df.copy() if df is not None else None), name)
         return df, name
@@ -602,18 +501,14 @@ def fetch_kline_df(category, symbol, period, count, adjust=ADJUST_FORWARD):
         flight["event"].set()
 
 
-def _fetch_chain(category, symbol, period, count, adj):
+def _fetch_chain(category, symbol, period, count, adj, *, timing=None):
     chain = _chain(category)
     for i, name in enumerate(chain):
         src = SOURCES[name]
         if not src.supports(category, period, adj):
             continue
-        if _in_cooldown(name):
-            # 该源刚连续失败过: 冷却期内直接跳过, 不再重吃同一份超时
-            perf.bump(f"src_skip_cooldown_{name}")
-            log.info("数据源 %s 冷却中, 跳过 %s %s", name, symbol, period)
-            continue
-        df = _try_source(name, symbol, period, count, adj, category, i, chain)
+        with perf.Span(timing, f"src_{name}_ms"):
+            df = _try_source(name, symbol, period, count, adj, category, i, chain)
         if df is not None:
             return df, name
     perf.bump("chain_exhausted")

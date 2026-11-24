@@ -493,15 +493,18 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
                         ("infoPanelRows", "panelStockName", "panelStockCode",
                          "fmtLots", "fmtCN", "fmtPrice3", "normPct",
                          "marketCountdownSec", "marketHintTitle"))
-        # 下一开盘行读的是共享时钟 (真模块 + 可控状态), 不是服务端返回的字段
+        # 下一开盘行读的是共享时钟 (真模块 + 可控状态), 不是服务端返回的字段。
+        # pos-calc 用 require: 源码拼进 node -e 会顶上 Windows 命令行长度上限。
+        pos_js = str(POS_CALC_JS).replace("\\", "/")
         cls.script = (
-            POS_CALC_JS.read_text(encoding="utf-8") + "\n"
+            f"require({json.dumps(pos_js)});\n"
             + MARKET_CLOCK_JS.read_text(encoding="utf-8") + "\n"
             + fns + "\n"
             + "globalThis.C = () => ({ up: 'up', down: 'down' });\n"
             + "globalThis.VisualLive = { price: (v) => (v == null ? '—' : String(+Number(v).toFixed(3))) };\n"
             + "const c = JSON.parse(process.argv[1]);\n"
-            + "globalThis.STATE = { symbol: c.symbol, period: c.period, klineData: null, posCalc: c.posCalc || null };\n"
+            + "globalThis.STATE = { symbol: c.symbol, period: c.period, klineData: null,"
+            + " posCalc: c.posCalc || null, hkLive: c.hkLive || null };\n"
             # 真实载荷一定带 time (→ today); 用例不写就默认"目标时刻就在今天"
             + "const mk = Object.assign({ phase: 'trading', at: Date.now() }, c.market || {});\n"
             + "if (!mk.today) mk.today = String(mk.nextOpenAt || mk.nextLiveAt || '').slice(0, 10);\n"
@@ -560,6 +563,20 @@ class InfoPanelRowsBehaviorTest(unittest.TestCase):
         self.assertIn("ATR20", by_period["止损参考"]["title"])
         self.assertNotIn("建议仓位", self._rows(dict(base, is_index=True))["labels"])
         self.assertNotIn("建议仓位", self._rows(self.STOCK)["labels"])
+        self.assertNotIn("半凯利", out["labels"])
+
+    def test_half_kelly_row_only_when_enabled(self):
+        base = dict(self.STOCK, last_price=10, atr14=0.4, atr20=0.55)
+        on = self._rows(base, pos_calc={
+            "halfKelly": True, "hkSource": "manual", "hkWinRate": 47.3, "hkPayoff": 2.09,
+        })
+        labels = on["labels"]
+        self.assertLess(labels.index("止损参考"), labels.index("半凯利"))
+        self.assertLess(labels.index("半凯利"), labels.index("总手"))
+        row = {r["label"]: r for r in on["rows"]}["半凯利"]
+        self.assertEqual(row["text"], "11手 (11%)")
+        self.assertEqual(row["action"], "poscalc")
+        self.assertNotIn("minor", row)
 
     def test_ranking_values_display_source_date_and_ttm(self):
         data = dict(self.STOCK, pe=17.053, pb=4.058,

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _VISUAL = Path(__file__).resolve().parents[1]
 if str(_VISUAL) not in sys.path:
@@ -78,6 +79,19 @@ class StaticAssetsTest(unittest.TestCase):
         r = self._get("/js/api.js")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.headers["Cache-Control"], "no-store")
+
+    def test_favicon_is_empty_without_session_lookup(self):
+        from security import SESSION_COOKIE
+
+        client = self.client.application.test_client()
+        client.set_cookie(SESSION_COOKIE, "unused-session")
+        with mock.patch("trades.get_session", side_effect=AssertionError("session lookup")) as lookup:
+            for method in ("GET", "HEAD"):
+                with self.subTest(method=method), client.open("/favicon.ico", method=method) as response:
+                    self.assertEqual(response.status_code, 204)
+                    self.assertEqual(response.data, b"")
+                    self.assertEqual(response.headers["Cache-Control"], "public, max-age=86400")
+            lookup.assert_not_called()
 
     def test_immutable_rule_only_matches_versioned_names(self):
         from app import _IMMUTABLE_VENDOR

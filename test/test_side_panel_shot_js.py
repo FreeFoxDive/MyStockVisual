@@ -172,6 +172,7 @@ function collect(step) {
   _infoOn = step.info !== false;
   _depthOn = !!step.depth;
   STATE.posCalc = step.posCalc || null;
+  STATE.hkLive = step.hkLive || null;
   STATE.stockInfo = step.stockInfo === undefined ? INFO : step.stockInfo;
   STATE.depth = step.depthData === undefined ? DEPTH : step.depthData;
   const ctx = recCtx();
@@ -214,6 +215,19 @@ process.stdout.write(JSON.stringify(collect(JSON.parse(process.argv[1]))));"""
         stop = next(t for t in out["drawn"] if t["t"] == "9.20")
         self.assertEqual(stop["color"], "#14b143")
         self.assertLess(out["model"]["content"], 720)
+        self.assertNotIn("半凯利", texts)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_half_kelly_row_reaches_the_shot_only_when_on(self):
+        info = {"symbol": "000001.SZ", "name": "平安银行", "last_price": 10, "prev_close": 9.8,
+                "atr14": 0.4, "atr20": 0.55, "trade_status": "trading", "trade_status_text": "连续竞价"}
+        out = self._collect({
+            "width": 204, "height": 900, "stockInfo": info,
+            "posCalc": {"halfKelly": True, "hkSource": "manual", "hkWinRate": 47.3, "hkPayoff": 2.09},
+        })
+        texts = [t["t"] for t in out["drawn"]]
+        self.assertLess(texts.index("止损参考"), texts.index("半凯利"))
+        self.assertIn("11手 (11%)", texts)
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_label_left_and_value_right_aligned(self):

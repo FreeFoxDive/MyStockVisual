@@ -83,6 +83,59 @@ class AnalysisTestCase(unittest.TestCase):
         return quant_analysis.compute_quant_analysis(uid, **kwargs)
 
 
+class TestModelPositionStats(AnalysisTestCase):
+    def test_only_selected_closed_trades_and_same_fee_basis_as_quant(self):
+        uid = self._user()
+        other_uid = self._user("bob")
+        mid, other_mid = [m["id"] for m in trades.list_models(active_only=True)[:2]]
+        self._closed(uid, model_id=mid, exit_price=12)
+        self._batch(uid, [
+            {"side": "buy", "price": 10, "quantity": 100, "date": "2026-01-05"},
+            {"side": "sell", "price": 9, "quantity": 100, "date": "2026-01-07"},
+        ], model_id=mid)
+        self._batch(uid, [
+            {"side": "buy", "price": 10, "quantity": 200, "date": "2026-01-05"},
+            {"side": "sell", "price": 15, "quantity": 100, "date": "2026-01-07"},
+        ], model_id=mid)
+        self._closed(uid, model_id=other_mid, exit_price=9)
+        self._closed(uid, exit_price=9)
+        self._closed(other_uid, model_id=mid, exit_price=9)
+        full = self._run(uid, model_id=mid, deduct_fees=True)["summary"]
+        with mock.patch.object(quant_analysis, "_analyze", side_effect=AssertionError("full report")):
+            light = quant_analysis.compute_model_position_stats(uid, str(mid))
+            unassigned = quant_analysis.compute_model_position_stats(uid, "none")
+        self.assertEqual(light["closed_count"], 2)
+        self.assertEqual(light["win_rate"], 50)
+        self.assertEqual(light["closed_count"], full["closed_count"])
+        self.assertEqual(round(light["win_rate"], 2), full["win_rate"])
+        self.assertEqual(round(light["payoff_ratio"], 2), full["payoff_ratio"])
+        self.assertEqual(unassigned, {"closed_count": 1, "win_rate": 0, "payoff_ratio": None})
+
+    def test_position_stats_keep_precision_near_break_even(self):
+        uid = self._user()
+        with mock.patch.object(trades, "get_user_fees", return_value=None):
+            for _ in range(22):
+                self._closed(uid, exit_price=10.136)
+            for _ in range(3):
+                self._closed(uid, exit_price=9)
+            summary = quant_analysis.compute_model_position_stats(uid, "none")
+        self.assertEqual(summary["closed_count"], 25)
+        self.assertAlmostEqual(summary["win_rate"], 88)
+        self.assertAlmostEqual(summary["payoff_ratio"], 0.136)
+        p = summary["win_rate"] / 100
+        self.assertLess(p - (1 - p) / summary["payoff_ratio"], 0)
+
+    def test_position_stats_do_not_round_fractional_win_rate(self):
+        uid = self._user()
+        with mock.patch.object(trades, "get_user_fees", return_value=None):
+            self._closed(uid, exit_price=10.5)
+            self._closed(uid, exit_price=10.5)
+            self._closed(uid, exit_price=9)
+            summary = quant_analysis.compute_model_position_stats(uid, "none")
+        self.assertAlmostEqual(summary["win_rate"], 200 / 3)
+        self.assertEqual(summary["payoff_ratio"], 0.5)
+
+
 class TestRealizedCurve(AnalysisTestCase):
     def test_simple_pnl_lands_on_exit_day_and_position_clears(self):
         uid = self._user()
@@ -444,6 +497,38 @@ class TestAnalysisApi(unittest.TestCase):
         anon = self.app.test_client()
         response = anon.get("/api/analysis/quant")
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(anon.get("/api/analysis/model-position-stats?model_id=none").status_code, 401)
+
+    def test_position_stats_route_checks_model_and_returns_only_stats(self):
+        url = "/api/analysis/model-position-stats?model_id="
+        self.assertEqual(self.client.get(url + "all").status_code, 400)
+        response = self.client.get(url + "2147483647")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.get_json(), {
+            "summary": {"closed_count": 0, "win_rate": None, "payoff_ratio": None},
+        })
+
+    def test_position_stats_cache_reuses_only_same_account_and_model_until_expiry(self):
+        cache = self.app.extensions["model_position_stats_cache"]
+        cache.clear()
+        self.addCleanup(cache.clear)
+        url = "/api/analysis/model-position-stats?model_id="
+        user = {"id": 1001}
+        from market import time
+        with mock.patch("app.current_user_from_request", return_value=user), \
+             mock.patch.object(trades, "get_user_fees", wraps=trades.get_user_fees) as fees, \
+             mock.patch.object(time, "time", return_value=time.time()) as clock:
+            self.assertEqual(self.client.get(url + "42").status_code, 200)
+            self.assertEqual(self.client.get(url + "042").status_code, 200)
+            self.assertEqual(fees.call_count, 1)
+            self.assertEqual(self.client.get(url + "none").status_code, 200)
+            self.assertEqual(fees.call_count, 2)
+            user["id"] = 1002
+            self.assertEqual(self.client.get(url + "42").status_code, 200)
+            self.assertEqual(fees.call_count, 3)
+            clock.return_value += 16
+            self.assertEqual(self.client.get(url + "42").status_code, 200)
+            self.assertEqual(fees.call_count, 4)
 
     def test_rejects_bad_params(self):
         for query, message in (

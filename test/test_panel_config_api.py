@@ -126,7 +126,11 @@ class PanelConfigApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
     def test_pos_calc_roundtrip_and_reject(self):
-        good = {"capital": 100000, "riskPct": 1.5, "atrMult": 2, "atrPeriod": 20}
+        good = {
+            "capital": 100000, "riskPct": 1.5, "atrMult": 2, "atrPeriod": 20,
+            "halfKelly": False, "hkSource": "manual",
+            "hkWinRate": None, "hkPayoff": None, "hkModelId": None,
+        }
         r = self._put({"volume": True, "posCalc": good})
         cfg = r.get_json()["config"]
         self.assertEqual(cfg["posCalc"], good)
@@ -142,7 +146,49 @@ class PanelConfigApiTest(unittest.TestCase):
         }})
         self.assertEqual(r.get_json()["config"]["posCalc"], {
             "capital": 200000, "riskPct": 2, "atrMult": 2.5, "atrPeriod": 14,
+            "halfKelly": False, "hkSource": "manual",
+            "hkWinRate": None, "hkPayoff": None, "hkModelId": None,
         })
+
+    def test_half_kelly_persists_binding_not_model_snapshot(self):
+        manual = {
+            "capital": 100000, "riskPct": 2, "atrMult": 2, "atrPeriod": 14,
+            "halfKelly": True, "hkSource": "manual",
+            "hkWinRate": 47.3, "hkPayoff": 2.09, "hkModelId": 3,
+        }
+        r = self._put({"posCalc": manual})
+        self.assertEqual(r.get_json()["config"]["posCalc"], manual)
+
+        r = self._put({"posCalc": {
+            "capital": 100000, "riskPct": 2, "atrMult": 2, "atrPeriod": 14,
+            "halfKelly": True, "hkSource": "model", "hkModelId": 4,
+            "hkWinRate": 80, "hkPayoff": 3,
+        }})
+        saved = r.get_json()["config"]["posCalc"]
+        self.assertEqual(saved["hkSource"], "model")
+        self.assertEqual(saved["hkModelId"], 4)
+        self.assertEqual(saved["hkWinRate"], 80)
+        self.assertEqual(saved["hkPayoff"], 3)
+        self.assertEqual(saved["capital"], 100000)
+
+        r = self._put({"posCalc": {
+            "capital": 100000, "riskPct": 2, "atrMult": 2, "atrPeriod": 14,
+            "halfKelly": True, "hkSource": "model", "hkModelId": "none",
+        }})
+        self.assertEqual(r.get_json()["config"]["posCalc"]["hkModelId"], "none")
+
+        r = self._put({"posCalc": {
+            "capital": 100000, "riskPct": 2, "atrMult": 2, "atrPeriod": 14,
+            "halfKelly": "yes", "hkSource": "nope", "hkWinRate": 500,
+            "hkPayoff": True, "hkModelId": "all",
+        }})
+        dirty = r.get_json()["config"]["posCalc"]
+        self.assertEqual(dirty["atrMult"], 2)
+        self.assertFalse(dirty["halfKelly"])
+        self.assertEqual(dirty["hkSource"], "manual")
+        self.assertIsNone(dirty["hkWinRate"])
+        self.assertIsNone(dirty["hkPayoff"])
+        self.assertIsNone(dirty["hkModelId"])
 
     def test_unauthorized_401(self):
         anon = self.app.test_client()

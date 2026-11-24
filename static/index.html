@@ -974,10 +974,12 @@ body {
 #param-pop button { padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border);
   background: transparent; color: var(--text); cursor: pointer; font-size: 12px; }
 #param-pop button.pp-ok { background: var(--btn-active); color: var(--btn-active-text); border-color: var(--btn-active); }
-#poscalc-modal input[type="number"] {
+#poscalc-modal input[type="number"], #poscalc-modal select {
   width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 13px;
   border: 1px solid var(--border); border-radius: 4px; background: var(--bg-card); color: var(--text);
 }
+#poscalc-modal input[readonly] { color: var(--text-secondary); }
+#pc-hk-note { margin-top: 6px; font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
 #poscalc-modal .pc-chip, #poscalc-modal .pc-btn {
   border: 1px solid var(--border); background: transparent; color: var(--text);
   border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer;
@@ -1356,6 +1358,29 @@ body {
       <input type="number" id="pc-entry" min="0" step="0.001" inputmode="decimal">
       <span>ATR</span>
       <input type="number" id="pc-atr" min="0" step="0.001" inputmode="decimal" title="默认用日线 ATR，可改成试算">
+      <div id="pc-hk-block" style="grid-column:1 / -1;margin-top:4px;padding-top:8px;border-top:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span>半凯利</span>
+          <button type="button" class="pc-btn" id="pc-hk-off">关</button>
+          <button type="button" class="pc-btn" id="pc-hk-on">开</button>
+        </div>
+        <div id="pc-hk-body" style="display:none;margin-top:8px">
+          <div style="display:grid;grid-template-columns:72px 1fr;gap:8px 8px;align-items:center">
+            <span>来源</span>
+            <div style="display:flex;gap:4px">
+              <button type="button" class="pc-btn" id="pc-hk-src-manual">手动</button>
+              <button type="button" class="pc-btn" id="pc-hk-src-model">模型</button>
+            </div>
+            <span id="pc-hk-model-label">模型</span>
+            <select id="pc-hk-model"></select>
+            <span>胜率</span>
+            <span style="display:flex;align-items:center;gap:4px"><input type="number" id="pc-hk-win" min="0" max="100" step="0.1" inputmode="decimal" style="width:88px"><span style="color:var(--text-secondary)">%</span></span>
+            <span>盈亏比</span>
+            <input type="number" id="pc-hk-payoff" min="0.01" max="1000" step="0.01" inputmode="decimal" style="width:88px">
+          </div>
+          <div id="pc-hk-note"></div>
+        </div>
+      </div>
     </div>
     <div style="display:flex;gap:8px;margin-top:10px">
       <button type="button" class="pc-btn" id="pc-follow">跟随现价</button>
@@ -1572,7 +1597,9 @@ const STATE = {
   logScale: false,       // 主图对数坐标轴
   maPeriods: [5, 10, 20],// 均线参数 (客户端重算)
   bollParams: { n: 20, k: 2 }, // BOLL 参数 (客户端重算)
-  posCalc: { capital: 100000, riskPct: 2, atrMult: 2, atrPeriod: 14 }, // 以损定量 (跟账号同步)
+  posCalc: { capital: 100000, riskPct: 2, atrMult: 2, atrPeriod: 14,
+    halfKelly: false, hkSource: 'manual', hkWinRate: null, hkPayoff: null, hkModelId: null }, // 以损定量 + 可选半凯利 (跟账号同步)
+  hkLive: null,          // 模型源的胜率/盈亏比, 只在内存, 随交易结算刷新
   draw: {                // 画线模式 (Drawings 模块; 数据模型见 static/js/drawings.js)
     enabled: false,      // 画线模式开关 (工具面板可见)
     tool: 'select',      // 当前工具
@@ -3178,7 +3205,7 @@ function infoPanelRows(d) {
   // 641~900 紧凑侧栏始终显示这些行, 其余加 minor。写在函数内: 截图/面板测试会整段抽走本函数。
   const INFO_KEEP_LABELS = {
     '名称': 1, '代码': 1, '现价': 1, '涨停价': 1, '跌停价': 1,
-    '建议仓位': 1, '止损参考': 1,
+    '建议仓位': 1, '止损参考': 1, '半凯利': 1,
     '换手': 1, '量比': 1, 'PE': 1, 'PB': 1, '溢价': 1, '状态': 1,
   };
   const markInfoMinor = (r) => {
@@ -3219,12 +3246,14 @@ function infoPanelRows(d) {
   // 建议仓位/止损参考: 无日线 ATR 或指数时 formatSideRows 返回 []，filter 会丢掉。
   const posRows = (typeof VisualPosCalc !== 'undefined' && VisualPosCalc.formatSideRows)
     ? VisualPosCalc.formatSideRows({
+        symbol: d.symbol,
         isIndex: !!d.is_index,
         isEtf: !!d.is_etf,
         entryPrice: d.last_price,
         atr14: d.atr14,
         atr20: d.atr20,
         config: (typeof STATE !== 'undefined' && STATE.posCalc) || null,
+        hkLive: (typeof STATE !== 'undefined' && STATE.hkLive) || null,
         downColor: down,
       })
     : [];
@@ -4944,6 +4973,7 @@ async function fetchIntraday(opts) {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
   const fetchTs = Date.now(); STATE._intraFetchTs = fetchTs;
+  STATE._intradayLoading = true;
   STATE._lastBarAt = fetchTs;
   const _cacheKey = `vi_${symbol}_1m`;
 
@@ -5008,7 +5038,10 @@ async function fetchIntraday(opts) {
       _cleanLocalStorage();
     } catch(e) { /* ignore */ }
   } catch(e) { if (loading) showToast('分时数据获取失败: ' + e.message, { type: 'err', actionLabel: '重试', onAction: () => fetchIntraday() }); }
-  finally { if (loading && STATE.chart) STATE.chart.hideLoading(); }
+  finally {
+    if (STATE._intraFetchTs === fetchTs) STATE._intradayLoading = false;
+    if (loading && STATE.chart) STATE.chart.hideLoading();
+  }
 }
 
 function renderIntraday(data) {
@@ -9029,12 +9062,24 @@ function posCalcDraft() {
     const n = Number(document.getElementById(id).value);
     return Number.isFinite(n) && n > 0 ? n : fallback;
   };
-  return {
+  const draft = {
     capital: read('pc-capital', cfg.capital),
     riskPct: read('pc-risk', cfg.riskPct),
     atrMult: read('pc-mult', cfg.atrMult),
     atrPeriod: cfg.atrPeriod,
+    halfKelly: cfg.halfKelly,
+    hkSource: cfg.hkSource,
+    hkModelId: cfg.hkModelId,
+    hkWinRate: cfg.hkWinRate,
+    hkPayoff: cfg.hkPayoff,
   };
+  if (cfg.halfKelly && cfg.hkSource === 'manual') {
+    const winEl = document.getElementById('pc-hk-win');
+    const payEl = document.getElementById('pc-hk-payoff');
+    draft.hkWinRate = winEl.value === '' ? null : Number(winEl.value);
+    draft.hkPayoff = payEl.value === '' ? null : Number(payEl.value);
+  }
+  return draft;
 }
 
 /** 正在输入的本金/风险/倍数若越界, 不要静默退回已保存值来试算。空串仍交给 posCalcDraft 用已保存值。 */
@@ -9054,9 +9099,25 @@ function posCalcInputIssue() {
   return null;
 }
 
+function posCalcHkInputIssue(cfg) {
+  if (!cfg || !cfg.halfKelly || cfg.hkSource !== 'manual') return null;
+  const winRaw = document.getElementById('pc-hk-win').value;
+  if (winRaw !== '' && winRaw != null) {
+    const n = Number(winRaw);
+    if (!Number.isFinite(n) || n < 0 || n > 100) return '胜率需在 0～100';
+  }
+  const payRaw = document.getElementById('pc-hk-payoff').value;
+  if (payRaw !== '' && payRaw != null) {
+    const n = Number(payRaw);
+    if (!Number.isFinite(n) || n <= 0 || n > 1000) return '盈亏比需大于 0 且不超过 1000';
+  }
+  return null;
+}
+
 function renderPosCalcModal(opts) {
   if (!posCalcModalOpen() || typeof VisualPosCalc === 'undefined') return;
   if (opts && opts.refill) fillPosCalcConfigInputs();
+  syncHalfKellyControls(VisualPosCalc.normalizePosCalcConfig(STATE.posCalc), opts);
   const cfg = posCalcDraft();
   const pair = dailyAtrPair();
   const fmtAtr = (v) => (v == null ? '—' : Number(v).toFixed(3));
@@ -9076,43 +9137,221 @@ function renderPosCalcModal(opts) {
     atrEl.value = followedAtr != null ? String(followedAtr) : '';
   }
   const box = document.getElementById('poscalc-result');
+  const lines = [];
   const issue = posCalcInputIssue();
   if (issue) {
-    box.textContent = issue;
-    return;
+    lines.push({ text: issue });
+  } else {
+    const r = VisualPosCalc.calcPositionSizing({
+      entryPrice: Number(entryEl.value),
+      atr: Number(atrEl.value),
+      isEtf: posCalcIsEtf(),
+      capital: cfg.capital,
+      riskPct: cfg.riskPct,
+      atrMult: cfg.atrMult,
+      atrPeriod: cfg.atrPeriod,
+    });
+    if (!r) {
+      lines.push({ text: '无法计算：缺少有效的买入价或 ATR' });
+    } else if (r.reason === 'stop_non_positive') {
+      lines.push({ text: '无法计算：止损价 ' + VisualPosCalc.formatPrice(r.stopPrice, r.dp) + ' ≤ 0' });
+    } else {
+      const pct = (r.stopPrice / r.entryPrice - 1) * 100;
+      lines.push({ text: (r.shares >= 100 ? (r.lots + ' 手 / ' + r.shares + ' 股') : (r.note || '不足1手')) });
+      lines.push({ text: '止损 ' + VisualPosCalc.formatPrice(r.stopPrice, r.dp) + '（' + VisualPosCalc.formatPct(pct) + '%）', stop: true });
+      lines.push({ text: '建仓 ' + VisualPosCalc.formatMoney(r.cost) + ' · 仓位 ' + VisualPosCalc.formatPct(r.posPct) + '%' });
+      lines.push({ text: '最大亏损 ' + VisualPosCalc.formatMoney(r.actualRisk) + ' · 占本金 ' + VisualPosCalc.formatPct(r.actualRiskPct) + '%' });
+      if (r.note && r.shares >= 100) lines.push({ text: r.note });
+    }
   }
-  const r = VisualPosCalc.calcPositionSizing({
-    entryPrice: Number(entryEl.value),
-    atr: Number(atrEl.value),
-    isEtf: posCalcIsEtf(),
-    capital: cfg.capital,
-    riskPct: cfg.riskPct,
-    atrMult: cfg.atrMult,
-    atrPeriod: cfg.atrPeriod,
-  });
-  if (!r) {
-    box.textContent = '无法计算：缺少有效的买入价或 ATR';
-    return;
-  }
-  if (r.reason === 'stop_non_positive') {
-    box.textContent = '无法计算：止损价 ' + VisualPosCalc.formatPrice(r.stopPrice, r.dp) + ' ≤ 0';
-    return;
-  }
-  const pct = (r.stopPrice / r.entryPrice - 1) * 100;
-  const lines = [
-    (r.shares >= 100 ? (r.lots + ' 手 / ' + r.shares + ' 股') : (r.note || '不足1手')),
-    '止损 ' + VisualPosCalc.formatPrice(r.stopPrice, r.dp) + '（' + VisualPosCalc.formatPct(pct) + '%）',
-    '建仓 ' + VisualPosCalc.formatMoney(r.cost) + ' · 仓位 ' + VisualPosCalc.formatPct(r.posPct) + '%',
-    '最大亏损 ' + VisualPosCalc.formatMoney(r.actualRisk) + ' · 占本金 ' + VisualPosCalc.formatPct(r.actualRiskPct) + '%',
-  ];
-  if (r.note && r.shares >= 100) lines.push(r.note);
+  if (cfg.halfKelly && !issue) lines.push.apply(lines, halfKellyResultLines(cfg, Number(entryEl.value)));
   box.textContent = '';
-  lines.forEach((text, i) => {
+  lines.forEach((line) => {
     const row = document.createElement('div');
-    if (i === 1) row.className = 'pc-stop';
-    row.textContent = text;
+    if (line.stop) row.className = 'pc-stop';
+    row.textContent = line.text;
     box.appendChild(row);
   });
+}
+
+const HK_LIVE_TTL_MS = 30000;
+let _hkFetchSeq = 0;
+let _hkRequest = null;
+let _hkModels = null;
+let _hkModelsLoaded = false;
+let _hkModelsError = null;
+
+function halfKellyResultLines(cfg, entryPrice) {
+  const hkIssue = posCalcHkInputIssue(cfg);
+  if (hkIssue) return [{ text: hkIssue }];
+  const picked = VisualPosCalc.pickHalfKellyInputs(cfg, STATE.hkLive);
+  if (!picked.ready) return [{ text: picked.hint || '半凯利：—' }];
+  const hk = VisualPosCalc.calcHalfKelly({
+    symbol: STATE.symbol,
+    entryPrice: entryPrice,
+    capital: cfg.capital,
+    winRate: picked.winRate,
+    payoff: picked.payoff,
+  });
+  if (!hk) return [{ text: '半凯利：缺少有效买入价' }];
+  return [{ text: VisualPosCalc.halfKellyResultText(hk) }];
+}
+
+function fillHkModelSelect(selectedId) {
+  const sel = document.getElementById('pc-hk-model');
+  if (!sel) return;
+  const models = _hkModels || [];
+  const cur = selectedId != null ? String(selectedId) : '';
+  sel.innerHTML = '<option value="">选择模型</option><option value="none">无模型</option>' + models.map((m) => {
+    const name = (m.name || ('#' + m.id)) + (m.active ? '' : '（已删除）');
+    return '<option value="' + m.id + '">' + escHtml(name) + '</option>';
+  }).join('');
+  if (!cur) return;
+  sel.value = cur;
+  if (sel.value !== cur) {
+    const opt = document.createElement('option');
+    opt.value = cur;
+    opt.textContent = '模型 #' + cur;
+    sel.appendChild(opt);
+    sel.value = cur;
+  }
+}
+
+async function ensureHkModels() {
+  if (_hkModelsLoaded) return _hkModels;
+  try {
+    const resp = await fetch('/api/models', { credentials: 'same-origin' });
+    if (!resp.ok) {
+      _hkModels = [];
+      _hkModelsLoaded = false;
+      _hkModelsError = resp.status === 401 ? '未登录，无法读取量化模型' : '模型列表加载失败';
+      return _hkModels;
+    }
+    const data = await resp.json();
+    _hkModels = Array.isArray(data) ? data : [];
+    _hkModelsLoaded = true;
+    _hkModelsError = null;
+  } catch (e) {
+    _hkModels = [];
+    _hkModelsLoaded = false;
+    _hkModelsError = '模型列表加载失败';
+  }
+  return _hkModels;
+}
+
+function syncHalfKellyControls(cfg, opts) {
+  const on = !!cfg.halfKelly;
+  const modelSrc = cfg.hkSource === 'model';
+  document.getElementById('pc-hk-on').classList.toggle('pc-on', on);
+  document.getElementById('pc-hk-off').classList.toggle('pc-on', !on);
+  document.getElementById('pc-hk-body').style.display = on ? 'block' : 'none';
+  if (!on) return;
+  document.getElementById('pc-hk-src-manual').classList.toggle('pc-on', !modelSrc);
+  document.getElementById('pc-hk-src-model').classList.toggle('pc-on', modelSrc);
+  document.getElementById('pc-hk-model-label').style.display = modelSrc ? '' : 'none';
+  const sel = document.getElementById('pc-hk-model');
+  sel.style.display = modelSrc ? '' : 'none';
+  const winEl = document.getElementById('pc-hk-win');
+  const payEl = document.getElementById('pc-hk-payoff');
+  winEl.readOnly = modelSrc;
+  payEl.readOnly = modelSrc;
+  const live = STATE.hkLive;
+  const liveMatch = !!(modelSrc && live && live.modelId === cfg.hkModelId);
+  const refill = !!(opts && opts.refill);
+  if (modelSrc) {
+    if (refill || !sel.options.length) fillHkModelSelect(cfg.hkModelId);
+    // 只格式化只读输入框；实际试算仍用 STATE.hkLive 的原值。
+    winEl.value = liveMatch && live.winRate != null ? String(Number(live.winRate.toFixed(2))) : '';
+    payEl.value = liveMatch && live.payoff != null ? String(Number(live.payoff.toPrecision(4))) : '';
+  } else if (refill) {
+    winEl.value = cfg.hkWinRate == null ? '' : String(cfg.hkWinRate);
+    payEl.value = cfg.hkPayoff == null ? '' : String(cfg.hkPayoff);
+  }
+  const note = document.getElementById('pc-hk-note');
+  if (!modelSrc) {
+    note.textContent = '手动胜率、盈亏比会保存，不随交易记录变化。';
+  } else if (VisualPosCalc.hkModelBound(cfg.hkModelId)) {
+    note.textContent = hkModelNote(cfg, liveMatch ? live : null);
+  } else if (_hkModelsError) {
+    note.textContent = _hkModelsError;
+  } else {
+    note.textContent = '选择模型后，胜率和盈亏比按该模型已结算交易实时计算。未指定模型的交易选「无模型」。';
+  }
+}
+
+function hkModelNote(cfg, live) {
+  if (!live) return '正在读取模型统计…';
+  if (live.error === '未登录') return '未登录，无法读取模型统计。';
+  if (live.error === '加载失败') return '模型统计加载失败。';
+  if (live.error || live.winRate == null || !(Number(live.payoff) > 0)) {
+    return '样本不足，暂时无法计算半凯利。';
+  }
+  const n = live.closedCount == null ? '' : (' · ' + live.closedCount + ' 笔');
+  const who = cfg.hkModelId === 'none' ? '无模型' : '模型';
+  return '来自' + who + n + '。平仓后会更新。';
+}
+
+function hkLiveFresh(cfg, live) {
+  return !!(live && live.modelId === cfg.hkModelId && live.fetchedAt
+    && (Date.now() - live.fetchedAt) < HK_LIVE_TTL_MS);
+}
+
+async function refreshHalfKellyFromModel(opts) {
+  const force = !!(opts && opts.force);
+  const cfg = VisualPosCalc.normalizePosCalcConfig(STATE.posCalc);
+  if (!cfg.halfKelly || cfg.hkSource !== 'model' || !VisualPosCalc.hkModelBound(cfg.hkModelId)) return;
+  const modelId = cfg.hkModelId;
+  if (_hkRequest?.modelId === modelId || (!force && hkLiveFresh(cfg, STATE.hkLive))) return;
+  if (_hkRequest) _hkRequest.controller.abort();
+  const seq = ++_hkFetchSeq;
+  const controller = new AbortController();
+  _hkRequest = { modelId, controller };
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch('/api/analysis/model-position-stats?model_id=' + encodeURIComponent(modelId), {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    });
+    if (seq !== _hkFetchSeq) return;
+    if (resp.status === 401) {
+      STATE.hkLive = {
+        modelId: modelId, winRate: null, payoff: null, closedCount: null,
+        fetchedAt: Date.now(), error: '未登录',
+      };
+    } else {
+      const payload = resp.ok ? await resp.json() : null;
+      if (seq !== _hkFetchSeq) return;
+      const live = VisualPosCalc.hkLiveFromQuant(modelId, payload, Date.now());
+      if (!resp.ok) live.error = '加载失败';
+      STATE.hkLive = live;
+    }
+  } catch (e) {
+    if (seq !== _hkFetchSeq) return;
+    STATE.hkLive = {
+      modelId: modelId, winRate: null, payoff: null, closedCount: null,
+      fetchedAt: Date.now(), error: '加载失败',
+    };
+  } finally {
+    clearTimeout(timeout);
+    if (seq === _hkFetchSeq) _hkRequest = null;
+  }
+  if (seq !== _hkFetchSeq) return;
+  if (STATE.stockInfo) renderStockInfo(STATE.stockInfo);
+  if (posCalcModalOpen()) renderPosCalcModal();
+}
+
+function maybeRefreshHalfKelly(opts) {
+  if (document.hidden || (!infoPanelOn() && !posCalcModalOpen())) return;
+  if (!STATE._lastBarAt || STATE._foregroundLoading || (STATE.period === 'intraday' && STATE._intradayLoading)) return;
+  if (typeof VisualPosCalc !== 'undefined') return refreshHalfKellyFromModel(opts);
+}
+
+async function refreshHalfKellyModelSelect() {
+  await ensureHkModels();
+  const cfg = STATE.posCalc;
+  if (!posCalcModalOpen() || !cfg.halfKelly || cfg.hkSource !== 'model') return;
+  fillHkModelSelect(cfg.hkModelId);
+  renderPosCalcModal();
 }
 
 function commitPosCalc(partial) {
@@ -9138,6 +9377,11 @@ function openPosCalcModal() {
   modal.style.display = 'block';
   renderPosCalcModal({ refill: true });
   if (!STATE.stockInfo) fetchStockInfo();
+  const cfg = VisualPosCalc.normalizePosCalcConfig(STATE.posCalc);
+  if (cfg.halfKelly && cfg.hkSource === 'model') {
+    refreshHalfKellyModelSelect();
+    refreshHalfKellyFromModel({ force: true });
+  }
 }
 
 function closePosCalcModal() {
@@ -9150,6 +9394,15 @@ function closePosCalcModal() {
       const typed = el ? Number(el.value) : NaN;
       if (Number.isFinite(typed) && Math.abs(typed - Number(cfg[pair[1]])) > 1e-9) partial[pair[1]] = typed;
     });
+    if (cfg.halfKelly && cfg.hkSource === 'manual') {
+      [['pc-hk-win', 'hkWinRate'], ['pc-hk-payoff', 'hkPayoff']].forEach((pair) => {
+        const el = document.getElementById(pair[0]);
+        if (el.validity.badInput) return;
+        const typed = el.value === '' ? null : Number(el.value);
+        const saved = cfg[pair[1]];
+        if (typed !== saved) partial[pair[1]] = typed;
+      });
+    }
     if (Object.keys(partial).length) commitPosCalc(partial);
   }
   const modal = document.getElementById('poscalc-modal');
@@ -9190,11 +9443,54 @@ function wirePosCalc() {
   document.getElementById('pc-mult').addEventListener('change', () => {
     commitPosCalc({ atrMult: Number(document.getElementById('pc-mult').value) });
   });
-  ['pc-capital', 'pc-risk', 'pc-mult', 'pc-entry', 'pc-atr'].forEach((id) => {
+  document.getElementById('pc-hk-off').addEventListener('click', () => commitPosCalc({ halfKelly: false }));
+  document.getElementById('pc-hk-on').addEventListener('click', () => {
+    commitPosCalc({ halfKelly: true });
+    if (STATE.posCalc.hkSource === 'model') {
+      refreshHalfKellyModelSelect();
+      refreshHalfKellyFromModel({ force: true });
+    }
+  });
+  document.getElementById('pc-hk-src-manual').addEventListener('click', () => {
+    const cfg = VisualPosCalc.normalizePosCalcConfig(STATE.posCalc);
+    const partial = { hkSource: 'manual' };
+    const live = STATE.hkLive;
+    // 已有手填值留着。两边都空时, 才用当前模型统计填一次。
+    const empty = cfg.hkWinRate == null && cfg.hkPayoff == null;
+    if (empty && cfg.hkSource === 'model' && live && live.modelId === cfg.hkModelId
+        && live.winRate != null && live.payoff != null && !live.error) {
+      partial.hkWinRate = live.winRate;
+      partial.hkPayoff = live.payoff;
+    }
+    commitPosCalc(partial);
+  });
+  document.getElementById('pc-hk-src-model').addEventListener('click', () => {
+    commitPosCalc({ hkSource: 'model' });
+    refreshHalfKellyModelSelect();
+    refreshHalfKellyFromModel({ force: true });
+  });
+  document.getElementById('pc-hk-model').addEventListener('change', () => {
+    const raw = document.getElementById('pc-hk-model').value;
+    const hkModelId = raw === 'none' ? 'none' : (raw ? Number(raw) : null);
+    commitPosCalc({ hkSource: 'model', hkModelId: hkModelId });
+    refreshHalfKellyFromModel({ force: true });
+  });
+  document.getElementById('pc-hk-win').addEventListener('change', () => {
+    const raw = document.getElementById('pc-hk-win').value;
+    commitPosCalc({ hkWinRate: raw === '' ? null : Number(raw) });
+  });
+  document.getElementById('pc-hk-payoff').addEventListener('change', () => {
+    const raw = document.getElementById('pc-hk-payoff').value;
+    commitPosCalc({ hkPayoff: raw === '' ? null : Number(raw) });
+  });
+  ['pc-capital', 'pc-risk', 'pc-mult', 'pc-entry', 'pc-atr', 'pc-hk-win', 'pc-hk-payoff'].forEach((id) => {
     document.getElementById(id).addEventListener('input', () => {
       if (id === 'pc-entry' || id === 'pc-atr') _posCalcFollow = false;
       renderPosCalcModal();
     });
+  });
+  document.addEventListener('visibilitychange', () => {
+    maybeRefreshHalfKelly({ force: true });
   });
   document.getElementById('pc-follow').addEventListener('click', () => {
     _posCalcFollow = true;
@@ -9640,6 +9936,8 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshScreenerBadge().then(scheduleScreenerBadge, scheduleScreenerBadge);
 
   setInterval(() => {
+    // 已平仓统计按自己的 TTL 刷新，收盘后仍可能录入交易。
+    maybeRefreshHalfKelly();
     if (!canAutoRefresh()) return;
     const now = Date.now();
     ensureQuoteStream();

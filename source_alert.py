@@ -1,12 +1,6 @@
-"""数据源熔断/退避通知: **每个源每天最多一条**。
+"""数据源退避通知: **每个源每天最多一条**。
 
-要通知的两件事 (两者都会让整条取数链降级, 但平时只在日志里, 没人盯):
-  * `kline_source` 的源级熔断 —— 连续失败达阈值 → 冷却 SOURCE_COOLDOWN_SEC, 窗口内跳过该源;
-  * `market` 的麦蕊 429 退避 —— 命中官方限流 → 进程级退避, 窗口内不再发 HTTP。
-
-闸门 key 就是**源名**(alphafeed / mairui / akshare...), 也就是同一源的两类事件共用一条
-当日配额 (同一天最多收到一条关于麦蕊的告警, 正文里区分是 429 还是连续失败)。这是刻意的:
-"每源每天一条"是防打扰口径, 不是"每种故障各一条"; 要拆成两个键, 改 `_gate_key()` 一行。
+由 `market` 在麦蕊命中官方 429 限流时调用。闸门按源名记，跨日恢复。
 
 写法定式照 `af_intraday.py`: {key: date} + 锁 + 可 patch 的 `_today()` + `reset()`。
 真正的发送委托给 `error_notify.notify_alert` (异步队列 + 工作线程 + 全局预算 + 双通道),
@@ -15,7 +9,7 @@
 环境变量:
   SOURCE_ALERT_DISABLED=1   关掉数据源告警 (默认开; 未配置的通道由 dingtalk/ntfy 各自跳过)
 
-**测试侧注意**: 触发熔断的用例必须打桩本条路径 (`source_alert.notify`), 否则会真的发出
+**测试侧注意**: 触发 429 退避的用例必须打桩本条路径 (`source_alert.notify`), 否则会真的发出
 钉钉/ntfy 消息 —— `visual/test/test_source_alert.py` 在模块级把 SOURCE_ALERT_DISABLED
 默认置 1 兜底 (unittest discover 会先 import 完所有测试模块再跑), 单个文件单跑时由各
 测试基类自己打桩。要真验通道连通性, 用 README 里 DINGTALK_LIVE=1 / NTFY_LIVE=1 那套。
@@ -45,12 +39,12 @@ def _disabled() -> bool:
 
 
 def _gate_key(source) -> str:
-    """当日闸门的键。现在是源名 (同源的两类故障合用一条配额), 见模块 docstring。"""
+    """当日闸门的键为源名。"""
     return str(source or "?").strip() or "?"
 
 
 def reset():
-    """清空闸门 (测试隔离用; kline_source.reset_health 也会调它)。"""
+    """清空闸门 (测试隔离用)。"""
     with _lock:
         _notified.clear()
 
@@ -93,9 +87,9 @@ def _text(source, reason, detail, cooldown_sec) -> str:
 
 
 def notify(source, reason, detail="", cooldown_sec=None) -> bool:
-    """该源今天的熔断/退避通知: 发返回 True, 被当日闸门挡下或已关闭返回 False。
+    """该源今天的退避通知: 发返回 True, 被当日闸门挡下或已关闭返回 False。
 
-    先占配额再发 (两个线程同时熔断也只发一条), 但**发不出去就退回配额** ——
+    先占配额再发 (两个线程同时触发也只发一条), 但**发不出去就退回配额** ——
     "每天一条"限的是真发出去的那条, 不是把当天的机会浪费在一次入队失败上。
     任何异常都不外抛 —— 告警绝不能影响取数主流程。
     """

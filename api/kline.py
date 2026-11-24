@@ -197,22 +197,28 @@ def kline():
 
     观测: KLINE_PERF_LOG=1 时打一条 kline_perf 日志, 分解磁盘命中 / 实际数据源 /
     强制行情往返 / 指标计算 / 序列化耗时, 用于定位切换标的忽快忽慢的瓶颈。
-    关闭时直接走 _kline_body(None), 不在热路径上加任何计时。
+    响应头 Server-Timing 的 app 是路由内部总耗时，不含服务器排队及网络传输。
     """
-    if not perf.ENABLED:
-        return _kline_body(None)
     timing = {}
     t0 = time.perf_counter()
+    response = None
     try:
-        return _kline_body(timing)
+        response = _kline_body(timing)
+        return response
     finally:
         perf.add_ms(timing, "total_ms", (time.perf_counter() - t0) * 1000.0)
-        hot = {k: v for k, v in perf.counters().items() if v}
-        log.info("kline_perf %s counters=%s", perf.fmt(
-            timing,
-            symbol=request.args.get("symbol"),
-            period=request.args.get("period") or "1d",
-        ), hot or "-")
+        if response is not None:
+            response.headers["Server-Timing"] = ", ".join(
+                f"{'app' if key == 'total_ms' else key[:-3]};dur={value}"
+                for key, value in timing.items() if key.endswith("_ms")
+            )
+        if perf.ENABLED:
+            hot = {k: v for k, v in perf.counters().items() if v}
+            log.info("kline_perf %s counters=%s", perf.fmt(
+                timing,
+                symbol=request.args.get("symbol"),
+                period=request.args.get("period") or "1d",
+            ), hot or "-")
 
 
 def _kline_body(timing):
@@ -256,7 +262,8 @@ def _kline_body(timing):
         resp["meta"].update(cached=True, **_session_meta())
         with perf.Span(timing, "attach_quote_ms"):
             _attach_quote(resp, symbol)
-        return _json(resp)
+        with perf.Span(timing, "json_ms"):
+            return _json(resp)
 
     try:
         df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
@@ -341,11 +348,13 @@ def _kline_body(timing):
 
     # 缓存里不存 quote: TTLCache 存引用, 事后挂 quote 会污染缓存条目,
     # 让后续命中拿到最长 TTL 前的旧快照。改为存副本 (不含 quote), 每次返回前现挂。
-    _attach_quote(resp, symbol)
+    with perf.Span(timing, "attach_quote_ms"):
+        _attach_quote(resp, symbol)
     if not skip_1d_cache:
         cache.set(cache_key, {k: v for k, v in resp.items() if k != "quote"})
 
-    return _json(resp)
+    with perf.Span(timing, "json_ms"):
+        return _json(resp)
 
 
 @api_bp.route("/api/kline/tail", methods=["GET"])

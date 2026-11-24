@@ -113,6 +113,8 @@ def create_app():
 
     @app.before_request
     def _before():
+        if request.endpoint == "favicon":
+            return None  # 空图标响应与会话无关。
         g.user = current_user_from_request()
         g.https = request_is_https(request.headers)
 
@@ -211,6 +213,11 @@ def create_app():
     @app.route("/js/<path:filename>")
     def js_files(filename):
         return _send_static(f"js/{filename}")
+
+    @app.route("/favicon.ico")
+    def favicon():
+        # 未提供站点图标：浏览器的默认探测直接返回空响应，避免命中 SPA 兜底。
+        return Response(status=204, headers={"Cache-Control": "public, max-age=86400"})
 
     @app.route("/<path:filename>")
     def pages_or_spa(filename):

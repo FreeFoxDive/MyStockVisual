@@ -275,7 +275,7 @@ AlphaFeed 日内走势接口 `/v1/klines/intraday`（限额 60/min，与「分�
 权限被拒则记**当日**熔断并退回分钟K批量（`market._fetch_intraday_kline` + `visual/af_intraday.py`，
 监控补种共用同一份熔断）；而 1m/5m/15m/30m/60m 是跨天历史（1m 要 1200 根 ≈ 5 个交易日），
 仍走批量接口。实测差异与复跑命令见 [`docs/alphafeed-limits.md`](docs/alphafeed-limits.md)。
-注意 AF 的权限按**功能 × 市场**授权：本套餐 A股 两个接口都可用（日内分时 200），而港/美股日内分时与 `klines.batch` 分钟线均为 403 —— 港/美股分时在默认链下会直接报无数据（默认**不**兜 akshare：实测它分钟数据不稳、东财限流期整段失败，而且是静默换供应商；要这层兜底就显式配 `KLINE_SOURCE_INTRADAY=alphafeed_intraday,akshare`）。所以当日熔断按市场分别记（`af_intraday.available(symbol)`），自选表里的美股不会把 A股 的日内走势偏好关掉；监控补种的批量请求也**按市场分组**发（混一只没权限的会被整批拒）。另外分时是**单源链**、而源级冷却与市场无关 —— 所以"这个市场/标的我服务不了"必须抛 `kline_source.SourceSkip`（能力缺口不计源故障），否则港/美股 403 或某个没数据的代码连来 3 次就能把整源冷却 60s，全站 A股 分时一起 404（见 `market._fetch_intraday_kline` 与 `kline_source._try_source`）。
+注意 AF 的权限按**功能 × 市场**授权：本套餐 A 股两个分时接口都可用，港/美股两个接口均为 403。港/美股在默认链下报无分时数据；需要东财兜底时可设 `KLINE_SOURCE_INTRADAY=alphafeed_intraday,akshare`。日内走势权限拒绝按市场记录（`af_intraday.available(symbol)`），监控补种也按市场分批，避免把 A 股和无权限的市场混在一起。
 
 | 数据源 | 分钟K | 股票/指数/基金 日周月K | 说明 |
 |---|---|---|---|
@@ -323,7 +323,9 @@ NTFY_PASSWORD=...
 
 未配置的通道会跳过并打错误日志，不中断监控。
 
-**数据源告警**：K 线数据源熔断（`kline_source` 连续失败达阈值 → 冷却跳过该源）与麦蕊 429 退避（`market._mr_note_429`）都会推一条通知，正文带"原因 + 冷却时长 + 最后失败的标的/周期"，例如 `数据源告警: alphafeed` → `连续失败 3 次 → 60s 内跳过该源（最后失败: 600519.SH 1m (stock)）`。**每个源每天最多一条**（当日闸门在 `visual/source_alert.py`，按源名记，跨日自动恢复；麦蕊的 429 与连续失败共用同一条配额）。关掉：`.env` 里 `SOURCE_ALERT_DISABLED=1`。走的是与「服务告警」同一条异步通道（`error_notify`：队列 + 工作线程 + 每源 5 分钟聚合窗口 + 全局 5 条/分钟预算），所以不会因告警本身拖慢取数。
+**数据源告警**：麦蕊返回 429 时仍退避并异步发送通知，按源名每天最多一条。可在 `.env` 用 `SOURCE_ALERT_DISABLED=1` 关闭通知。K 线遇到空数据、异常或超时只在本次请求内回退，后续请求仍按配置顺序尝试。
+
+**K 线慢请求排查**：`/api/kline` 响应头 `Server-Timing` 内的 `app` 是路由内耗时；`chart_read`、`disk_read`、`fetch`（含 `src_*`）、`quote`、`indicators` 和 `json` 给出实际执行过的阶段，嵌套阶段无需相加。若浏览器耗时明显更长，再检查服务器排队、代理和网络。`KLINE_PERF_LOG=1` 可同时记录缓存命中、实际数据源及各阶段耗时。
 
 ### 日志
 

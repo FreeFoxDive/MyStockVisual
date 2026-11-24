@@ -153,7 +153,9 @@ class KlineRateTest(unittest.TestCase):
         bucket.try_acquire.return_value = False
         with mock.patch.object(factors, "daily_kline_bucket", lambda: bucket), \
              mock.patch("market.get_af") as get_af:
-            self.assertIsNone(market._fetch_af_kline("600000.SH", "1d", 100))
+            with self.assertRaises(market.kline_source.SourceBusy):
+                market._fetch_af_kline("600000.SH", "1d", 100)
+        bucket.try_acquire.assert_called_once_with(lock_wait_s=0.25)
         get_af.assert_not_called()
 
 

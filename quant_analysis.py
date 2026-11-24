@@ -106,6 +106,63 @@ def compute_quant_analysis(
     return result
 
 
+def compute_model_position_stats(user_id, model_id, *, cache=None):
+    """全历史已平仓统计，同量化报告的扣费、胜负口径；保留原精度供仓位计算。"""
+    model_key = _parse_model_id(model_id)
+    if model_key == "all" or (isinstance(model_key, int) and model_key > 2**63 - 1):
+        raise AnalysisError("请选择有效的模型")
+    today = market_hours.now().date().isoformat()
+    cache_key = (user_id, model_key, today)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+    where = (
+        "t.user_id=? AND t.status='closed' AND t.exit_date > '' AND t.exit_date <= ? "
+        "AND IFNULL(t.type, 'simple')!='reverse_repo'"
+    )
+    args = [user_id, today]
+    if model_key == "none":
+        where += " AND t.model_id IS NULL"
+    else:
+        where += " AND t.model_id=?"
+        args.append(model_key)
+
+    fee_config = trades.get_user_fees(user_id)
+    conn = trades.get_conn()
+    try:
+        # 两次读取使用同一快照；只加载命中批次的成交腿，避免逐笔开连接。
+        conn.execute("BEGIN")
+        rows = conn.execute(f"SELECT t.* FROM trades t WHERE {where} ORDER BY t.exit_date, t.id", args).fetchall()
+        legs = {}
+        for leg in conn.execute(
+            "SELECT l.* FROM trades t JOIN trade_legs l ON l.trade_id=t.id "
+            f"WHERE {where} AND t.type='batch' ORDER BY l.trade_id, l.date, IFNULL(l.time, ''), l.id",
+            args,
+        ):
+            legs.setdefault(leg["trade_id"], []).append(dict(leg))
+    finally:
+        conn.close()
+
+    wins, losses = [], []
+    for row in rows:
+        if row["type"] == "batch":
+            metrics = trades._batch_metrics(row["symbol"], legs.get(row["id"], []), fee_config)
+        else:
+            metrics = trades._trade_metrics(row, fee_config=fee_config)
+        pnl = metrics.get("pnl") or 0.0
+        if pnl > 0:
+            wins.append(pnl)
+        elif pnl < 0:
+            losses.append(pnl)
+    win_rate, payoff, *_ = _win_loss_stats(wins, losses)
+    summary = {"closed_count": len(rows), "win_rate": win_rate,
+               "payoff_ratio": payoff if payoff is not None and math.isfinite(payoff) else None}
+    if cache is not None:
+        cache.set(cache_key, summary)
+    return summary
+
+
 def _analyze(
     rows, models, model_key, start_d, end_d, capital, mode,
     deduct_fees, fee_config, fetcher, *, detail, batch_closes=False,
@@ -775,22 +832,30 @@ def _exit_reason(row):
     return reason or "未填"
 
 
+def _win_loss_stats(wins, losses):
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    avg_win = gross_win / len(wins) if wins else None
+    avg_loss = -gross_loss / len(losses) if losses else None
+    payoff = (avg_win / abs(avg_loss)) if avg_win is not None and avg_loss else None
+    decided = len(wins) + len(losses)
+    win_rate = len(wins) / decided * 100 if decided else None
+    return win_rate, payoff, gross_win, gross_loss, avg_win, avg_loss
+
+
 def _quality(rounds, preps, days, pos_pct, hold_count, capital, start_s, end_s):
     wins = [t for t in rounds if t["pnl"] > 0]
     losses = [t for t in rounds if t["pnl"] < 0]
     flats = [t for t in rounds if t["pnl"] == 0]
-    gross_win = sum(t["pnl"] for t in wins)
-    gross_loss = abs(sum(t["pnl"] for t in losses))
-    avg_win = gross_win / len(wins) if wins else None
-    avg_loss = -gross_loss / len(losses) if losses else None
-    payoff = (avg_win / abs(avg_loss)) if avg_win is not None and avg_loss else None
+    win_rate, payoff, gross_win, gross_loss, avg_win, avg_loss = _win_loss_stats(
+        [t["pnl"] for t in wins], [t["pnl"] for t in losses],
+    )
     win_rets = [t["return_pct"] for t in wins if t["return_pct"] is not None]
     loss_rets = [t["return_pct"] for t in losses if t["return_pct"] is not None]
     payoff_pct = None
     if win_rets and loss_rets and sum(loss_rets) != 0:
         payoff_pct = (sum(win_rets) / len(win_rets)) / abs(sum(loss_rets) / len(loss_rets))
     decided = len(wins) + len(losses)
-    win_rate = round(len(wins) / decided * 100, 2) if decided else None
     rets = [t["return_pct"] for t in rounds if t["return_pct"] is not None]
     kelly = None
     if decided and payoff:
@@ -814,7 +879,7 @@ def _quality(rounds, preps, days, pos_pct, hold_count, capital, start_s, end_s):
         "win_count": len(wins),
         "loss_count": len(losses),
         "break_even_count": len(flats),
-        "win_rate": win_rate,
+        "win_rate": _r(win_rate, 2),
         "profit_factor": _r(gross_win / gross_loss, 2) if gross_loss else None,
         "payoff_ratio": _r(payoff, 2),
         "payoff_ratio_pct": _r(payoff_pct, 2),

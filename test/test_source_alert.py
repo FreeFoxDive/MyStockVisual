@@ -30,7 +30,7 @@ import source_alert  # noqa: E402
 
 # 整套用例不许发出真实的钉钉/ntfy 消息。`unittest discover` 会先 import 完所有测试模块
 # 再执行, 所以在模块级置默认值即可覆盖整轮 (各用例要验证"会发"时自己在 patch 里摘掉它)。
-# 单个文件单跑时, 由触发熔断的测试基类 (KlineSourceTestBase / BackoffBase) 各自打桩兜底。
+# 单个文件运行时，触发 429 的用例也会各自打桩。
 os.environ.setdefault("SOURCE_ALERT_DISABLED", "1")
 
 
@@ -71,11 +71,7 @@ class SourceAlertGateTest(unittest.TestCase):
                             "跨日必须恢复推送 (否则一次熔断就永久静默)")
 
     def test_same_source_shares_one_quota_across_reasons(self):
-        """闸门 key 是**源名**: 麦蕊的 429 退避与连续失败熔断合用当天一条配额。
-
-        这是刻意的 (每源每天一条是防打扰口径); 若哪天想拆成"每种故障各一条",
-        改 `_gate_key()` 一行即可 —— 这条用例就是那个决定的锚点。
-        """
+        """告警文案变化不影响同一源的当日配额。"""
         self.assertTrue(source_alert.notify("mairui", "429 限流退避"))
         self.assertFalse(source_alert.notify("mairui", "连续失败 3 次"))
         self.assertEqual(source_alert._gate_key("mairui"), "mairui")
@@ -122,37 +118,15 @@ class SourceAlertGateTest(unittest.TestCase):
 
 
 class SourceAlertWiringTest(unittest.TestCase):
-    """接入点: 源熔断与 429 退避都要走到 source_alert.notify (不接就等于没告警)。"""
-
-    def test_kline_source_note_fail_calls_notify(self):
-        import kline_source
-        kline_source.reset_health()
-        with mock.patch.object(kline_source, "SOURCE_FAIL_THRESHOLD", 2), \
-             mock.patch.object(kline_source.source_alert, "notify", return_value=True) as n:
-            kline_source._note_fail("alphafeed", detail="600519.SH 1m (stock)")
-            self.assertEqual(n.call_count, 0, "没到阈值不该告警")
-            kline_source._note_fail("alphafeed", detail="600519.SH 1m (stock)")
-        self.assertEqual(n.call_count, 1, "进冷却时该告警一次")
-        src, reason, kw = n.call_args.args[0], n.call_args.args[1], n.call_args.kwargs
-        self.assertEqual(src, "alphafeed")
-        self.assertIn("连续失败", reason)
-        self.assertEqual(kw.get("detail"), "600519.SH 1m (stock)", "要带上最后失败的上下文")
-        self.assertEqual(kw.get("cooldown_sec"), kline_source.SOURCE_COOLDOWN_SEC)
-        kline_source.reset_health()
-
-    def test_reset_health_also_clears_the_alert_gate(self):
-        import source_alert as sa
-        sa.notify("alphafeed", "连续失败 3 次")   # 占掉今天的配额
-        import kline_source
-        kline_source.reset_health()
-        self.assertEqual(sa.notified_today(), {}, "reset_health 要连告警闸门一起清 (测试隔离)")
+    """麦蕊 429 退避通知的接入点。"""
 
     def test_mr_429_calls_notify_with_safe_detail(self):
         import market
         with mock.patch.object(market.source_alert, "notify", return_value=True) as n:
             e = Exception("HTTP 429")
             e.status_code = 429
-            with mock.patch.object(market, "MAIRUI_BACKOFF_SEC", 60.0):
+            with mock.patch.object(market, "MAIRUI_BACKOFF_SEC", 60.0), \
+                 mock.patch.object(market, "_mr_backoff_until", 0.0):
                 market._mr_note_429(e, detail="stock_history 600519.SH")
         src, reason, kw = n.call_args.args[0], n.call_args.args[1], n.call_args.kwargs
         self.assertEqual(src, "mairui")

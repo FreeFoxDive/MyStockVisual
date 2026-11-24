@@ -90,6 +90,8 @@ def compute_premium(symbol, period, count, df=None):
     raw_close = None
     try:
         raw_df = market._fetch_af_kline(symbol, "1d", count, adjust="none")
+    except market.kline_source.SourceBusy:
+        raw_df = None
     except Exception as e:
         log.warning(f"ETF 溢价用未复权日K失败 {symbol}: {e}")
         raw_df = None
