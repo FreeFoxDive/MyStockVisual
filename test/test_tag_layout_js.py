@@ -64,7 +64,9 @@ class TagLayoutStaticTest(unittest.TestCase):
         self.assertIn("refreshPriceTagLayout()", _extract_fn(self.src, "updateChart"))
         self.assertIn("cacheGridRects(grids)", _extract_fn(self.src, "updateChart"))
         self.assertIn("refreshPriceTagLayout()", _extract_fn(self.src, "renderIntraday"))
-        self.assertIn("refreshPriceTagLayout()", self.src[self.src.index("STATE.chart.on('dataZoom'"):][:600])
+        zoom_listener = self.src[self.src.index("STATE.chart.on('dataZoom'"):][:600]
+        self.assertIn("scheduleChartZoomSync(", zoom_listener)
+        self.assertIn("refreshPriceTagLayout()", _extract_fn(self.src, "scheduleChartZoomSync"))
         self.assertIn("layoutPriceTagSlots(klines)", _extract_fn(self.src, "patchLastBarOnChart"))
 
     def test_overlay_tags_collected_then_painted(self):

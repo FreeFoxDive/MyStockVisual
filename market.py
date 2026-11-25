@@ -1239,6 +1239,33 @@ def _fetch_minute_kline(symbol, period, count, adjust="forward"):
     return _fetch_af_minute(symbol, period, count, adjust=adjust)[0]
 
 
+def _take_af_daily_kline_token(symbol):
+    import factors
+    try:
+        permitted = factors.daily_kline_bucket().try_acquire(lock_wait_s=FOREGROUND_LOCK_WAIT_S)
+    except Exception as e:
+        log.warning("日K共享配额不可用 %s: %s", symbol, _sanitize_error(e))
+        permitted = False
+    if not permitted:
+        raise kline_source.SourceBusy("日K共享额度暂不可用")
+
+
+def fetch_af_history(symbol, period, count, adjust, end_time):
+    """按历史游标取已结束的 K 线，保留明确的空响应和不足五根的末页。"""
+    if _symbol_market(symbol) in ("hk", "us") and not _hkus_kline_bucket.try_acquire():
+        raise kline_source.SourceBusy("港美股 K 线额度暂不可用")
+    _take_af_daily_kline_token(symbol)
+    frames = get_af().klines.batch([symbol], period=period, count=count,
+                                   adjust=_af_adjust(adjust), end_time=end_time, to_dataframe=True)
+    frame = frames.get(symbol) if frames is not None else None
+    if frame is None or frame.empty:
+        return frame
+    out = _normalize(frame, min_bars=1)
+    if out is None:
+        raise ValueError("历史行情格式无效")
+    return out[~out.index.duplicated(keep="last")].sort_index()
+
+
 def _fetch_af_kline(symbol, period, count, adjust="forward"):
     """从 AlphaFeed 拉取日/周/月K (股票/ETF/指数), 返回标准化 DataFrame 或 None。
 
@@ -1249,15 +1276,7 @@ def _fetch_af_kline(symbol, period, count, adjust="forward"):
     按本地忙处理，由 kline_source 走下一数据源，而不是打出 429。
     """
     if period == "1d":
-        import factors as _factors
-        try:
-            permitted = _factors.daily_kline_bucket().try_acquire(lock_wait_s=FOREGROUND_LOCK_WAIT_S)
-        except Exception as e:
-            log.warning("日K共享配额不可用 %s: %s", symbol, _sanitize_error(e))
-            permitted = False
-        if not permitted:
-            log.info("日K共享额度暂不可用，跳过 AlphaFeed %s", symbol)
-            raise kline_source.SourceBusy("日K共享额度暂不可用")
+        _take_af_daily_kline_token(symbol)
     adj = _af_adjust(adjust)
     try:
         af = get_af()
@@ -2041,9 +2060,9 @@ def fetch_display_quotes(symbols, *, live_info=True, **kwargs):
     return result
 
 
-def _normalize(df, prefer_time=False, *, preserve_ohlc=False):
+def _normalize(df, prefer_time=False, *, preserve_ohlc=False, min_bars=5):
     """标准化 K 线 DataFrame: 设置日期索引，确保 OHLCV 列存在"""
-    if df is None or len(df) < 5:
+    if df is None or len(df) < min_bars:
         return None
     # 选择正确的日期列 (分钟线优先用 trade_time，避免同日 bar 索引重复)
     if prefer_time:
@@ -2065,7 +2084,7 @@ def _normalize(df, prefer_time=False, *, preserve_ohlc=False):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     if not preserve_ohlc:
         df = df.dropna(subset=["close"])
-    return df if len(df) >= 5 else None
+    return df if len(df) >= min_bars else None
 
 
 # ── 五档盘口 (分时用) ──
@@ -2873,6 +2892,27 @@ def _symbol_market(symbol):
     if code.isdigit() and len(code) == 5:
         return "hk"
     return "cn"
+
+
+def _intraday_is_index(symbol, market):
+    """分时均线所用类型：True 为指数，False 为已确认的普通标的。"""
+    if symbol == "000001.SH":
+        return True
+    if symbol == "000001.SZ":
+        return False
+    if _is_index_symbol(symbol):
+        return True
+    instrument_type = (peek_instrument_meta(symbol) or {}).get("type")
+    if instrument_type == "index":
+        return True
+    if instrument_type in ("stock", "etf", "fund"):
+        return False
+    cache = {"cn": _stock_cache, "hk": _hk_cache, "us": _us_cache}[market]
+    rows, _ = cache._cached()
+    for row in rows or ():
+        if row["symbol"] == symbol:
+            return row.get("type") == "index"
+    return None
 
 
 # 港/美股 AF 快照与 K线令牌桶: 额度 10/min 的 4/5 = 8/min (env 可调)

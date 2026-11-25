@@ -15,7 +15,9 @@ import argparse
 import io
 import logging
 import os
+import socket
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 # Windows GBK 编码兼容
@@ -64,6 +66,29 @@ def main():
     parser.add_argument("--host", type=str, default="localhost", help="监听地址 (default: localhost)")
     args = parser.parse_args()
 
+    with ExitStack() as stack:
+        listen = {"host": args.host, "port": args.port}
+        if sys.platform == "win32":
+            # Windows 上 SO_REUSEADDR 允许两个 Waitress 实例同时接收同一端口的请求。
+            # 先独占绑定所有地址，再初始化数据库和后台任务。
+            from waitress.adjustments import Adjustments
+
+            sockets = []
+            for family, kind, proto, address in Adjustments(**listen).listen:
+                sock = stack.enter_context(socket.socket(family, kind, proto))
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                if family == socket.AF_INET6:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                try:
+                    sock.bind(address)
+                except OSError as exc:
+                    parser.exit(1, f"无法监听 {address}: {exc}\n")
+                sockets.append(sock)
+            listen = {"sockets": sockets}
+        _run_server(args, listen)
+
+
+def _run_server(args, listen):
     app = create_app()
     bootstrap_admin()
     _install_thread_excepthook()
@@ -89,7 +114,7 @@ def main():
     try:
         from waitress import serve
         threads = max(2, int(os.environ.get("WAITRESS_THREADS", "8")))
-        serve(app, host=args.host, port=args.port, threads=threads)
+        serve(app, threads=threads, **listen)
     except KeyboardInterrupt:
         log.info("服务器已停止")
 

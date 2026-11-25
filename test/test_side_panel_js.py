@@ -128,6 +128,32 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertNotIn('startQuoteStream()', body)
         self.assertIn('ensureQuoteStream', self.src)
 
+    @unittest.skipUnless(shutil.which("node"), "需要 node")
+    def test_switch_to_index_clears_rendered_book_without_a_depth_reply(self):
+        script = "\n".join(_extract_fn(self.src, name) for name in (
+            "resetSidePanelData", "renderStockInfo", "renderDepth", "depthPanelRows",
+        )) + """
+const elements = {
+  'info-body': {innerHTML: '平安银行'}, 'depth-body': {},
+  'info-pledge': {style: {}}, 'info-quote-status': {},
+};
+const document = {getElementById: id => elements[id]};
+const C = () => ({}), fmtPrice3 = String, fmtDepthVol = String;
+const infoPanelRows = () => null, setTrades = () => {};
+const STATE = {symbol: '000001.SZ', depth: {bid_prices: [12.34]}};
+renderDepth(STATE.depth);
+const previous = elements['depth-body'].innerHTML;
+STATE.symbol = '000001.SH';
+resetSidePanelData();
+console.log(JSON.stringify([previous, elements['depth-body'].innerHTML, elements['info-body'].innerHTML]));
+"""
+        result = subprocess.check_output(["node", "-e", script], encoding="utf-8")
+        previous, depth, info = json.loads(result)
+        self.assertIn("12.34", previous)
+        self.assertNotIn("12.34", depth)
+        self.assertIn("无五档数据", depth)
+        self.assertNotIn("平安银行", info)
+
     def test_fetch_depth_no_period_gate(self):
         body = _extract_fn(self.src, "fetchDepth")
         self.assertNotIn("STATE.period", body, "五档拉取不应再按周期拦截")

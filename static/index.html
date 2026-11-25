@@ -1146,14 +1146,14 @@ body {
       <span class="period-viewport" id="period-viewport">
       <span class="period-group">
       <button id="btn-intraday" onclick="switchPeriod('intraday')" title="分时 (快捷键 4)">分时</button>
-      <button id="btn-1d" class="active" onclick="switchPeriod('1d')" title="日K (快捷键 1)">日K</button>
-      <button id="btn-1w" onclick="switchPeriod('1w')" title="周K (快捷键 2)">周K</button>
-      <button id="btn-1M" onclick="switchPeriod('1M')" title="月K (快捷键 3)">月K</button>
-      <button id="btn-1m" onclick="switchPeriod('1m')" title="1分 (快捷键 5)">1分</button>
-      <button id="btn-5m" onclick="switchPeriod('5m')" title="5分 (快捷键 6)">5分</button>
-      <button id="btn-15m" onclick="switchPeriod('15m')" title="15分 (快捷键 7)">15分</button>
-      <button id="btn-30m" onclick="switchPeriod('30m')" title="30分 (快捷键 8)">30分</button>
-      <button id="btn-60m" onclick="switchPeriod('60m')" title="60分 (快捷键 9)">60分</button>
+      <button id="btn-1d" class="active" onclick="switchPeriod('1d')" title="日K (快捷键 1)，再点一次回到最新">日K</button>
+      <button id="btn-1w" onclick="switchPeriod('1w')" title="周K (快捷键 2)，再点一次回到最新">周K</button>
+      <button id="btn-1M" onclick="switchPeriod('1M')" title="月K (快捷键 3)，再点一次回到最新">月K</button>
+      <button id="btn-1m" onclick="switchPeriod('1m')" title="1分 (快捷键 5)，再点一次回到最新">1分</button>
+      <button id="btn-5m" onclick="switchPeriod('5m')" title="5分 (快捷键 6)，再点一次回到最新">5分</button>
+      <button id="btn-15m" onclick="switchPeriod('15m')" title="15分 (快捷键 7)，再点一次回到最新">15分</button>
+      <button id="btn-30m" onclick="switchPeriod('30m')" title="30分 (快捷键 8)，再点一次回到最新">30分</button>
+      <button id="btn-60m" onclick="switchPeriod('60m')" title="60分 (快捷键 9)，再点一次回到最新">60分</button>
       </span>
       </span>
       <button type="button" class="period-scroll" id="period-scroll-right" aria-label="向右滚动周期" title="向右滚动周期">›</button>
@@ -1565,6 +1565,7 @@ const STATE = {
   period: '1d',
   theme: 'light',
   klineData: null,       // raw JSON from server
+  _klineZoomRevision: 0, // 再点周期后，旧拖动和待执行的双击全景都应失效
   trades: null,          // 当前 symbol 的交易记录 (仅登录用户; /api/trades)
   risk: null,            // 当前持仓的止盈/保本/止损 (由 STATE.trades 派生; syncPosition 维护)
   position: null,        // 当前 symbol 的最新持仓 (徽章/悬停文案用; syncPosition 维护)
@@ -1851,9 +1852,13 @@ function chartTitleText() {
 /** 分时左上角的均价读数 (与均价线同色): 取当前可见那根 bar 的 avg_price。
  *  和 K 线那边的 MA 图例同一口径 (visibleBarIndex) —— 均价线随快照刷新/缩放/平移
  *  变化时这个数字跟着走 (60s 刷新重建标签, overlay 每帧重绘时求值)。 */
+function intradayAvgLabel(data) {
+  return data?.is_index ? '均点' : '均价';
+}
+
 function intradayAvgText() {
   const bar = intradayVisibleBar();
-  return `均价 ${fmtPrice3(bar ? bar.avg_price : null)}`;
+  return `${intradayAvgLabel(STATE.intradayData)} ${fmtPrice3(bar ? bar.avg_price : null)}`;
 }
 // 分钟 K / 分时历史按数据源周期刷新；快照、五档、日周月指标由 LiveMarket 管理。
 const MINUTE_REFRESH_MS = { '1m': 60e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3, '60m': 3600e3 };
@@ -2150,31 +2155,58 @@ function priceLineItem(price, color, text, fallbackPos, tagKey, fg, bg) {
   };
 }
 
-/** 现价线的取价口径 (实时价 > SSE 快照 > 末根收盘), 建线与签位共用一份 */
-function resolveLastPrice(bars, livePrice) {
-  if (!bars || !bars.length) return null;
-  let price = livePrice;
-  if (price == null && typeof liveQuotes !== 'undefined') {
-    const q = liveQuotes.get(STATE.symbol);
-    if (q && q.last_price != null) price = q.last_price;
-  }
-  if (price == null) price = bars[bars.length - 1].close;
-  return price == null ? null : price;
+/** 行情快照所属交易日。 */
+function chartQuoteDay(quote) {
+  if (quote?.quote_trade_date) return quote.quote_trade_date;
+  // 旧版沪深港快照仅有交易所时间戳。
+  if (!quote?.timestamp || !/\.(SH|SZ|BJ|HK)$/.test(STATE.symbol)) return null;
+  const ms = VisualMarketStore.stamp(quote.timestamp);
+  return ms ? new Date(ms + 8 * 3600000).toISOString().slice(0, 10) : null;
 }
 
-/** TradingView 式最新价虚线: 末端虚线 + 轴端色块价格签, 涨红/跌绿随主题。
- *  签上带「现价」前缀: 四条签都自带名称后, 避让把谁推开十几像素也能一眼对上。
- *  字色与风控签同走 --risk-fg (亮色黑字 / 暗色白字), 四个贴线签在两种主题下都同色;
- *  底色用 --up-chip/--down-chip (签专用, 比涨跌线色压深一档, 保证白字/黑字都够对比)。
- * 传入实时价时优先使用实时价；重绘图表时也自动读取当前 SSE 快照。 */
-function buildLastPriceLine(bars, livePrice) {
-  if (!bars || !bars.length) return undefined;
-  const price = resolveLastPrice(bars, livePrice);
-  if (price == null) return undefined;
-  const prev = bars.length > 1 ? bars[bars.length - 2] : null;
-  const rising = !prev || prev.close == null || price >= prev.close;
-  const item = priceLineItem(price, rising ? C().up : C().down, '现价 ' + fmtPrice3(price),
-    'insideStartTop', 'last', C().riskFg, rising ? C().upChip : C().downChip);
+/** 现价和昨收必须取同一标的、同一交易日，分时的上一分钟不能用作昨收。 */
+function chartPriceSnapshot(bars, quote = marketStore.quotes[STATE.symbol]) {
+  const last = bars?.at(-1);
+  if (!last) return null;
+  const intra = STATE.intradayData;
+  const day = STATE.period === 'intraday' ? intra?.date : last.date?.slice(0, 10);
+  const quoteDay = chartQuoteDay(quote);
+  if (day && quoteDay && quoteDay < day) quote = null;
+  const daily = STATE.klineData;
+  const adjustedBars = STATE.period !== 'intraday' && daily?.meta?.adjust === 'hfq';
+  const quotePrice = quote?.last_price;
+  const useQuotePrice = quotePrice > 0;
+  const price = adjustedBars || !useQuotePrice ? last.close : quotePrice;
+  if (!(price > 0)) return null;
+  if (useQuotePrice && quote.prev_close > 0) {
+    return { price, change: quotePrice - quote.prev_close };
+  }
+  if (adjustedBars) {
+    const previous = STATE.period === '1d' ? bars.at(-2)?.close : null;
+    return { price, change: previous > 0 ? price - previous : 0 };
+  }
+  const tradeDay = (useQuotePrice && quoteDay) || day;
+  let prevClose;
+  if (tradeDay && intra?.symbol === STATE.symbol && intra.date === tradeDay) {
+    prevClose = intra.prev_close;
+  }
+  if (!(prevClose > 0) && daily?.symbol === STATE.symbol && daily.period === '1d'
+      && daily.klines?.at(-1)?.date === tradeDay && daily.meta?.adjust !== 'hfq') {
+    prevClose = daily.klines.at(-2)?.close;
+  }
+  return { price, change: prevClose > 0 ? price - prevClose : 0 };
+}
+
+/** 现价虚线与价签按昨收同步着色；平盘或缺昨收时用中性色。 */
+function buildLastPriceLine(bars, quote) {
+  const snapshot = chartPriceSnapshot(bars, quote);
+  if (!snapshot) return undefined;
+  const { price, change } = snapshot;
+  const colors = C();
+  const color = change > 0 ? colors.up : change < 0 ? colors.down : colors.halt;
+  const chip = change > 0 ? colors.upChip : change < 0 ? colors.downChip : colors.halt;
+  const item = priceLineItem(price, color, '现价 ' + fmtPrice3(price),
+    'insideStartTop', 'last', colors.riskFg, chip);
   return {
     silent: true, symbol: 'none', animation: false,
     lineStyle: item.lineStyle, label: item.label,
@@ -2318,9 +2350,9 @@ function buildRiskLineItems() {
 /** K 线主图 markLine: 有持仓时把风控线与现价线合并进同一个 markLine 的 data
  *  (现价线放最后, 画在风控线之上); 无持仓时与改动前一致, 只画现价线。
  *  全量建图与增量 setOption 都走它, 保证 data 项顺序与 index 一致。 */
-function buildKlineMarkLines(bars, livePrice) {
+function buildKlineMarkLines(bars, quote) {
   const risk = buildRiskLineItems();
-  const last = buildLastPriceLine(bars, livePrice);
+  const last = buildLastPriceLine(bars, quote);
   if (!risk.length) return last;
   const data = risk.slice();
   if (last) data.push(last.data[0]);
@@ -2426,12 +2458,12 @@ function tagBars() {
 /** 算现价签 + 风控签的槽位: 用当前投影拿每条线的像素 y, 同列错开后可达到最小位移。
  *  现价每 1.25s 随快照移动, 重叠关系随之变化 —— 所以每次快照/建图/缩放都要重算。
  *  返回是否真的算出槽位 (投影未就绪返回 false)。 */
-function layoutPriceTagSlots(bars, livePrice) {
+function layoutPriceTagSlots(bars, quote) {
   const c = tagColumnCtx();
   if (!c) return false;
   const src = bars && bars.length ? bars : tagBars();
   const items = [];
-  const last = resolveLastPrice(src, livePrice);
+  const last = chartPriceSnapshot(src, quote)?.price;
   if (last != null) {
     const lineY = c.yOf(last);
     if (lineY >= c.top && lineY <= c.bottom) {
@@ -2540,13 +2572,14 @@ function klineRenderKey(data) {
   return [data && data.symbol, data && data.period, STATE.adjust, bars.length,
     data?._closeBarQuoteKey,
     data?.warmup_closes?.join(','),
+    data?.history_warmup?.flat().join(','),
     ...bars.map(k => [k.date, k.open, k.high, k.low, k.close, k.volume, k.amount].join(','))].join('|');
 }
 function renderFetchedKline(data) {
   const key = klineRenderKey(data);
   if (key === STATE._fetchedKlineRenderKey) return false;
+  if (!updateChart(false)) return false;
   STATE._fetchedKlineRenderKey = key;
-  updateChart(false);
   STATE._periodSwitching = false;
   return true;
 }
@@ -2566,6 +2599,32 @@ function chartWarmup(data, startIndex) {
 }
 
 function mergeKlineWindows(previous, data, count) {
+  if (data.history_cursor && previous?.history_cursor && chartWindowKey(previous) === chartWindowKey(data)) {
+    const first = data.klines[0];
+    if (!first || !previous.klines.length || previous.klines[0].date > first.date) return;
+    if (previous.klines[0].date === first.date && !previous.history_extended && !previous.history_end) return;
+    const overlap = previous.klines.findIndex(bar => bar.date === first?.date);
+    if (overlap < 0) return false;
+    // 除权后的新数据必须与已加载的历史处于同一价格口径。
+    const oldClose = previous.klines[overlap].close, newClose = first.close;
+    if (!Number.isFinite(oldClose) || !Number.isFinite(newClose)
+        || Math.abs(oldClose - newClose) > 0.0005 + Math.abs(newClose) * 1e-6) return false;
+    if (previous.history_extended && (data.period === '1w' || data.period === '1M')
+        && previous.klines[overlap].date === previous.history_anchor) {
+      data.klines[0] = previous.klines[overlap];
+    }
+    data.klines = previous.klines.slice(0, overlap).concat(data.klines);
+    data.count = data.klines.length;
+    data.warmup_closes = previous.warmup_closes;
+    data.history_warmup = previous.history_warmup;
+    data.has_more = previous.has_more;
+    data.history_end = previous.history_end;
+    data.history_remote = previous.history_remote;
+    data.history_extended = previous.history_extended;
+    data.history_anchor = previous.history_anchor;
+    data._historyEndShown = previous._historyEndShown;
+    return;
+  }
   if (!data.has_more || previous?.request_count !== count || chartWindowKey(previous) !== chartWindowKey(data)) return;
   const first = data.klines[0]?.date;
   // 只有新窗口首根能在旧窗口里定位，才能保留它之前的连续历史。
@@ -2579,43 +2638,142 @@ function mergeKlineWindows(previous, data, count) {
   data.has_more = data.count < count && previous.has_more;
 }
 
+async function readOlderKlinePage(current, full, signal) {
+  const anchor = current.klines[0];
+  const query = new URLSearchParams({ symbol: current.symbol, period: current.period,
+    count: current.request_count, adjust: current.meta.adjust, format: 'rows',
+    before: anchor.date, limit: full ? 1500 : 300, warmup: 249 });
+  if (current.history_cursor) {
+    query.set('history', full ? 'local' : current.history_remote ? 'remote' : '1');
+    query.set('anchor_close', anchor.close);
+  }
+  const response = await fetch('/api/kline?' + query, { signal });
+  if (!response.ok) throw new Error('history request failed');
+  return response.json();
+}
+
+function prependOlderKlinePage(current, data, full) {
+  if (chartWindowKey(data) !== chartWindowKey(current)) throw new Error('history view changed');
+  const older = unpackChartRows(data);
+  if (!older) throw new Error('invalid history rows');
+  const anchor = current.klines[0];
+  let newer = current.klines;
+  if (current.history_cursor) {
+    if (older.some((bar, i) => bar.date >= anchor.date || (i && bar.date <= older[i - 1].date))
+        || (!older.length && !data.history_end && !full)) throw new Error('history cursor did not advance');
+    if (data.anchor_row?.[0] === anchor.date) {
+      const replacement = unpackChartRows({ fields: data.fields, rows: [data.anchor_row] })[0];
+      newer = [replacement, ...newer.slice(1)];
+      if (!current.history_extended) current.history_anchor = anchor.date;
+    }
+    current.history_remote = data.history_remote;
+    current.history_extended ||= data.history_extended;
+    current.history_end = data.history_end;
+  }
+  current.klines = older.concat(newer);
+  if (older.length || Array.isArray(data.history_warmup)) {
+    current.warmup_closes = data.warmup_closes || [];
+    current.history_warmup = data.history_warmup;
+  }
+  current.count = current.klines.length;
+  current.has_more = data.has_more;
+}
+
+async function rebuildHistoryIndicators(data, signal) {
+  if (!Array.isArray(data.history_warmup)) return;
+  const inputFields = ['open', 'high', 'low', 'close', 'volume'];
+  const inputs = data.klines.map(bar => inputFields.map(field => bar[field]));
+  const response = await fetch('/api/kline', {
+    method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period: data.period, warmup: data.history_warmup.length,
+      rows: data.history_warmup.concat(inputs) }),
+  });
+  if (!response.ok) throw new Error('history indicator request failed');
+  const corrected = unpackChartRows(await response.json());
+  if (corrected?.length !== data.klines.length) throw new Error('invalid history indicators');
+  data.klines = data.klines.map((bar, i) => inputFields.every((field, j) => bar[field] === inputs[i][j])
+    ? { ...bar, ...corrected[i] } : { ...bar });
+}
+
+async function restoreHistoryWindow(data, earliest, signal, isCurrent) {
+  while (data.klines[0].date > earliest && data.has_more) {
+    const page = await readOlderKlinePage(data, false, signal);
+    if (!isCurrent()) return;
+    prependOlderKlinePage(data, page, false);
+  }
+  if (data.klines[0].date > earliest) throw new Error('history window no longer covered');
+}
+
 function markFirstChart() {
   if (STATE._firstChartScheduled) return;
   STATE._firstChartScheduled = true;
   requestAnimationFrame(() => requestAnimationFrame(() => performance.mark('visual:first-chart')));
 }
 
-async function loadOlderKlines(full = false) {
+async function loadOlderKlines(full = false, overviewRevision = null) {
   const current = STATE.klineData;
-  if (!current?.has_more || !current.klines.length) return;
-  if (current.symbol !== STATE.symbol || current.period !== STATE.period) return;
+  if (!current?.klines.length || current.symbol !== STATE.symbol || current.period !== STATE.period) return;
+  if (!current.has_more) {
+    if (!full && current.history_end && !current._historyEndShown) {
+      current._historyEndShown = true;
+      showToast('已到最早行情 · ' + current.history_end);
+    }
+    return;
+  }
+  if (full && current.history_cursor && current.history_remote) return;
+  if (current._historyRetryAt > Date.now()) return;
   const pending = STATE._historyPending;
   if (pending?.data === current) {
     await pending.done;
-    if (full && !pending.full && STATE.klineData === current) await loadOlderKlines(true);
+    if (full && !pending.full && STATE.klineData === current
+        && (overviewRevision === null || STATE._klineZoomRevision === overviewRevision)) {
+      await loadOlderKlines(true, overviewRevision);
+    }
     return;
   }
   let finish;
   const task = { data: current, full, done: new Promise(resolve => { finish = resolve; }) };
   STATE._historyPending = task;
+  const controller = STATE._klineAbort;
+  const stillCurrent = () => STATE.klineData === current && current.symbol === STATE.symbol
+    && current.period === STATE.period && STATE.adjust === current.meta.adjust && STATE._klineAbort === controller;
   try {
-    const query = new URLSearchParams({ symbol: current.symbol, period: current.period,
-      count: current.request_count, adjust: current.meta.adjust, format: 'rows',
-      before: current.klines[0].date, limit: full ? 1500 : 300, warmup: 249 });
-    const response = await fetch('/api/kline?' + query, { signal: STATE._klineAbort?.signal });
-    if (!response.ok) return;
-    const data = await response.json();
-    if (STATE.klineData !== current || current.symbol !== STATE.symbol || current.period !== STATE.period
-        || chartWindowKey(data) !== chartWindowKey(current) || STATE.adjust !== current.meta.adjust) return;
-    const older = unpackChartRows(data);
-    if (!older) return;
-    current.klines = older.concat(current.klines);
-    current.warmup_closes = data.warmup_closes || [];
-    current.count = current.klines.length;
-    current.has_more = data.has_more;
+    const data = await readOlderKlinePage(current, full, controller?.signal);
+    if (!stillCurrent()) return;
+    const sourceLength = current.klines.length;
+    const candidate = { ...current };
+    prependOlderKlinePage(candidate, data, full);
+    if (candidate.klines.length !== sourceLength || data.anchor_row) {
+      await rebuildHistoryIndicators(candidate, controller?.signal);
+    }
+    if (!stillCurrent()) return;
+    // 计算期间到达的实时末根保留，后台整段刷新则由 stillCurrent 拦下旧页。
+    candidate.klines.push(...current.klines.slice(sourceLength));
+    if (Array.isArray(candidate.history_warmup)) {
+      for (let i = Math.max(1, candidate.klines.length - 1 - (current.klines.length - sourceLength));
+        i < candidate.klines.length; i++) updateHistoryObv(candidate.klines, i);
+    }
+    current.klines = candidate.klines;
+    current.warmup_closes = candidate.warmup_closes;
+    current.history_warmup = candidate.history_warmup;
+    current.count = candidate.klines.length;
+    current.has_more = candidate.has_more;
+    current.history_remote = candidate.history_remote;
+    current.history_extended = candidate.history_extended;
+    current.history_anchor = candidate.history_anchor;
+    current.history_end = candidate.history_end;
+    if (current.history_end && !current._historyEndShown) {
+      current._historyEndShown = true;
+      showToast('已到最早行情 · ' + current.history_end);
+    }
     renderFetchedKline(current);
     fetchPremium(current.symbol, current.period, current.request_count, STATE._fetchTs, true);
-  } catch (_) { /* 下一次拖动可重试 */ }
+  } catch (error) {
+    if (current.history_cursor && stillCurrent() && error.name !== 'AbortError') {
+      current._historyRetryAt = Date.now() + 1500;
+      showToast('历史行情暂时无法加载，请稍后继续向左拖动', { type: 'err' });
+    }
+  }
   finally {
     if (STATE._historyPending === task) STATE._historyPending = null;
     finish();
@@ -2815,6 +2973,7 @@ async function fetchData(opts) {
     const inMemory = STATE.klineData;
     const sameWindow = inMemory?.symbol === symbol && inMemory.period === period
       && (inMemory.meta?.adjust || STATE.adjust) === STATE.adjust;
+    if (retainPanels && sameWindow) renderFetchedKline(inMemory);
     const raw = sameWindow ? null : localStorage.getItem(cacheKey);
     if (raw) {
       const cached = JSON.parse(raw);
@@ -2822,6 +2981,7 @@ async function fetchData(opts) {
       const needsWarmup = STATE.maPeriods.some(n => n > 20) || STATE.bollParams.n > 20;
       const lacksWarmup = cached.data?.has_more && !Array.isArray(cached.data.warmup_closes);
       if (Date.now() - cached.ts < ttl * 1000 && cached.data && !cached.data.meta?.adjust_fallback
+          && (MINUTE_PERIODS.includes(period) || cached.data.history_cursor)
           && !(needsWarmup && lacksWarmup)) {
         STATE.klineData = cached.data;
         STATE.klineData.request_count = count;
@@ -2840,7 +3000,8 @@ async function fetchData(opts) {
 
   const adjParam = MINUTE_PERIODS.includes(period) ? '' : `&adjust=${STATE.adjust}`;
   const gapParam = gapsEnabledForPeriod() ? '&gaps=1' : '';
-  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}&format=rows&limit=300&warmup=249${gapParam}`;
+  const historyParam = MINUTE_PERIODS.includes(period) ? '' : '&history=1';
+  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}&format=rows&limit=300&warmup=249${gapParam}${historyParam}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
   // 换股/切周期取消浏览器在途请求，减少废弃响应的接收与解析。
   // 不会自动终止 Flask 执行；后端另有实际工作数上限。
@@ -2864,7 +3025,30 @@ async function fetchData(opts) {
       delete data.fields;
     }
     data.request_count = count;
-    mergeKlineWindows(STATE.klineData, data, count);
+    const recent = { ...data, klines: data.klines.slice() };
+    const previous = STATE.klineData;
+    const previousBars = previous?.klines;
+    const earliest = previousBars?.[0]?.date;
+    const refreshIsCurrent = () => STATE._fetchTs === fetchTs && STATE.period === period
+      && STATE.symbol === symbol && STATE.klineData === previous && previous?.klines === previousBars;
+    try {
+      if (data.meta?.adjust_fallback && previous?.history_warmup && previous.symbol === symbol
+          && previous.period === period && previous.meta.adjust === STATE.adjust) {
+        throw new Error('history adjustment changed');
+      }
+      const needsReload = mergeKlineWindows(previous, data, count) === false;
+      if (needsReload) await restoreHistoryWindow(data, earliest, STATE._klineAbort?.signal, refreshIsCurrent);
+      if (!refreshIsCurrent()) return;
+      if (Array.isArray(data.history_warmup)) await rebuildHistoryIndicators(data, STATE._klineAbort?.signal);
+      if (!refreshIsCurrent()) return;
+    } catch (error) {
+      if (error.name !== 'AbortError' && refreshIsCurrent()) {
+        showToast('历史行情更新失败，已保留当前视窗', { type: 'err', actionLabel: '重试',
+          onAction: () => fetchData({ retainPanels: true }) });
+        fetchPremium(symbol, period, count, fetchTs);
+      }
+      return;
+    }
     markClosedDailyBar(data, requestedCloseKey);
     STATE._klineRecoverFails = 0;
     syncAdjustMeta(data);
@@ -2880,8 +3064,10 @@ async function fetchData(opts) {
     if (!data.meta?.adjust_fallback) {
       try {
         const entry = JSON.stringify({ ts: Date.now(), data: {
-          ...data, klines: data.klines.slice(-300), has_more: data.has_more || data.klines.length > 300,
-          warmup_closes: chartWarmup(data, Math.max(0, data.klines.length - 300)),
+          ...recent, klines: recent.klines.slice(-300), has_more: recent.has_more || recent.klines.length > 300,
+          history_remote: recent.klines.length <= 300 && recent.history_remote,
+          history_end: recent.klines.length <= 300 ? recent.history_end : undefined,
+          warmup_closes: chartWarmup(recent, Math.max(0, recent.klines.length - 300)),
         } });
         localStorage.setItem(cacheKey, entry);
         _cleanLocalStorage();
@@ -3968,13 +4154,13 @@ VisualMarketStore.watch(() => marketStore.last, (change) => {
  *  调用, 抛异常会打断行情回调; 首屏建图后 refreshPriceTagLayout 会补算签位。 */
 function updateLivePriceLine(q, symbol = STATE.symbol) {
   if (!q || symbol !== STATE.symbol || q.last_price == null || !chartModel()) return;
-  const bars = STATE.period === 'intraday'
-    ? STATE.intradayData && STATE.intradayData.bars
-    : STATE.klineData && STATE.klineData.klines;
+  const data = STATE.period === 'intraday' ? STATE.intradayData : STATE.klineData;
+  if (data?.symbol !== symbol) return;
+  const bars = STATE.period === 'intraday' ? data.bars : data.klines;
   if (!bars || !bars.length) return;
   const before = STATE._tagKeys;
-  layoutPriceTagSlots(bars, q.last_price);
-  const line = buildKlineMarkLines(bars, q.last_price);
+  layoutPriceTagSlots(bars, q);
+  const line = buildKlineMarkLines(bars, q);
   if (!line) return;
   STATE.chart.setOption({ series: [{ name: 'K线', markLine: line }] },
     { lazyUpdate: true, silent: true });
@@ -4125,8 +4311,9 @@ function updateLiveStockInfo(q, symbol = STATE.symbol) {
   if (q.vol_ratio != null && Number.isFinite(Number(q.vol_ratio))) d.vol_ratio = Number(q.vol_ratio);
   // ETF 快照源有时不返回换手率；用实时成交量和 K 线返回的份额即时回算，
   // 让基本信息面板不必等待下一次 /api/stock-info（换手率只作近似展示）。
-  if (q.turnover_rate == null && STATE.klineData && STATE.klineData.is_etf) {
-    const fs = Number(STATE.klineData.float_shares ?? d.float_shares);
+  const kd = STATE.klineData;
+  if (q.turnover_rate == null && kd && kd.symbol === symbol && kd.is_etf) {
+    const fs = Number(kd.float_shares ?? d.float_shares);
     const vol = Number(q.volume);
     // 单位自证: 只在 amount 可用时由 amount/(vol*px) 推断 volume 是股还是手;
     // amount 缺失时不猜 (猜错差 100 倍), 宁可不显示
@@ -4140,7 +4327,6 @@ function updateLiveStockInfo(q, symbol = STATE.symbol) {
   d.timestamp = q.timestamp || d.timestamp;
   // 基本信息面板的 流通/份额 与 溢价 行: 元数据只在 kline 响应里 (float_shares/is_etf/is_index),
   // 溢价缓存的「过期」还会随时间变 —— 都并进 stockInfo, 面板与截图共用这一份。
-  const kd = STATE.klineData;
   if (kd && kd.symbol === symbol) {
     d.is_etf = !!kd.is_etf;
     d.is_index = !!kd.is_index;
@@ -4179,6 +4365,19 @@ function scheduleQuoteStream() { ensureQuoteStream(); }
  *  数据只来自服务端, 前端不派生 OHLCV。合并用 Object.assign 以保留服务端
  *  未提供的字段 (如 ETF premium)。旧于末根的 bar 忽略。
  *  同日且当前快照新于这份 tail 时, 保住快照 OHLCV, 只合入 tail 的指标。 */
+function updateHistoryObv(klines, index) {
+  const previous = klines[index - 1], bar = klines[index];
+  if (!Number.isFinite(previous?.obv)) return;
+  const direction = Number.isFinite(bar.close) && Number.isFinite(previous.close)
+    ? Math.sign(bar.close - previous.close) : 0;
+  bar.obv = Number.isFinite(bar.volume) ? previous.obv + direction * bar.volume : null;
+  if (index >= 29) {
+    const window = klines.slice(index - 29, index + 1);
+    bar.maobv = window.every(item => Number.isFinite(item.obv))
+      ? window.reduce((sum, item) => sum + item.obv, 0) / window.length : null;
+  }
+}
+
 function applyServerBars(bars, frame) {
   if (!['1d', '1w', '1M'].includes(STATE.period) || !STATE.klineData || !STATE.klineData.klines) return false;
   if (!Array.isArray(bars) || !bars.length) return false;
@@ -4186,6 +4385,7 @@ function applyServerBars(bars, frame) {
   if (!klines.length) return false;
   const meta = (frame && frame.meta) || {};
   const adjust = (STATE.klineData.meta && STATE.klineData.meta.adjust) || STATE.adjust;
+  const stitched = Array.isArray(STATE.klineData.history_warmup);
   let changed = false;
   for (const bar of bars) {
     if (!bar || !bar.date) continue;
@@ -4194,7 +4394,8 @@ function applyServerBars(bars, frame) {
     const lastDate = String(last.date).slice(0, 10);
     const tailStamp = extractBarQuoteStamp(meta, d, frame && frame._revision);
     if (d > lastDate) {
-      klines.push(bar);
+      klines.push(stitched ? { ...bar } : bar);
+      if (stitched) updateHistoryObv(klines, klines.length - 1);
       changed = true;
       if (STATE.period === '1d') STATE.klineData._lastQuoteStamp = tailStamp;
     } else if (d === lastDate) {
@@ -4210,6 +4411,7 @@ function applyServerBars(bars, frame) {
         Object.assign(last, bar);
         if (STATE.period === '1d') STATE.klineData._lastQuoteStamp = tailStamp;
       }
+      if (stitched) updateHistoryObv(klines, klines.length - 1);
       if (JSON.stringify(last) !== before) changed = true;
     }
     // d < lastDate: 过期 bar, 忽略
@@ -4384,6 +4586,8 @@ function patchLastBarOnChart() {
   if (curLen > klines.length) return false;
 
   const patchOpts = { lazyUpdate: true, silent: true };
+  layoutPriceTagSlots(klines);
+  const markLine = buildKlineMarkLines(klines);
 
   if (curLen < klines.length) {
     const dates = klines.map((x) => x.date);
@@ -4392,8 +4596,7 @@ function patchLastBarOnChart() {
     const klinePatch = { name: 'K线', data: klines.map((kk) => buildOhlcPoint(kk, impulseOn)) };
     const gapMark = buildGapMarkArea(klines, dates);
     klinePatch.markArea = gapMark || { data: [] };
-    layoutPriceTagSlots(klines);
-    klinePatch.markLine = buildKlineMarkLines(klines);
+    klinePatch.markLine = markLine;
     const eff = effectiveMaBoll(klines);
     const seriesPatch = [
       klinePatch,
@@ -4429,6 +4632,7 @@ function patchLastBarOnChart() {
     const dates = klines.map((x) => x.date);
     const gapMark = buildGapMarkArea(klines, dates);
     pK.markArea = gapMark || { data: [] };
+    pK.markLine = markLine;
     seriesPatch.push(pK);
   }
   const pV = copyLast('成交量', buildVolPoint(k));
@@ -5189,13 +5393,8 @@ async function syncPanelConfigWithServer() {
 async function fetchIntraday(opts) {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
-  if (STATE._intradayPending?.symbol === symbol) return;
-  const task = { symbol };
-  STATE._intradayPending = task;
-  const fetchTs = (STATE._intraFetchTs || 0) + 1; STATE._intraFetchTs = fetchTs;
-  STATE._intradayLoading = true;
-  STATE._lastBarAt = Date.now();
-  const _cacheKey = `vi_${symbol}_1m`;
+  // 旧缓存可能有类型未确定时计算的错误均价。
+  const _cacheKey = `vi_v4_${symbol}_1m`;
 
   // ── 浏览器缓存 ──
   // 从别的周期切回分时 (retainChart): 内存里已有同一只的分时就先画出来再后台刷新,
@@ -5207,7 +5406,16 @@ async function fetchIntraday(opts) {
     renderIntraday(mem);
     fetchDepth();
     cacheHit = true;
-  } else if (!mem) {
+  }
+
+  if (STATE._intradayPending?.symbol === symbol) return;
+  const task = { symbol };
+  STATE._intradayPending = task;
+  const fetchTs = (STATE._intraFetchTs || 0) + 1; STATE._intraFetchTs = fetchTs;
+  STATE._intradayLoading = true;
+  STATE._lastBarAt = Date.now();
+
+  if (!mem) {
     try {
       const raw = localStorage.getItem(_cacheKey);
       if (raw) {
@@ -5247,7 +5455,9 @@ async function fetchIntraday(opts) {
       delete id.rows;
     }
     if (!id.bars || id.bars.length === 0) { if (loading) showToast('暂无分时数据'); return; }
-    id.prev_close = liveQuotes.get(symbol)?.prev_close ?? base?.prev_close;
+    const latest = marketStore.quotes[symbol];
+    if (latest?.prev_close > 0 && chartQuoteDay(latest) === id.date) id.prev_close = latest.prev_close;
+    else if (base?.date === id.date) id.prev_close ??= base.prev_close;
     STATE.intradayData = id;
     renderIntraday(STATE.intradayData);
     fetchDepth();  // 五档初始拉取
@@ -5312,13 +5522,14 @@ function renderIntraday(data) {
       itemStyle: { color: C().up, color0: C().down, borderColor: C().up, borderColor0: C().down },
       markLine: buildKlineMarkLines(bars) },
   ];
-  // 分时均线 (均价): 当日累计成交额/累计成交量, 口径同东财分时那条黄线 (后端算好随 bar 下发)。
+  // 分时黄线：股票取累计成交均价，指数取当日分钟收盘点位的累计平均。
   // hasAvg 守卫两种空数据: 源不带成交额、以及浏览器里 ≤120s 的旧缓存 payload 没有该字段 ——
   // 这时不画线、左上角也不出那个读数行, 而不是画一条全 0 的线把价格轴拉开。
   const hasAvg = bars.some(b => b.avg_price != null);
+  const avgLabel = intradayAvgLabel(data);
   if (hasAvg) {
     series.push({
-      name: '均价', type: 'line', xAxisIndex: 0, yAxisIndex: 0,
+      name: avgLabel, type: 'line', xAxisIndex: 0, yAxisIndex: 0,
       data: pad(b => b.avg_price), symbol: 'none', smooth: false,
       lineStyle: { color: C().avgPrice, width: 1 }, itemStyle: { color: C().avgPrice },
     });
@@ -5443,7 +5654,7 @@ function renderIntraday(data) {
         h += isPhoneUi()
           ? `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)}</div><div>低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`
           : `<div>开 ${cFn(b.open)} 高 ${cFn(b.high)} 低 ${cFn(b.low)} 收 ${cFn(b.close)}</div>`;
-        h += `<div>均价 <span style="color:${C().avgPrice}">${b.avg_price==null?'—':fmtPrice3(b.avg_price)}</span></div>`;
+        if (b.avg_price != null) h += `<div>${avgLabel} <span style="color:${C().avgPrice}">${fmtPrice3(b.avg_price)}</span></div>`;
         h += `<div>量 ${fmtVolume(b.volume)}</div>`;
         if (showMacd && b.macd_dif != null) h += `<div>MACD DIF ${b.macd_dif.toFixed(3)} DEA ${b.macd_dea.toFixed(3)}</div>`;
         const cKdjV = (v,clr) => v == null ? '—' : `<span style="color:${v>80?C().overbought:v<20?C().oversold:clr}">${v.toFixed(2)}</span>`;
@@ -5470,6 +5681,9 @@ function renderIntraday(data) {
   // 同样必须同步提交 (见 updateChart 处的说明): 换 model 与跑数据管线不能跨帧, 否则旧元素会在
   // 这一帧里命中无数据的新 series, 鼠标事件一碰就抛 TypeError。
   chart.setOption(option, { notMerge: true, silent: true });
+  // 分时已替换整图。切回相同的日 K 时也要重画，且不能沿用分时轴的缩放下标。
+  STATE._fetchedKlineRenderKey = null;
+  STATE._drawnKlineWindow = null;
   markFirstChart();
   // 面板名称标签 (VOL/MACD/KDJ/RSI/ATR): 与 K 线周期走同一条路径 ——
   // 组装成 STATE.draw._labels 交给 overlay 画布 paintLabels 绘制, 位置口径也照抄
@@ -5899,6 +6113,72 @@ function updateQuoteDisplay(quote) {
 // ═══════════════════════════════════════════════════════════════
 // CHART RENDERING
 // ═══════════════════════════════════════════════════════════════
+// zrender 会把横向和纵向滚轮合成一个缩放量。在进入它之前用横向手势平移分类轴。
+function bindChartWheelPan(dom, chart) {
+  let previousAxis, fraction = 0;
+  let lastWheelAt = -Infinity, gestureAxis = null, initialX = 0, initialY = 0;
+  dom.addEventListener('wheel', event => {
+    if (event.ctrlKey || event.metaKey) {
+      lastWheelAt = -Infinity;
+      return;
+    }
+    if (!event.deltaX && !event.deltaY) return;
+    const model = chart.getModel();
+    const zoom = model?.getComponent('dataZoom', 0);
+    if (!zoom) return;
+    const bounds = dom.getBoundingClientRect();
+    const x = event.clientX - bounds.left, y = event.clientY - bounds.top;
+    const rect = STATE._gridRects?.find((r, i) => zoom.option.xAxisIndex.includes(i)
+      && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
+    if (!rect || rect.right <= rect.left) {
+      lastWheelAt = -Infinity;
+      return;
+    }
+    // 一次触控板横滑可能从 1px 纵向抖动开始，也可能以纯纵向惯性帧结束。
+    // 像素模式累计到能判定方向后再分流；滚轮行/页和 Shift 平移直接响应。
+    if (event.timeStamp - lastWheelAt > 160) {
+      gestureAxis = null;
+      initialX = initialY = 0;
+      fraction = 0;
+    }
+    lastWheelAt = event.timeStamp;
+    let delta = event.deltaX;
+    if (event.shiftKey) {
+      gestureAxis = 'x';
+      if (Math.abs(event.deltaY) >= Math.abs(delta)) delta = event.deltaY;
+    } else if (!gestureAxis) {
+      initialX += event.deltaX;
+      initialY += event.deltaY;
+      if (event.deltaMode !== 0 || Math.max(Math.abs(initialX), Math.abs(initialY)) >= 3) {
+        gestureAxis = Math.abs(initialX) > Math.abs(initialY) ? 'x' : 'y';
+        delta = initialX;
+      }
+    }
+    if (gestureAxis === 'y') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!gestureAxis || drawPanLocked()) return;
+
+    const axis = model.getComponent('xAxis', 0);
+    if (axis !== previousAxis) { previousAxis = axis; fraction = 0; }
+    const { startValue, endValue } = zoom.option;
+    const span = endValue - startValue;
+    const width = rect.right - rect.left;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? width : 1;
+    fraction += delta * unit * (span + 1) / width;
+    const steps = Math.round(fraction);
+    fraction -= steps;
+    if (!steps) return;
+    const lastSlot = Math.max(axis.getCategories().length - 1, axis.get('max') ?? 0);
+    const start = Math.max(0, Math.min(lastSlot - span, startValue + steps));
+    if (start !== startValue) {
+      chart.dispatchAction({ type: 'dataZoom', dataZoomId: zoom.id, startValue: start, endValue: start + span });
+    } else if (steps < 0 && start === 0 && STATE.period !== 'intraday') {
+      loadOlderKlines();
+    }
+  }, { capture: true, passive: false });
+}
+
 function initChart() {
   const dom = document.getElementById('chart-container');
   // CDN 兜底: ECharts 加载失败时给出提示, 工具栏/行情/五档等 DOM 功能不受影响
@@ -5909,6 +6189,7 @@ function initChart() {
     return;
   }
   STATE.chart = echarts.init(dom, null, { renderer: 'canvas' });
+  bindChartWheelPan(dom, STATE.chart);
   // 容器尺寸看护: 顶栏/记录栏/指标栏高度变化 (搜索记录增减、展开「更多」、风控线勾选框显隐)
   // 会改变图表可用高度, 而 window.resize 不会触发 —— 不 resize 的话 ECharts 画布与
   // overlay 画线层 (尺寸取自 chart.getWidth/Height) 会一起和容器错位。
@@ -5992,25 +6273,57 @@ function initChart() {
     }
     if (STATE.draw && STATE.draw.enabled) return;
     const data = STATE.klineData;
-    loadOlderKlines(true).then(() => {
-      if (STATE.klineData !== data || STATE.period === 'intraday') return;
+    if (!data || data.period !== STATE.period || data.symbol !== STATE.symbol) return;
+    const revision = STATE._klineZoomRevision;
+    loadOlderKlines(true, revision).then(() => {
+      if (STATE._klineZoomRevision !== revision || STATE.klineData !== data
+          || STATE.period !== data.period || STATE.symbol !== data.symbol) return;
       try { STATE.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); } catch (e) { /* ignore */ }
     });
   });
   // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样); 画线层同步重投影
-  STATE.chart.on('dataZoom', function() {
-    if (STATE._chipSyncPending) return;
-    STATE._chipSyncPending = true;
-    requestAnimationFrame(function() {
-      STATE._chipSyncPending = false;
-      if (STATE._chip) syncChipAxis();
-      redrawDrawings();
-      refreshPriceTagLayout();   // 缩放改变可见价格区间 → 签位要重排
-      const zoom = STATE.chart.getModel()?.getComponent('dataZoom', 0)?.option;
-      if (zoom && zoom.start <= 8) loadOlderKlines();
-    });
+  // 周/月首屏可能已铺满整段本地历史，贴住左端继续拖时 ECharts 不一定发 dataZoom。
+  let historyDrag = null;
+  STATE.chart.getZr().on('mousedown', e => {
+    const data = STATE.klineData;
+    const zoom = chartModel()?.getComponent('dataZoom', 0)?.option;
+    const grid = STATE._gridRects?.[0];
+    historyDrag = data?.history_cursor && (data.has_more || !data._historyEndShown) && zoom?.startValue === 0
+      && e.offsetX >= grid?.left && e.offsetX <= grid?.right
+      && e.offsetY >= grid?.top && e.offsetY <= grid?.bottom && !drawPanLocked()
+      ? { data, first: data.klines[0]?.date, x: e.offsetX, y: e.offsetY } : null;
+  });
+  STATE.chart.getZr().on('mouseup', e => {
+    const drag = historyDrag;
+    historyDrag = null;
+    if (drag && drag.data === STATE.klineData && drag.first === drag.data.klines[0]?.date
+        && e.offsetX - drag.x > Math.max(12, Math.abs(e.offsetY - drag.y))) loadOlderKlines();
+  });
+  STATE.chart.on('dataZoom', function(event) {
+    // ECharts 仍会上报已经移除的组件派发的延迟事件；这种事件不能触发补页。
+    const model = chartModel();
+    if ((event.batch || [event]).some(action => action.dataZoomId == null
+        || model?.queryComponents({ mainType: 'dataZoom', id: action.dataZoomId }).length)) {
+      scheduleChartZoomSync(true);
+    }
   });
   initDrawEvents();
+}
+
+function scheduleChartZoomSync(checkHistory) {
+  // 同一帧以最后一次操作为准；复位也要重排副图和价签，但无需探测历史页。
+  STATE._checkZoomHistory = checkHistory;
+  if (STATE._chipSyncPending) return;
+  STATE._chipSyncPending = true;
+  requestAnimationFrame(function() {
+    STATE._chipSyncPending = false;
+    if (STATE._chip) syncChipAxis();
+    redrawDrawings();
+    refreshPriceTagLayout();
+    const zoom = chartModel()?.getComponent('dataZoom', 0)?.option;
+    if (STATE._checkZoomHistory && zoom && zoom.start <= 8
+        && !(STATE.klineData?.history_cursor && zoom.start === 0 && zoom.end === 100)) loadOlderKlines();
+  });
 }
 
 // K 线主图 y 轴可见范围: 可见 K 线 low/high + (通道开启时) 可见 ±3ATR 带
@@ -6256,9 +6569,45 @@ function effectiveMaBoll(klines) {
   return val;
 }
 
+// dataZoom 的分类轴端点是槽位下标。补历史后按日期定位，预测区则按距末根的偏移定位。
+function klineZoomWindow(dates, futureBars, period, drawn, zoom) {
+  const last = dates.length - 1 + futureBars;
+  const visibleBars = period === '1m' ? 240 : 80;
+  const initial = [Math.max(0, dates.length - visibleBars), last];
+  if (!drawn || !zoom) return initial;
+  const { startValue, endValue } = zoom;
+  if (!Number.isInteger(startValue) || !Number.isInteger(endValue)) return initial;
+  const span = endValue - startValue;
+  const oldLastBar = drawn.dates.length - 1;
+  if (endValue === oldLastBar + drawn.futureBars) {
+    // 贴住右端时跟随新 bar，开关预测区时保持可见的历史根数。
+    const addedBars = dates.length - drawn.dates.length;
+    return [Math.max(0, Math.min(last, startValue + addedBars)), last];
+  }
+  const locate = i => i > oldLastBar
+    ? Math.min(last, dates.length - 1 + i - oldLastBar)
+    : dates.indexOf(drawn.dates[i]);
+  const start = locate(startValue), end = locate(endValue);
+  if (start < 0 && end < 0) return initial;
+  return [start < 0 ? Math.max(0, end - span) : start, end < 0 ? Math.min(last, start + span) : end];
+}
+
+function klineDataZoomOptions(zoomKey, allXAxisIndices, startValue, endValue) {
+  const key = zoomKey + '|' + STATE._klineZoomRevision;
+  const dzLocked = drawPanLocked();
+  return [
+    { id: 'inside|' + key, type: 'inside', xAxisIndex: allXAxisIndices, startValue, endValue, moveOnMouseMove: !dzLocked },
+    { id: 'slider|' + key, type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16, show: !dzLocked,
+      brushSelect: false, // 整个选中区都用于平移，拖动两端手柄才改变可见根数。
+      borderColor: C().gridLine, backgroundColor: 'transparent',
+      fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().axisText },
+      textStyle: { color: C().axisText, fontSize: 10 } }
+  ];
+}
+
 function updateChart(reTheme) {
   const data = STATE.klineData;
-  if (!data || !data.klines || data.klines.length === 0) return;
+  if (!data || data.symbol !== STATE.symbol || data.period !== STATE.period || !data.klines?.length) return false;
   if (!STATE.chart) return; // echarts 兜底
 
   applySidePanels();   // 侧栏(信息) + 五档: 手机五档在右缘且只分时
@@ -6275,22 +6624,13 @@ function updateChart(reTheme) {
     && !!STATE.chips && !!STATE.chips.buckets
     && !!chipBand;
   const { grids, xAxes, yAxes, hasVolume, indicatorStartGi } = calcGridLayout(panels, chipOn, chipBand);
-  const visibleBars = STATE.period === '1m' ? 240 : 80;
   const futureBars = drawNeedsFuture() ? (window.Drawings ? Drawings.FUTURE_BARS : 0) : 0;
-  const totalSlots = Math.max(dates.length, 1) + futureBars;
-  let startPct = Math.max(0, Math.min(100, (1 - (visibleBars + futureBars) / totalSlots) * 100));
-  let endPct = 100;
   const windowKey = chartWindowKey(data);
   const drawn = STATE._drawnKlineWindow;
-  const oldZoom = chart.getModel?.()?.getComponent('dataZoom', 0)?.option;
-  if (drawn?.key === windowKey && oldZoom) {
-    const anchor = value => typeof value === 'number' ? drawn.dates[value] : value;
-    const from = dates.indexOf(anchor(oldZoom.startValue));
-    const end = dates.indexOf(anchor(oldZoom.endValue));
-    const units = Math.max(1, totalSlots - 1);
-    if (from >= 0) startPct = from * 100 / units;
-    if (end >= 0 && Number(oldZoom.end) < 99.5) endPct = end * 100 / units;
-  }
+  const oldZoom = drawn?.key === windowKey ? chart.getModel?.()?.getComponent('dataZoom', 0)?.option : null;
+  const [startValue, endValue] = klineZoomWindow(dates, futureBars, data.period, drawn, oldZoom);
+  // ECharts 会延迟派发拖动中的百分比。横轴范围变化后换 ID，使旧动作无法命中新窗口。
+  const zoomKey = [windowKey, dates[0], dates[dates.length - 1], dates.length, futureBars].join('|');
 
   // ── Readonly series data ──
   const impulseOn = STATE.impulseEnabled && isElderPeriod(STATE.period);
@@ -6536,7 +6876,7 @@ function updateChart(reTheme) {
   let chipGi = -1;
   if (chipOn) {
     chipGi = grids.length;
-    const range = klineVisibleYRange(klines, startPct, 100)
+    const range = klineVisibleYRange(klines, 100 * startValue / dates.length, 100 * (endValue + 1) / dates.length)
       || { min: STATE.chips.min, max: STATE.chips.max };
     const chipPxH = parseFloat(grids[0].height) / 100 * chart.getHeight();
     const band = chipBand;
@@ -6579,14 +6919,7 @@ function updateChart(reTheme) {
 
   // ── DataZoom ──
   const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
-  const dzLocked = drawPanLocked();   // 画图时/选中画线时禁用拖拽平移(滚轮缩放保留), 规则见 drawPanLocked
-  const dataZoom = [
-    { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: endPct, moveOnMouseMove: !dzLocked },
-    { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16, show: !dzLocked,
-      borderColor: C().gridLine, backgroundColor: 'transparent',
-      fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().axisText },
-      textStyle: { color: C().axisText, fontSize: 10 } }
-  ];
+  const dataZoom = klineDataZoomOptions(zoomKey, allXAxisIndices, startValue, endValue);
 
   // ── Tooltip (adaptive: shows different data per panel) ──
   // 画线模式下不弹提示框: 触屏点/拖 K 线就是在定位画线, 提示框会盖住落点。
@@ -6732,7 +7065,7 @@ function updateChart(reTheme) {
   // ── Build option ──
   const option = {
     backgroundColor: C().bg,
-    animation: reTheme ? false : !STATE._periodSwitching,
+    animation: !reTheme && !STATE._periodSwitching && (!oldZoom || zoomKey === drawn.zoomKey),
     tooltip: tooltip,
     grid: grids,
     xAxis: xAxes,
@@ -6830,7 +7163,7 @@ function updateChart(reTheme) {
   // 鼠标, ECharts 内部事件桥接就会拿旧索引去查新 series 的 getDataParams, getData() 为空直接抛
   // TypeError (getRawIndex)。增量补丁 (merge 语义, 模型实例不变) 保留 lazyUpdate 没问题。
   chart.setOption(option, { notMerge: true, silent: true });
-  STATE._drawnKlineWindow = { key: windowKey, dates };
+  STATE._drawnKlineWindow = { key: windowKey, zoomKey, dates, futureBars };
   markFirstChart();
   if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
   cacheGridRects(grids);
@@ -6922,6 +7255,7 @@ function updateChart(reTheme) {
   redrawDrawings(graphics);  // 面板标签 + 画线层绘制到 overlay canvas
   // 首次渲染延迟 resize，解决底部日期轴被截断
   if (!STATE._initResized) { STATE._initResized = true; setTimeout(() => chart.resize({ animation: { duration: 0 } }), 100); }
+  return true;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -6960,8 +7294,27 @@ function applyPeriodUI(period) {
   applyIndSheet();   // 周期变了 → 副图计数与浮层分组要跟着重算
 }
 
+function resetKlineZoom() {
+  const data = STATE.klineData;
+  const drawn = STATE._drawnKlineWindow;
+  if (!data || data.symbol !== STATE.symbol || data.period !== STATE.period || drawn?.key !== chartWindowKey(data)) return;
+  const model = chartModel();
+  const dates = model?.getComponent('xAxis', 0)?.getCategories();
+  const zoom = model?.getComponent('dataZoom', 0);
+  if (!dates?.length || !zoom) return;
+  const [startValue, endValue] = klineZoomWindow(dates, drawn.futureBars, data.period);
+  const dataZoom = klineDataZoomOptions(drawn.zoomKey, zoom.option.xAxisIndex, startValue, endValue);
+  STATE.chart.setOption({ dataZoom }, { replaceMerge: ['dataZoom'], silent: true });
+  scheduleChartZoomSync(false);
+}
+
 function switchPeriod(period) {
-  if (!ALL_PERIODS.includes(period) || period === STATE.period) return;
+  if (!ALL_PERIODS.includes(period)) return;
+  STATE._klineZoomRevision++;
+  if (period === STATE.period) {
+    if (period !== 'intraday') resetKlineZoom();
+    return;
+  }
   // 换周期前收掉画线数值编辑并立刻落库 (画线按 代码+周期 分库, 换完再存会记到新周期名下)
   closePriceInput(false);
   flushPendingSave();
@@ -7044,6 +7397,8 @@ function syncSymbolUrl(replace) {
 function resetSidePanelData() {
   STATE.stockInfo = null;
   STATE.depth = null;
+  renderStockInfo(null);
+  renderDepth(null);
   STATE._lastInfoAt = 0;
   STATE._lastDepthAt = 0;
   STATE._tradesSeq++;

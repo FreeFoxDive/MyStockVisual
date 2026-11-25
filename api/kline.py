@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import Future
+from datetime import date, datetime, time as clock_time, timedelta
 from functools import lru_cache
 import hashlib
 import json
@@ -9,8 +11,10 @@ import logging
 import os
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 import numpy as np
+import pandas as pd
 from flask import request
 
 import kline_source
@@ -28,10 +32,13 @@ from market import (
     MINUTE_PERIODS,
     TTLCache,
     _fetch_instrument_meta,  # 测试仍 patch 此名; 热路径改用 peek_instrument_meta
+    _intraday_is_index,
     _is_etf,
     _is_index_symbol,
     _safe_float,
     _safe_int,
+    _symbol_market,
+    fetch_af_history,
     fetch_kline_ex,
     fetch_quote,
     kline_cache,
@@ -47,6 +54,10 @@ log = logging.getLogger("api")
 
 # 日K: 3年可见 (3×252) + RSI 收敛 warmup 250
 DAILY_COUNT = 3 * 252 + 250  # 1006
+HISTORY_PERIODS = ("1d", "1w", "1M")
+_history_cache = TTLCache(ttl_seconds=900, max_entries=128)
+_history_pending = {}
+_history_lock = threading.Lock()
 
 # 图表当日 bar 的快照新鲜度: 默认复用 quote_cache (TTL 1.25s), 不再每次强制一次
 # 实时行情往返 —— 实测该往返在 0~700ms 抖动, 是磁盘 TTL 抬高后热路径上仅剩的
@@ -138,6 +149,9 @@ _BAR_FIELDS = (
     ("bias6", _safe_float), ("bias12", _safe_float), ("bias24", _safe_float),
     ("dmi_pdi", _safe_float), ("dmi_mdi", _safe_float), ("dmi_adx", _safe_float),
 )
+_HISTORY_INPUT_FIELDS = ("open", "high", "low", "close", "volume")
+_HISTORY_INDICATORS = tuple((name, convert) for name, convert in _BAR_FIELDS
+                            if name not in (*_HISTORY_INPUT_FIELDS, "amount"))
 _CANDLE_PRICES = frozenset(("open", "high", "low", "close"))
 _CHART_INDICATORS = frozenset(
     name for name, convert in _BAR_FIELDS
@@ -228,26 +242,26 @@ def serialize_bars(df, period, *, packed=False):
     return out
 
 
-def _intraday_response(symbol, period, count, day, bars):
+def _intraday_response(symbol, period, count, day, bars, *, is_index):
     fields = list(bars[0])
     rows = [list(bar.values()) for bar in bars]
     _compact_chart_rows(fields, rows)
     encoded = json.dumps(rows, separators=(",", ":")).encode()
-    version = hashlib.blake2b(day.encode() + encoded, digest_size=12).hexdigest()
+    version = hashlib.blake2b(f"{day}:{is_index}:".encode() + encoded, digest_size=12).hexdigest()
     key = (symbol, period, count, version)
     previous = request.args.get("since")
     with _intraday_lock:
         old = _intraday_versions.get((symbol, period, count, previous))
-        _intraday_versions[key] = (day, rows)
+        _intraday_versions[key] = (day, is_index, rows)
         _intraday_versions.move_to_end(key)
         if len(_intraday_versions) > 32:
             _intraday_versions.popitem(last=False)
     current = {row[0]: row for row in rows}
-    delta = bool(old and old[0] == day and all(row[0] in current for row in old[1]))
+    delta = bool(old and old[:2] == (day, is_index) and all(row[0] in current for row in old[2]))
     if delta:
-        previous_rows = {row[0]: row for row in old[1]}
+        previous_rows = {row[0]: row for row in old[2]}
         rows = [row for row in rows if previous_rows.get(row[0]) != row]
-    return _json({"symbol": symbol, "period": period, "date": day, "version": version,
+    return _json({"symbol": symbol, "period": period, "date": day, "is_index": is_index, "version": version,
                   "delta": delta, "fields": fields, "rows": rows}, compact=True)
 
 
@@ -300,6 +314,119 @@ def kline():
             ), hot or "-")
 
 
+def _listing_day(symbol):
+    value = str((peek_instrument_meta(symbol) or {}).get("listing_date") or "")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _history_close_matches(close, anchor):
+    return close is not None and anchor is not None and np.isclose(close, anchor, rtol=1e-6, atol=0.0005)
+
+
+def _history_warmup(bars, limit, warmup):
+    seed = bars.iloc[:-limit].tail(warmup)
+    fields = list(_HISTORY_INPUT_FIELDS)
+    return [[_safe_float(value) for value in row] for row in seed[fields].itertuples(index=False, name=None)]
+
+
+@api_bp.route("/api/kline", methods=["POST"])
+def kline_history_indicators():
+    """用已拼接的 OHLCV 重算整段指标，不取行情或写入数据。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("period") not in HISTORY_PERIODS:
+        return _error("无效的历史周期")
+    rows, warmup = data.get("rows"), data.get("warmup")
+    if (not isinstance(rows, list) or not 1 <= len(rows) <= 20_000
+            or type(warmup) is not int or not 0 <= warmup <= min(249, len(rows) - 1)
+            or any(not isinstance(row, list) or len(row) != len(_HISTORY_INPUT_FIELDS) for row in rows)):
+        return _error("无效的历史行情")
+    try:
+        values = np.asarray(rows, dtype=float)
+    except (TypeError, ValueError, OverflowError):
+        return _error("无效的历史行情数值")
+    if values.ndim != 2 or np.isinf(values).any():
+        return _error("无效的历史行情数值")
+    frame = pd.DataFrame(values, columns=list(_HISTORY_INPUT_FIELDS))
+    computed, _ = compute_all_indicators(frame, data["period"], serialize=False)
+    fields = [name for name, _ in _HISTORY_INDICATORS]
+    columns = [computed[name].iloc[warmup:].tolist() for name in fields]
+    result = [[convert(value) for (_, convert), value in zip(_HISTORY_INDICATORS, row)]
+              for row in zip(*columns)]
+    _compact_chart_rows(fields, result)
+    return _json({"fields": fields, "rows": result}, compact=True)
+
+
+def _fetch_history_page(symbol, period, adjust, cursor, anchor_close, limit, warmup):
+    # 请求包含游标这根，以确认复权口径，也能补齐日 K 仓边界上的残缺周/月柱。
+    zone = {"us": "America/New_York", "hk": "Asia/Hong_Kong"}.get(_symbol_market(symbol), "Asia/Shanghai")
+    end = datetime.combine(cursor + timedelta(days=1), clock_time.min, ZoneInfo(zone))
+    frame = fetch_af_history(symbol, period, limit + max(249, warmup) + 2,
+                             adjust, int(end.timestamp() * 1000) - 1)
+    if frame is None:
+        raise ValueError("历史行情缺少标的")
+    payload = {"symbol": symbol, "period": period, "meta": {"adjust": adjust, "source": "alphafeed"},
+               "history_cursor": True, "history_remote": True, "history_extended": True,
+               "fields": ["date", *(name for name, _ in _BAR_FIELDS)], "rows": [],
+               "warmup_closes": [], "has_more": False}
+    if frame.empty:
+        return {**payload, "history_end": cursor.isoformat()}
+
+    days = frame.index.date
+    if days[-1] != cursor:
+        raise ValueError("历史游标与当前图表无法对齐")
+    close = _safe_float(frame["close"].iloc[-1])
+    if not _history_close_matches(close, anchor_close):
+        raise ValueError("历史行情复权口径与当前图表不一致")
+
+    frame, _ = compute_all_indicators(frame, period, serialize=False)
+    bars = frame.iloc[:-1]
+    payload["rows"] = serialize_bars(bars.tail(limit), period, packed=True)
+    if payload["rows"] or period != "1d":
+        payload["history_warmup"] = _history_warmup(bars, limit, warmup)
+    payload["warmup_closes"] = [_short_chart_price(_safe_float(close))
+                                for close in bars["close"].iloc[:-limit].tail(warmup)]
+    if period != "1d":
+        payload["anchor_row"] = serialize_bars(frame.tail(1), period, packed=True)[0]
+    # 短页可能是上游返回上限。用最早一根再探一次，直到上游也只返回游标本身。
+    first = date.fromisoformat(payload["rows"][0][0]) if payload["rows"] else cursor
+    listing = _listing_day(symbol) if period == "1d" else None
+    payload["has_more"] = bool(payload["rows"]) and first != listing
+    if not payload["has_more"]:
+        payload["history_end"] = first.isoformat()
+    return payload
+
+
+def _history_response(symbol, period, adjust, cursor, anchor_close, limit, warmup):
+    key = (symbol, period, adjust, cursor, anchor_close, limit, warmup)
+    with _history_lock:
+        cached = _history_cache.get(key)
+        if cached is not None:
+            return _json(cached, compact=True)
+        pending = _history_pending.get(key)
+        leader = pending is None
+        if leader:
+            pending = _history_pending[key] = Future()
+
+    if leader:
+        try:
+            payload = _fetch_history_page(*key)
+            _history_cache.set(key, payload)
+            pending.set_result(payload)
+        except Exception as exc:
+            pending.set_exception(exc)
+            log.warning("历史K线加载失败 %s %s %s: %s", symbol, period, cursor, _sanitize_error(exc))
+        finally:
+            with _history_lock:
+                del _history_pending[key]
+    try:
+        return _json(pending.result(timeout=10), compact=True)
+    except Exception:
+        return _error("历史行情暂时无法加载，请重试", 503)
+
+
 def _kline_body(timing):
     symbol_raw = request.args.get("symbol")
     if not symbol_raw:
@@ -323,17 +450,37 @@ def _kline_body(timing):
 
     packed = request.args.get("format") == "rows"
     before = request.args.get("before") if packed else None
+    history = request.args.get("history") if packed and period in HISTORY_PERIODS else None
+    history_cursor = history in ("1", "local", "remote")
+    cursor = None
+    anchor_close = None
+    if history_cursor and before:
+        try:
+            cursor = date.fromisoformat(before)
+            before = cursor.isoformat()
+        except ValueError:
+            return _error("无效的历史日期")
+        raw_anchor = request.args.get("anchor_close")
+        anchor_close = _safe_float(raw_anchor)
+        if raw_anchor is not None and (anchor_close is None or not np.isfinite(anchor_close)):
+            return _error("无效的历史接缝价格")
     with_gap_seed = (packed and not before and period in ("1d", "1w", "1M", "60m")
                      and request.args.get("gaps") == "1")
     try:
         limit = max(1, min(1500, int(request.args.get("limit", "1500")))) if packed else None
+        if history in ("1", "remote") and before:
+            limit = min(300, limit)
         warmup = max(0, min(249, int(request.args.get("warmup", "0")))) if packed else 0
     except ValueError:
         return _error("无效 limit 或 warmup")
+    if history == "remote" and cursor:
+        return _history_response(symbol, period, adjust, cursor, anchor_close, limit, warmup)
     revision = time.time_ns() // 1000
     cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
     if packed:
         cache_key += f":rows:{limit}:{before or ''}:{int(with_gap_seed)}:{warmup}"
+        if history_cursor:
+            cache_key += f":history:{history}:{anchor_close}"
     skip_1d_cache = period == "1d" and market_hours.is_trading_day(
         market_hours.now().date().isoformat()
     )
@@ -357,16 +504,16 @@ def _kline_body(timing):
 
     try:
         df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
-                                         timing=timing,
-                                         quote_fresh=TODAY_BAR_QUOTE_FRESH,
-                                         quote_wait_budget=not TODAY_BAR_QUOTE_FRESH)
+                                         timing=timing, quote_fresh=TODAY_BAR_QUOTE_FRESH,
+                                         quote_wait_budget=not TODAY_BAR_QUOTE_FRESH,
+                                         **({"append_today": False} if cursor else {}))
     except Exception as e:
         log.warning("获取K线失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("获取K线失败，请稍后重试", 500)
 
     # 请求的复权无数据 (如 AF 不支持后复权) → 回退前复权重取一次, 保住图表
     adjust_fallback = False
-    if df is None and adjust != kline_source.ADJUST_FORWARD and period not in MINUTE_PERIODS:
+    if df is None and not cursor and adjust != kline_source.ADJUST_FORWARD and period not in MINUTE_PERIODS:
         log.warning("%s %s 无 %s 复权数据, 回退前复权", symbol, period, adjust)
         adjust = kline_source.ADJUST_FORWARD
         adjust_fallback = True
@@ -380,6 +527,14 @@ def _kline_body(timing):
         if df is None:
             return _error(f"无法获取 {symbol} 的K线数据", 404)
 
+    if cursor:
+        anchors = df.loc[df.index.date == cursor, "close"] if df is not None else ()
+        local_close = _safe_float(anchors.iloc[-1]) if len(anchors) else None
+        if history == "1" and (not len(anchors) or cursor <= df.index[0].date()):
+            return _history_response(symbol, period, adjust, cursor,
+                                     anchor_close if anchor_close is not None else local_close, limit, warmup)
+        if anchor_close is not None and not _history_close_matches(local_close, anchor_close):
+            return _error("历史行情与当前图表无法对齐，请刷新后重试", 503)
     if df is None:
         return _error(f"无法获取 {symbol} 的K线数据", 404)
 
@@ -446,6 +601,16 @@ def _kline_body(timing):
         resp.update(fields=["date", *(name for name, _ in _BAR_FIELDS)], rows=klines,
                     has_more=has_more, macd_params=get_macd_params(period),
                     obv_params={"ma_period": 30}, boll_params={"n": 20, "k": 2})
+        if history_cursor:
+            resp["history_cursor"] = True
+            first = date.fromisoformat(klines[0][0]) if klines else cursor
+            resp["history_remote"] = bool(first and first <= df.index[0].date())
+            listing = _listing_day(symbol) if period == "1d" else None
+            resp["has_more"] = not (listing and first == listing)
+            if not resp["has_more"]:
+                resp["history_end"] = first.isoformat()
+            if cursor and klines:
+                resp["history_warmup"] = _history_warmup(df.loc[df.index.date < cursor], limit, warmup)
         if warmup:
             resp["warmup_closes"] = [_short_chart_price(_safe_float(value)) for value in warmup_closes]
         if with_gap_seed and has_more:
@@ -655,7 +820,7 @@ def intraday():
     symbol = normalize_symbol(symbol_raw)
     period = request.args.get("period") or "5m"
     try:
-        count = min(int(request.args.get("count") or "120"), 250)
+        count = max(1, min(int(request.args.get("count") or "120"), 250))
     except ValueError:
         count = 120
     try:
@@ -663,8 +828,15 @@ def intraday():
         # 当日退回分钟K批量), 失败继续沿链回退; df 已标准化前复权。
         # 注意不能挂到 "minute" 类别 —— 那是跨天分钟K历史视图 (1m 要 1200 根),
         # 换成只回当日的接口会把 1m/5m/15m/30m/60m 视图打坏。
+        market = _symbol_market(symbol)
+        session_minutes = {"cn": 240, "hk": 330, "us": 390}[market]
+        fetch_count = count
+        if period in MINUTE_PERIODS:
+            minutes = int(period[:-1])
+            # 标准化至少需要五根；60m 的 A 股取数可能需要补上一交易日。
+            fetch_count = max(count, 5, (session_minutes + minutes - 1) // minutes)
         df, _src = kline_source.fetch_kline_df(
-            "intraday", symbol, period, count, adjust="forward"
+            "intraday", symbol, period, fetch_count, adjust="forward"
         )
         if df is None or len(df) == 0:
             return _error(f"无法获取 {symbol} 的分钟线", 404)
@@ -674,14 +846,18 @@ def intraday():
         if len(df) == 0:
             return _error("无分时数据", 404)
         df, indicators = compute_all_indicators(df, period="1d", with_atr_val=True)
-        # 分时均线 (均价): 当日累计成交额/累计成交量, 口径同东财分时那条黄线。
-        # 必须用「截当日之后」的 df 累计 —— 从前一日接着累加不是分时均价。
-        avgs = intraday_avg_price(
-            df["close"], df["volume"],
-            df["amount"] if "amount" in df.columns else None,
-        )
+        # 指数的量额汇总自成分股，两者相除得不到指数点位。
+        is_index = _intraday_is_index(symbol, market)
+        if is_index:
+            points = df["close"]
+            avgs = points.where(np.isfinite(points) & (points > 0)).expanding().mean().tolist()
+        elif is_index is False:
+            avgs = intraday_avg_price(df["close"], df["volume"], df.get("amount"))
+        else:
+            avgs = [None] * len(df)
         bars = []
-        for i, (idx, row) in enumerate(df.iterrows()):
+        start = max(0, len(df) - count)
+        for i, (idx, row) in enumerate(df.iloc[start:].iterrows(), start=start):
             ts = idx.strftime("%H:%M") if hasattr(idx, "strftime") else str(idx)[-8:-3]
             bars.append({
                 "time": ts,
@@ -691,7 +867,7 @@ def intraday():
                 "close": _safe_float(row.get("close")),
                 "volume": _safe_int(row.get("volume")),
                 "amount": _safe_float(row.get("amount")),
-                "avg_price": avgs[i],
+                "avg_price": _safe_float(avgs[i]),
                 "macd_dif": indicators["macd"]["dif"][i],
                 "macd_dea": indicators["macd"]["dea"][i],
                 "macd_hist": indicators["macd"]["hist"][i],
@@ -709,9 +885,11 @@ def intraday():
                 "vol_ma20": _safe_float(row.get("vol_ma20")),
             })
         if request.args.get("format") == "rows":
-            return _intraday_response(symbol, period, count, last_day.strftime("%Y-%m-%d"), bars)
+            return _intraday_response(symbol, period, count, last_day.strftime("%Y-%m-%d"), bars,
+                                      is_index=is_index is True)
         return _json({
             "symbol": symbol,
+            "is_index": is_index is True,
             "period": period,
             # 当日日期: bar 只有 HH:MM, 而图表左上角标题要「分时 · 2026-09-18」这种口径;
             # 不能让客户端用本地时钟推"今天" —— 周末/节假日打开时会说错日子。

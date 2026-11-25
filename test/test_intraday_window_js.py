@@ -320,6 +320,77 @@ process.stdout.write(JSON.stringify({
         intra = _extract_fn(self.src, "renderIntraday")
         self.assertEqual(intra.count("interval: 29"), 2)
 
+    def test_switch_period_renders_cached_intraday_while_update_is_pending(self):
+        functions = ("switchPeriod", "klineRenderKey", "renderFetchedKline", "renderIntraday",
+                     "intradaySessionSlots", "intradayPad", "intradayAvgLabel",
+                     "fetchIntraday", "unpackChartRows")
+        script = "\n".join(_extract_fn(self.src, name) for name in functions) + """
+const noop = () => {}, closePriceInput = noop, flushPendingSave = noop, syncSymbolUrl = noop,
+      ensureQuoteStream = noop, applySidePanels = noop, markFirstChart = noop,
+      redrawDrawings = noop, cacheGridRects = noop, refreshPriceTagLayout = noop,
+      fetchDepth = noop, _cleanLocalStorage = noop, showToast = message => { throw Error(message); };
+const STATE = {symbol: '000001.SH', period: '1d'}, ALL_PERIODS = ['1d', 'intraday'];
+const daily = {symbol: STATE.symbol, period: '1d', klines: [{date:'2026-11-25', close:3476}]};
+const minute = {symbol: STATE.symbol, date:'2026-11-25', is_index: true, version:'v1',
+                bars: [{time:'09:31', close:3500, avg_price:3500}]};
+const marketStore = {quotes: {}};
+const liveQuotes = {get: noop, healthy: () => true};
+const localStorage = {getItem: () => null, setItem: noop};
+let requests = [];
+const fetch = url => new Promise(resolve => requests.push({url, resolve}));
+let axis, meanLine;
+STATE.chart = {setOption: o => {axis = o.xAxis[0].data; meanLine = o.series.find(s => s.name === '均点')},
+               getWidth: () => 800, getHeight: () => 400};
+const document = {getElementById: () => ({checked:false})};
+const isPhoneUi = () => false, sidePanelOn = () => false, isHaltBar = () => false, C = () => ({}),
+      panelGridLeft = () => 0, panelGridRight = () => 0, buildKlineMarkLines = noop,
+      spanPx = () => 0, mainRowOffsets = () => ({}), chartTitleText = noop, intradayAvgText = noop,
+      INTRADAY_EMPTY_CANDLE = '-', MAIN_TITLE_FONT = '';
+function applyPeriodUI(p) { STATE.period = p; }
+function fetchData() { renderFetchedKline(daily); }
+function updateChart() { axis = daily.klines.map(b => b.date); return true; }
+async function respond(delta, rows, version) {
+  const request = requests.shift();
+  request.resolve({json: async () => ({
+    ...minute, delta, version, fields: ['time', 'close', 'avg_price'], rows,
+  })});
+  await new Promise(resolve => setImmediate(resolve));
+}
+async function run() {
+  const log = [];
+  fetchData();
+  switchPeriod('intraday');   // 无缓存，复用在途的首次请求。
+  switchPeriod('1d');
+  switchPeriod('intraday');
+  log.push([axis[0], requests.length]);
+  await respond(false, [['09:31', 3500, 3500]], 'v1');
+  log.push([axis[0], meanLine.data[0]]);
+  for (const rows of [[], [['09:31', 3501, 3501]]]) {
+    const pending = fetchIntraday();
+    switchPeriod('1d');
+    log.push(axis[0]);
+    switchPeriod('intraday');
+    log.push([axis[0], requests.length, requests[0].url.endsWith('&since=v1')]);
+    await respond(true, rows, rows.length ? 'v2' : 'v1');
+    await pending;
+    log.push([axis[0], meanLine.data[0]]);
+  }
+  const pending = fetchIntraday();
+  switchPeriod('1d');
+  await respond(true, [['09:31', 3502, 3502]], 'v3');
+  await pending;
+  log.push([axis[0], renderFetchedKline(daily)]);
+  console.log(JSON.stringify(log));
+}
+run().catch(err => { console.error(err); process.exitCode = 1; });
+"""
+        self.assertEqual(json.loads(run_node(script)), [
+            ["2026-11-25", 1], ["09:31", 3500],
+            "2026-11-25", ["09:31", 1, True], ["09:31", 3500],
+            "2026-11-25", ["09:31", 1, True], ["09:31", 3501],
+            ["2026-11-25", False],
+        ])
+
 
 class SessionProgressionTest(unittest.TestCase):
     """一根根推进一整个交易日: 槽宽、落槽、末根槽位都不许随分钟数变化。

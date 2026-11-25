@@ -97,7 +97,7 @@ class RiskLinesStaticTest(unittest.TestCase):
 
     def test_all_price_tags_share_fg_token(self):
         """现价签与风控签共用 --risk-fg: 亮色白字 / 暗色深字, 两主题下四签同色。"""
-        self.assertIn("'last', C().riskFg, rising ? C().upChip : C().downChip)",
+        self.assertIn("'last', colors.riskFg, chip)",
                       _extract_fn(self.src, "buildLastPriceLine"),
                       "现价签: 字色走 --risk-fg, 底色走签专用的 --up-chip/--down-chip")
         self.assertIn("it.key, C().riskFg)", _extract_fn(self.src, "buildRiskLineItems"))
@@ -215,6 +215,7 @@ class RiskLinesBehaviorTest(unittest.TestCase):
         script = "\n".join(_extract_fn(self.src, name) for name in (
             "chartWarmup", "clientSma", "clientBoll", "effectiveMaBoll", "matchBarIndex",
             "normalizeChartSymbol", "chartWindowKey", "loadOlderKlines",
+            "readOlderKlinePage", "prependOlderKlinePage", "rebuildHistoryIndicators",
         )) + """
 const assert = require('node:assert/strict');
 const all = Array.from({length: 1006}, (_, i) => i + 1);
@@ -257,6 +258,7 @@ loadOlderKlines().then(() => {
     def test_history_merge_only_retains_contiguous_windows(self):
         script = "\n".join(_extract_fn(self.src, name) for name in (
             "chartWindowKey", "chartWarmup", "mergeKlineWindows", "loadOlderKlines",
+            "readOlderKlinePage", "prependOlderKlinePage", "rebuildHistoryIndicators",
         )) + """
 const assert = require('node:assert/strict');
 const STATE = {symbol: '002935.SZ', period: '1m', adjust: 'forward'};
@@ -284,6 +286,138 @@ function fetchPremium() {}
 loadOlderKlines().then(() => assert.deepEqual(recent.klines, bars(301, 600)));
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_long_history_retries_replaces_partial_bar_and_survives_refresh(self):
+        script = "\n".join(_extract_fn(self.src, name) for name in (
+            "chartWindowKey", "unpackChartRows", "mergeKlineWindows", "loadOlderKlines",
+            "readOlderKlinePage", "prependOlderKlinePage", "rebuildHistoryIndicators",
+        )) + """
+const assert = require('node:assert/strict');
+const STATE = {symbol: '300413.SZ', period: '1M', adjust: 'forward'};
+const identity = {symbol: STATE.symbol, period: STATE.period, meta: {adjust: 'forward'}};
+const partial = {date: '2022-09-30', close: 10, volume: 9};
+const recent = {date: '2022-10-31', close: 11, volume: 50};
+const current = {...identity, history_cursor: true, history_remote: true,
+  has_more: true, klines: [partial, recent], warmup_closes: []};
+STATE.klineData = current;
+const fields = ['date', 'close', 'volume'];
+const page = {...identity, fields, rows: [['2022-08-31', 9, 31]],
+  anchor_row: ['2022-09-30', 10, 36], history_remote: true, history_extended: true,
+  history_end: '2022-08-31', has_more: false};
+let time = 5000, calls = 0, deliver;
+Date.now = () => time;
+const fetch = async url => {
+  const query = new URL(url, 'http://localhost').searchParams;
+  assert.equal(query.get('history'), 'remote');
+  assert.equal(query.get('before'), partial.date);
+  assert.equal(query.get('anchor_close'), '10');
+  calls++;
+  if (calls === 1) return {ok: false, status: 429};
+  if (calls === 2) await new Promise(resolve => { deliver = resolve; });
+  return {ok: true, json: async () => page};
+};
+function showToast() {}
+function renderFetchedKline() {}
+function fetchPremium() {}
+(async () => {
+  await loadOlderKlines(true);
+  assert.equal(calls, 0);
+  await loadOlderKlines();
+  assert.deepEqual(current.klines, [partial, recent]);
+  assert.equal(current.has_more, true);
+  time += 2000;
+  const pending = loadOlderKlines();
+  STATE.period = '1d';
+  deliver();
+  await pending;
+  assert.deepEqual(current.klines, [partial, recent]);
+  STATE.period = '1M';
+  await loadOlderKlines();
+  await loadOlderKlines();
+  assert.equal(calls, 3);
+  assert.deepEqual(current.klines.map(bar => bar.volume), [31, 36, 50]);
+  assert.equal(current.has_more, false);
+  const refreshed = {...identity, klines: [partial, {...recent, close: 12}], history_cursor: true};
+  mergeKlineWindows(current, refreshed, 300);
+  assert.deepEqual(refreshed.klines.map(bar => bar.volume), [31, 36, 50]);
+  assert.equal(refreshed.klines[2].close, 12);
+  assert.equal(refreshed.history_end, '2022-08-31');
+  const rebased = {...identity, klines: [{...partial, close: 9}, recent], history_cursor: true};
+  assert.equal(mergeKlineWindows(current, rebased, 300), false);
+  assert.equal(rebased.klines.length, 2);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_history_refresh_reloads_on_adjustment_change_and_keeps_view(self):
+        script = "\n".join(_extract_fn(self.src, name) for name in (
+            "chartWindowKey", "chartWarmup", "unpackChartRows", "mergeKlineWindows", "fetchData",
+            "readOlderKlinePage", "prependOlderKlinePage", "rebuildHistoryIndicators",
+            "restoreHistoryWindow", "klineZoomWindow",
+        )) + """
+const assert = require('node:assert/strict');
+const bar = (date, close) => ({date, open: close, high: close, low: close, close, volume: 100});
+const first = '2020-01-01', second = '2020-02-01', third = '2020-03-01', fourth = '2020-04-01';
+const identity = {symbol: '300413.SZ', period: '1d', meta: {adjust: 'forward'}, history_cursor: true};
+const previous = {...identity, klines: [bar(first, 1), bar(second, 2), bar(third, 3), bar(fourth, 4)],
+  history_extended: true, history_warmup: []};
+const STATE = {symbol: identity.symbol, period: identity.period, adjust: 'forward', klineData: previous, _requestSeq: 0};
+const MINUTE_PERIODS = [], DAILY_COUNT = 1006, marketClock = {state:{phase: 'trading'}};
+const liveQuotes = {get: () => null};
+const document = {getElementById: () => ({})};
+const localStorage = {setItem() {}};
+const noOp = () => {};
+const cancelPremium = noOp, gapsEnabledForPeriod = noOp, markClosedDailyBar = noOp,
+  syncAdjustMeta = noOp, ensureQuoteStream = noOp, adoptKlineQuoteStamp = noOp,
+  applyPremiumToKlines = noOp, reconcileLiveBars = noOp, _cleanLocalStorage = noOp,
+  updateInfo = noOp, fetchPremium = noOp;
+let renders = 0, notices = 0, fail = true, release, requestStarted;
+const renderFetchedKline = () => { renders++; };
+const showToast = () => { notices++; };
+const fetchKlineWithRetry = async () => ({...identity, has_more: true, history_remote: true,
+  klines: [bar(third, 30), bar(fourth, 40)]});
+const result = json => ({ok: true, json: async () => json});
+async function fetch(url, options) {
+  if (options.method === 'POST') {
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.rows.map(row => row[3]), [10, 20, 30, 40]);
+    return result({fields: ['obv', 'ma20'], rows: [[0, null], [100, null], [200, null], [300, null]]});
+  }
+  const query = new URL(url, 'http://localhost').searchParams;
+  assert.equal(query.get('before'), third);
+  assert.equal(query.get('anchor_close'), '30');
+  assert.equal(query.get('history'), 'remote');
+  if (fail) return {ok: false, status: 503};
+  await new Promise(resolve => { release = resolve; requestStarted(); });
+  const bars = [bar(first, 10), bar(second, 20)], fields = Object.keys(bars[0]);
+  return result({...identity, history_warmup: [], history_extended: true,
+    history_end: first, has_more: false, fields, rows: bars.map(row => fields.map(field => row[field]))});
+}
+(async () => {
+  await fetchData({silent: true});
+  assert.equal(STATE.klineData, previous);
+  assert.equal(notices, 1);
+  assert.equal(renders, 0);
+  fail = false;
+  const started = new Promise(resolve => { requestStarted = resolve; });
+  const pending = fetchData({silent: true});
+  await started;
+  assert.equal(STATE.klineData, previous);
+  release();
+  await pending;
+  const loaded = STATE.klineData.klines;
+  assert.deepEqual(loaded.map(row => row.close), [10, 20, 30, 40]);
+  assert.deepEqual(loaded.map(row => row.obv), [0, 100, 200, 300]);
+  assert.equal(renders, 1);
+  const dates = loaded.map(row => row.date);
+  const [left, right] = klineZoomWindow(dates, 0, '1d', {dates, futureBars: 0}, {startValue: 0, endValue: 1});
+  assert.deepEqual([dates[left], dates[right]], [first, second]);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+        proc = subprocess.run(["node", "-e", script], capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8"))
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_close_confirmation_refreshes_current_daily_chart_and_retries(self):
@@ -463,6 +597,94 @@ assert.deepEqual(calls, [['quote', ['002935.SZ'], true, false], ['quote', ['0029
         self.assertEqual(out[2], [], "无持仓不出线")
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_index_last_price_uses_previous_session_on_both_charts(self):
+        functions = ("chartQuoteDay", "chartPriceSnapshot", "priceLineLabel", "priceLineItem",
+                     "buildLastPriceLine", "buildRiskLineItems", "buildKlineMarkLines", "updateLivePriceLine")
+        script = "\n".join(_extract_fn(self.src, name) for name in functions) + """
+const symbol = '000001.SH', day = '2026-11-25';
+const daily = { symbol, period: '1d', klines: [
+  { date: '2026-11-24', close: 3548.369 }, { date: day, close: 3476.47 }
+] };
+const intraday = { symbol, date: day, bars: [{ close: 3476.4492 }, { close: 3476.4697 }] };
+const STATE = { symbol, period: '1d', klineData: daily, intradayData: intraday };
+const marketStore = { quotes: {} };
+const VisualMarketStore = { stamp: seconds => seconds * 1000 };
+const C = () => ({ up: 'red', down: 'green', upChip: 'redChip', downChip: 'greenChip', halt: 'gray' });
+const fmtPrice3 = String, riskOn = () => false;
+const chartModel = () => true, layoutPriceTagSlots = () => {};
+const log = [];
+function record(markLine) {
+  const item = markLine.data[0];
+  log.push([item.yAxis, item.lineStyle.color, item.label.backgroundColor]);
+}
+STATE.chart = { setOption: patch => record(patch.series[0].markLine) };
+function draw(period) {
+  STATE.period = period;
+  record(buildKlineMarkLines(period === '1d' ? daily.klines : intraday.bars));
+}
+draw('1d');
+draw('intraday');  // 末分钟上涨，全天收跌。无快照时两图共用日K昨收。
+const quote = { timestamp: 1795590003, last_price: 3476.47, prev_close: 3548.3694 };
+// 换成日K暂缺当日 bar 的场景。快照到达、周期切换和签位重排都必须按快照昨收。
+daily.klines.pop();
+daily.klines.unshift({ date: '2026-11-23', close: 3400 });
+marketStore.quotes[symbol] = quote;
+updateLivePriceLine(quote, symbol);
+draw('1d');
+draw('intraday');
+updateLivePriceLine({ ...quote, last_price: 3550 }, symbol);
+updateLivePriceLine({ ...quote, last_price: quote.prev_close }, symbol);
+marketStore.quotes[symbol] = { ...quote, timestamp: quote.timestamp - 86400 };
+draw('intraday');  // 昨天的快照和未对齐的日K都不能提供今天的基准。
+intraday.prev_close = quote.prev_close;
+draw('intraday');
+console.log(JSON.stringify(log));
+"""
+        proc = subprocess.run(["node", "-e", script], capture_output=True, check=True)
+        self.assertEqual(json.loads(proc.stdout), [
+            [3476.47, "green", "greenChip"], [3476.4697, "green", "greenChip"],
+            *([[3476.47, "green", "greenChip"]] * 3),
+            [3550, "red", "redChip"], [3548.3694, "gray", "gray"],
+            [3476.4697, "gray", "gray"], [3476.4697, "green", "greenChip"],
+        ])
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_hfq_last_price_uses_adjusted_y_axis_and_quote_direction(self):
+        functions = ("chartQuoteDay", "chartPriceSnapshot", "priceLineLabel", "priceLineItem",
+                     "buildLastPriceLine")
+        script = "\n".join(_extract_fn(self.src, name) for name in functions) + """
+const symbol = '000001.SZ', date = '2026-11-25';
+const bars = [{ date: '2026-11-24', close: 51 }, { date, close: 50 }];
+const STATE = {
+  symbol, intradayData: { symbol, date, prev_close: 10.2 },
+  klineData: { symbol, meta: { adjust: 'hfq' }, klines: bars },
+};
+const marketStore = { quotes: {} };
+const C = () => ({ up: 'red', down: 'green', upChip: 'redChip', downChip: 'greenChip', halt: 'gray' });
+const fmtPrice3 = String;
+const down = { quote_trade_date: date, last_price: 10, prev_close: 10.2 };
+const stale = { ...down, quote_trade_date: '2026-11-24' };
+const results = [];
+for (const period of ['1d', '1w', '1M']) {
+  STATE.period = STATE.klineData.period = period;
+  for (const quote of [undefined, stale, { ...down, prev_close: null }, down, { ...down, last_price: 10.3 }]) {
+    const line = buildLastPriceLine(bars, quote).data[0];
+    results.push([line.yAxis, line.lineStyle.color, line.label.backgroundColor]);
+  }
+}
+console.log(JSON.stringify(results));
+"""
+        proc = subprocess.run(["node", "-e", script], capture_output=True, check=True)
+        green = [50, "green", "greenChip"]
+        red = [50, "red", "redChip"]
+        neutral = [50, "gray", "gray"]
+        self.assertEqual(json.loads(proc.stdout), [
+            green, green, green, green, red,
+            neutral, neutral, neutral, green, red,
+            neutral, neutral, neutral, green, red,
+        ])
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_merged_markline_renders_in_real_echarts(self):
         """markLine 必须是单个对象: 早期实现返回 [风控..., 现价] 数组, ECharts 5 会把
         整个 markLine 忽略 —— 一条线都画不出来。这里用真实 ECharts 渲染 SVG 断言
@@ -478,6 +700,8 @@ assert.deepEqual(calls, [['quote', ['002935.SZ'], true, false], ['quote', ['0029
             _extract_const(self.src, "RISK_ITEMS") + "\n"
             + _extract_fn(self.src, "priceLineLabel") + "\n"
             + _extract_fn(self.src, "priceLineItem") + "\n"
+            + _extract_fn(self.src, "chartQuoteDay") + "\n"
+            + _extract_fn(self.src, "chartPriceSnapshot") + "\n"
             + _extract_fn(self.src, "buildLastPriceLine") + "\n"
             + _extract_fn(self.src, "buildRiskLineItems") + "\n"
             + _extract_fn(self.src, "buildKlineMarkLines") + "\n"
@@ -485,11 +709,10 @@ assert.deepEqual(calls, [['quote', ['002935.SZ'], true, false], ['quote', ['0029
             + "function C() { return { up: '#ef5350', down: '#26a69a',"
             + " riskTp: '#c97a00', riskBe: '#1565c0', riskSl: '#7b3fa0', riskFg: '#f0f0f0' }; }\n"
             + "function fmtPrice3(v) { return Number(v).toFixed(3); }\n"
-            + "function resolveLastPrice(bars, livePrice) { return livePrice != null ? livePrice : bars[bars.length - 1].close; }\n"
             + "const echarts = require(process.argv[2]);\n"
             + "const p = JSON.parse(process.argv[1]);\n"
             + "const STATE = { symbol: 'X', risk: p.risk, _tagSlots: null };\n"
-            + "const markLine = buildKlineMarkLines(p.bars, p.live);\n"
+            + "const markLine = buildKlineMarkLines(p.bars, { last_price: p.live, prev_close: 10.5 });\n"
             + "const chart = echarts.init(null, null,"
             + " { renderer: 'svg', ssr: true, width: 600, height: 400 });\n"
             + "chart.setOption({ xAxis: { type: 'category',"
@@ -517,7 +740,7 @@ assert.deepEqual(calls, [['quote', ['002935.SZ'], true, false], ['quote', ['0029
             self.assertEqual(svg.count(text), 1, f"{text} 未画出")
         for color in ("#c97a00", "#1565c0", "#7b3fa0"):
             self.assertGreaterEqual(svg.count(color), 1, f"{color} 未用上")
-        # 现价线在最右一根 close 之上 → 涨色
+        # 现价高于昨收 → 涨色
         self.assertGreaterEqual(svg.count("#ef5350"), 1, "现价线未画")
         # 四个签的字色必须同源 (亮色白字 / 暗色深字都由 --risk-fg 给), 不再现价签固定白字
         self.assertTrue(any("现价" in t for t in out["texts"]), "现价签文案丢了")
@@ -705,7 +928,7 @@ class MarkLineLayoutRenderTest(unittest.TestCase):
 
     def _run(self, payload):
         fns = ["stackTags", "tagLabelPos", "priceLineLabel", "priceLineItem",
-               "resolveLastPrice", "buildLastPriceLine", "buildRiskLineItems",
+               "chartQuoteDay", "chartPriceSnapshot", "buildLastPriceLine", "buildRiskLineItems",
                "buildKlineMarkLines", "spanPx", "cacheGridRects", "chartModel", "priceYMapper",
                "tagBars", "tagColumnCtx", "layoutPriceTagSlots"]
         script = (
@@ -731,9 +954,10 @@ class MarkLineLayoutRenderTest(unittest.TestCase):
             + "cacheGridRects(GRIDS);   // 与实际 grid 一致, 否则列边界与 ECharts 对不上\n"
             + "const shots = [];\n"
             + "for (const tick of p.ticks) {\n"
-            + "  layoutPriceTagSlots(p.bars, tick.live);\n"
+            + "  const quote = { last_price: tick.live, prev_close: p.bars[0].close };\n"
+            + "  layoutPriceTagSlots(p.bars, quote);\n"
             + "  // SSR 没有动画循环可 flush lazyUpdate, 这里同步提交 (合并语义与线上一致)\n"
-            + "  chart.setOption({ series: [{ name: 'K线', markLine: buildKlineMarkLines(p.bars, tick.live) }] },"
+            + "  chart.setOption({ series: [{ name: 'K线', markLine: buildKlineMarkLines(p.bars, quote) }] },"
             + " { silent: true });\n"
             + "  const svg = chart.renderToSVGString();\n"
             + "  const labels = {};\n"

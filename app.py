@@ -76,7 +76,8 @@ _COMPRESSIBLE_JSON_ROUTES = frozenset({
 
 def _compress_api_json(response):
     size = response.content_length
-    if (request.path not in _COMPRESSIBLE_JSON_ROUTES or request.method != "GET"
+    if (request.path not in _COMPRESSIBLE_JSON_ROUTES
+            or (request.method != "GET" and (request.method, request.path) != ("POST", "/api/kline"))
             or response.status_code != 200 or response.mimetype != "application/json"
             or response.is_streamed or response.direct_passthrough
             or response.headers.get("Content-Encoding") or response.cache_control.no_transform

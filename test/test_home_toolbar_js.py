@@ -732,6 +732,7 @@ const document = { getElementById: () => ({ checked: false }) };
 // formatter 从闭包里取这几个量, 所以必须声明在外层, 逐例改写。
 // showMacd 与 macd 面板同源 (真页面上都由 chk-macd 决定), 别拆成两个开关。
 let showVolume = true, showMacd = true, subList = [];
+const avgLabel = '均价';
 const cases = JSON.parse(process.argv[1]);
 process.stdout.write(JSON.stringify(cases.map(c => {
   showVolume = c.vol;

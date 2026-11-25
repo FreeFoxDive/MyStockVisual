@@ -105,10 +105,10 @@ class ChartColorTest(unittest.TestCase):
         self.assertRegex(html, r"avgPrice:\s*'--chart-amber'",
                          "CHART_VAR_MAP 未把 avgPrice 映射到 --chart-amber (东财均线黄)")
         # 取色只有 C().avgPrice 一处来源, 不许在分时建图里写死颜色
-        self.assertIn("name: '均价', type: 'line'", html, "分时均价线没有建成 line series")
+        self.assertIn("name: avgLabel, type: 'line'", html, "分时均线没有建成 line series")
         self.assertIn("lineStyle: { color: C().avgPrice, width: 1 }", html,
                       "均价线没有走 C().avgPrice")
-        self.assertIn('<div>均价 <span style="color:${C().avgPrice}">', html,
+        self.assertIn('<div>${avgLabel} <span style="color:${C().avgPrice}">', html,
                       "分时提示框的均价读数没用同一个 token")
         self.assertIn("text: intradayAvgText", html, "分时左上角缺少均价读数行")
         readout = html[html.index("text: intradayAvgText"):]

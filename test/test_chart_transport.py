@@ -28,7 +28,7 @@ class ChartTransportTest(unittest.TestCase):
     def test_intraday_delta_revises_older_minutes_and_resets_across_days(self):
         def get(day, bars, since=""):
             with self.app.test_request_context(f"/?since={since}"):
-                return kline._intraday_response("000792.SZ", "1m", 240, day, bars).get_json()
+                return kline._intraday_response("000792.SZ", "1m", 240, day, bars, is_index=False).get_json()
 
         base = get("2026-11-23", [{"time": "09:31", "close": 10}, {"time": "09:32", "close": 11}])
         fixed = [{"time": "09:31", "close": 11}, {"time": "09:32", "close": 11}]
@@ -71,6 +71,102 @@ class ChartTransportTest(unittest.TestCase):
                 else:
                     self.assertEqual(bar[field], value, field)
         self.assertLess(len(gzip.compress(packed.data)), len(gzip.compress(old.data)) * .35)
+
+    def test_long_chart_history_crosses_local_boundary_and_replaces_partial_period(self):
+        daily = pd.DataFrame({"open": 8., "high": 11., "low": 7., "close": 9.,
+                              "volume": 10000, "amount": 90000.},
+                             index=pd.bdate_range("2019-01-01", periods=930))
+        from daily_chart_store import resample_bars
+
+        def get(period, query="", history="1"):
+            with self.app.test_request_context(
+                    f"/?symbol=300413.SZ&period={period}&format=rows&history={history}&warmup=249{query}"):
+                return kline.kline()
+
+        for period in ("1d", "1w", "1M"):
+            with self.subTest(period=period):
+                full = daily if period == "1d" else resample_bars(daily, period)
+                local = daily.iloc[707:]
+                if period != "1d":
+                    local = resample_bars(local, period)
+                cursor = local.index[0]
+
+                def provider(symbol, period, count, adjust, end_time):
+                    day = pd.Timestamp(end_time, unit="ms", tz="Asia/Shanghai").date()
+                    return full.loc[:str(day)].tail(count)
+
+                with patch.object(kline, "fetch_kline_ex", return_value=(local, "stock", "daily_chart")), \
+                     patch.object(kline, "_attach_quote"), patch.object(kline, "peek_instrument_meta", return_value=None), \
+                     patch.object(kline, "_is_index_symbol", return_value=False), \
+                     patch.object(kline, "fetch_af_history", side_effect=provider) as upstream:
+                    first = get(period, "&limit=300").get_json()
+                    self.assertTrue(first["has_more"])
+                    self.assertTrue(first["history_remote"])
+                    upstream.assert_not_called()
+                    query = f"&before={cursor.date()}&limit=1000&anchor_close=9"
+                    page = get(period, query, history="remote").get_json()
+                    self.assertEqual(page["rows"][-1][0], full.loc[:cursor].index[-2].date().isoformat())
+                    self.assertLessEqual(len(page["rows"]), 300)
+                    if period != "1d":
+                        anchor = dict(zip(page["fields"], page["anchor_row"]))
+                        self.assertEqual(anchor["date"], cursor.date().isoformat())
+                        self.assertEqual(anchor["volume"], full.loc[cursor, "volume"])
+                        self.assertGreater(anchor["volume"], local.loc[cursor, "volume"])
+                    self.assertTrue(page["has_more"])
+                    end = get(period, f"&before={full.index[0].date()}&anchor_close=9").get_json()
+                    self.assertFalse(end["has_more"])
+                    self.assertEqual(end["history_end"], full.index[0].date().isoformat())
+                    self.assertEqual(len(end["rows"]), 0)
+
+    def test_history_failed_requests_can_retry_and_success_is_cached(self):
+        frame = pd.DataFrame({"open": 8., "high": 11., "low": 7., "close": 9.,
+                              "volume": 10000, "amount": 90000.},
+                             index=pd.bdate_range("2021-01-01", periods=3))
+        with patch.object(kline, "fetch_af_history", side_effect=[None, frame, frame]) as upstream, \
+             patch.object(kline, "_listing_day", return_value=None), \
+             self.app.test_request_context("/"):
+            args = ("TEST.SZ", "1d", "forward", frame.index[-1].date())
+            self.assertEqual(kline._history_response(*args, 9., 41, 0).status_code, 503)
+            self.assertEqual(kline._history_response(*args, 5., 41, 0).status_code, 503)
+            for _ in range(2):
+                result = kline._history_response(*args, 9., 41, 0)
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(len(result.get_json()["rows"]), 2)
+            self.assertEqual(upstream.call_count, 3)
+
+    def test_local_history_cache_validates_each_anchor_close(self):
+        frame = pd.DataFrame({"open": 8., "high": 11., "low": 7., "close": 9.,
+                              "volume": 10000, "amount": 90000.},
+                             index=pd.date_range("2024-01-05", periods=12, freq="W-FRI"))
+
+        def get(close):
+            with self.app.test_request_context(
+                    f"/?symbol=300413.SZ&period=1w&format=rows&history=1"
+                    f"&before={frame.index[7].date()}&limit=4&warmup=3&anchor_close={close}"):
+                return kline.kline()
+
+        with patch.object(kline, "kline_cache_long", market.TTLCache()), \
+             patch.object(kline, "fetch_kline_ex", return_value=(frame, "stock", "daily_chart")) as source, \
+             patch.object(kline, "_attach_quote"), patch.object(kline, "_is_etf", return_value=False), \
+             patch.object(kline, "peek_instrument_meta", return_value=None):
+            self.assertFalse(get(9).get_json()["meta"]["cached"])
+            self.assertTrue(get(9).get_json()["meta"]["cached"])
+            self.assertEqual(get(31).status_code, 503)
+            self.assertEqual(source.call_count, 2)
+
+    def test_history_indicator_post_recalculates_obv_and_ma_across_pages(self):
+        rows = [[price, price, price, price, 100] for price in range(1, 1001)]
+        with self.app.test_request_context(
+                "/api/kline", method="POST", json={"period": "1d", "rows": rows, "warmup": 249}):
+            response = kline.kline_history_indicators()
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        bars = [dict(zip(data["fields"], row)) for row in data["rows"]]
+        self.assertEqual(len(bars), 751)
+        self.assertEqual(bars[51]["ma20"], 291.5)
+        self.assertEqual(bars[301]["obv"] - bars[300]["obv"], 100)
+        self.assertEqual(bars[301]["maobv"] - bars[300]["maobv"], 100)
+        self.assertNotIn("open", data["fields"])
 
     def test_chart_transport_shortens_values_and_preserves_crossings(self):
         bar = {"date": "2026-11-25", "open": 12.300000190734863, "close": 12.3000001,

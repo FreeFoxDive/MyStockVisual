@@ -325,10 +325,12 @@ process.stdout.write(JSON.stringify(cases.map(c => {
         js = (stub + _extract_fn(self.src, "chartModel")
               + "\n" + _extract_fn(self.src, "visibleBarIndex")
               + "\n" + _intraday_axis_fns(self.src)
+              + "\n" + _extract_fn(self.src, "intradayAvgLabel")
               + "\n" + _extract_fn(self.src, "intradayAvgText"))
         cases = [
             # 可见末端 = 最后一根
             {"bars": [{"avg_price": 17.5}, {"avg_price": 17.831}], "want": "均价 17.831"},
+            {"index": True, "bars": [{"avg_price": 3505}], "want": "均点 3505"},
             # 缩放把末端停在第 2 根: 读数跟可见末端, 不是永远取最新
             {"bars": [{"avg_price": 17.5}, {"avg_price": 17.831}], "endValue": 0, "want": "均价 17.5"},
             # 末根均价为 null (停牌/缺字段那根)
@@ -342,7 +344,7 @@ process.stdout.write(JSON.stringify(cases.map(c => {
 const cases = JSON.parse(process.argv[1]);
 let STATE = {};
 process.stdout.write(JSON.stringify(cases.map(c => {
-  STATE.intradayData = { bars: c.bars };
+  STATE.intradayData = { bars: c.bars, is_index: c.index };
   STATE.chart = mkChart(c.endValue);
   return intradayAvgText();
 })));

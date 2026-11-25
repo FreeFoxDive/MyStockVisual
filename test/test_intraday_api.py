@@ -24,6 +24,7 @@ _VISUAL_DIR = Path(__file__).resolve().parents[1]
 if str(_VISUAL_DIR) not in sys.path:
     sys.path.insert(0, str(_VISUAL_DIR))
 
+import market  # noqa: E402
 import security  # noqa: E402
 import trades  # noqa: E402
 
@@ -137,7 +138,7 @@ def _session_df(n, day=DAY, base=34.0):
 
 
 class FakeIntradaySource:
-    """冒充 kline_source: 记录调用参数, 回一份固定分钟 df。"""
+    """模拟上游按 count 返回最近的分钟线。"""
 
     def __init__(self, df):
         self.df = df
@@ -148,7 +149,7 @@ class FakeIntradaySource:
             {"category": category, "symbol": symbol, "period": period,
              "count": count, "adjust": adjust}
         )
-        return self.df, "fake"
+        return self.df.tail(count), "fake"
 
 
 class IntradayRouteTest(unittest.TestCase):
@@ -170,6 +171,10 @@ class IntradayRouteTest(unittest.TestCase):
 
     def setUp(self):
         _reset_rate_limit()
+        self.enterContext(mock.patch.object(market._index_cache, "get_snapshot", return_value=([], 0)))
+        self.enterContext(mock.patch.object(market, "_index_symbols", None))
+        self.enterContext(mock.patch.object(market._stock_cache, "_cached", return_value=([{"symbol": SYM}], 0)))
+        self.instrument_meta = self.enterContext(mock.patch.object(market, "peek_instrument_meta", return_value=None))
         from api import kline as kline_mod
         self.kline_mod = kline_mod
         self.client = self.app.test_client()
@@ -262,6 +267,80 @@ class IntradayRouteTest(unittest.TestCase):
         shares = self._avg_values(_avg_minute_df(_AVG_CLOSES, _AVG_VOLS, shares=True))
         for i, (a, b) in enumerate(zip(lots, shares)):
             self.assertAlmostEqual(a, b, places=6, msg=f"第 {i} 根均价随单位口径漂移")
+
+    def test_index_line_averages_today_close_points(self):
+        df = _session_df(240, base=3550.0)
+        df["amount"] = df["volume"] * 100 * 16.0  # 成分股每股成交均价约 16 元
+        history = pd.concat([_session_df(10, day=PREV_DAY, base=3400), df])
+        with self._mock_source(history):
+            response = self.client.get("/api/intraday?symbol=000001.SH&period=1m&count=240&format=rows")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["is_index"])
+        bars = [dict(zip(body["fields"], row)) for row in body["rows"]]
+        self.assertEqual([bar["time"] for bar in bars], df.index.strftime("%H:%M").tolist())
+        for i, bar in enumerate(bars):
+            self.assertAlmostEqual(bar["avg_price"], df["close"].iloc[:i + 1].mean(), places=6)
+        self.assertEqual(bars[-1]["close"], df["close"].iloc[-1])
+        self.assertEqual(bars[-1]["amount"], df["amount"].iloc[-1])
+
+    def test_cold_catalog_distinguishes_index_stock_and_unknown(self):
+        df = _avg_minute_df(_AVG_CLOSES, _AVG_VOLS)
+        with self._mock_source(df):
+            def get(symbol, params=""):
+                return self.client.get(f"/api/intraday?symbol={symbol}&period=1m{params}").get_json()
+
+            index = get("000001.SH")
+            stock = get("000001.SZ")
+            unknown = get("000300.SH", "&format=rows")
+            self.instrument_meta.return_value = {"type": "index"}
+            classified = get("000300.SH", f"&format=rows&since={unknown['version']}")
+
+        self.assertTrue(index["is_index"])
+        self.assertAlmostEqual(index["bars"][-1]["avg_price"], df.close.mean())
+        self.assertFalse(stock["is_index"])
+        self.assertAlmostEqual(stock["bars"][-1]["avg_price"], _vwap(_AVG_CLOSES, _AVG_VOLS)[-1])
+        self.assertFalse(unknown["is_index"])
+        self.assertTrue(all(row[unknown["fields"].index("avg_price")] is None for row in unknown["rows"]))
+        self.assertTrue(classified["is_index"])
+        self.assertFalse(classified["delta"])
+        self.assertEqual(len(classified["rows"]), len(df))
+
+    def test_index_short_window_matches_full_session_and_updates_revised_points(self):
+        df = _session_df(240, base=3550.0)
+        url = "/api/intraday?symbol=000001.SH&period=1m"
+        with self._mock_source(df):
+            full = self.client.get(url + "&count=240").get_json()["bars"]
+            short = self.client.get(url + "&count=30&format=rows").get_json()
+            self.assertEqual([call["count"] for call in self.source.calls], [240, 240])
+            # 修订窗口外的开盘价，窗口内每个累计均点都应随之更新。
+            df.loc[df.index[0], "close"] += 1
+            revised = self.client.get(url + f"&count=30&format=rows&since={short['version']}").get_json()
+
+        time_col = short["fields"].index("time")
+        avg_col = short["fields"].index("avg_price")
+        self.assertEqual(len(short["rows"]), 30)
+        for row, bar in zip(short["rows"], full[-30:]):
+            self.assertEqual(row[time_col], bar["time"])
+            self.assertAlmostEqual(row[avg_col], bar["avg_price"], places=6)
+        self.assertTrue(revised["delta"])
+        self.assertEqual(len(revised["rows"]), 30)
+        self.assertAlmostEqual(revised["rows"][-1][avg_col], df.close.mean(), places=6)
+
+    def test_short_index_window_uses_latest_day_even_at_open(self):
+        previous = _session_df(240, day=PREV_DAY, base=3400.0)
+        today = _session_df(3, base=3550.0)
+        url = "/api/intraday?symbol=000001.SH&period=1m&count=30"
+        with self._mock_source(previous):
+            before_open = self.client.get(url).get_json()
+        with self._mock_source(pd.concat([previous, today])):
+            after_open = self.client.get(url).get_json()
+        self.assertEqual(before_open["date"], PREV_DAY)
+        self.assertEqual(len(before_open["bars"]), 30)
+        self.assertAlmostEqual(before_open["bars"][-1]["avg_price"], previous.close.mean())
+        self.assertEqual(after_open["date"], DAY)
+        self.assertEqual(len(after_open["bars"]), 3)
+        self.assertAlmostEqual(after_open["bars"][-1]["avg_price"], today.close.mean())
 
     def test_avg_price_null_when_amount_missing(self):
         """源不带成交额 (market._normalize 会填 0.0) → 均价全 null, 前端据此不画线。"""

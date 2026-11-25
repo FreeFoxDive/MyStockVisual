@@ -110,6 +110,18 @@ class KlineCacheTest(unittest.TestCase):
     def _get(self, period="1w"):
         return self.client.get(f"/api/kline?symbol={self.SYMBOL}&period={period}")
 
+    def test_history_indicator_post_uses_existing_csrf_and_compression(self):
+        rows = [[close, close, close, close, 100] for close in range(1, 65)]
+        data = {"period": "1d", "warmup": 20, "rows": rows}
+        self.assertEqual(self.client.post("/api/kline", json=data).status_code, 403)
+        headers = {**self._csrf(self.client), "Accept-Encoding": "gzip"}
+        response = self.client.post("/api/kline", json=data, headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Encoding"], "gzip")
+        result = json.loads(gzip.decompress(response.data))
+        self.assertEqual(len(result["rows"]), 44)
+        self.assertEqual(result["rows"][0][result["fields"].index("ma20")], 11.5)
+
     def test_cached_entry_has_no_quote_and_hit_gets_fresh(self):
         p1, p2, p3, p4 = self._patches(
             quotes=[{"last_price": 10.0, "prev_close": 9.9},
