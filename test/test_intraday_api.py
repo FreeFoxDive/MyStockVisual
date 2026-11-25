@@ -38,6 +38,16 @@ def _reset_rate_limit():
     security._rate_limit_last_refill = time.time()
 
 
+def _mock_intraday_catalog(test):
+    # 分钟行情和标的目录独立。为测试显式提供股票分类，避免依赖本机缓存。
+    test.enterContext(mock.patch.object(market._index_cache, "get_snapshot", return_value=([], 0)))
+    test.enterContext(mock.patch.object(market, "_index_symbols", None))
+    test.enterContext(mock.patch.object(
+        market._stock_cache, "_cached", return_value=([{"symbol": SYM, "type": "stock"}], 0)
+    ))
+    return test.enterContext(mock.patch.object(market, "peek_instrument_meta", return_value=None))
+
+
 def _csrf(client):
     client.get("/login.html")
     headers = {}
@@ -171,10 +181,7 @@ class IntradayRouteTest(unittest.TestCase):
 
     def setUp(self):
         _reset_rate_limit()
-        self.enterContext(mock.patch.object(market._index_cache, "get_snapshot", return_value=([], 0)))
-        self.enterContext(mock.patch.object(market, "_index_symbols", None))
-        self.enterContext(mock.patch.object(market._stock_cache, "_cached", return_value=([{"symbol": SYM}], 0)))
-        self.instrument_meta = self.enterContext(mock.patch.object(market, "peek_instrument_meta", return_value=None))
+        self.instrument_meta = _mock_intraday_catalog(self)
         from api import kline as kline_mod
         self.kline_mod = kline_mod
         self.client = self.app.test_client()
@@ -401,6 +408,7 @@ class IntradayPhaseContractTest(unittest.TestCase):
 
     def setUp(self):
         _reset_rate_limit()
+        _mock_intraday_catalog(self)
         from api import kline as kline_mod
         self.kline_mod = kline_mod
         self.client = self.app.test_client()
