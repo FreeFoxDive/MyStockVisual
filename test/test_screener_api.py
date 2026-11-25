@@ -8,6 +8,7 @@ mock; 路由用例只落库 (worker 不在测试里启动)。
     venv/Scripts/python.exe -u visual/test/test_screener_api.py
 """
 
+import gzip
 import json
 import os
 import sys
@@ -331,6 +332,25 @@ class ScreenerRunRouteTest(ScreenerTestBase):
         self.assertEqual(light["current"]["n_results"], 1)
         full = self.client.get("/api/screener/status?full=1").get_json()
         self.assertEqual(len(full["current"]["results"]), 1)
+
+    def test_status_negotiates_content_encoding(self):
+        url = "/api/screener/status"
+        empty = self.client.get(url, headers={"Accept-Encoding": "gzip"})
+        self.assertNotIn("Content-Encoding", empty.headers)
+
+        for _ in range(3):
+            trades.create_screener_run(self.uid["scr_bob"], CONDS_AND, status="done",
+                                       data_version="2026-09-18", total=30,
+                                       results=[{"symbol": f"6000{i:02}.SH", "hit_count": 2} for i in range(30)])
+        for endpoint in (url, url + "?full=1"):
+            with self.subTest(endpoint=endpoint):
+                plain = self.client.get(endpoint, headers={"Accept-Encoding": "identity"})
+                zipped = self.client.get(endpoint, headers={"Accept-Encoding": "gzip"})
+                self.assertEqual(zipped.status_code, 200)
+                self.assertEqual(zipped.headers["Content-Encoding"], "gzip")
+                self.assertIn("Accept-Encoding", zipped.vary)
+                self.assertLess(zipped.content_length, plain.content_length)
+                self.assertEqual(gzip.decompress(zipped.data), plain.data)
 
     def test_status_summary_does_not_parse_results(self):
         """轮询走摘要查询: 即使 results 是坏 JSON, 命中数仍取 n_results 列。"""

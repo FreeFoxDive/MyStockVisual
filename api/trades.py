@@ -50,10 +50,14 @@ def trades_list():
         "limit": request.args.get("limit"),
         "offset": request.args.get("offset"),
     }
-    deduct = (request.args.get("deduct_fees") or "").lower() in ("1", "true")
+    chart = request.args.get("view") == "chart"
+    deduct = not chart and (request.args.get("deduct_fees") or "").lower() in ("1", "true")
     fee_config = trades.get_user_fees(user["id"]) if deduct else None
-    records, total = trades.list_trades(user["id"], filters, fee_config=fee_config)
-    return _json({"trades": records, "total": total})
+    if chart:
+        records, total = trades.list_trades(user["id"], filters, chart=True)
+    else:
+        records, total = trades.list_trades(user["id"], filters, fee_config=fee_config)
+    return _json({"trades": records, "total": total}, compact=chart)
 
 
 @api_bp.route("/api/trades", methods=["POST"])

@@ -21,6 +21,7 @@ services:
     environment:
       MALLOC_ARENA_MAX: "2"
       WAITRESS_THREADS: "6"
+      VISUAL_HTTP_COMPRESSION: "${VISUAL_HTTP_COMPRESSION:-app}"
     # 日志上限: docker 的 json-file 默认无上限, 7x24 运行会把日志堆在根分区上
     # (与镜像无关的另一个磁盘口子); 保留 30MB 近期日志足够 docker compose logs -f 排查
     logging:

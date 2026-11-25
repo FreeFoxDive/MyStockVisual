@@ -509,3 +509,28 @@ docker builder prune -a -f  # 磁盘告急才用: 连被镜像引用的缓存一
 恢复判定按标的及数据类型分别进行：建立连接不算恢复，只有有效数据才能暂停该类型的轮询；连接错误立即回退，15 秒无有效进展则重连。空帧、错误响应和失效快照不会清空已有数据。交易所时间戳、服务端采集版本、连接代次和请求期间的 SSE 更新序号共同防止倒退；旧连接、旧标的请求、恢复前 HTTP 响应均不能覆盖有效推送。切回标签页或从浏览器页面缓存恢复时重新订阅。
 
 2026-09-14 五档受控探测：前 30 次成功，第 31 次返回 `RateLimitError`，明确限额 `30/min`。快照套餐 60/min，网页预算 48/min（起点间隔 1.25s）；五档预算 24/min（2.5s）。这些是同一服务进程内的共享上限，多个服务进程/机器需外置共享限速器。
+
+### 首页传输和全市场快照
+
+- 首页日 K 按 1006 根计算，首次返回最近 300 根，并附最多 249 个先前收盘价供客户端自定义 MA/BOLL 计算。向左浏览、双击全览或打开历史画线时，按日期补足历史。紧凑图表数据缩短可往返 `float32` 的价格尾数，指标在传输时保留 6 位小数。接近零点或均线、MACD 交叉的值保留识别信号所需的精度。
+- 分时首次返回完整交易日，之后按版本传新增或修订的分钟。分时刷新复用交易标记和已经收到的五档。交易页保存后，列表与统计更新完成才重新订阅依赖的报价。
+- Visual 默认用 `QUOTE_SNAPSHOT_MODE=universe` 分开请求 `CN_Stock`、`CN_ETF`。`QUOTE_SNAPSHOT_INTERVAL_SEC=3` 是每轮启动间隔，两次池请求均计入 54 次/分钟预算。`QUOTE_SNAPSHOT_TIMEOUT_SEC` 默认 5 秒。需要回退时将 `QUOTE_SNAPSHOT_MODE` 改为 `legacy` 后重启。
+- 午休缺少当日上午快照时分池补取。收盘后按池记录成功轮次并对失败的池退避重试，快照存于 `.cache/quote_close.json.gz`。日 K 仓发布当日数据后，逐标的核对行情时间、收盘及前收价格。缺少终值依据时显示“收盘待确认”及实际行情时间，页面每分钟查一次本地快照缓存直到确认。周末、假期和重启使用最近归档。成交校验和五档沿用各自原有链路。
+
+验证时使用同一账户、标的及代理压缩配置。浏览器 Network 面板核对冷启动、热启动、切股、换分时、补历史与连续停留 5 分钟的请求次数、传输大小及 `Server-Timing`。首页第一张图可用 `performance.getEntriesByName('visual:first-chart')[0]?.startTime` 查看浏览器时间。
+
+Docker Compose 和直连 Waitress 默认使用 `VISUAL_HTTP_COMPRESSION=app`。行情和 `/api/screener/status` 的 JSON 响应达到 1 KiB 后按 `Accept-Encoding` 协商，权重相同时优先使用 `zstd` level 1，兼容端使用 `gzip` level 3。Cloudflare 负责公网 CSS、JS 压缩，也可协商发给浏览器的 JSON 编码。用 Network 面板的 transferred 大小与 `Content-Encoding` 核对传输效果。Python 3.14 使用标准库，旧版 Python 按 `requirements.txt` 安装 `zstandard`。已有容器需要重建镜像以安装依赖。
+
+宿主机 Nginx 接管普通 JSON 压缩时，可引用 [`api-compression.conf`](deploy/nginx/api-compression.conf) 和 [`sse-streaming.conf`](deploy/nginx/sse-streaming.conf)。前者用于普通 API，后者用于 `/api/stream/quotes`。沿用站点的 upstream 与请求头配置，执行 `nginx -t` 后再重载。确认 Nginx 自身能压缩 JSON 后，在 Compose 使用的 `.env` 里设置 `VISUAL_HTTP_COMPRESSION=proxy`，重建容器并核对回源和公网响应。
+
+SSE 常规订阅使用流式 `gzip` level 3。达到 20 个标的、客户端明确支持 `zstd` 且权重允许时使用 `zstd` level 3。Apple WebKit 使用 gzip 兼容路径。每帧立即刷新压缩器，响应保持 `X-Accel-Buffering: no`。盘中日志里的 `sse_wire_gzip_bytes` 和 `sse_wire_zstd_bytes` 可用于观察实际压缩体积。
+
+- 本机已登录浏览器使用同一批日 K 和模拟盘中行情，日 K 实际传输约 331 kB → 92 kB，首屏 300 根可补齐至 1006 根。300 笔样本交易的图表请求约 5.4 kB → 2.6 kB。冷启动首图单次约 714 ms → 384 ms，热启动单次约 191 ms → 253 ms。
+- 分时首次传输约 40.6 kB → 34.2 kB。随后 5 分钟内，稳定行情的分时请求累计约 202.9 kB → 2.6 kB，完整交易列表重复下载由 5 次降至 0 次。
+- 独立 300 秒 SSE 回放中，单标的报价由 240 帧降至 100 帧，报价、五档、指标及保活合计约 141 kB → 116 kB。服务内用模拟的 7227 只标的测得标准化和发布 P95 约 201 ms。线上传输和容器性能以部署后的盘中测量为准。
+
+在服务器启用 `VISUAL_API_PERF_LOG=1` 输出 JSON 大小与服务端耗时，启用 `KLINE_PERF_LOG=1` 输出快照下载、整轮 P95、候选标的时间戳、容器内存与 SSE 各事件类型的累计增量。连续竞价时段查看日志后确认 3 秒配置。可用下面的命令查看相关记录。
+
+```bash
+docker logs --since 10m stock-visual 2>&1 | grep -E 'quote_pool_round|quote_pool pool|api_perf'
+```

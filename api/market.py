@@ -6,7 +6,9 @@ import time
 
 from flask import request
 
+import market
 import market_hours
+import quote_snapshots
 from api import api_bp
 from api.common import _error, _json, _monitor_error_label, _require_user
 from logger import sanitize_error as _sanitize_error
@@ -145,7 +147,8 @@ def quote():
         return _error("缺少 symbol 参数")
     symbol = normalize_symbol(symbol_raw)
     try:
-        q = fetch_quote(symbol)
+        q = (market.fetch_display_quotes([symbol]).get(symbol)
+             if quote_snapshots.current() else fetch_quote(symbol))
         if q is None:
             return _error(f"无法获取 {symbol} 的快照", 404)
         # fetch_quote 返回 quote_cache 共享条目, 复制后再挂标志避免污染缓存;
@@ -167,7 +170,17 @@ def quotes():
         return _error("缺少 symbols 参数")
     fresh = (request.args.get("fresh") or "0").lower() in ("1", "true", "yes")
     try:
-        quotes = fetch_quotes(symbols, fresh=fresh)
+        if request.args.get("cache_only") == "1":
+            quotes, missing = market.display_quote_cache(symbols)
+            cached = {s: q for s in missing if (q := market._quote_cache_lookup(s, True)) is not None}
+            if quote_snapshots.current():
+                market.merge_display_quotes(quotes, cached)
+            else:
+                quotes.update(cached)
+        elif quote_snapshots.current():
+            quotes = market.fetch_display_quotes(symbols, fresh=fresh)
+        else:
+            quotes = fetch_quotes(symbols, fresh=fresh)
         # 与 /api/quote、SSE 口径一致: 每条快照带交易日标志 (不改写共享缓存条目)
         td = market_hours.is_trading_day(market_hours.now())
         return _json({s: {**q, "is_trading_day": td} for s, q in quotes.items()})
@@ -202,6 +215,14 @@ def stock_info():
     # ROE 榜、行业及涨跌停等慢请求。未传 core 时保持完整资料的 API 语义。
     core_only = (request.args.get("core") or "").lower() in ("1", "true", "yes")
     try:
+        if request.args.get("view") == "enrichment":
+            return _json(fetch_stock_info(symbol, enrichment_only=True), compact=True)
+        if core_only and request.args.get("view") == "chart":
+            data = dict(fetch_stock_info(symbol, include_enrichment=False))
+            pledge = None if data.get("is_index") else _load_pledge(background_only=True)
+            if pledge or data.get("is_index"):
+                data["pledge_ratio"] = (pledge or {}).get(symbol.split(".")[0], {}).get("ratio")
+            return _json(data, compact=True)
         return _json(fetch_stock_info(symbol, include_enrichment=not core_only))
     except Exception as e:
         log.warning("获取基本信息失败 %s: %s", symbol, _sanitize_error(e))
@@ -217,8 +238,10 @@ def pledge():
     if _is_index_symbol(symbol):
         return _json({"symbol": symbol, "pledge": None})
     code = symbol.split(".")[0]
-    data = _load_pledge().get(code)
-    return _json({"symbol": symbol, "pledge": data if data else None})
+    if request.args.get("view") == "chart":
+        cached = _load_pledge(background_only=True)
+        return _json({"symbol": symbol, "pledge": (cached or {}).get(code), "ready": bool(cached)})
+    return _json({"symbol": symbol, "pledge": _load_pledge().get(code)})
 
 
 @api_bp.route("/api/quota", methods=["GET"])

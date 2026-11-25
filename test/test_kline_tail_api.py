@@ -124,8 +124,11 @@ class KlineTailRouteTest(unittest.TestCase):
         with m1, m2, m3:
             tail = self.client.get(f"/api/kline/tail?symbol={SYM}&n=1").get_json()
             full = self.client.get(f"/api/kline?symbol={SYM}&period=1d&count=1006").get_json()
+            chart_tail = self.client.get(f"/api/kline/tail?symbol={SYM}&n=1&precision=chart").get_json()
+            chart = self.client.get(f"/api/kline?symbol={SYM}&period=1d&count=1006&format=rows").get_json()
         self.assertEqual(tail["bars"][-1], full["klines"][-1],
                          "tail 与 /api/kline 的末根必须逐字段一致")
+        self.assertEqual(chart_tail["bars"][-1], dict(zip(chart["fields"], chart["rows"][-1])))
 
     def test_short_ttl_merges_repeated_calls(self):
         df = _kline_df()

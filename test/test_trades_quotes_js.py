@@ -101,6 +101,42 @@ class TradesQuotesBehaviorTest(unittest.TestCase):
         cls.trades = _TRADES_HTML.read_text(encoding="utf-8")
         cls.monitor = _MONITOR_HTML.read_text(encoding="utf-8")
 
+    def test_update_waits_for_both_trade_responses_and_retries_reads(self):
+        refresh = _extract_fn(self.trades, "refreshTradePage")
+        script = refresh + """
+const assert = require('node:assert/strict');
+const state = {}, pending = [], rendered = [];
+const banner = { hidden: true, firstChild: { textContent: '' } };
+const document = { getElementById: () => banner };
+const api = path => new Promise((resolve, reject) => pending.push({path, resolve, reject}));
+const statQuery = () => '?range=1m', listQuery = () => '?offset=0';
+const showStats = data => rendered.push(['stats', data]);
+const showTrades = data => rendered.push(['list', data]);
+const refreshQuotes = () => rendered.push(['quotes']);
+(async () => {
+  const obsolete = refreshTradePage(true), current = refreshTradePage(true);
+  pending[2].resolve(20);
+  await Promise.resolve();
+  assert.deepEqual(rendered, []);
+  pending[3].resolve(21);
+  await current;
+  pending[0].resolve(10); pending[1].resolve(11);
+  await obsolete;
+  assert.deepEqual(rendered, [['stats', 20], ['list', 21], ['quotes']]);
+  const failed = refreshTradePage(true);
+  pending[4].reject(new Error('network'));
+  await failed;
+  assert.equal(banner.hidden, false);
+  const retry = refreshTradePage();
+  pending[6].resolve(30); pending[7].resolve(31);
+  await retry;
+  assert.equal(banner.hidden, true);
+  assert.equal(pending.filter(x => x.path.startsWith('/api/trades')).length, 8);
+  console.log('ok');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        self.assertEqual(run_node(script), "ok")
+
     def test_snapshot_fallback_behavior(self):
         script = """
 const results = {};

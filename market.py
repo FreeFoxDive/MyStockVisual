@@ -794,10 +794,11 @@ PLEDGE_TTL = 24 * 3600      # 每日收盘后更新一次, 24h 作为保鲜兜�
 PLEDGE_KEEP_FILES = 7       # 磁盘只保留最近 7 个质押缓存文件
 
 _pledge_cache = None        # {code: {ratio, shares, market_value, count}}
-_pledge_ts = 0              # 内存缓存写入时间 (epoch)
+_pledge_ts = 0              # 内存缓存最近成功校验时间 (epoch)
 _pledge_date = None         # 内存缓存对应的数据交易日 YYYYMMDD
 _pledge_lock = threading.Lock()
 _refreshing_pledge = False  # 后台刷新是否进行中 (stale-while-revalidate)
+_pledge_last_attempt = None
 
 
 def _pledge_file_path(date_str):
@@ -886,15 +887,17 @@ def _pledge_to_disk(date_str, pledge):
         log.warning(f"写入质押缓存失败: {e}")
 
 
-def _refresh_pledge_async():
+def _refresh_pledge_async(*, on_read=False):
     """后台异步刷新质押数据 (stale-while-revalidate), 同一时刻只跑一个
 
-    拉取失败或日期未更新时保留旧缓存, 不覆盖、不清空, 仅记录日志等待下轮重试。
+    拉取失败时保留旧缓存；日期未更新时只推进最近校验时间。
     """
-    global _refreshing_pledge, _pledge_cache, _pledge_ts, _pledge_date
+    global _refreshing_pledge, _pledge_last_attempt, _pledge_cache, _pledge_ts, _pledge_date
     with _pledge_lock:
-        if _refreshing_pledge:
+        now = time.monotonic()
+        if _refreshing_pledge or (on_read and _pledge_last_attempt is not None and now - _pledge_last_attempt < 60):
             return
+        _pledge_last_attempt = now
         _refreshing_pledge = True
 
     def _worker():
@@ -905,12 +908,22 @@ def _refresh_pledge_async():
         except Exception:
             pass
         try:
+            if not _pledge_cache:
+                cached_date, cached, cached_ts = _pledge_from_disk()
+                if cached:
+                    with _pledge_lock:
+                        if not _pledge_cache:
+                            _pledge_cache, _pledge_ts, _pledge_date = cached, cached_ts, cached_date
+                    if on_read and time.time() - cached_ts < PLEDGE_TTL:
+                        return
             date_str, pledge = _fetch_pledge()
             if not pledge:
                 log.warning("质押数据刷新失败: 未获取到数据, 保留旧缓存")
                 return
             # 非交易日或当天数据尚未更新: 拉到的仍是旧日期, 跳过重复写入
             if _pledge_date and date_str == _pledge_date:
+                with _pledge_lock:
+                    _pledge_ts = time.time()
                 log.info(f"质押数据已是 {date_str} 最新, 跳过写入")
                 return
             _pledge_to_disk(date_str, pledge)
@@ -933,7 +946,7 @@ def _refresh_pledge_async():
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def _load_pledge():
+def _load_pledge(*, background_only=False):
     """加载全市场质押数据 (内存+磁盘双层缓存, stale-while-revalidate)
 
     有缓存绝不阻塞: 内存新鲜直接用, 过期返回旧值并后台刷新; 磁盘兜底。
@@ -948,8 +961,12 @@ def _load_pledge():
 
     # 2) 内存有但过期 → 返回旧数据 + 后台刷新 (不阻塞)
     if _pledge_cache is not None:
-        _refresh_pledge_async()
+        _refresh_pledge_async(on_read=True)
         return _pledge_cache
+
+    if background_only:
+        _refresh_pledge_async(on_read=True)
+        return None
 
     # 3) 磁盘缓存 → 加载返回; 过期则后台刷新 (不阻塞)
     date_str, pledge, ts = _pledge_from_disk()
@@ -961,7 +978,7 @@ def _load_pledge():
                 _pledge_date = date_str
         if now - (ts or 0) < PLEDGE_TTL:
             return pledge
-        _refresh_pledge_async()
+        _refresh_pledge_async(on_read=True)
         return pledge
 
     # 4) 无任何缓存 (首次运行) → 同步拉取, 加锁避免并发重复拉取
@@ -1753,7 +1770,7 @@ def publish_quote_snapshot(symbol, quote):
 
 
 def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0, for_trade=False,
-                  wait_for_budget=False):
+                  wait_for_budget=False, only_requested=False):
     """批量获取实时快照。
 
     ``wait_for_lock`` 仅供成交校验等强一致性调用使用：常规 UI 轮询继续
@@ -1786,8 +1803,8 @@ def fetch_quotes(symbols, fresh=False, wait_for_lock=0.0, for_trade=False,
                 if (q := _quote_cache_lookup(s, off_session)) is not None}
     combined = []
     try:
-        if for_trade:
-            # 成交校验只占一个批次，不被多页面轮转挤到后续批次。
+        if for_trade or only_requested:
+            # 成交校验和全池回退只查询本次需要的标的。
             combined = symbols
         else:
             with _quote_interest_lock:
@@ -1973,6 +1990,55 @@ def _fetch_quotes_locked(symbols, fresh=False, budget_deadline=None):
 def fetch_quote(symbol):
     """获取实时快照（单只，AF 优先 + 麦蕊回退，缓存优先）"""
     return fetch_quotes([symbol]).get(normalize_symbol(symbol))
+
+
+def display_quote_cache(symbols, *, live_info=True):
+    """Pool lookups are local. Report which symbols still need the legacy source."""
+    import quote_snapshots
+
+    worker = quote_snapshots.current()
+    now = market_hours.now()
+    result, missing = {}, []
+    for symbol in dict.fromkeys(normalize_symbol(s) for s in symbols):
+        quote, refresh = worker.lookup(symbol, now) if worker else (None, True)
+        if quote:
+            if live_info and quote["quote_status"] in ("live", "midday"):
+                quote = {**quote, "_live_info": _live_info_for_quote(symbol, quote)}
+            result[symbol] = quote
+        if refresh:
+            missing.append(symbol)
+    return result, missing
+
+
+def merge_display_quotes(result, legacy):
+    """Use a newer legacy quote during a pool outage without regressing its exchange time."""
+    phase = market_hours.session_phase()
+    day = market_hours.now().date().isoformat()
+    for symbol, quote in legacy.items():
+        previous = result.get(symbol)
+        ts = _safe_epoch(quote.get("timestamp"))
+        if previous and (ts or 0) <= previous["timestamp"]:
+            continue
+        quote_day = (dt_mod.datetime.fromtimestamp(ts, dt_mod.timezone(dt_mod.timedelta(hours=8))).date().isoformat()
+                     if ts else None)
+        if previous and quote_day == previous.get("quote_trade_date") and previous.get("quote_status") == "close_confirmed":
+            continue
+        status = "last_quote"
+        if quote_day == day and phase in market_hours.LIVE_PHASES:
+            status = "live"
+        elif quote_day == day and phase == "break":
+            status = "midday"
+        elif phase == "closed":
+            status = "close_pending"
+        result[symbol] = {**quote, "quote_trade_date": quote_day, "quote_status": status}
+    return result
+
+
+def fetch_display_quotes(symbols, *, live_info=True, **kwargs):
+    result, missing = display_quote_cache(symbols, live_info=live_info)
+    if missing:
+        merge_display_quotes(result, fetch_quotes(missing, only_requested=True, **kwargs))
+    return result
 
 
 def _normalize(df, prefer_time=False, *, preserve_ohlc=False):
@@ -2898,7 +2964,7 @@ def _strip_today_bar_df(df):
     if last is not None and last == today:
         # 仅收盘后视为终值可落盘; 盘中/午休(BAR_READY 但非 closed)都剥掉,
         # 避免把不完整的当日 bar 当终值写进磁盘缓存 (午休 in_session=False 曾是陷阱)
-        if market_hours.session_phase() == "closed":
+        if market_hours.session_phase() == "closed" and not df.attrs.get("unconfirmed_close"):
             return df
         return df.iloc[:-1].copy()
     return df
@@ -2927,6 +2993,7 @@ def _apply_quote_bar_to_df(df, quote_bar):
             if col in df.columns:
                 df.iloc[-1, df.columns.get_loc(col)] = val
         df.attrs["today_quote_meta"] = meta
+        df.attrs["unconfirmed_close"] = quote_bar.get("_unconfirmed_close", False)
         return df
     new_row = pd.DataFrame([row], index=[ts])
     for col in df.columns:
@@ -2935,6 +3002,7 @@ def _apply_quote_bar_to_df(df, quote_bar):
     out = pd.concat([df, new_row]).sort_index()
     out.index.name = df.index.name or "trade_date"
     out.attrs["today_quote_meta"] = meta
+    out.attrs["unconfirmed_close"] = quote_bar.get("_unconfirmed_close", False)
     return out
 
 
@@ -2965,6 +3033,8 @@ def _maybe_append_today_bar(symbol, df, timing=None, fresh=True, wait_for_budget
         # 盘中本该有今日 bar 但快照没拿到: 标上, 让 tail 不要把这份残缺结果缓存住。
         if last_date < today:
             df.attrs["today_bar_missing"] = True
+        return df
+    if quote_bar.get("_unconfirmed_close") and last_date == today:
         return df
     return _apply_quote_bar_to_df(df, quote_bar)
 
@@ -3004,23 +3074,35 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
         return None
     if not market_hours.is_trading_day(today.strftime("%Y-%m-%d")):
         return unavailable("非交易日")
-    if market_hours.session_phase() not in market_hours.BAR_READY_PHASES:
+    phase = market_hours.session_phase()
+    if phase not in market_hours.BAR_READY_PHASES:
         # 盘前/集合竞价不拼当日 bar (快照为上一交易日残留)
         return unavailable("当日bar未成型")
     # 观测: 该往返的耗时即 quote_ms, 是 /api/kline 关键路径上的网络成本
     if quote is not _NO_QUOTE:
         q = quote
     else:
+        import quote_snapshots
         with perf.Span(timing, "quote_ms"):
-            q = (fetch_trade_quote(symbol) if for_trade
-                 else fetch_quotes(
-                     [symbol], fresh=fresh, wait_for_lock=_CHART_QUOTE_WAIT_SEC,
-                     wait_for_budget=bool(wait_for_budget) and not fresh and not for_trade,
-                 ).get(normalize_symbol(symbol)))
+            if for_trade:
+                q = fetch_trade_quote(symbol)
+            elif quote_snapshots.current():
+                q = fetch_display_quotes([symbol], live_info=False).get(normalize_symbol(symbol))
+            else:
+                q = fetch_quotes([symbol], fresh=fresh, wait_for_lock=_CHART_QUOTE_WAIT_SEC,
+                                 wait_for_budget=bool(wait_for_budget) and not fresh).get(normalize_symbol(symbol))
     if not q:
         return unavailable("未取到快照")
     # 快照自带交易所时间戳时校验日期: 挡住盘前/停牌等陈旧快照被当今日
     ts = q.get("timestamp")
+    if ts is None and not for_trade:
+        import quote_snapshots
+        if quote_snapshots.current():
+            return unavailable("缺少行情时间")
+    if q.get("quote_trade_date") and q["quote_trade_date"] != target.isoformat():
+        return unavailable("快照交易日不匹配")
+    if phase == "break" and q.get("quote_status") == "last_quote":
+        return unavailable("无上午连续竞价快照")
     if ts is not None:
         try:
             ts_date = dt_mod.datetime.fromtimestamp(
@@ -3064,6 +3146,7 @@ def _daily_bar_from_quote(symbol, target, timing=None, fresh=True, for_trade=Fal
         "amount": _safe_float(q.get("amount")),
         "_quote_timestamp": quote_ts,
         "_quote_revision": quote_rev,
+        "_unconfirmed_close": phase == "closed" and "quote_status" in q,
     }
 
 
@@ -3897,7 +3980,7 @@ _stock_info_lock = threading.Lock()
 _stock_info_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="stock-info")
 
 
-def fetch_stock_info(symbol, force=False, include_enrichment=True):
+def fetch_stock_info(symbol, force=False, include_enrichment=True, *, enrichment_only=False):
     """侧栏「基本信息」数据: 行业/总手/成交额/换手/量比/涨跌停/3-5-10日涨幅/PE/PB/交易状态。
 
     个股/ETF 另附前复权日线 atr14/atr20（仓位计算，指数为 null）。
@@ -3918,7 +4001,7 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
             with _stock_info_lock:
                 ent = _stock_info_enrichment_cache.get(symbol)
                 if ent and now - ent[0] < _STOCK_INFO_TTL:
-                    return {**core, **ent[1]}
+                    return ent[1] if enrichment_only else {**core, **ent[1]}
 
         market = _symbol_market(symbol)
         is_cn = market == "cn"
@@ -3974,7 +4057,7 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
                         extra["limit_estimated"] = True
         with _stock_info_lock:
             _stock_info_enrichment_cache[symbol] = (now, extra)
-        return {**core, **extra}
+        return extra if enrichment_only else {**core, **extra}
 
     if not force:
         with _stock_info_lock:
@@ -3990,7 +4073,8 @@ def fetch_stock_info(symbol, force=False, include_enrichment=True):
 
     quote = None
     try:
-        quote = fetch_quote(symbol)
+        import quote_snapshots
+        quote = (fetch_display_quotes([symbol]).get(symbol) if quote_snapshots.current() else fetch_quote(symbol))
     except Exception as e:
         log.warning(f"基本信息快照失败 {symbol}: {_sanitize_error(e)}")
 

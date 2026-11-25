@@ -1,6 +1,7 @@
 """Flask application factory for Visual K-line web app."""
 from __future__ import annotations
 
+import gzip
 import logging
 import os
 import re
@@ -9,6 +10,14 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
+
+try:
+    from compression.zstd import compress as _compress_zstd
+except ImportError:
+    try:
+        from zstandard import compress as _compress_zstd
+    except ImportError:
+        _compress_zstd = None
 
 # ── 路径 + .env (须在 import market / routes 之前) ──
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -58,6 +67,36 @@ STATIC_DIR = SCRIPT_DIR / "static"
 # (HTML / 无版本 JS 改了必须立刻生效, 否则用户拿到旧 JS 与后端口径不一致)
 _IMMUTABLE_VENDOR = re.compile(r"^vendor/[\w.-]+-\d[\w.]*\.(?:js|css)$")
 _VENDOR_CACHE = "public, max-age=31536000, immutable"
+_COMPRESSIBLE_JSON_ROUTES = frozenset({
+    "/api/kline", "/api/kline/tail", "/api/kline/deferred", "/api/intraday",
+    "/api/chips", "/api/quote", "/api/quotes", "/api/depth", "/api/stock-info",
+    "/api/screener/status",
+})
+
+
+def _compress_api_json(response):
+    size = response.content_length
+    if (request.path not in _COMPRESSIBLE_JSON_ROUTES or request.method != "GET"
+            or response.status_code != 200 or response.mimetype != "application/json"
+            or response.is_streamed or response.direct_passthrough
+            or response.headers.get("Content-Encoding") or response.cache_control.no_transform
+            or size is None or size < 1024):
+        return
+    response.vary.add("Accept-Encoding")
+    accepted = request.accept_encodings
+    # Older clients may send a wildcard without advertising zstd support.
+    offers = ("zstd", "gzip") if _compress_zstd and any(name.lower() == "zstd" for name, _ in accepted) else ("gzip",)
+    encoding = accepted.best_match(offers)
+    if encoding is None or accepted[encoding] < accepted["identity"]:
+        return
+    body = response.get_data()
+    if encoding == "zstd":
+        compressed = _compress_zstd(body, level=1)
+    else:
+        compressed = gzip.compress(body, compresslevel=3, mtime=0)
+    if len(compressed) < size:
+        response.set_data(compressed)
+        response.headers["Content-Encoding"] = encoding
 
 
 def _api_json_error(msg, code):
@@ -86,6 +125,7 @@ def create_app():
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_PATH"] = "/"
+    app_compress_json = os.getenv("VISUAL_HTTP_COMPRESSION", "app").strip().lower() != "proxy"
 
     from api import api_bp, auth_bp
     app.register_blueprint(auth_bp)
@@ -113,6 +153,8 @@ def create_app():
 
     @app.before_request
     def _before():
+        if request.path.startswith("/api/"):
+            g.api_start = time.perf_counter()
         if request.endpoint == "favicon":
             return None  # 空图标响应与会话无关。
         g.user = current_user_from_request()
@@ -160,6 +202,15 @@ def create_app():
 
     @app.after_request
     def _after(resp):
+        if hasattr(g, "api_start") and not resp.is_streamed:
+            json_bytes = resp.content_length
+            if app_compress_json:
+                _compress_api_json(resp)
+            ms = (time.perf_counter() - g.api_start) * 1000
+            resp.headers.add("Server-Timing", f"request;dur={ms:.1f}")
+            if os.getenv("VISUAL_API_PERF_LOG") == "1":
+                log.info("api_perf method=%s endpoint=%s status=%s json_bytes=%s encoded_bytes=%s total_ms=%.1f",
+                         request.method, request.endpoint, resp.status_code, json_bytes, resp.content_length, ms)
         resp.headers["Content-Security-Policy"] = CSP_HEADER
         # 首次访问 HTML / auth/me 时下发 csrf cookie
         if request.method == "GET":
@@ -277,6 +328,12 @@ def bootstrap_admin():
 def start_background_jobs():
     """磁盘缓存清理、股票列表预热、质押定时刷新、持仓监控。"""
     import market
+    import quote_snapshots
+
+    try:
+        quote_snapshots.start(market.AF_API_KEY)
+    except Exception as exc:
+        log.warning("全池快照启动失败，使用按标的取数: %s", type(exc).__name__)
 
     try:
         market._disk_cache.cleanup()

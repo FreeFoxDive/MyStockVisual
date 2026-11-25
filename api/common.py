@@ -11,8 +11,9 @@ from market import NumpyEncoder
 log = logging.getLogger("api")
 
 
-def _json(data, code=200):
-    body = json.dumps(data, ensure_ascii=False, cls=NumpyEncoder)
+def _json(data, code=200, *, compact=False):
+    options = {"separators": (",", ":")} if compact else {}
+    body = json.dumps(data, ensure_ascii=False, cls=NumpyEncoder, **options)
     resp = Response(body, status=code, mimetype="application/json")
     resp.headers["Cache-Control"] = "no-cache"
     return resp

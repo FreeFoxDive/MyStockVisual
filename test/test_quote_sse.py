@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -116,6 +117,7 @@ class QuoteSseTest(unittest.TestCase):
         r.close()
 
     def test_frame_protocol_and_headers(self):
+        self.client.environ_base["HTTP_ACCEPT_ENCODING"] = "identity"
         quotes = {SYM: {"last_price": np.float64(10.5), "volume": np.int64(100)}}
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value=quotes):
             resp, frames = self._frames(f"/api/stream/quotes?symbols={SYM}", n=3)
@@ -127,8 +129,69 @@ class QuoteSseTest(unittest.TestCase):
         self.assertEqual(payload[SYM]["last_price"], 10.5, "numpy 标量应被 NumpyEncoder 正常编码")
         self.assertEqual(payload[SYM]["volume"], 100)
         self.assertEqual(resp.mimetype, "text/event-stream")
-        self.assertEqual(resp.headers["Cache-Control"], "no-cache")
+        self.assertNotIn("Content-Encoding", resp.headers)
+        self.assertTrue(resp.cache_control.no_cache)
+        self.assertTrue(resp.cache_control.no_transform)
         self.assertEqual(resp.headers["X-Accel-Buffering"], "no")
+
+    def test_sse_compression_negotiates_and_flushes_each_frame(self):
+        count = self.stream.SSE_ZSTD_MIN_SYMBOLS
+        symbols = ",".join(f"{600000 + i}.SH" for i in range(count))
+        cases = (
+            (SYM, "gzip, zstd", "", "gzip"),
+            (symbols, "gzip, ZSTD", "Mozilla Chrome/140.0 AppleWebKit/537.36", "zstd"),
+            (symbols, "gzip, zstd", "Mozilla AppleWebKit/605.1.15 Version/26.3 Safari/605.1.15", "gzip"),
+            (symbols, "gzip;q=1, zstd;q=0.5", "", "gzip"),
+            (symbols, "zstd;q=1, gzip;q=0.5", "", "zstd"),
+        )
+        with mock.patch.object(self.stream.market, "fetch_quotes", return_value={SYM: {"last_price": 10.5}}):
+            for picked, accept, user_agent, encoding in cases:
+                with self.subTest(encoding=encoding, symbols=picked, user_agent=user_agent):
+                    resp = self.client.get("/api/stream/quotes?symbols=" + picked, buffered=False,
+                                           headers={"Accept-Encoding": accept, "User-Agent": user_agent})
+                    try:
+                        self.assertEqual(resp.headers["Content-Encoding"], encoding)
+                        self.assertIn("Accept-Encoding", resp.vary)
+                        if picked == symbols:
+                            self.assertIn("User-Agent", resp.vary)
+                        self.assertNotIn("Content-Length", resp.headers)
+                        if encoding == "gzip":
+                            decoder = zlib.decompressobj(31)
+                        elif self.stream.zstd is not None:
+                            decoder = self.stream.zstd.ZstdDecompressor()
+                        else:
+                            decoder = self.stream.zstandard.ZstdDecompressor().decompressobj()
+                        chunks = iter(resp.iter_encoded())
+                        self.assertEqual(decoder.decompress(next(chunks)), b"retry: 5000\n\n")
+                        self.assertTrue(decoder.decompress(next(chunks)).startswith(b"event: market\n"))
+                        data_frame = decoder.decompress(next(chunks))
+                        self.assertTrue(data_frame.endswith(b"\n\n"))
+                        self.assertEqual(json.loads(data_frame[len(b"data: "):])[SYM]["last_price"], 10.5)
+                    finally:
+                        resp.close()
+                    self.assertEqual(self._count_free_slots(), self.stream.QUOTE_SSE_MAX_CLIENTS)
+
+    def test_slot_released_if_compressed_stream_closes_before_iteration(self):
+        path = f"/api/stream/quotes?symbols={SYM}"
+        with self.app.test_request_context(path, headers={"Accept-Encoding": "gzip"}), \
+             mock.patch.object(self.stream, "_require_user", return_value={"id": self.uid}):
+            resp = self.stream.stream_quotes()
+            self.assertEqual(resp.headers["Content-Encoding"], "gzip")
+            self.assertEqual(self._count_free_slots(), self.stream.QUOTE_SSE_MAX_CLIENTS - 1)
+            resp.close()
+            resp.close()
+            self.assertEqual(self._count_free_slots(), self.stream.QUOTE_SSE_MAX_CLIENTS)
+
+    def test_pool_cache_serves_sse_without_symbol_request(self):
+        worker = mock.Mock(revision=1)
+        worker.lookup.return_value = ({"symbol": SYM, "last_price": 10.5,
+                                      "_revision": 1, "quote_status": "live"}, False)
+        with mock.patch.object(self.stream.quote_snapshots, "current", return_value=worker), \
+             mock.patch.object(self.stream.market, "fetch_quotes") as upstream:
+            _, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}")
+        upstream.assert_not_called()
+        payload = json.loads(frames[0][len("data: "):])
+        self.assertEqual(payload[SYM]["last_price"], 10.5)
 
     def test_market_frame_carries_phase_and_next_wake_hint(self):
         """相位帧是前端唯一状态来源: 连上就知道现在是什么时段、下一次几点开始。"""
@@ -217,12 +280,14 @@ class QuoteSseTest(unittest.TestCase):
         self.assertFalse(self.stream.market._quote_interests)
 
     def test_indicators_named_event(self):
-        payload = {"symbol": SYM, "bars": [{"date": "2026-09-14", "close": 10}], "_revision": 2}
+        payload = {"symbol": SYM, "bars": [{"date": "2026-09-14", "close": 10, "rsi6": 52.123456789}], "_revision": 2}
         with mock.patch.object(self.stream.market, "fetch_quotes", return_value={}), \
              mock.patch("api.kline.build_kline_tail", return_value=payload) as build:
             _, frames = self._frames_data(
-                f"/api/stream/quotes?symbols={SYM}&tail=1d&count=1006&adjust=none", n=2)
+                f"/api/stream/quotes?symbols={SYM}&tail=1d&count=1006&adjust=none&precision=chart", n=2)
         self.assertTrue(frames[1].startswith("event: bars\ndata: "))
+        frame = json.loads(frames[1].split("data: ", 1)[1])
+        self.assertEqual(frame[SYM]["bars"][0]["rsi6"], 52.123457)
         build.assert_called_once_with(SYM, "1d", 1006, "none", quote_fresh=False)
 
     def test_symbols_truncated_to_max(self):
@@ -237,6 +302,19 @@ class QuoteSseTest(unittest.TestCase):
                                side_effect=RuntimeError("upstream down")):
             _resp, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}")
         self.assertEqual(frames[0], ": tick\n\n", "单次快照失败应发保活帧而非断开")
+
+    def test_lunch_stream_delivers_recovered_cache_without_fetching_fallback(self):
+        worker = mock.Mock(revision=1)
+        quotes = {SYM: {"last_price": 10, "quote_status": "midday"}}
+        with mock.patch.object(self.stream.market_hours, "session_phase", return_value="break"), \
+             mock.patch.object(self.stream.market_hours, "is_live", return_value=False), \
+             mock.patch.object(self.stream.quote_snapshots, "current", return_value=worker), \
+             mock.patch.object(self.stream.market, "display_quote_cache", return_value=(quotes, [SYM])), \
+             mock.patch.object(self.stream.market, "fetch_quotes") as fallback:
+            _, frames = self._frames_data(f"/api/stream/quotes?symbols={SYM}")
+        quote = json.loads(frames[0].removeprefix("data: "))[SYM]
+        self.assertEqual(quote["quote_status"], "midday")
+        fallback.assert_not_called()
 
     def test_keepalive_frame_between_snapshots(self):
         # 推送间隔未到时发 : keepalive 注释帧, 使断线能在 ~1s 内被发现并归还槽位

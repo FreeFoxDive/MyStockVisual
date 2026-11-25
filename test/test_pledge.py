@@ -267,14 +267,19 @@ class PledgeTestCase(unittest.TestCase):
     def test_refresh_same_date_skips_write(self):
         old = _mk_pledge(ratio=9.9)
         market._pledge_cache = old
-        market._pledge_ts = time.time()
+        market._pledge_ts = time.time() - market.PLEDGE_TTL - 1
         market._pledge_date = "20260818"
-        # 拉到同一交易日 → 跳过写入, 保持旧值
         with mock.patch.object(market, "_fetch_pledge",
-                               return_value=("20260818", _mk_pledge(ratio=1.0))):
+                               return_value=("20260818", _mk_pledge(ratio=1.0))) as fetch, \
+             mock.patch.object(market, "_pledge_to_disk") as write:
             market._refresh_pledge_async()
             self._wait_refresh()
-        self.assertEqual(market._pledge_cache, old)
+            self.assertGreater(market._pledge_ts, time.time() - market.PLEDGE_TTL)
+            with mock.patch.object(market, "_refresh_pledge_async") as refresh:
+                self.assertEqual(market._load_pledge(background_only=True), old)
+                refresh.assert_not_called()
+            write.assert_not_called()
+            fetch.assert_called_once()
 
     # ---- 定时点计算 ----
 

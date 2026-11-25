@@ -33,7 +33,8 @@
 | 监控补种 `feed.seed_intraday` | 日内走势·批量（逐只） | 无独立桶 | 只为空序列补种，与分时图共用同一份**按市场**的当日熔断 |
 | 分钟K视图（1m/5m/15m/30m/60m） | 分钟K·批量 | 无独立桶 | 跨天历史（1m 要 1200 根 ≈ 5 个交易日），**不**走日内走势 |
 | 监控快照 | 实时快照·按标的 | 6/min | `feed.QUOTES_RATE_PER_MIN`，自己收紧的预算 |
-| 网页快照 SSE | 实时快照·按标的 | 48/min | `QUOTE_SSE_INTERVAL=1.25s`，无突发 |
+| 网页全市场快照 | 实时快照·标的池 | **54/min**（60 × 90%） | A 股与 ETF 分开采集。默认每 3 秒一轮，正常约 40 次/min |
+| 网页池外快照及回退 | 实时快照·按标的 | 48/min | `QUOTE_SSE_INTERVAL=1.25s`，同原有预算 |
 | 五档盘口 | 盘口·按标的（`depth.get` 模拟 batch） | 30/min | `feed.DEPTH_GET_RATE_PER_MIN`，实测 31 次触发限流 |
 | 麦蕊兜底 | 麦蕊 | 20/min | `MR_QUOTE_RATE_PER_MIN` |
 

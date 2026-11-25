@@ -1123,6 +1123,7 @@ body {
     <span id="info-shares" style="font-size:12px;display:none"></span>
     <span id="info-amount" style="font-size:12px;display:none"></span>
     <span class="price" id="info-price">—</span>
+    <span id="info-quote-status" hidden style="font-size:11px" aria-live="off"></span>
     <span class="change" id="info-change">—</span>
     <span class="oh" id="info-open">开 —</span>
     <span class="oh" id="info-high">高 —</span>
@@ -1865,15 +1866,73 @@ const marketStore = VisualMarketStore.store;
 // 开盘那一刻是准点切自动刷新, 而不是等下一次 60s 轮询撞上。
 const marketClock = new VisualMarketClock.MarketClock({
   onChange: (state, kind) => {
-    if (kind === 'change') renderMarketHint();
+    if (kind === 'change') {
+      renderMarketHint();
+      if (state.phase === 'trading') STATE._lastChipsAt = 0;
+      const symbol = STATE.symbol;
+      if (STATE._marketLoadedSymbol === symbol && ['break', 'closed', 'pre', 'non_trading'].includes(state.phase)) {
+        refreshHeldQuote(true);
+      }
+    }
     if (kind === 'resume') {
       // 休眠/后台节流后时间已经脱节: 状态之外, 行情本身也得重来一次
       liveQuotes.refresh();
-      if (canAutoRefresh()) fetchData({ silent: true });
+      if (!marketClock.live()) refreshHeldQuote(true);
+      if (STATE.period === 'intraday') {
+        if (canAutoRefresh()) fetchIntraday();
+      } else if (canAutoRefresh()) fetchData({ silent: true });
     }
     if (kind === 'unreachable') showToast('服务端不可达, 稍后自动重试', { type: 'err' });
   },
 });
+
+function refreshHeldQuote(force = false) {
+  const { phase, today } = marketClock.state;
+  const symbol = STATE.symbol;
+  if (document.hidden || STATE._marketLoadedSymbol !== symbol) return;
+  if (force && !['closed', 'break', 'pre', 'non_trading'].includes(phase)) return;
+  const quote = liveQuotes.get(symbol);
+  const awaitingPool = quote?.snapshot_received_at || !quote ||
+    ['close_pending', 'last_quote'].includes(quote.quote_status);
+  const needsUpdate = awaitingPool && (
+    (phase === 'closed' && (quote?.quote_status !== 'close_confirmed' || quote?.quote_trade_date !== today)) ||
+    (phase === 'break' && quote?.quote_status !== 'midday')
+  );
+  if (!force && (!needsUpdate || Date.now() - (STATE._heldQuoteAt || 0) < 60000)) return;
+  STATE._heldQuoteAt = Date.now();
+  liveQuotes.poll('quote', [symbol], true, !force);
+}
+
+function closeBarQuoteKey(quote, day) {
+  if (quote?.quote_status !== 'close_confirmed' || quote.quote_trade_date !== day) return null;
+  return day + ':' + (quote._revision ?? quote.timestamp);
+}
+
+function markClosedDailyBar(data, requestedCloseKey) {
+  if (data.period !== '1d' || data.meta?.session_phase !== 'closed') return;
+  const day = data.meta.server_time?.slice(0, 10);
+  if (!day || data.klines.at(-1)?.date !== day) return;
+  // 冷启动命中日 K 仓的终值时，直接记下已经对齐的收盘确认。
+  if (data.meta.today_quote_timestamp == null) {
+    data._closeBarQuoteKey = requestedCloseKey
+      || (data.meta.source === 'daily_chart' ? closeBarQuoteKey(data.quote, day) : null);
+  } else if (requestedCloseKey === day + ':' + data.meta.today_quote_revision) {
+    data._closeBarQuoteKey = requestedCloseKey;
+  }
+}
+
+function refreshClosedDailyBar() {
+  const { phase, today } = marketClock.state;
+  const data = STATE.klineData;
+  if (document.hidden || phase !== 'closed' || STATE.period !== '1d' || STATE._foregroundLoading
+      || data?.period !== '1d' || data.symbol !== STATE.symbol || data.meta?.adjust !== STATE.adjust) return;
+  const closeKey = closeBarQuoteKey(liveQuotes.get(data.symbol), today);
+  if (!closeKey || data._closeBarQuoteKey === closeKey) return;
+  const key = chartWindowKey(data) + ':' + closeKey;
+  if (STATE._closeBarAttempt?.key === key && Date.now() - STATE._closeBarAttempt.at < 60e3) return;
+  STATE._closeBarAttempt = { key, at: Date.now() };
+  fetchData({ silent: true });
+}
 
 /** 该不该自动刷新行情 (服务端时段口径优先, 浏览器时钟只作兜底)。 */
 function canAutoRefresh() {
@@ -2479,6 +2538,8 @@ function onSystemThemeChange() {
 function klineRenderKey(data) {
   const bars = (data && data.klines) || [];
   return [data && data.symbol, data && data.period, STATE.adjust, bars.length,
+    data?._closeBarQuoteKey,
+    data?.warmup_closes?.join(','),
     ...bars.map(k => [k.date, k.open, k.high, k.low, k.close, k.volume, k.amount].join(','))].join('|');
 }
 function renderFetchedKline(data) {
@@ -2488,6 +2549,77 @@ function renderFetchedKline(data) {
   updateChart(false);
   STATE._periodSwitching = false;
   return true;
+}
+
+function unpackChartRows(data) {
+  if (!Array.isArray(data.fields) || !Array.isArray(data.rows)) return null;
+  return data.rows.map(row => Object.fromEntries(data.fields.map((field, i) => [field, row[i]])));
+}
+
+function chartWindowKey(data) {
+  return data && [data.symbol, data.period, data.meta?.adjust || STATE.adjust].join(':');
+}
+
+function chartWarmup(data, startIndex) {
+  const prefix = data.warmup_closes || [];
+  return prefix.concat(data.klines.slice(Math.max(0, startIndex - 249), startIndex).map(bar => bar.close)).slice(-249);
+}
+
+function mergeKlineWindows(previous, data, count) {
+  if (!data.has_more || previous?.request_count !== count || chartWindowKey(previous) !== chartWindowKey(data)) return;
+  const first = data.klines[0]?.date;
+  // 只有新窗口首根能在旧窗口里定位，才能保留它之前的连续历史。
+  const overlap = previous.klines.findIndex(bar => bar.date === first);
+  if (overlap <= 0) return;
+  const merged = previous.klines.slice(0, overlap).concat(data.klines);
+  const trim = Math.max(0, merged.length - count);
+  data.warmup_closes = chartWarmup(previous, trim);
+  data.klines = merged.slice(trim);
+  data.count = data.klines.length;
+  data.has_more = data.count < count && previous.has_more;
+}
+
+function markFirstChart() {
+  if (STATE._firstChartScheduled) return;
+  STATE._firstChartScheduled = true;
+  requestAnimationFrame(() => requestAnimationFrame(() => performance.mark('visual:first-chart')));
+}
+
+async function loadOlderKlines(full = false) {
+  const current = STATE.klineData;
+  if (!current?.has_more || !current.klines.length) return;
+  if (current.symbol !== STATE.symbol || current.period !== STATE.period) return;
+  const pending = STATE._historyPending;
+  if (pending?.data === current) {
+    await pending.done;
+    if (full && !pending.full && STATE.klineData === current) await loadOlderKlines(true);
+    return;
+  }
+  let finish;
+  const task = { data: current, full, done: new Promise(resolve => { finish = resolve; }) };
+  STATE._historyPending = task;
+  try {
+    const query = new URLSearchParams({ symbol: current.symbol, period: current.period,
+      count: current.request_count, adjust: current.meta.adjust, format: 'rows',
+      before: current.klines[0].date, limit: full ? 1500 : 300, warmup: 249 });
+    const response = await fetch('/api/kline?' + query, { signal: STATE._klineAbort?.signal });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (STATE.klineData !== current || current.symbol !== STATE.symbol || current.period !== STATE.period
+        || chartWindowKey(data) !== chartWindowKey(current) || STATE.adjust !== current.meta.adjust) return;
+    const older = unpackChartRows(data);
+    if (!older) return;
+    current.klines = older.concat(current.klines);
+    current.warmup_closes = data.warmup_closes || [];
+    current.count = current.klines.length;
+    current.has_more = data.has_more;
+    renderFetchedKline(current);
+    fetchPremium(current.symbol, current.period, current.request_count, STATE._fetchTs, true);
+  } catch (_) { /* 下一次拖动可重试 */ }
+  finally {
+    if (STATE._historyPending === task) STATE._historyPending = null;
+    finish();
+  }
 }
 
 // ── 慢派生字段: ETF 溢价 (/api/kline/deferred) ──
@@ -2539,9 +2671,10 @@ async function fetchPremium(symbol, period, count, fetchTs, force = false) {
   const want = d && d.symbol === symbol && d.period === period && d.meta
     && Array.isArray(d.meta.deferred) && d.meta.deferred.includes('premium');
   if (!want || STATE._fetchTs !== fetchTs) return;
-  if (STATE._premiumTask && STATE._premiumTask.fetchTs === fetchTs) return;
+  const firstDate = d.klines?.[0]?.date;
+  if (STATE._premiumTask?.fetchTs === fetchTs && STATE._premiumTask.firstDate === firstDate) return;
   cancelPremium();
-  const task = { symbol, period, count, fetchTs, controller: new AbortController(),
+  const task = { symbol, period, count, fetchTs, firstDate, controller: new AbortController(),
     timer: null, running: false, attempts: 0 };
   STATE._premiumTask = task;
   const stale = () => STATE._premiumTask !== task || STATE._fetchTs !== fetchTs
@@ -2554,7 +2687,7 @@ async function fetchPremium(symbol, period, count, fetchTs, force = false) {
   task.run = async () => {
     if (stale() || task.running) return;
     if (document.hidden) return;  // visibilitychange 恢复，无后台忙轮询
-    if (!force && premiumInMemory(symbol, period, count)) {
+    if (!force && STATE.premium?.firstDate === firstDate && premiumInMemory(symbol, period, count)) {
       schedule(Math.min(60000, STATE.premium.expiresAt - Date.now()));
       return;
     }
@@ -2565,7 +2698,11 @@ async function fetchPremium(symbol, period, count, fetchTs, force = false) {
     let nextMs = Math.min(10000, 400 * 2 ** Math.min(task.attempts++, 5));
     try {
       const r = await fetch(`/api/kline/deferred?symbol=${encodeURIComponent(symbol)}`
-        + `&period=${encodeURIComponent(period)}&count=${count}&fields=premium`,
+        + `&period=${encodeURIComponent(period)}&count=${count}&fields=premium`
+        + (firstDate ? '&from=' + encodeURIComponent(firstDate) : '')
+        + (STATE.premium?.firstDate === firstDate && STATE.premium?.symbol === symbol
+          && STATE.premium?.period === period && STATE.premium?.count === count && STATE.premium?.generatedAt != null
+          ? '&version=' + encodeURIComponent(STATE.premium.generatedAt) : ''),
         { signal: task.controller.signal });
       const prem = r.ok ? (await r.json()).premium : null;
       if (stale()) return;
@@ -2575,7 +2712,7 @@ async function fetchPremium(symbol, period, count, fetchTs, force = false) {
           map[String(dt).slice(0, 10)] = prem.values && prem.values[idx] != null
             ? prem.values[idx] : null;
         });
-        STATE.premium = { symbol, period, count, map, stale: !!prem.stale,
+        STATE.premium = { symbol, period, count, firstDate, map, stale: !!prem.stale,
           generatedAt: prem.generated_at,
           expiresAt: Date.now() + Math.max(0, Number(prem.max_age_sec) || 0) * 1000 };
         reapplyPremium();
@@ -2583,6 +2720,11 @@ async function fetchPremium(symbol, period, count, fetchTs, force = false) {
           task.attempts = 0;
           nextMs = Math.max(1000, Math.min(60000, (Number(prem.max_age_sec) || 10) * 1000));
         }
+      }
+      if (prem?.ready && !prem.dates && STATE.premium?.generatedAt === prem.generated_at) {
+        STATE.premium.stale = !!prem.stale;
+        STATE.premium.expiresAt = Date.now() + (Number(prem.max_age_sec) || 1) * 1000;
+        nextMs = Math.max(1000, Math.min(60000, (Number(prem.max_age_sec) || 10) * 1000));
       }
       if (prem && (prem.status === 'failed' || prem.status === 'no_data')) {
         if (prem.retry_after_sec == null) return;
@@ -2610,7 +2752,15 @@ function resumePremium() {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && STATE._premiumTask) clearTimeout(STATE._premiumTask.timer);
-  else resumePremium();
+  else if (!document.hidden) {
+    resumePremium();
+    if (STATE._marketLoadedSymbol === STATE.symbol) loadTrades(STATE.symbol);
+  }
+});
+window.addEventListener('storage', event => {
+  if (event.key === 'visual-trades-changed' && !document.hidden && STATE._marketLoadedSymbol === STATE.symbol) {
+    loadTrades(STATE.symbol, true);
+  }
 });
 
 /** K线请求有界重试: 冷启动/上游抖动会让源链单次耗尽 (404), 短退避重试避免
@@ -2647,23 +2797,34 @@ async function fetchData(opts) {
   // 分时下请求K线 (如切换复权) → 统一收口到日K, 同步按钮/面板/URL
   if (STATE.period === 'intraday') { applyPeriodUI('1d'); syncSymbolUrl(true); }
   const period = STATE.period;
+  const count = period === '1d' ? DAILY_COUNT : (MINUTE_COUNTS[period] || 300);
+  const { phase, today } = marketClock.state;
+  const requestedCloseKey = period === '1d' && phase === 'closed'
+    ? closeBarQuoteKey(liveQuotes.get(symbol), today) : null;
   const fetchTs = ++STATE._requestSeq; STATE._fetchTs = fetchTs;
   STATE._lastBarAt = Date.now();
   if (!silent) STATE._foregroundLoading = true;
   cancelPremium();
-  if (!silent && !retainPanels) { setTrades(null); STATE.chips = null; } // 仅换股清空，切周期保留当前侧栏/图表直到新数据就绪
+  if (!silent && !retainPanels) STATE.chips = null;
   const cacheKey = `vk_${symbol}_${period}_${STATE.adjust}`;
   // SSE 快照流由 loadCurrent()/ensureQuoteStream() 统一管理, 此处不再随 fetchData 重启
 
   // ── 浏览器缓存: 命中→立即渲染, 后台刷新 ──
   let cacheHit = false;
   try {
-    const raw = localStorage.getItem(cacheKey);
+    const inMemory = STATE.klineData;
+    const sameWindow = inMemory?.symbol === symbol && inMemory.period === period
+      && (inMemory.meta?.adjust || STATE.adjust) === STATE.adjust;
+    const raw = sameWindow ? null : localStorage.getItem(cacheKey);
     if (raw) {
       const cached = JSON.parse(raw);
       const ttl = MINUTE_PERIODS.includes(period) ? 60 : (period === '1d' ? 120 : 300);
-      if (Date.now() - cached.ts < ttl * 1000 && cached.data) {
+      const needsWarmup = STATE.maPeriods.some(n => n > 20) || STATE.bollParams.n > 20;
+      const lacksWarmup = cached.data?.has_more && !Array.isArray(cached.data.warmup_closes);
+      if (Date.now() - cached.ts < ttl * 1000 && cached.data && !cached.data.meta?.adjust_fallback
+          && !(needsWarmup && lacksWarmup)) {
         STATE.klineData = cached.data;
+        STATE.klineData.request_count = count;
         adoptKlineQuoteStamp(STATE.klineData);
         const liveQ = liveQuotes.get(symbol, 'quote');
         if (liveQ) patchTodayBarOhlcv(liveQ, symbol);
@@ -2677,9 +2838,9 @@ async function fetchData(opts) {
     }
   } catch(e) { /* ignore */ }
 
-  const count = period === '1d' ? DAILY_COUNT : (MINUTE_COUNTS[period] || 300);
   const adjParam = MINUTE_PERIODS.includes(period) ? '' : `&adjust=${STATE.adjust}`;
-  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}`;
+  const gapParam = gapsEnabledForPeriod() ? '&gaps=1' : '';
+  const url = `/api/kline?symbol=${encodeURIComponent(symbol)}&period=${period}&count=${count}${adjParam}&format=rows&limit=300&warmup=249${gapParam}`;
   const sameView = STATE.klineData && STATE.klineData.period === period && STATE.klineData.symbol === symbol;
   // 换股/切周期取消浏览器在途请求，减少废弃响应的接收与解析。
   // 不会自动终止 Flask 执行；后端另有实际工作数上限。
@@ -2695,7 +2856,16 @@ async function fetchData(opts) {
   try {
     const data = await fetchKlineWithRetry(
       url, STATE._klineAbort ? STATE._klineAbort.signal : null, fetchTs);
-    if (STATE._fetchTs !== fetchTs) return; // 竞态: 已切到新股票, 丢弃旧响应
+    if (STATE._fetchTs !== fetchTs || STATE.period !== period || STATE.symbol !== symbol) return;
+    const packed = unpackChartRows(data);
+    if (packed) {
+      data.klines = packed;
+      delete data.rows;
+      delete data.fields;
+    }
+    data.request_count = count;
+    mergeKlineWindows(STATE.klineData, data, count);
+    markClosedDailyBar(data, requestedCloseKey);
     STATE._klineRecoverFails = 0;
     syncAdjustMeta(data);
     ensureQuoteStream();
@@ -2707,35 +2877,20 @@ async function fetchData(opts) {
     reconcileLiveBars(data);
     document.getElementById('symbol-input').value = data.symbol; // 同步服务端标准化后的 symbol
     // 保存到 localStorage (限制 2MB 总大小)
-    try {
-      const entry = JSON.stringify({ ts: Date.now(), data });
-      localStorage.setItem(cacheKey, entry);
-      _cleanLocalStorage();
-    } catch(e) { /* quota exceeded */ }
+    if (!data.meta?.adjust_fallback) {
+      try {
+        const entry = JSON.stringify({ ts: Date.now(), data: {
+          ...data, klines: data.klines.slice(-300), has_more: data.has_more || data.klines.length > 300,
+          warmup_closes: chartWarmup(data, Math.max(0, data.klines.length - 300)),
+        } });
+        localStorage.setItem(cacheKey, entry);
+        _cleanLocalStorage();
+      } catch(e) { /* quota exceeded */ }
+    }
     if (!silent && !retainPanels) {
-      // 质押比例: 切股先隐藏, 响应回来做竞态防护 + 无数据时隐藏
-      document.getElementById('info-pledge').style.display = 'none';
-      fetch(`/api/pledge?symbol=${encodeURIComponent(data.symbol)}`)
-        .then(r => r.json()).then(d => {
-          if (STATE._fetchTs !== fetchTs) return; // 已切到新股票, 丢弃旧响应
-          const el = document.getElementById('info-pledge');
-          const ratio = d.pledge ? Number(d.pledge.ratio) : null;
-          if (ratio != null && Number.isFinite(ratio)) {
-            setReadout(el, '质押', ratio.toFixed(2) + '%');
-            el.style.display = '';
-          } else {
-            el.style.display = 'none';
-          }
-          // 基本信息面板也有这一行 (顶栏挤不下时会收起): 并进 stockInfo 让面板/截图一起拿到。
-          // 无数据时显式置 null, 免得同一标的下残留上一次的值 (换股靠 resetSidePanelData 清)。
-          if (STATE.stockInfo && STATE.stockInfo.symbol === data.symbol) {
-            marketStore.accept('info', data.symbol, {
-              ...STATE.stockInfo,
-              pledge_ratio: ratio != null && Number.isFinite(ratio) ? ratio : null,
-            });
-          }
-          scheduleFitInfoRow();   // 质押是异步到的, 来了要重算放不放得下
-        }).catch(() => {});
+      const info = marketStore.infos[data.symbol];
+      if (info && Object.prototype.hasOwnProperty.call(info, 'pledge_ratio')) showPledge(info.pledge_ratio);
+      else if (!STATE._infoPending) fetchPledge(data.symbol);
       addToHistory(data.symbol, data.name,
         data.is_index ? 'index' : (data.is_etf ? 'etf' : deriveSymbolType(data.symbol)));
     }
@@ -2748,10 +2903,6 @@ async function fetchData(opts) {
       if (STATE.chart) STATE.chart.hideLoading();
     }
     if (!silent) {
-      await loadTrades(data.symbol);
-      if (STATE._fetchTs !== fetchTs) return;
-      // 拿到交易记录后补一次重绘, 否则买卖点与持仓风控线要等下一次刷新才出现
-      if (STATE.klineData && klineRenderKey(STATE.klineData) === STATE._fetchedKlineRenderKey) updateChart(false);
       fetchChips(data.symbol);
     }
     if (retainPanels && isChipPeriod(period)) fetchChips(data.symbol);
@@ -2782,19 +2933,23 @@ async function fetchData(opts) {
 // 守卫用自增序号 + symbol 比对, 不绑前台 K 线请求: 分时路径也要拉 (否则换股后「持仓中」
 // 徽章与图上风控线还是上一只的), 而分时用的是另一个请求序号。序号守卫同时保证
 // 失败/401 的迟到响应不会清掉新股票刚拿到的持仓。
-async function loadTrades(symbol) {
+async function loadTrades(symbol, force = false) {
+  if (!force && STATE._tradesPending?.symbol === symbol && STATE._tradesPending.seq === STATE._tradesSeq) return;
   const seq = ++STATE._tradesSeq;
+  STATE._tradesPending = { symbol, seq };
   const stale = () => seq !== STATE._tradesSeq || STATE.symbol !== symbol;
   try {
-    const resp = await fetch(`/api/trades?symbol=${encodeURIComponent(symbol)}&limit=500`);
+    const resp = await fetch(`/api/trades?symbol=${encodeURIComponent(symbol)}&limit=500&view=chart`, { cache: 'no-store' });
     if (stale()) return;
-    if (!resp.ok) { setTrades(null); return; }
+    if (!resp.ok) return;
     const data = await resp.json();
     if (stale()) return; // 已切到新股票 / 已被更新的请求取代
     setTrades(data.trades || []);
-  } catch (e) {
-    if (stale()) return;
-    setTrades(null); // 静默降级: 无买卖点与持仓, 不影响 K 线
+    if (STATE.period === 'intraday' && STATE.intradayData) renderIntraday(STATE.intradayData);
+    else if (STATE.klineData?.symbol === symbol && STATE.klineData.period === STATE.period) updateChart(false);
+  } catch (_) { /* 保留已显示的交易标记 */ }
+  finally {
+    if (STATE._tradesPending?.seq === seq) STATE._tradesPending = null;
   }
 }
 
@@ -2809,18 +2964,23 @@ async function fetchChips(symbol) {
   STATE._chipsPending = { symbol, period };
   STATE._lastChipsAt = Date.now();
   const key = `vc_${symbol}_${period}`;
+  const session = marketClock.state.today + ':' + marketClock.state.phase;
   let hasLocal = false;
   try {
     const raw = localStorage.getItem(key);
     if (raw) {
       const cached = JSON.parse(raw);
-      if (Date.now() - cached.ts < 60000 && cached.data) {
+      if (Date.now() - cached.ts < 60000 && cached.data && cached.session === session) {
         STATE.chips = cached.data.chips || null;
         hasLocal = true;
         if (STATE.symbol === symbol && STATE.period === period) updateChart(false);
       }
     }
   } catch (e) { /* ignore */ }
+  if (hasLocal) {
+    STATE._chipsPending = null;
+    return;
+  }
   try {
     const resp = await fetch(`/api/chips?symbol=${encodeURIComponent(symbol)}&period=${period}`);
     if (!resp.ok) return;
@@ -2828,7 +2988,7 @@ async function fetchChips(symbol) {
     if (STATE.symbol !== symbol || STATE.period !== period) return; // 已切股/切周期
     STATE.chips = data.chips || null;
     try {
-      localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+      localStorage.setItem(key, JSON.stringify({ ts: Date.now(), session, data }));
       _cleanLocalStorage();
     } catch (e) { /* quota */ }
     if (STATE.symbol === symbol && STATE.period === period) updateChart(false);
@@ -3341,14 +3501,52 @@ function renderStockInfo(d) {
     : '<div class="dp-empty">无数据</div>';
 }
 
+function showPledge(ratio) {
+  const el = document.getElementById('info-pledge');
+  const valid = ratio != null && Number.isFinite(Number(ratio));
+  if (valid) setReadout(el, '质押', Number(ratio).toFixed(2) + '%');
+  el.style.display = valid ? '' : 'none';
+  scheduleFitInfoRow();
+}
+
+async function fetchPledge(symbol, retry = 0) {
+  if (STATE._pledgePending?.symbol === symbol) return;
+  const task = { symbol };
+  STATE._pledgePending = task;
+  try {
+    const response = await fetch('/api/pledge?view=chart&symbol=' + encodeURIComponent(symbol));
+    if (!response.ok) return;
+    const data = await response.json();
+    if (STATE.symbol !== symbol || STATE._pledgePending !== task) return;
+    if (data.ready === false) {
+      if (retry < 3) setTimeout(() => {
+        if (STATE.symbol === symbol && !Object.prototype.hasOwnProperty.call(marketStore.infos[symbol] || {}, 'pledge_ratio')) {
+          fetchPledge(symbol, retry + 1);
+        }
+      }, [3000, 15000, 60000][retry]);
+      return;
+    }
+    const ratio = data.pledge?.ratio ?? null;
+    const old = marketStore.infos[symbol];
+    if (old) marketStore.accept('info', symbol, { ...old, pledge_ratio: ratio });
+    showPledge(ratio);
+  } catch (_) { /* 后续核心包可补齐 */ }
+  finally {
+    if (STATE._pledgePending === task) STATE._pledgePending = null;
+  }
+}
+
 async function fetchStockInfo(enrich = false, retry = 0) {
   const symbol = STATE.symbol;
+  if (STATE._infoPending?.symbol === symbol && STATE._infoPending.enrich === enrich) return;
+  const task = { symbol, enrich };
+  STATE._infoPending = task;
   const seq = (STATE._infoReqSeq || 0) + 1;
   STATE._infoReqSeq = seq;
   STATE._lastInfoAt = Date.now();   // 定时刷新节流标记 (盘中约 60s)
   try {
     // 核心包不等行业/PE/PB/涨跌停等慢资料，优先显示量比和 3/5/10 日涨幅。
-    const suffix = enrich ? '' : '&core=1';
+    const suffix = enrich ? '&view=enrichment' : '&core=1&view=chart';
     const resp = await fetch(`/api/stock-info?symbol=${encodeURIComponent(symbol)}${suffix}`);
     if (!resp.ok) {
       // 补充资料的上游超时/临时故障也要重试；否则行业等字段会一直停在核心包。
@@ -3358,17 +3556,31 @@ async function fetchStockInfo(enrich = false, retry = 0) {
       }
       return;
     }
-    const data = await resp.json();
+    const update = await resp.json();
     if (STATE.symbol !== symbol || STATE._infoReqSeq !== seq) return; // 已切走/旧响应
+    const old = marketStore.infos[symbol];
+    // 核心行情每分钟刷新，成功取得的补充资料继续显示至下一次补取。
+    if (!enrich && old) for (const key of ['industry', 'limit_up', 'limit_down', 'float_shares', 'total_shares', 'pe', 'pb']) {
+      if (update[key] == null && old[key] != null) delete update[key];
+    }
+    const data = { ...old, ...update, symbol };
     data._revision = seq;
     marketStore.accept('info', symbol, data);
     updateLiveStockInfo(marketStore.quotes[symbol], symbol);
     // 完整资料延后请求；它慢或失败时，已显示的核心行情仍然保留。
-    if (!enrich && STATE.symbol === symbol) fetchStockInfo(true);
+    if (enrich) STATE._infoEnriched = { symbol, at: Date.now(), session: marketClock.state.phase };
+    if (!enrich && STATE.symbol === symbol) {
+      if (Object.prototype.hasOwnProperty.call(update, 'pledge_ratio')) showPledge(update.pledge_ratio);
+      else if (!Object.prototype.hasOwnProperty.call(data, 'pledge_ratio')) fetchPledge(symbol);
+      const cached = STATE._infoEnriched;
+      if (cached?.symbol !== symbol || cached.session !== marketClock.state.phase || Date.now() - cached.at >= 300000) fetchStockInfo(true);
+    }
   } catch (e) {
     if (retry < 2) setTimeout(() => {
       if (STATE.symbol === symbol) fetchStockInfo(enrich, retry + 1);
     }, 4000);
+  } finally {
+    if (STATE._infoPending === task) STATE._infoPending = null;
   }
 }
 
@@ -3550,24 +3762,26 @@ function drawSidePanelShot(ctx, model, scale) {
 }
 
 async function fetchDepth() {
+  if (!depthPanelVisible()) return;
   ensureQuoteStream();
-  // 首帧直接处理响应，避免换股时 LiveMarket 的 symbols/epoch 切换把结果丢掉；
-  // 后续实时更新仍由 LiveMarket 的 SSE/轮询接管。
   const symbol = STATE.symbol;
-  const seq = (STATE._depthReqSeq || 0) + 1;
-  STATE._depthReqSeq = seq;
-  try {
-    const resp = await fetch('/api/depth?symbol=' + encodeURIComponent(symbol));
-    if (!resp.ok) return;
-    const body = await resp.json();
-    if (STATE.symbol !== symbol || STATE._depthReqSeq !== seq || !body || !body.depth) return;
-    liveQuotes.accept('depth', symbol, body.depth, 'poll');
-  } catch (_) { /* SSE/轮询后续重试 */ }
+  const cached = liveQuotes.get(symbol, 'depth');
+  if (cached && !STATE.depth) marketStore.accept('depth', symbol, cached);
+  if (!liveQuotes.healthy('depth', symbol) && (!cached || marketClock.live())) await liveQuotes.poll('depth', [symbol]);
 }
 
 
-// 交易日期 → bar 索引 (升序 dates 里第一个 date >= d 的 bar; 日/周/月通用)
-function matchBarIndex(dates, d) {
+// 日内和日线取日期，周线和月线允许成交落在首根聚合 K 线覆盖的时段内。
+function matchBarIndex(dates, d, period) {
+  if (!dates.length || !d) return -1;
+  const first = String(dates[0]).slice(0, 10);
+  if (d < first) {
+    if (period === '1M') return d.slice(0, 7) === first.slice(0, 7) ? 0 : -1;
+    if (period !== '1w') return -1;
+    const end = new Date(first + 'T00:00:00Z');
+    end.setUTCDate(end.getUTCDate() - (end.getUTCDay() + 6) % 7);
+    return d >= end.toISOString().slice(0, 10) ? 0 : -1;
+  }
   for (let i = 0; i < dates.length; i++) {
     if (String(dates[i]).slice(0, 10) >= d) return i;
   }
@@ -3611,7 +3825,7 @@ function forEachTradeLeg(trades, fn) {
 function tradeTipsHtml(dates, idx) {
   const rows = [];
   forEachTradeLeg(STATE.trades, (side, date, price, qty) => {
-    if (matchBarIndex(dates, date) !== idx) return;
+    if (matchBarIndex(dates, date, STATE.period) !== idx) return;
     const tip = tradeLegTip(side, date, price, qty);
     if (!tip) return;
     const color = tip.isBuy ? C().up : C().down;
@@ -3631,7 +3845,7 @@ function buildTradeMarkers(klines, dates) {
   const push = (side, date, price, qty) => {
     const tip = tradeLegTip(side, date, price, qty);
     if (!tip) return;
-    const idx = matchBarIndex(dates, date);
+    const idx = matchBarIndex(dates, date, STATE.period);
     if (idx < 0) return; // K 线窗口外不显示
     const bar = klines[idx];
     points.push({
@@ -3840,6 +4054,9 @@ function isQuoteFreshForDailyBar(q, meta) {
   if (trading === false) return false;
   const phase = q.session_phase || meta.session_phase;
   if (phase && !['trading', 'break', 'closed'].includes(phase)) return false;
+  if (q.quote_status && !q.timestamp) return false;
+  if (phase === 'break' && q.quote_status === 'last_quote') return false;
+  if (q.quote_status === 'close_pending' || q.quote_status === 'close_confirmed') return false;
   if (!(Number(q.volume) > 0)) return false;
   return true;
 }
@@ -4972,9 +5189,12 @@ async function syncPanelConfigWithServer() {
 async function fetchIntraday(opts) {
   if (STATE.period !== 'intraday') return;
   const symbol = STATE.symbol;
-  const fetchTs = Date.now(); STATE._intraFetchTs = fetchTs;
+  if (STATE._intradayPending?.symbol === symbol) return;
+  const task = { symbol };
+  STATE._intradayPending = task;
+  const fetchTs = (STATE._intraFetchTs || 0) + 1; STATE._intraFetchTs = fetchTs;
   STATE._intradayLoading = true;
-  STATE._lastBarAt = fetchTs;
+  STATE._lastBarAt = Date.now();
   const _cacheKey = `vi_${symbol}_1m`;
 
   // ── 浏览器缓存 ──
@@ -5007,28 +5227,27 @@ async function fetchIntraday(opts) {
   const still = () => STATE._intraFetchTs === fetchTs && STATE.period === 'intraday' && STATE.symbol === symbol;
   // 报价和交易记录不挡第一帧。分时图也画持仓风控线/显示「持仓中」徽章, 交易记录到达后
   // 风控价变了才补画一次。
-  const riskBefore = JSON.stringify(STATE.risk);
-  loadTrades(symbol).then(() => {
-    if (still() && STATE.intradayData && JSON.stringify(STATE.risk) !== riskBefore) {
-      renderIntraday(STATE.intradayData);
-    }
-  });
-  // /api/quotes keeps an unavailable snapshot as an empty 200 response;
-  // a transient upstream miss must not produce a noisy 404 in the console.
-  fetch(`/api/quotes?symbols=${encodeURIComponent(symbol)}`).then(async (qResp) => {
-    const quoteBody = await qResp.json();
-    const quote = quoteBody && quoteBody[symbol] || null;
-    if (!still() || !quote) return;
-    applyQuoteData(quote);
-    const d = STATE.intradayData;
-    if (d && d.symbol === symbol && quote.prev_close != null) d.prev_close = quote.prev_close;
-  }).catch(() => {});
+  const quote = liveQuotes.get(symbol);
+  if (quote) applyQuoteData(quote);
+  else if (!liveQuotes.healthy('quote', symbol)) liveQuotes.poll('quote', [symbol]);
   try {
-    const idResp = await fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240`);
+    const base = STATE.intradayData?.symbol === symbol ? STATE.intradayData : null;
+    const since = base?.version ? '&since=' + encodeURIComponent(base.version) : '';
+    const idResp = await fetch(`/api/intraday?symbol=${encodeURIComponent(symbol)}&period=1m&count=240&format=rows${since}`);
     const id = await idResp.json();
-    if (STATE._intraFetchTs !== fetchTs) return;
+    if (!still()) return;
+    const packed = unpackChartRows(id);
+    if (packed) {
+      if (id.delta && (!base || base.date !== id.date)) return;
+      if (id.delta && !packed.length) return;
+      const bars = new Map((id.delta ? base.bars : []).map(bar => [bar.time, bar]));
+      packed.forEach(bar => bars.set(bar.time, bar));
+      id.bars = [...bars.values()].sort((a, b) => a.time.localeCompare(b.time));
+      delete id.fields;
+      delete id.rows;
+    }
     if (!id.bars || id.bars.length === 0) { if (loading) showToast('暂无分时数据'); return; }
-    id.prev_close = (liveQuotes.get(symbol) || {}).prev_close;
+    id.prev_close = liveQuotes.get(symbol)?.prev_close ?? base?.prev_close;
     STATE.intradayData = id;
     renderIntraday(STATE.intradayData);
     fetchDepth();  // 五档初始拉取
@@ -5039,8 +5258,11 @@ async function fetchIntraday(opts) {
     } catch(e) { /* ignore */ }
   } catch(e) { if (loading) showToast('分时数据获取失败: ' + e.message, { type: 'err', actionLabel: '重试', onAction: () => fetchIntraday() }); }
   finally {
-    if (STATE._intraFetchTs === fetchTs) STATE._intradayLoading = false;
-    if (loading && STATE.chart) STATE.chart.hideLoading();
+    if (STATE._intradayPending === task) STATE._intradayPending = null;
+    if (STATE._intraFetchTs === fetchTs) {
+      STATE._intradayLoading = false;
+      if (loading && still() && STATE.chart) STATE.chart.hideLoading();
+    }
   }
 }
 
@@ -5248,6 +5470,7 @@ function renderIntraday(data) {
   // 同样必须同步提交 (见 updateChart 处的说明): 换 model 与跑数据管线不能跨帧, 否则旧元素会在
   // 这一帧里命中无数据的新 series, 鼠标事件一碰就抛 TypeError。
   chart.setOption(option, { notMerge: true, silent: true });
+  markFirstChart();
   // 面板名称标签 (VOL/MACD/KDJ/RSI/ATR): 与 K 线周期走同一条路径 ——
   // 组装成 STATE.draw._labels 交给 overlay 画布 paintLabels 绘制, 位置口径也照抄
   // (x = grid.left + 6, y = grid.top + 15, bold 11px monospace)。
@@ -5301,7 +5524,9 @@ function renderIntraday(data) {
 function onConfigChange() {
   STATE.impulseEnabled = document.getElementById('chk-impulse').checked;
   STATE.channelEnabled = document.getElementById('chk-channel').checked;
-  STATE.gapEnabled = document.getElementById('chk-gap').checked;
+  const enableGaps = document.getElementById('chk-gap').checked;
+  if (enableGaps && !STATE.gapEnabled) loadOlderKlines(true);
+  STATE.gapEnabled = enableGaps;
   STATE.logScale = document.getElementById('chk-log').checked;
   STATE._maCache = null;  // 自定义 MA/BOLL 参数时客户端重算缓存失效
   saveConfig();
@@ -5610,7 +5835,13 @@ function gapsEnabledForPeriod() {
 /** 扫描并构建 K 线 markArea（无缺口时返回 undefined） */
 function buildGapMarkArea(klines, dates) {
   if (!gapsEnabledForPeriod() || !klines || !klines.length) return undefined;
-  const gaps = GapScanner.scanGaps(klines, { isHalt: isHaltBar });
+  const earlier = (STATE.klineData?.gap_seed || []).filter(row => row[0] < dates[0]);
+  const prefix = earlier.map(([, high, low, volume]) => ({ high, low, volume }));
+  const gaps = GapScanner.scanGaps(prefix.concat(klines), { isHalt: isHaltBar });
+  for (const gap of gaps) {
+    gap.startIdx = Math.max(1, gap.startIdx - prefix.length);
+    gap.endIdx -= prefix.length;
+  }
   STATE._gaps = gaps;
   return GapScanner.buildMarkArea(gaps, dates, C());
 }
@@ -5639,6 +5870,14 @@ function updateQuoteDisplay(quote) {
   document.getElementById('info-code').textContent = STATE.symbol.replace(/\.(SH|SZ|BJ)$/, '');
   document.getElementById('info-name').textContent = quote.name || '';
   document.getElementById('info-price').textContent = pf(p);
+  const status = quote.quote_status;
+  const label = { close_pending: '收盘待确认', close_confirmed: '收盘', midday: '午休前行情', last_quote: '最后行情' }[status];
+  const stamp = quote.timestamp ? new Date(Number(quote.timestamp) * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : quote.quote_trade_date;
+  const statusEl = document.getElementById('info-quote-status');
+  if (statusEl) {
+    statusEl.textContent = label ? [label, stamp].filter(Boolean).join(' · ') : '';
+    statusEl.hidden = !label;
+  }
   document.getElementById('info-price').className = 'price ' + colorCls;
   document.getElementById('info-change').textContent = pctLabel(chgPct);
   document.getElementById('info-change').className = 'change ' + colorCls;
@@ -5752,7 +5991,11 @@ function initChart() {
       }
     }
     if (STATE.draw && STATE.draw.enabled) return;
-    try { STATE.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); } catch (e) { /* ignore */ }
+    const data = STATE.klineData;
+    loadOlderKlines(true).then(() => {
+      if (STATE.klineData !== data || STATE.period === 'intraday') return;
+      try { STATE.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); } catch (e) { /* ignore */ }
+    });
   });
   // 筹码面板价格轴随主图缩放联动 (rAF 节流, 避免高频重采样); 画线层同步重投影
   STATE.chart.on('dataZoom', function() {
@@ -5763,6 +6006,8 @@ function initChart() {
       if (STATE._chip) syncChipAxis();
       redrawDrawings();
       refreshPriceTagLayout();   // 缩放改变可见价格区间 → 签位要重排
+      const zoom = STATE.chart.getModel()?.getComponent('dataZoom', 0)?.option;
+      if (zoom && zoom.start <= 8) loadOlderKlines();
     });
   });
   initDrawEvents();
@@ -5990,21 +6235,24 @@ function cachedPatterns(klines) {
 
 /** 生效的 MA/BOLL 序列: 自定义参数 → 客户端重算; 否则用服务器列 (带缓存) */
 function effectiveMaBoll(klines) {
-  const closes = klines.map(k => k.close);
+  const seed = STATE.klineData?.warmup_closes;
+  const skip = seed?.length || 0;
   const key = STATE.symbol + ':' + STATE.period + ':' + klines.length + ':'
     + (klines.length ? String(klines[klines.length - 1].close) : '') + ':'
     + STATE.maPeriods.join(',') + ':' + STATE.bollParams.n + ',' + STATE.bollParams.k;
-  if (STATE._maCache && STATE._maCache.key === key) return STATE._maCache.val;
+  if (STATE._maCache?.key === key && STATE._maCache.klines === klines && STATE._maCache.seed === seed) return STATE._maCache.val;
   const customMa = JSON.stringify(STATE.maPeriods) !== JSON.stringify([5, 10, 20]);
   const customBoll = STATE.bollParams.n !== 20 || STATE.bollParams.k !== 2;
+  const closes = customMa || customBoll ? (seed || []).concat(klines.map(k => k.close)) : null;
+  const boll = customBoll ? clientBoll(closes, STATE.bollParams.n, STATE.bollParams.k) : null;
   const val = {
     ma: customMa
-      ? STATE.maPeriods.map(n => clientSma(closes, n))
+      ? STATE.maPeriods.map(n => clientSma(closes, n).slice(skip))
       : [klines.map(k => k.ma5), klines.map(k => k.ma10), klines.map(k => k.ma20)],
-    boll: customBoll ? clientBoll(closes, STATE.bollParams.n, STATE.bollParams.k)
+    boll: customBoll ? { mid: boll.mid.slice(skip), up: boll.up.slice(skip), low: boll.low.slice(skip) }
       : { mid: klines.map(k => k.boll_mid), up: klines.map(k => k.boll_up), low: klines.map(k => k.boll_low) },
   };
-  STATE._maCache = { key, val };
+  STATE._maCache = { key, val, klines, seed };
   return val;
 }
 
@@ -6030,7 +6278,19 @@ function updateChart(reTheme) {
   const visibleBars = STATE.period === '1m' ? 240 : 80;
   const futureBars = drawNeedsFuture() ? (window.Drawings ? Drawings.FUTURE_BARS : 0) : 0;
   const totalSlots = Math.max(dates.length, 1) + futureBars;
-  const startPct = Math.max(0, Math.min(100, (1 - (visibleBars + futureBars) / totalSlots) * 100));
+  let startPct = Math.max(0, Math.min(100, (1 - (visibleBars + futureBars) / totalSlots) * 100));
+  let endPct = 100;
+  const windowKey = chartWindowKey(data);
+  const drawn = STATE._drawnKlineWindow;
+  const oldZoom = chart.getModel?.()?.getComponent('dataZoom', 0)?.option;
+  if (drawn?.key === windowKey && oldZoom) {
+    const anchor = value => typeof value === 'number' ? drawn.dates[value] : value;
+    const from = dates.indexOf(anchor(oldZoom.startValue));
+    const end = dates.indexOf(anchor(oldZoom.endValue));
+    const units = Math.max(1, totalSlots - 1);
+    if (from >= 0) startPct = from * 100 / units;
+    if (end >= 0 && Number(oldZoom.end) < 99.5) endPct = end * 100 / units;
+  }
 
   // ── Readonly series data ──
   const impulseOn = STATE.impulseEnabled && isElderPeriod(STATE.period);
@@ -6321,7 +6581,7 @@ function updateChart(reTheme) {
   const allXAxisIndices = [0, ...(hasVolume ? [1] : []), ...panels.map((_, i) => indicatorStartGi + i)];
   const dzLocked = drawPanLocked();   // 画图时/选中画线时禁用拖拽平移(滚轮缩放保留), 规则见 drawPanLocked
   const dataZoom = [
-    { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: 100, moveOnMouseMove: !dzLocked },
+    { type: 'inside', xAxisIndex: allXAxisIndices, start: startPct, end: endPct, moveOnMouseMove: !dzLocked },
     { type: 'slider', xAxisIndex: allXAxisIndices, top: 2, height: 16, show: !dzLocked,
       borderColor: C().gridLine, backgroundColor: 'transparent',
       fillerColor: 'rgba(128,128,128,0.15)', handleStyle: { color: C().axisText },
@@ -6570,6 +6830,8 @@ function updateChart(reTheme) {
   // 鼠标, ECharts 内部事件桥接就会拿旧索引去查新 series 的 getDataParams, getData() 为空直接抛
   // TypeError (getRawIndex)。增量补丁 (merge 语义, 模型实例不变) 保留 lazyUpdate 没问题。
   chart.setOption(option, { notMerge: true, silent: true });
+  STATE._drawnKlineWindow = { key: windowKey, dates };
+  markFirstChart();
   if (chipOn) requestAnimationFrame(syncChipAxis); // 布局后取主图轴实际范围(nice), 校正筹码轴
   cacheGridRects(grids);
   refreshPriceTagLayout(); // 布局后按新刻度重排现价/风控签位 (建图前拿不到新刻度)
@@ -6742,8 +7004,24 @@ function chartUrl(symbol, period) {
 }
 
 /** 用户切换符号统一入口: 同步输入框与 STATE, 符号变化时 pushState (返回键可回到上一只股票) */
+function normalizeChartSymbol(input) {
+  const symbol = (input || '').trim().toUpperCase();
+  if (!symbol || /\.(SH|SZ|BJ|HK)$/.test(symbol)) return symbol;
+  if (symbol.endsWith('.US')) return symbol.slice(0, -3);
+  const prefix = /^(SH|SZ|BJ|HK|US)([.\-]?)([A-Z0-9]+)$/.exec(symbol);
+  if (prefix && (prefix[2] || /^\d+$/.test(prefix[3]))) {
+    return prefix[1] === 'US' ? prefix[3] : prefix[3] + '.' + prefix[1];
+  }
+  const code = symbol.split('.')[0];
+  if (/^[A-Z]{1,6}$/.test(code)) return code;
+  if (/^\d{5}$/.test(code)) return code + '.HK';
+  if (/^(00|30|20|15|16|18)/.test(symbol)) return symbol + '.SZ';
+  if (/^[489]/.test(symbol)) return symbol + '.BJ';
+  return symbol + '.SH';
+}
+
 function switchSymbol(symbol) {
-  symbol = (symbol || '').trim();
+  symbol = normalizeChartSymbol(symbol);
   if (!symbol) return false;
   document.getElementById('symbol-input').value = symbol;
   if (symbol === STATE.symbol) return false;
@@ -6768,13 +7046,18 @@ function resetSidePanelData() {
   STATE.depth = null;
   STATE._lastInfoAt = 0;
   STATE._lastDepthAt = 0;
+  STATE._tradesSeq++;
+  document.getElementById('info-pledge').style.display = 'none';
+  document.getElementById('info-quote-status').hidden = true;
   setTrades(null);   // 持仓/风控线同属"上一只股票的数据", 换股先作废 (两条加载路径各自会重新拉)
 }
 
 function loadCurrent() {
   resetSidePanelData(); // 换股先作废旧股面板数据, 避免信息/五档停留在上一只
+  STATE._marketLoadedSymbol = STATE.symbol;
   ensureQuoteStream();  // SSE 快照流跟随当前标的 (含分时换股)
   refreshSymbolPanels(); // 市场数据抽屉/预警弹窗随换股刷新
+  loadTrades(STATE.symbol);
   if (STATE.period === 'intraday') {
     STATE.intradayData = null; // 清缓存，强制重新加载分时
     STATE.intradayAxis = null; // 固定窗口槽位表同属上一只股票的数据
@@ -6790,7 +7073,7 @@ function refresh() {
   const input = document.getElementById('symbol-input').value.trim();
   if (!input) { switchSymbol('000001.SH'); loadCurrent(); return; }
   // 如果输入包含非数字/字母字符（如中文名），触发搜索而不是直接请求
-  if (/[^\w.]/.test(input)) {
+  if (/[^\w.]/.test(input) && !/^(SH|SZ|BJ|HK|US)-[A-Z0-9]+$/i.test(input)) {
     fetch(`/api/search?q=${encodeURIComponent(input)}`)
       .then(r => r.json())
       .then(data => {
@@ -8911,9 +9194,11 @@ async function loadDrawings() {
     if (!resp.ok) return;
     const data = await resp.json();
     if (STATE.symbol + ':' + STATE.period !== key) return; // 竞态
-    STATE.draw.drawings = (data.drawings || []).map(d => Drawings.normalize(d));
+    STATE.draw.drawings = (data.drawings || []).map(d => Drawings.normalize(d)).filter(Boolean);
     STATE.draw.undo = [];
     STATE.draw._autoLines = null;
+    const first = STATE.klineData?.klines[0]?.date;
+    if (first && STATE.draw.drawings.some(d => d.points.some(p => p.t && p.t < first))) loadOlderKlines(true);
   } catch (e) { /* 离线/未登录: 画线仅本会话内存态 */ }
   redrawDrawings();
 }
@@ -9746,19 +10031,16 @@ document.addEventListener('DOMContentLoaded', () => {
   if (hist.length > 0) {
     const last = hist[0];
     document.getElementById('symbol-input').value = last.symbol;
-    STATE.symbol = last.symbol;
+    STATE.symbol = normalizeChartSymbol(last.symbol);
   }
 
   // 支持从交易记录/监控中心跳转 ?symbol=000001.SZ 自动加载 (URL 参数优先于历史恢复);
   // 趋势线监控还带 ?period=1w|1M, 定位到被监控的那个周期 (画线按 代码+周期 分库)
   const bootParams = new URLSearchParams(location.search);
-  const jumpSymbol = bootParams.get('symbol');
+  const jumpSymbol = normalizeChartSymbol(bootParams.get('symbol'));
   if (jumpSymbol) {
     document.getElementById('symbol-input').value = jumpSymbol;
     STATE.symbol = jumpSymbol;
-    // URL 参数在首个面板初始化请求之后才解析；此处必须立即为当前标的
-    // 重置盘口流，否则首屏只会请求默认的 000001.SH。
-    if (depthSecOn()) fetchDepth();
   }
   const jumpPeriod = bootParams.get('period');
   if (jumpPeriod && ALL_PERIODS.includes(jumpPeriod)) applyPeriodUI(jumpPeriod);
@@ -9768,7 +10050,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 浏览器返回/前进: 回到上一只/下一只股票 (对标 TradingView), 周期同样跟随
   window.addEventListener('popstate', () => {
     const params = new URLSearchParams(location.search);
-    const s = params.get('symbol');
+    const s = normalizeChartSymbol(params.get('symbol'));
     const per = params.get('period');
     const nextPeriod = (per && ALL_PERIODS.includes(per)) ? per : '1d';
     const symbolChanged = !!s && s !== STATE.symbol;
@@ -9856,13 +10138,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const synced = loadHistory();
       if (synced.length > 0) {
         document.getElementById('symbol-input').value = synced[0].symbol;
-        STATE.symbol = synced[0].symbol;
+        STATE.symbol = normalizeChartSymbol(synced[0].symbol);
         syncSymbolUrl(true);
       }
       scheduleInit();
     }).catch(scheduleInit);
   } else {
-    bootReady().then(scheduleInit, scheduleInit);
+    scheduleInit();  // 地址或本机历史已确定标的，账号配置到达后再应用
   }
 
 
@@ -9938,7 +10220,11 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(() => {
     // 已平仓统计按自己的 TTL 刷新，收盘后仍可能录入交易。
     maybeRefreshHalfKelly();
-    if (!canAutoRefresh()) return;
+    if (!canAutoRefresh()) {
+      refreshHeldQuote();
+      refreshClosedDailyBar();
+      return;
+    }
     const now = Date.now();
     ensureQuoteStream();
     if (STATE.period === 'intraday') {

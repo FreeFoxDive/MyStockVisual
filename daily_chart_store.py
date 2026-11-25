@@ -417,6 +417,25 @@ def open_store() -> ChartStore | None:
     return store
 
 
+def final_closes(day: str) -> dict:
+    """Read the last two rows of a published end-of-day generation."""
+    pointer = _read_pointer()
+    if not pointer or pointer.get("as_of") != day:
+        return {}
+    path = ROOT / pointer["gen"]
+    try:
+        symbols = np.load(path / "symbols.npy", allow_pickle=False)
+        dates = np.load(path / "dates.npy", mmap_mode="r", allow_pickle=False)
+        closes = np.load(path / "close.npy", mmap_mode="r", allow_pickle=False)
+    except (OSError, ValueError):
+        return {}
+    if len(dates) < 2:
+        return {}
+    target = (pd.Timestamp(day) - pd.Timestamp("1970-01-01")).days
+    return {str(symbols[i]): (float(closes[-1, i]), float(closes[-2, i]))
+            for i in np.flatnonzero((dates[-1] == target) & (dates[-2] > 0))}
+
+
 def required_as_of(now=None) -> str:
     """仓至少要覆盖到今天之前最近一个交易日，否则中间缺的几天快照补不回来。"""
     global _required_memo

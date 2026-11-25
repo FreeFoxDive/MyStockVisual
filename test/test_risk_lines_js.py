@@ -192,13 +192,15 @@ class RiskLinesStaticTest(unittest.TestCase):
         self.assertEqual(self.src.count("buildLastPriceLine("), 2)
 
     def test_sync_called_where_trades_change(self):
-        fetch = _extract_fn(self.src, "fetchData")
-        self.assertIn("setTrades(null)", fetch, "换股清空交易记录须同步持仓状态")
-        self.assertIn("klineRenderKey(STATE.klineData) === STATE._fetchedKlineRenderKey", fetch,
-                      "缓存命中已渲染过, 拿到交易记录后须补一次重绘")
+        reset = _extract_fn(self.src, "resetSidePanelData")
+        self.assertIn("setTrades(null)", reset, "换股清空交易记录须同步持仓状态")
+        current = _extract_fn(self.src, "loadCurrent")
+        self.assertIn("loadTrades(STATE.symbol)", current)
+        self.assertNotIn("loadTrades(", _extract_fn(self.src, "fetchIntraday"), "分时刷新复用交易标记")
         load = _extract_fn(self.src, "loadTrades")
         self.assertNotIn("STATE.trades = ", load, "交易记录写入须经 setTrades 统一刷新")
-        self.assertEqual(load.count("setTrades("), 3, "成功/未授权/异常三条路径都要刷新")
+        self.assertIn("view=chart", load)
+        self.assertIn("updateChart(false)", load, "拿到交易记录后须重绘已显示的图")
 
 
 class RiskLinesBehaviorTest(unittest.TestCase):
@@ -207,6 +209,154 @@ class RiskLinesBehaviorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.src = INDEX_HTML.read_text(encoding="utf-8")
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_compact_history_keeps_indicators_trade_dates_and_symbol_identity(self):
+        script = "\n".join(_extract_fn(self.src, name) for name in (
+            "chartWarmup", "clientSma", "clientBoll", "effectiveMaBoll", "matchBarIndex",
+            "normalizeChartSymbol", "chartWindowKey", "loadOlderKlines",
+        )) + """
+const assert = require('node:assert/strict');
+const all = Array.from({length: 1006}, (_, i) => i + 1);
+const bars = all.slice(-300).map(close => ({close}));
+const STATE = {symbol: normalizeChartSymbol('002935'), period: '1d', adjust: 'forward',
+  maPeriods: [5, 10, 250], bollParams: {n: 250, k: 2}};
+STATE.klineData = {symbol: '002935.SZ', period: '1d', meta: {adjust: 'forward'}, request_count: 1006,
+  has_more: true, klines: bars, warmup_closes: all.slice(-549, -300)};
+bars[0].date = '2026-11-25';
+const out = effectiveMaBoll(bars);
+assert.deepEqual(out.ma[2], clientSma(all, 250).slice(-300));
+assert.deepEqual(out.boll, Object.fromEntries(Object.entries(clientBoll(all, 250, 2))
+  .map(([key, values]) => [key, values.slice(-300)])));
+assert.deepEqual(chartWarmup(STATE.klineData, 1), all.slice(-548, -299));
+assert.equal(matchBarIndex(['2026-11-25'], '2026-11-24', '1d'), -1);
+assert.equal(matchBarIndex(['2026-11-27'], '2026-11-23', '1w'), 0);
+assert.equal(matchBarIndex(['2026-11-27'], '2026-11-20', '1w'), -1);
+assert.equal(matchBarIndex(['2026-11-30'], '2026-11-02', '1M'), 0);
+assert.equal(matchBarIndex(['2026-11-30'], '2026-10-30', '1M'), -1);
+const older = [{date: '2026-11-24', close: 706}];
+const fetch = async url => {
+  const query = new URLSearchParams(url.split('?')[1]);
+  assert.equal(query.get('symbol'), '002935.SZ');
+  assert.equal(query.get('before'), '2026-11-25');
+  assert.equal(query.get('warmup'), '249');
+  return {ok: true, json: async () => ({symbol: '002935.SZ', period: '1d', meta: {adjust: 'forward'},
+    has_more: true, warmup_closes: all.slice(-550, -301)})};
+};
+function unpackChartRows() { return older; }
+function renderFetchedKline() {}
+function fetchPremium() {}
+loadOlderKlines().then(() => {
+  assert.deepEqual(STATE.klineData.klines[0], older[0]);
+  assert.equal(matchBarIndex(STATE.klineData.klines.map(bar => bar.date), '2026-11-24', '1d'), 0);
+});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_history_merge_only_retains_contiguous_windows(self):
+        script = "\n".join(_extract_fn(self.src, name) for name in (
+            "chartWindowKey", "chartWarmup", "mergeKlineWindows", "loadOlderKlines",
+        )) + """
+const assert = require('node:assert/strict');
+const STATE = {symbol: '002935.SZ', period: '1m', adjust: 'forward'};
+const bars = (start, count = 300) => Array.from({length: count}, (_, i) => ({date: start + i, close: start + i}));
+const windowData = (start, has_more) => ({symbol: STATE.symbol, period: STATE.period, meta: {adjust: 'forward'},
+  request_count: 1200, has_more, klines: bars(start), warmup_closes: [-2, -1]});
+const previous = windowData(1, false);
+const recent = windowData(601, true);
+mergeKlineWindows(previous, recent, 1200);
+assert.deepEqual(recent.klines, bars(601));
+assert.equal(recent.has_more, true);
+assert.deepEqual(recent.warmup_closes, [-2, -1]);
+const overlapping = windowData(201, true);
+mergeKlineWindows(previous, overlapping, 1200);
+assert.deepEqual(overlapping.klines, bars(1, 500));
+assert.equal(overlapping.has_more, false);
+STATE.klineData = recent;
+const fetch = async url => {
+  assert.equal(new URLSearchParams(url.split('?')[1]).get('before'), '601');
+  return {ok: true, json: async () => windowData(301, true)};
+};
+function unpackChartRows(data) { return data.klines; }
+function renderFetchedKline() {}
+function fetchPremium() {}
+loadOlderKlines().then(() => assert.deepEqual(recent.klines, bars(301, 600)));
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_close_confirmation_refreshes_current_daily_chart_and_retries(self):
+        script = "\n".join(_extract_fn(self.src, name) for name in (
+            "closeBarQuoteKey", "markClosedDailyBar", "refreshClosedDailyBar", "chartWindowKey", "klineRenderKey",
+        )) + """
+const assert = require('node:assert/strict');
+const day = '2026-11-25';
+const marketClock = {state: {phase: 'closed', today: day}};
+const document = {hidden: false};
+const STATE = {symbol: '002935.SZ', period: '1d', adjust: 'forward'};
+const provisional = {symbol: STATE.symbol, period: '1d', klines: [{date: day, close: 10}],
+  meta: {adjust: 'forward', source: 'daily_chart', session_phase: 'closed', today_quote_timestamp: 100,
+    server_time: day + ' 15:01:00'}};
+STATE.klineData = provisional;
+let quote = {quote_status: 'close_pending', quote_trade_date: day};
+const liveQuotes = {get: () => quote};
+let calls = 0, now = 1000;
+Date.now = () => now;
+function fetchData(options) {
+  assert.deepEqual(options, {silent: true});
+  calls++;
+  if (calls === 1) return;
+  const data = {...provisional, meta: {...provisional.meta, today_quote_timestamp: null}};
+  markClosedDailyBar(data, closeBarQuoteKey(quote, day));
+  STATE.klineData = data;
+}
+refreshClosedDailyBar();
+assert.equal(calls, 0);
+quote = {...quote, quote_status: 'close_confirmed', _revision: 10};
+markClosedDailyBar(provisional, closeBarQuoteKey(quote, day));
+assert.equal(provisional._closeBarQuoteKey, undefined);
+refreshClosedDailyBar();
+refreshClosedDailyBar();
+assert.equal(calls, 1);
+now += 60000;
+refreshClosedDailyBar();
+assert.equal(calls, 2);
+assert.notEqual(klineRenderKey(provisional), klineRenderKey(STATE.klineData));
+now += 60000;
+refreshClosedDailyBar();
+assert.equal(calls, 2);
+const stored = {...provisional, quote, meta: {...provisional.meta, today_quote_timestamp: null}};
+markClosedDailyBar(stored, null);
+assert.equal(stored._closeBarQuoteKey, closeBarQuoteKey(quote, day));
+quote = {...quote, _revision: 11};
+refreshClosedDailyBar();
+assert.equal(calls, 3);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
+    def test_after_hours_quote_poll_tracks_current_close_until_confirmed(self):
+        script = _extract_fn(self.src, "refreshHeldQuote") + """
+const assert = require('node:assert/strict');
+const STATE = {symbol: '002935.SZ', _marketLoadedSymbol: '002935.SZ'};
+const marketClock = {state: {phase: 'closed', today: '2026-11-25'}};
+const document = {hidden: false};
+let quote, calls = [], now = 100000;
+Date.now = () => now;
+const liveQuotes = {get: () => quote, poll: (...args) => calls.push(args)};
+refreshHeldQuote(true);
+quote = {snapshot_received_at: 1, quote_status: 'close_pending'};
+now += 59000;
+refreshHeldQuote();
+now += 1000;
+refreshHeldQuote();
+quote = {snapshot_received_at: 1, quote_status: 'close_confirmed', quote_trade_date: '2026-11-25'};
+now += 60000;
+refreshHeldQuote();
+assert.deepEqual(calls, [['quote', ['002935.SZ'], true, false], ['quote', ['002935.SZ'], true, true]]);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True)
 
     def _run(self, payload):
         script = (
@@ -509,12 +659,11 @@ class PositionTradesSyncTest(unittest.TestCase):
         cls.src = INDEX_HTML.read_text(encoding="utf-8")
 
     def test_intraday_path_loads_trades_and_switch_clears(self):
-        self.assertIn("loadTrades(symbol)", _extract_fn(self.src, "fetchIntraday"),
-                      "分时也要拉交易记录 (分时图会画风控线/显示持仓徽章)")
         self.assertIn("setTrades(null)", _extract_fn(self.src, "resetSidePanelData"),
                       "换股先作废上一只的持仓")
-        # 换股入口确实调用了它
-        self.assertIn("resetSidePanelData()", _extract_fn(self.src, "loadCurrent"))
+        current = _extract_fn(self.src, "loadCurrent")
+        self.assertLess(current.index("loadTrades(STATE.symbol)"), current.index("fetchIntraday()"))
+        self.assertIn("resetSidePanelData()", current)
 
     @unittest.skipUnless(shutil.which("node"), "需要 node 才能跑前端镜像测试")
     def test_stale_response_does_not_clobber_new_data(self):
@@ -526,7 +675,7 @@ class PositionTradesSyncTest(unittest.TestCase):
             + "const STATE = { _tradesSeq: 0, symbol: 'B', trades: null };\n"
             + "(async () => {\n"
             + "  const p1 = loadTrades('B');\n"
-            + "  const p2 = loadTrades('B');\n"
+            + "  const p2 = loadTrades('B', true);\n"
             + "  pending[1]({ ok: true, json: () => Promise.resolve({ trades: [{ id: 9 }] }) });\n"
             + "  await p2;\n"
             + "  const afterNew = calls.length;\n"

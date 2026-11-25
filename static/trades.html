@@ -350,6 +350,7 @@ td.neg { color: var(--down-text); font-weight: 600; }
     </span>
   </div>
   <div class="cards" id="stat-cards"></div>
+  <div id="trade-refresh-error" role="status" hidden>交易记录已保存，页面刷新失败。 <button type="button" onclick="refreshTradePage()">重试刷新</button></div>
 
   <div class="section-title"><span class="bar"></span>盈亏走势
     <span style="flex:1"></span>
@@ -807,8 +808,8 @@ async function checkAuth() {
     state.user = { username: data.username, is_admin: data.is_admin, monitor_enabled: !!data.monitor_enabled };
     showMain();
     initRepoCodeSelect();
-    await Promise.all([loadReasons(), loadModels(), loadStats(), loadTrades(), loadFees()]);
-    await refreshQuotes(true);  // 进入页面强刷一次持仓现价
+    await Promise.all([loadReasons(), loadModels(), loadFees()]);
+    await refreshTradePage();
   } catch (e) {
     state.user = null;
     redirectToLogin();
@@ -1046,7 +1047,14 @@ function setGranularity(g) {
 }
 
 async function loadStats() {
-  const data = await api('/api/trades/stats' + statQuery());
+  const seq = state.statsRequest = (state.statsRequest || 0) + 1;
+  const data = await api('/api/trades/stats' + statQuery(), { cache: 'no-store' });
+  if (seq !== state.statsRequest) return;
+  showStats(data);
+  refreshQuotes(false);
+}
+
+function showStats(data) {
   state.stats = data;
   renderStatCards(data.summary);
   renderPnlChart();
@@ -1121,17 +1129,17 @@ async function fetchQuoteSnapshot(symbols) {
 // 持仓聚合 (仅未平仓): 市值 = Σ现价×数量, 浮盈亏 = Σ(现价-买入价)×数量
 function openPositionAggregates() {
   const positions = (state.stats && state.stats.open_positions) || [];
-  let marketValue = 0, cost = 0, floatPnl = 0;
+  let marketValue = 0, cost = 0, floatPnl = 0, missing = 0;
   for (const p of positions) {
     const q = state.quotes[p.symbol];
     const price = (q && q.last_price != null) ? q.last_price : null;
-    if (price == null) continue;
+    if (price == null) { missing++; continue; }
     marketValue += price * p.quantity;
     cost += p.entry_price * p.quantity;
     floatPnl += (price - p.entry_price) * p.quantity;
   }
   const floatPct = cost ? (floatPnl / cost * 100) : 0;
-  return { marketValue, cost, floatPnl, floatPct };
+  return { marketValue, cost, floatPnl, floatPct, missing, priced: positions.length - missing };
 }
 
 function fmtMoney(v, signed = false) {
@@ -1369,10 +1377,12 @@ function positionPnlTip(cell, tip) {
 function renderStatCards(s) {
   const agg = openPositionAggregates();
   const floatPctStr = agg.floatPct > 0 ? '+' + agg.floatPct.toFixed(2) + '%' : agg.floatPct.toFixed(2) + '%';
+  const pending = agg.missing ? ` · ${agg.missing} 笔未计价` : '';
+  const showAmount = agg.priced || !agg.missing;
   const cards = [
     { label: '总盈亏', value: fmtMoney(s.total_pnl, true), cls: pnlClass(s.total_pnl), sub: (s.total_return_pct === null ? '—' : (s.total_return_pct > 0 ? '+' : '') + s.total_return_pct + '%'), subCls: pnlClass(s.total_pnl) },
-    { label: '持仓金额', value: fmtAmount(agg.marketValue), cls: '', sub: `成本 ${fmtAmount(agg.cost)}` },
-    { label: '持仓浮盈亏', value: fmtMoney(agg.floatPnl, true), cls: pnlClass(agg.floatPnl), sub: floatPctStr, subCls: pnlClass(agg.floatPnl) },
+    { label: '持仓金额', value: showAmount ? fmtAmount(agg.marketValue) : '—', cls: '', sub: `已计价成本 ${showAmount ? fmtAmount(agg.cost) : '—'}${pending}` },
+    { label: '持仓浮盈亏', value: showAmount ? fmtMoney(agg.floatPnl, true) : '—', cls: pnlClass(agg.floatPnl), sub: (showAmount ? floatPctStr : '—') + pending, subCls: pnlClass(agg.floatPnl) },
     { label: '胜率', value: s.win_rate === null ? '—' : s.win_rate + '%', cls: s.win_rate === null ? '' : pnlClass(s.win_rate - 50), sub: `${s.win_count}胜 / ${s.loss_count}负 / ${s.break_even_count}平` },
     { label: '盈亏比', value: s.profit_factor === null ? '∞' : s.profit_factor, cls: '', sub: s.avg_win === null ? '' : `均盈 ${fmtMoney(s.avg_win)} / 均亏 ${fmtMoney(s.avg_loss)}` },
     { label: '最大单笔盈利', value: s.max_win ? fmtMoney(s.max_win.pnl, true) : '—', cls: 'pos', sub: s.max_win ? `${s.max_win.name} +${s.max_win.return_pct}%` : '', subCls: 'pos' },
@@ -1931,11 +1941,39 @@ function formatBatchSideReasons(legs, side) {
 }
 
 async function loadTrades() {
-  const data = await api('/api/trades' + listQuery());
+  const seq = state.tradesRequest = (state.tradesRequest || 0) + 1;
+  const data = await api('/api/trades' + listQuery(), { cache: 'no-store' });
+  if (seq !== state.tradesRequest) return;
+  showTrades(data);
+  await refreshQuotes();
+}
+
+function showTrades(data) {
   state.trades = data.trades;
   state.total = data.total;
   renderTable();
-  await refreshQuotes();  // 翻页/筛选后当前页(含平仓)标的重订阅 + 快照兜底
+}
+
+async function refreshTradePage(afterWrite = false) {
+  const statsSeq = state.statsRequest = (state.statsRequest || 0) + 1;
+  const tradesSeq = state.tradesRequest = (state.tradesRequest || 0) + 1;
+  const banner = document.getElementById('trade-refresh-error');
+  try {
+    const [stats, list] = await Promise.all([
+      api('/api/trades/stats' + statQuery(), { cache: 'no-store' }),
+      api('/api/trades' + listQuery(), { cache: 'no-store' }),
+    ]);
+    if (statsSeq === state.statsRequest) showStats(stats);
+    if (tradesSeq === state.tradesRequest) showTrades(list);
+    if (statsSeq === state.statsRequest || tradesSeq === state.tradesRequest) {
+      banner.hidden = true;
+      refreshQuotes(false);
+    }
+  } catch (e) {
+    if (statsSeq !== state.statsRequest && tradesSeq !== state.tradesRequest) return;
+    banner.firstChild.textContent = afterWrite ? '交易记录已保存，页面刷新失败。 ' : '页面刷新失败。 ';
+    banner.hidden = false;
+  }
 }
 
 function renderTable() {
@@ -2100,9 +2138,18 @@ async function removeTrade(id) {
   const t = state.trades.find(x => x.id === id);
   const name = t ? `${t.name} ${t.symbol}` : '该记录';
   if (!confirm(`确认删除 ${name} 的交易记录？此操作不可撤销。`)) return;
-  await api('/api/trades/' + id, { method: 'DELETE' });
-  await Promise.all([loadTrades(), loadStats()]);
-  await refreshQuotes(false);
+  try {
+    await api('/api/trades/' + id, { method: 'DELETE' });
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+  notifyTradeChange();
+  await refreshTradePage(true);
+}
+
+function notifyTradeChange() {
+  lsSet('visual-trades-changed', String(Date.now()));
 }
 
 // ═══════════════ 录入/编辑弹窗 ═══════════════
@@ -2512,8 +2559,8 @@ async function saveTrade() {
         await api('/api/trades', { method: 'POST', body: JSON.stringify(body) });
       }
       closeModal();
-      await Promise.all([loadTrades(), loadStats()]);
-      await refreshQuotes(false);
+      notifyTradeChange();
+      await refreshTradePage(true);
     } catch (e) {
       err(e.message);
     }
@@ -2593,8 +2640,8 @@ async function saveTrade() {
       await api('/api/trades', { method: 'POST', body: JSON.stringify(body) });
     }
     closeModal();
-    await Promise.all([loadTrades(), loadStats()]);
-    await refreshQuotes(false);
+    notifyTradeChange();
+    await refreshTradePage(true);
   } catch (e) {
     document.getElementById('modal-err').textContent = e.message;
   }
@@ -2621,8 +2668,7 @@ document.getElementById('deduct-fees').checked = state.deductFees;
 document.getElementById('deduct-fees').addEventListener('change', function (e) {
   state.deductFees = e.target.checked;
   try { localStorage.setItem('trades-deduct-fees', state.deductFees ? '1' : '0'); } catch (err) {}
-  loadTrades();
-  loadStats();
+  refreshTradePage();
 });
 
 // 窗口缩放时重绘图表

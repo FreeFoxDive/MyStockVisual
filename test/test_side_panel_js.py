@@ -255,10 +255,9 @@ class SidePanelStaticTest(unittest.TestCase):
         self.assertIn("premium_pct: p, premium_stale: stale", info)
         self.assertIn("premium_at:", info)
         # 质押
-        pledge = self.src[self.src.index("/api/pledge"):]
-        pledge = pledge[:pledge.index("}).catch")]
+        pledge = _extract_fn(self.src, "fetchPledge")
         self.assertIn("pledge_ratio:", pledge)
-        self.assertIn("setReadout(el, '质押'", pledge, "顶栏那段保持原样")
+        self.assertIn("setReadout(el, '质押'", _extract_fn(self.src, "showPledge"))
 
     def test_info_row_positions(self):
         """面板排列 (分块): ①标识 ②价格边界 ③成交与资金 ④股本结构 ⑤估值 ⑥区间表现 ⑦状态。"""

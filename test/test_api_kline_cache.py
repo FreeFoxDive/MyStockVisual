@@ -9,6 +9,7 @@ quote, 每次返回前现挂新鲜快照 (fetch_quote 自身 30s 缓存)。
     venv/Scripts/python.exe -u visual/test/test_api_kline_cache.py
 """
 
+import gzip
 import json
 import os
 import sys
@@ -126,6 +127,22 @@ class KlineCacheTest(unittest.TestCase):
         self.assertNotIn("quote", cached)
         self.assertEqual(b2["quote"]["last_price"], 11.0)
 
+    def test_hfq_fallback_does_not_mask_recovered_source(self):
+        df = _kline_df()
+        url = f"/api/kline?symbol={self.SYMBOL}&period=1w&adjust=hfq&format=rows"
+        source_responses = [(None, None, None), (df.copy(), "test", "mock"), (df, "test", "mock")]
+        with mock.patch.object(self.api, "fetch_kline_ex", side_effect=source_responses) as fetch, \
+             mock.patch.object(self.api, "_attach_quote"), mock.patch.object(self.api, "_is_etf", return_value=False):
+            first = self.client.get(url).get_json()["meta"]
+            second = self.client.get(url).get_json()["meta"]
+            third = self.client.get(url).get_json()["meta"]
+        self.assertEqual(first["adjust"], "forward")
+        self.assertTrue(first["adjust_fallback"])
+        self.assertEqual(second["adjust"], "hfq")
+        self.assertFalse(second["adjust_fallback"])
+        self.assertTrue(third["cached"])
+        self.assertEqual([call.kwargs["adjust"] for call in fetch.call_args_list], ["hfq", "forward", "hfq"])
+
     def test_quote_failure_still_serves_kline(self):
         p1, p2, p3, p4 = self._patches(quote_exc=RuntimeError("行情源抖动"))
         with p1, p2, p3, p4:
@@ -149,6 +166,71 @@ class KlineCacheTest(unittest.TestCase):
                 self.assertRegex(header, rf"(?:^|, ){phase};dur=\d+(?:\.\d+)?")
         self.assertIn("indicators;dur=", cold.headers["Server-Timing"])
         self.assertNotIn("indicators;dur=", warm.headers["Server-Timing"])
+
+    def test_large_chart_json_negotiates_gzip(self):
+        path = f"/api/kline?symbol={self.SYMBOL}&period=1w&format=rows&limit=30"
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3, p4, mock.patch.object(self.api, "_session_meta", return_value={}):
+            self.client.get(path)  # compare two cache hits with identical metadata
+            plain = self.client.get(path)
+            zipped = self.client.get(path, headers={"Accept-Encoding": "gzip, br"})
+            refused = self.client.get(path, headers={"Accept-Encoding": "gzip;q=0, *;q=1"})
+        self.assertEqual(zipped.headers["Content-Encoding"], "gzip")
+        self.assertIn("Accept-Encoding", zipped.vary)
+        self.assertIn("Accept-Encoding", plain.vary)
+        self.assertEqual(int(zipped.headers["Content-Length"]), len(zipped.data))
+        self.assertLess(len(zipped.data), len(plain.data))
+        self.assertEqual(gzip.decompress(zipped.data), plain.data)
+        self.assertNotIn("Content-Encoding", refused.headers)
+        self.assertEqual(refused.data, plain.data)
+
+    def test_chart_json_prefers_zstd_and_respects_client_preferences(self):
+        try:
+            from compression.zstd import decompress
+        except ImportError:
+            from zstandard import decompress
+
+        path = f"/api/kline?symbol={self.SYMBOL}&period=1w&format=rows&limit=30"
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3, p4, mock.patch.object(self.api, "_session_meta", return_value={}):
+            self.client.get(path)
+            plain = self.client.get(path)
+            cases = (
+                ("gzip, zstd", "zstd", decompress),
+                ("ZSTD, gzip", "zstd", decompress),
+                ("zstd;q=1, gzip;q=0.5", "zstd", decompress),
+                ("gzip;q=1, zstd;q=0.5", "gzip", gzip.decompress),
+                ("zstd;q=0, gzip", "gzip", gzip.decompress),
+                ("zstd;q=0.5, gzip;q=0.5, identity;q=1", None, lambda body: body),
+            )
+            for accept, encoding, decode in cases:
+                with self.subTest(accept=accept):
+                    response = self.client.get(path, headers={"Accept-Encoding": accept})
+                    self.assertEqual(response.headers.get("Content-Encoding"), encoding)
+                    self.assertIn("Accept-Encoding", response.vary)
+                    self.assertEqual(response.content_length, len(response.data))
+                    self.assertEqual(decode(response.data), plain.data)
+            with mock.patch("app._compress_zstd", None):
+                response = self.client.get(path, headers={"Accept-Encoding": "gzip, zstd"})
+        self.assertEqual(response.headers["Content-Encoding"], "gzip")
+        self.assertEqual(gzip.decompress(response.data), plain.data)
+
+    def test_proxy_mode_leaves_json_for_nginx(self):
+        import trades
+        from app import create_app
+
+        with mock.patch.dict(os.environ, {"VISUAL_HTTP_COMPRESSION": "proxy"}):
+            client = create_app().test_client()
+        token, _ = trades.create_session(trades.list_users()[0]["id"])
+        client.set_cookie("session", token)
+        path = f"/api/kline?symbol={self.SYMBOL}&period=1w&format=rows&limit=30"
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3, p4:
+            response = client.get(path, headers={"Accept-Encoding": "zstd, gzip"})
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(response.content_length, 1024)
+        self.assertNotIn("Content-Encoding", response.headers)
+        self.assertEqual(response.get_json()["count"], 30)
 
     def test_chips_endpoint_returns_payload(self):
         payload = {"buckets": [{"price": 10.0, "weight": 1.0}], "avgCost": 10.0}

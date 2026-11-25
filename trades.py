@@ -2389,14 +2389,42 @@ def get_trade(user_id, tid):
     return _attach_hold_days([_row_to_dict(row)])[0]
 
 
-def list_trades(user_id, filters=None, fee_config=None):
+_CHART_TRADE_FIELDS = (
+    "id", "type", "status", "entry_date", "exit_date", "entry_price", "exit_price", "quantity",
+    "model_id", "atr_n", "take_profit", "breakeven", "stop_loss", "ch_asof", "ch_stop",
+    "ch_armed", "ch_close", "ch_reason", "ch_held",
+)
+
+
+def _chart_trades(conn, rows):
+    records = [dict(row) for row in rows]
+    batches = {row["id"]: row for row in records if row["type"] == "batch"}
+    if batches:
+        placeholders = ",".join("?" for _ in batches)
+        for row in batches.values():
+            row["legs"] = []
+        for leg in conn.execute(
+            "SELECT trade_id, side, price, quantity, date FROM trade_legs "
+            f"WHERE trade_id IN ({placeholders}) ORDER BY id", list(batches),
+        ):
+            item = dict(leg)
+            batches[item.pop("trade_id")]["legs"].append(item)
+        for row in batches.values():
+            buys = [leg for leg in row["legs"] if leg["side"] == "buy"]
+            qty = sum(leg["quantity"] for leg in buys)
+            row["cost_price"] = round(sum(leg["price"] * leg["quantity"] for leg in buys) / qty, 4) if qty else 0.0
+    return _attach_hold_days(records)
+
+
+def list_trades(user_id, filters=None, fee_config=None, *, chart=False):
     """查询交易记录，返回 (records, total)。filters: status/symbol/q/from/to/model_id/limit/offset。
 
     model_id: 空不加条件; 'none'/'null' 匹配未关联模型; 正整数精确匹配。
     fee_config 非空时按费率扣佣计算单笔盈亏 (平仓=完整往返, 持仓=仅买入侧)。
     """
     filters = filters or {}
-    sql = "SELECT * FROM trades WHERE user_id=?"
+    columns = ", ".join(_CHART_TRADE_FIELDS) if chart else "*"
+    sql = f"SELECT {columns} FROM trades WHERE user_id=?"
     args = [user_id]
 
     if filters.get("status"):
@@ -2460,6 +2488,8 @@ def list_trades(user_id, filters=None, fee_config=None):
         sql += " LIMIT ? OFFSET ?"
         args.extend([limit, offset])
         rows = conn.execute(sql, args).fetchall()
+        if chart:
+            return _chart_trades(conn, rows), total
     finally:
         conn.close()
     recs = [_row_to_dict(r, fee_config) for r in rows]

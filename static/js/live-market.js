@@ -146,7 +146,7 @@
       const url = '/api/stream/quotes?symbols=' + encodeURIComponent(this.symbols.slice(0, 50).join(','))
         + (this.depth ? '&depth=1' : '')
         + (this.tail ? '&tail=' + encodeURIComponent(this.tail.period) + '&count=' + this.tail.count
-          + '&adjust=' + encodeURIComponent(this.tail.adjust) : '');
+          + '&adjust=' + encodeURIComponent(this.tail.adjust) + '&precision=chart' : '');
       // 生产页面开启 status 预检；保留无预检模式供嵌入调用和旧客户端兼容。
       if (this.options.streamStatus !== true) {
         this._openSSE(url, epoch);
@@ -222,7 +222,7 @@
         };
         this.connectedAt = Date.now();
     }
-    async poll(kind, symbols, force = false) {
+    async poll(kind, symbols, force = false, cacheOnly = false) {
       if (!symbols.length) return;
       const id = kind + ':' + symbols.join(',');
       if (this.pending.has(id)) return;
@@ -237,11 +237,12 @@
       const failed = () => this.pollFailures.set(id, (this.pollFailures.get(id) || 0) + 1);
       try {
         const url = kind === 'quote' ? '/api/quotes?symbols=' + encodeURIComponent(symbols.join(','))
+            + (cacheOnly ? '&cache_only=1' : '')
           : kind === 'bars' ? '/api/kline/tail?symbol=' + encodeURIComponent(symbols[0])
             + '&period=' + encodeURIComponent(this.tail.period) + '&count=' + this.tail.count
-            + '&adjust=' + encodeURIComponent(this.tail.adjust) + '&n=2'
+            + '&adjust=' + encodeURIComponent(this.tail.adjust) + '&n=2&precision=chart'
           : '/api/depth?symbol=' + encodeURIComponent(symbols[0]);
-        const response = await fetch(url, { signal: abort.signal });
+        const response = await fetch(url, { signal: abort.signal, ...(kind === 'quote' ? { cache: 'no-store' } : {}) });
         // 服务端 5xx/429 也是故障: 记一次退避, 免得故障期间按 2.5s 一直打
         if (!response.ok) { failed(); return; }
         const body = await response.json();
@@ -251,7 +252,7 @@
         for (const s of symbols) {
           // Even when abort loses a race, a recovered SSE wins over its old HTTP request.
           if ((this.serial.get(this.key(kind, s)) || 0) !== versions.get(s)) continue;
-          if (this.healthy(kind, s)) continue;
+          if (!force && this.healthy(kind, s)) continue;
           this.accept(kind, s, rows[s], 'poll');
         }
       } catch (_) {

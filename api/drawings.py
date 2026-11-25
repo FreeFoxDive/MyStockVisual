@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 
 from flask import request
 
@@ -23,7 +24,11 @@ def drawings_get():
     if not symbol or not period:
         return _error("缺少 symbol/period 参数")
     drawings = trades.get_chart_drawings(user["id"], symbol, period)
-    return _json({"symbol": symbol, "period": period, "drawings": drawings})
+    response = _json({"symbol": symbol, "period": period, "drawings": drawings})
+    response.headers["Cache-Control"] = "private, no-cache"
+    response.vary.add("Cookie")
+    response.set_etag(hashlib.sha256(str(user["id"]).encode() + b":" + response.data).hexdigest())
+    return response.make_conditional(request)
 
 
 @api_bp.route("/api/drawings", methods=["PUT"])

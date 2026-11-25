@@ -1,16 +1,23 @@
 """Flask 路由: K线/筹码/分时/末根增量 (/api/kline|kline/tail|chips|intraday)。"""
 from __future__ import annotations
 
+from collections import OrderedDict
+from functools import lru_cache
+import hashlib
+import json
 import logging
 import os
+import threading
 import time
 
+import numpy as np
 from flask import request
 
 import kline_source
 import market_hours
 import perf
 import premium
+import quote_snapshots
 from api import api_bp
 from api.common import _error, _json
 from chips import get_chips
@@ -33,6 +40,7 @@ from market import (
     normalize_symbol,
     peek_instrument_meta,
     _quote_cache_lookup,
+    display_quote_cache,
 )
 
 log = logging.getLogger("api")
@@ -44,10 +52,10 @@ DAILY_COUNT = 3 * 252 + 250  # 1006
 # 实时行情往返 —— 实测该往返在 0~700ms 抖动, 是磁盘 TTL 抬高后热路径上仅剩的
 # 耗时来源。当日 bar 仍**完全由后端快照产出** (契约不变: 前端不派生 OHLCV),
 # 只是允许最多旧 1.25s; 缓存未命中时图表路径短等下一枚令牌 (不放大 48/min)。
-# 前端另有 SSE 报价流 (1.25s) 与 /api/kline/tail (SSE 默认 5s, 缓存 2s)
+# 前端另有 SSE 报价流及 /api/kline/tail (SSE 默认 5s)
 # 持续纠正末根 bar。
 # 成交校验 (market.get_daily_bar) 不经过这里, 始终强制新鲜快照。
-# KLINE_TODAY_BAR_FRESH=1 → 恢复"每次强制拉新快照"的旧行为 (更实时, 但慢)。
+# KLINE_TODAY_BAR_FRESH=1 → legacy 模式下每次强制拉新快照。
 TODAY_BAR_QUOTE_FRESH = os.environ.get("KLINE_TODAY_BAR_FRESH", "").strip().lower() in (
     "1", "true", "yes", "on",
 )
@@ -58,7 +66,11 @@ TODAY_BAR_QUOTE_FRESH = os.environ.get("KLINE_TODAY_BAR_FRESH", "").strip().lowe
 # 单次约 30ms (1006 根, 磁盘命中); 5s 推送先试跑, 环境变量可调回 15s 观察 CPU。
 KLINE_TAIL_TTL = max(1.0, float(os.environ.get("KLINE_TAIL_TTL", "2")))
 _tail_cache = TTLCache(KLINE_TAIL_TTL, max_entries=30)
+_tail_version_cache = TTLCache(15, max_entries=40)
+_tail_locks = [threading.Lock() for _ in range(16)]
 _TAIL_CACHE_BARS = 10
+_intraday_versions = OrderedDict()
+_intraday_lock = threading.Lock()
 
 
 def _today_quote_fields(df):
@@ -93,7 +105,10 @@ def _attach_quote(resp, symbol):
     """
     try:
         sym = normalize_symbol(symbol)
-        if market_hours.is_live():
+        if quote_snapshots.current():
+            quotes, _ = display_quote_cache([sym])
+            q = quotes.get(sym) or _quote_cache_lookup(sym, not market_hours.is_live())
+        elif market_hours.is_live():
             q = fetch_quote(sym)
         else:
             q = _quote_cache_lookup(sym, True)
@@ -123,6 +138,41 @@ _BAR_FIELDS = (
     ("bias6", _safe_float), ("bias12", _safe_float), ("bias24", _safe_float),
     ("dmi_pdi", _safe_float), ("dmi_mdi", _safe_float), ("dmi_adx", _safe_float),
 )
+_CANDLE_PRICES = frozenset(("open", "high", "low", "close"))
+_CHART_INDICATORS = frozenset(
+    name for name, convert in _BAR_FIELDS
+    if convert is _safe_float and name not in _CANDLE_PRICES and name != "amount"
+) | {"avg_price"}
+_CROSS_PAIRS = (("ma5", "ma20"), ("macd_dif", "macd_dea"))
+_FLOAT32_MAX = float(np.finfo(np.float32).max)
+
+
+@lru_cache(maxsize=8192)
+def _short_chart_price(value):
+    if value is None or abs(value) > _FLOAT32_MAX:
+        return value
+    stored = np.float32(value)
+    return float(str(stored)) if float(stored) == value else value
+
+
+def _compact_chart_rows(fields, rows):
+    positions = {field: index for index, field in enumerate(fields)}
+    prices = [positions[f] for f in fields if f in _CANDLE_PRICES]
+    indicators = [positions[f] for f in fields if f in _CHART_INDICATORS]
+    crosses = [(positions[a], positions[b]) for a, b in _CROSS_PAIRS if a in positions and b in positions]
+    for row in rows:
+        originals = [(a, b, row[a], row[b]) for a, b in crosses]
+        for i in prices:
+            row[i] = _short_chart_price(row[i])
+        for i in indicators:
+            value = row[i]
+            if value is not None:
+                # Preserve nonzero values that would become zero, e.g. a negative MACD bar.
+                row[i] = round(value, 6) or value
+        for a, b, left, right in originals:
+            # Rounding is monotonic. Keeping pairs that become equal preserves crossover signs.
+            if row[a] == row[b] and left != right:
+                row[a], row[b] = left, right
 
 
 def _bar_date(idx, period):
@@ -142,7 +192,7 @@ def _serialize_bar(idx, row, period):
     return out
 
 
-def serialize_bars(df, period):
+def serialize_bars(df, period, *, packed=False):
     """整段 K 线 → JSON entries (含全部指标)。
 
     替代 `[_serialize_bar(i, r, period) for i, r in df.iterrows()]`: iterrows
@@ -165,11 +215,40 @@ def serialize_bars(df, period):
     fields = [(name, conv, cols[name]) for name, conv in _BAR_FIELDS]
     out = []
     for i in range(n):
+        if packed:
+            out.append([dates[i], *(conv(vals[i]) if vals is not None else None
+                                    for _, conv, vals in fields)])
+            continue
         bar = {"date": dates[i]}
         for name, conv, vals in fields:
             bar[name] = conv(vals[i]) if vals is not None else None
         out.append(bar)
+    if packed:
+        _compact_chart_rows(["date", *(name for name, _ in _BAR_FIELDS)], out)
     return out
+
+
+def _intraday_response(symbol, period, count, day, bars):
+    fields = list(bars[0])
+    rows = [list(bar.values()) for bar in bars]
+    _compact_chart_rows(fields, rows)
+    encoded = json.dumps(rows, separators=(",", ":")).encode()
+    version = hashlib.blake2b(day.encode() + encoded, digest_size=12).hexdigest()
+    key = (symbol, period, count, version)
+    previous = request.args.get("since")
+    with _intraday_lock:
+        old = _intraday_versions.get((symbol, period, count, previous))
+        _intraday_versions[key] = (day, rows)
+        _intraday_versions.move_to_end(key)
+        if len(_intraday_versions) > 32:
+            _intraday_versions.popitem(last=False)
+    current = {row[0]: row for row in rows}
+    delta = bool(old and old[0] == day and all(row[0] in current for row in old[1]))
+    if delta:
+        previous_rows = {row[0]: row for row in old[1]}
+        rows = [row for row in rows if previous_rows.get(row[0]) != row]
+    return _json({"symbol": symbol, "period": period, "date": day, "version": version,
+                  "delta": delta, "fields": fields, "rows": rows}, compact=True)
 
 
 def _session_meta(now=None):
@@ -242,8 +321,19 @@ def _kline_body(timing):
     except ValueError:
         count = default_count
 
+    packed = request.args.get("format") == "rows"
+    before = request.args.get("before") if packed else None
+    with_gap_seed = (packed and not before and period in ("1d", "1w", "1M", "60m")
+                     and request.args.get("gaps") == "1")
+    try:
+        limit = max(1, min(1500, int(request.args.get("limit", "1500")))) if packed else None
+        warmup = max(0, min(249, int(request.args.get("warmup", "0")))) if packed else 0
+    except ValueError:
+        return _error("无效 limit 或 warmup")
     revision = time.time_ns() // 1000
     cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
+    if packed:
+        cache_key += f":rows:{limit}:{before or ''}:{int(with_gap_seed)}:{warmup}"
     skip_1d_cache = period == "1d" and market_hours.is_trading_day(
         market_hours.now().date().isoformat()
     )
@@ -263,7 +353,7 @@ def _kline_body(timing):
         with perf.Span(timing, "attach_quote_ms"):
             _attach_quote(resp, symbol)
         with perf.Span(timing, "json_ms"):
-            return _json(resp)
+            return _json(resp, compact=packed)
 
     try:
         df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
@@ -280,7 +370,6 @@ def _kline_body(timing):
         log.warning("%s %s 无 %s 复权数据, 回退前复权", symbol, period, adjust)
         adjust = kline_source.ADJUST_FORWARD
         adjust_fallback = True
-        cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
         try:
             df, name, source = fetch_kline_ex(symbol, period, count, adjust=adjust,
                                              timing=timing,
@@ -297,7 +386,7 @@ def _kline_body(timing):
     quote_fields = _today_quote_fields(df)
     try:
         with perf.Span(timing, "indicators_ms"):
-            df, indicators = compute_all_indicators(df, period)
+            df, indicators = compute_all_indicators(df, period, serialize=not packed)
     except Exception as e:
         log.warning("指标计算失败 %s %s: %s", symbol, period, _sanitize_error(e))
         return _error("指标计算失败", 500)
@@ -313,7 +402,15 @@ def _kline_body(timing):
         deferred.append("premium")
 
     with perf.Span(timing, "serialize_ms"):
-        klines = serialize_bars(df, period)
+        last_date = _bar_date(df.index[-1], period) if len(df) else None
+        window = df
+        if before:
+            window = df[[_bar_date(idx, period) < before for idx in df.index]]
+        has_more = packed and len(window) > limit
+        warmup_closes = window["close"].iloc[:-limit].tail(warmup) if warmup else ()
+        if packed:
+            window = window.tail(limit)
+        klines = serialize_bars(window, period, packed=packed)
 
     # 股本不挡主图: 只读内存缓存。缺的时候由同时发出的 /api/stock-info 补全并带回 float_shares。
     inst_meta = peek_instrument_meta(symbol) or {}
@@ -330,13 +427,12 @@ def _kline_body(timing):
         "total_shares": inst_meta.get("total_shares"),
         "instrument_type": inst_meta.get("type"),
         "obv_params": indicators.get("obv", {}).get("params"),
-        "macd_params": indicators["macd"]["params"],
+        "macd_params": indicators.get("macd", {}).get("params"),
         "boll_params": indicators.get("boll", {}).get("params"),
-        "klines": klines,
         "meta": {
             "cached": False,
             **_session_meta(now),
-            "last_trade_date": klines[-1]["date"] if klines else None,
+            "last_trade_date": last_date,
             "source": source,
             "adjust": adjust,
             "adjust_fallback": adjust_fallback,
@@ -345,16 +441,34 @@ def _kline_body(timing):
             "deferred": deferred,
         },
     }
+    if packed:
+        from indicators import get_macd_params
+        resp.update(fields=["date", *(name for name, _ in _BAR_FIELDS)], rows=klines,
+                    has_more=has_more, macd_params=get_macd_params(period),
+                    obv_params={"ma_period": 30}, boll_params={"n": 20, "k": 2})
+        if warmup:
+            resp["warmup_closes"] = [_short_chart_price(_safe_float(value)) for value in warmup_closes]
+        if with_gap_seed and has_more:
+            # The browser runs the same gap scanner over earlier high/low data.
+            # Include only the fields it consumes, without indicators or OHLCV duplicates.
+            older = df.iloc[:-limit]
+            resp["gap_seed"] = [
+                [_bar_date(idx, period), _short_chart_price(_safe_float(high)),
+                 _short_chart_price(_safe_float(low)), (_safe_int(volume) or 0) > 0]
+                for idx, high, low, volume in older[["high", "low", "volume"]].itertuples(name=None)
+            ]
+    else:
+        resp["klines"] = klines
 
     # 缓存里不存 quote: TTLCache 存引用, 事后挂 quote 会污染缓存条目,
     # 让后续命中拿到最长 TTL 前的旧快照。改为存副本 (不含 quote), 每次返回前现挂。
     with perf.Span(timing, "attach_quote_ms"):
         _attach_quote(resp, symbol)
-    if not skip_1d_cache:
+    if not skip_1d_cache and not adjust_fallback:
         cache.set(cache_key, {k: v for k, v in resp.items() if k != "quote"})
 
     with perf.Span(timing, "json_ms"):
-        return _json(resp)
+        return _json(resp, compact=packed)
 
 
 @api_bp.route("/api/kline/tail", methods=["GET"])
@@ -384,7 +498,10 @@ def kline_tail():
         n = 1
 
     try:
-        return _json(build_kline_tail(symbol, period, count, adjust, n))
+        payload = build_kline_tail(symbol, period, count, adjust, n)
+        if request.args.get("precision") == "chart":
+            return _json(compact_chart_tail(payload), compact=True)
+        return _json(payload)
     except LookupError:
         # LookupError 的文本可能包含上游响应或内部路径，不应直接返回给客户端。
         return _error("无法获取K线数据", 404)
@@ -394,10 +511,30 @@ def kline_tail():
 
 def build_kline_tail(symbol, period, count, adjust, n=2, quote_fresh=True):
     # n 不进 key: 缓存末 _TAIL_CACHE_BARS 根, 不同 n / 多客户端共用一次计算。
-    # quote_fresh: HTTP /api/kline/tail 默认 True (强制新快照)。SSE 传 False,
-    # 复用刚刚写入的 quote_cache, 不再跟自己抢同一枚令牌。
+    # legacy 模式的 HTTP tail 可强刷，SSE 继续复用短缓存。全池按快照版本共享指标。
     cache_key = f"{symbol}:{period}:{count}:{kline_source.adjust_tag(adjust)}"
-    cached = _tail_cache.get(cache_key)
+    if quote_snapshots.current() and period == "1d" and adjust != kline_source.ADJUST_HFQ:
+        quotes, missing = display_quote_cache([symbol], live_info=False)
+        if not missing and symbol in quotes:
+            quote = quotes[symbol]
+            cache_key = (cache_key, quote["_revision"], market_hours.session_phase())
+            with _tail_locks[hash(cache_key) % len(_tail_locks)]:
+                return _build_kline_tail(symbol, period, count, adjust, n, False, cache_key, _tail_version_cache)
+    return _build_kline_tail(symbol, period, count, adjust, n, quote_fresh, cache_key, _tail_cache)
+
+
+def compact_chart_tail(payload):
+    bars = payload["bars"]
+    if not bars:
+        return payload
+    fields = list(bars[0])
+    rows = [[bar.get(field) for field in fields] for bar in bars]
+    _compact_chart_rows(fields, rows)
+    return {**payload, "bars": [dict(zip(fields, row)) for row in rows]}
+
+
+def _build_kline_tail(symbol, period, count, adjust, n, quote_fresh, cache_key, cache):
+    cached = cache.get(cache_key)
     if cached is not None:
         bars = list(cached["bars"][-n:])
         resp = dict(cached)
@@ -440,7 +577,8 @@ def build_kline_tail(symbol, period, count, adjust, n=2, quote_fresh=True):
         },
     }
     if not omit_cache:
-        _tail_cache.set(cache_key, stored)
+        if not isinstance(cache_key, tuple) or quote_fields["today_quote_revision"] == cache_key[1]:
+            cache.set(cache_key, stored)
     out_bars = list(bars[-n:])
     resp = dict(stored)
     resp["bars"] = out_bars
@@ -471,8 +609,18 @@ def kline_deferred():
         count = max(1, min(int(request.args.get("count") or str(DAILY_COUNT)), 1500))
     except ValueError:
         count = DAILY_COUNT
-    return _json({"symbol": symbol, "period": period,
-                  "premium": premium.get(symbol, period, count)})
+    result = premium.get(symbol, period, count)
+    start = request.args.get("from")
+    if start and result and result.get("ready") and "dates" in result:
+        result = {**result}
+        if request.args.get("version") == str(result.get("generated_at")):
+            result.pop("dates")
+            result.pop("values")
+        else:
+            pairs = [(date, value) for date, value in zip(result["dates"], result["values"]) if date >= start]
+            result["dates"] = [date for date, _ in pairs]
+            result["values"] = [value for _, value in pairs]
+    return _json({"symbol": symbol, "period": period, "premium": result}, compact=bool(start))
 
 
 @api_bp.route("/api/chips", methods=["GET"])
@@ -560,6 +708,8 @@ def intraday():
                 "vol_ma10": _safe_float(row.get("vol_ma10")),
                 "vol_ma20": _safe_float(row.get("vol_ma20")),
             })
+        if request.args.get("format") == "rows":
+            return _intraday_response(symbol, period, count, last_day.strftime("%Y-%m-%d"), bars)
         return _json({
             "symbol": symbol,
             "period": period,
