@@ -518,6 +518,7 @@ td.neg { color: var(--down-text); font-weight: 600; }
         <span id="legs-net-qty" style="margin-left:auto;font-weight:600;font-size:13px;align-self:center">当前剩余 0 股</span>
       </div>
       <div id="legs-list"></div>
+      <datalist id="t-batch-exit-reasons"></datalist>
     </div>
     <fieldset class="panel risk-panel" id="risk-panel">
       <legend id="risk-legend">风控价格（可选，须三个都填或都空）</legend>
@@ -945,8 +946,10 @@ async function loadReasons() {
   state.reasons = data;
   const entry = document.getElementById('t-entry-reason');
   const exit = document.getElementById('t-exit-reason');
+  const exitOptions = data.exit.map(r => `<option>${escHtml(r)}</option>`).join('');
   entry.innerHTML = '<option value="">请选择...</option>' + data.entry.map(r => `<option>${escHtml(r)}</option>`).join('');
-  exit.innerHTML = '<option value="">请选择...</option>' + data.exit.map(r => `<option>${escHtml(r)}</option>`).join('');
+  exit.innerHTML = '<option value="">请选择...</option>' + exitOptions;
+  document.getElementById('t-batch-exit-reasons').innerHTML = exitOptions;
 }
 
 async function loadModels() {
@@ -2459,7 +2462,9 @@ function legRowHtml(leg, idx) {
       </div>
       <div class="col-3">
         <label>理由 (可选)</label>
-        <input type="text" data-leg-field="reason" value="${escHtml(leg.reason || '')}" placeholder="如 加仓 / 止盈 / 做T" oninput="setLegField(${idx},'reason',this.value)">
+        <input type="text" data-leg-field="reason" value="${escHtml(leg.reason || '')}"
+          ${side === 'sell' ? 'list="t-batch-exit-reasons" placeholder="可选择或手填"' : 'placeholder="如 加仓 / 止盈 / 做T"'}
+          oninput="setLegField(${idx},'reason',this.value)">
       </div>
       <div class="col-3">
         <label>备注 (可选)</label>
